@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.Mvc;
 using smart_compressor.Models;
 using smart_compressor.Services;
 
@@ -20,7 +21,18 @@ app.UseDefaultFiles(); // Enables serving index.html at root URL
 app.UseStaticFiles();
 
 // POST endpoint to upload and compress video
-app.MapPost("/api/compress", async (IFormFile file, int? crf, int? scalePercent, VideoCompressionService compressionService) =>
+app.MapPost("/api/compress", async (
+    [FromForm] IFormFile file,
+    [FromForm] int? crf,
+    [FromForm] int? scalePercent,
+    [FromForm] string? mode,
+    [FromForm] string? codec,
+    [FromForm] double? targetSizeMb,
+    [FromForm] double? sourceDuration,
+    [FromForm] int? sourceWidth,
+    [FromForm] int? sourceHeight,
+    [FromForm] long? originalSizeBytes,
+    VideoCompressionService compressionService) =>
 {
     if (file == null || file.Length == 0)
     {
@@ -29,14 +41,36 @@ app.MapPost("/api/compress", async (IFormFile file, int? crf, int? scalePercent,
 
     try
     {
-        var jobId = await compressionService.CompressVideoAsync(file, crf, scalePercent);
+        var compressionRequest = new CompressionRequest
+        {
+            Mode = mode ?? "advanced",
+            Codec = codec ?? "h264",
+            Crf = crf,
+            ScalePercent = scalePercent,
+            TargetSizeMb = targetSizeMb,
+            SourceDuration = sourceDuration,
+            SourceWidth = sourceWidth,
+            SourceHeight = sourceHeight,
+            OriginalSizeBytes = originalSizeBytes
+        };
+
+        var jobId = await compressionService.CompressVideoAsync(file, compressionRequest);
+        var job = compressionService.GetJob(jobId);
         
         return Results.Ok(new CompressionResult
         {
             JobId = jobId,
             OriginalFilename = file.FileName,
-            Status = "processing",
-            Message = "Video compression started. Use the jobId to download the result."
+            Status = job?.Status ?? "processing",
+            Message = "Video compression started. Use the jobId to download the result.",
+            Mode = job?.Mode ?? compressionRequest.Mode,
+            Codec = job?.Codec ?? compressionRequest.Codec,
+            Crf = job?.Crf,
+            ScalePercent = job?.ScalePercent,
+            TargetSizeMb = job?.TargetSizeMb,
+            TargetBitrateKbps = job?.TargetBitrateKbps,
+            OutputFilename = job?.OutputFilename,
+            OutputMimeType = job?.OutputMimeType
         });
     }
     catch (Exception ex)
@@ -80,7 +114,15 @@ app.MapGet("/api/status/{jobId}", (string jobId, VideoCompressionService compres
             "completed" => "Video compression completed successfully.",
             "failed" => $"Video compression failed: {job.ErrorMessage}",
             _ => "Unknown status"
-        }
+        },
+        Mode = job.Mode,
+        Codec = job.Codec,
+        Crf = job.Crf,
+        ScalePercent = job.ScalePercent,
+        TargetSizeMb = job.TargetSizeMb,
+        TargetBitrateKbps = job.TargetBitrateKbps,
+        OutputFilename = job.OutputFilename,
+        OutputMimeType = job.OutputMimeType
     });
 })
 .WithName("GetJobStatus");
@@ -113,7 +155,15 @@ app.MapGet("/api/download/{jobId}", async (string jobId, VideoCompressionService
             JobId = jobId,
             OriginalFilename = job.OriginalFilename,
             Status = "processing",
-            Message = "Video compression is still in progress. Please try again later."
+            Message = "Video compression is still in progress. Please try again later.",
+            Mode = job.Mode,
+            Codec = job.Codec,
+            Crf = job.Crf,
+            ScalePercent = job.ScalePercent,
+            TargetSizeMb = job.TargetSizeMb,
+            TargetBitrateKbps = job.TargetBitrateKbps,
+            OutputFilename = job.OutputFilename,
+            OutputMimeType = job.OutputMimeType
         });
     }
 
@@ -138,14 +188,15 @@ app.MapGet("/api/download/{jobId}", async (string jobId, VideoCompressionService
         try
         {
             var fileBytes = await File.ReadAllBytesAsync(job.OutputPath);
-            var fileName = $"compressed_{job.OriginalFilename}";
+            var fileName = !string.IsNullOrWhiteSpace(job.OutputFilename) ? job.OutputFilename : $"compressed_{job.OriginalFilename}";
             
             logger.LogInformation("Serving file for job: {JobId}, Size: {Size} bytes", jobId, fileBytes.Length);
             
             // Clean up files after reading
             compressionService.CleanupJob(jobId);
             
-            return Results.File(fileBytes, "video/mp4", fileName);
+            var mimeType = !string.IsNullOrWhiteSpace(job.OutputMimeType) ? job.OutputMimeType : "video/mp4";
+            return Results.File(fileBytes, mimeType, fileName);
         }
         catch (Exception ex)
         {
