@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Globalization;
 
 namespace smart_compressor.Services;
 
@@ -21,12 +22,12 @@ public class VideoCompressionService
         Directory.CreateDirectory(_tempOutputPath);
     }
 
-    public async Task<string> CompressVideoAsync(IFormFile videoFile)
+    public async Task<string> CompressVideoAsync(IFormFile videoFile, int? crf = null, int? scalePercent = null)
     {
         var jobId = Guid.NewGuid().ToString();
         var originalFilename = videoFile.FileName;
         var inputPath = Path.Combine(_tempUploadPath, $"{jobId}_{originalFilename}");
-        var outputPath = Path.Combine(_tempOutputPath, $"{jobId}_compressed_{originalFilename}");
+        var outputPath = Path.Combine(_tempOutputPath, $"{jobId}_compressed_{Path.GetFileNameWithoutExtension(originalFilename)}.mp4");
 
         // Save uploaded file
         using (var stream = new FileStream(inputPath, FileMode.Create))
@@ -45,19 +46,29 @@ public class VideoCompressionService
         };
 
         // Run FFmpeg compression asynchronously
-        _ = Task.Run(async () => await RunFFmpegCompressionAsync(jobId, inputPath, outputPath));
+        _ = Task.Run(async () => await RunFFmpegCompressionAsync(jobId, inputPath, outputPath, crf, scalePercent));
 
         return jobId;
     }
 
-    private async Task RunFFmpegCompressionAsync(string jobId, string inputPath, string outputPath)
+    private async Task RunFFmpegCompressionAsync(string jobId, string inputPath, string outputPath, int? crf, int? scalePercent)
     {
         try
         {
+            var crfValue = Math.Clamp(crf ?? 28, 18, 45);
+            var scaleValue = Math.Clamp(scalePercent ?? 100, 10, 100);
+            string vfArg = string.Empty;
+            if (scaleValue < 100)
+            {
+                var factor = scaleValue / 100.0;
+                var factorStr = factor.ToString(CultureInfo.InvariantCulture);
+                vfArg = $" -vf \"scale=trunc(iw*{factorStr}/2)*2:trunc(ih*{factorStr}/2)*2:flags=lanczos\"";
+            }
+
             var processStartInfo = new ProcessStartInfo
             {
                 FileName = "ffmpeg",
-                Arguments = $"-i \"{inputPath}\" -c:v libx264 -crf 45 -c:a copy \"{outputPath}\"",
+                Arguments = $"-y -i \"{inputPath}\" -c:v libx264 -preset veryfast -crf {crfValue}{vfArg} -c:a aac -b:a 128k -movflags +faststart \"{outputPath}\"",
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,

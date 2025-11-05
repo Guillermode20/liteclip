@@ -20,7 +20,7 @@ app.UseDefaultFiles(); // Enables serving index.html at root URL
 app.UseStaticFiles();
 
 // POST endpoint to upload and compress video
-app.MapPost("/api/compress", async (IFormFile file, VideoCompressionService compressionService) =>
+app.MapPost("/api/compress", async (IFormFile file, int? crf, int? scalePercent, VideoCompressionService compressionService) =>
 {
     if (file == null || file.Length == 0)
     {
@@ -29,7 +29,7 @@ app.MapPost("/api/compress", async (IFormFile file, VideoCompressionService comp
 
     try
     {
-        var jobId = await compressionService.CompressVideoAsync(file);
+        var jobId = await compressionService.CompressVideoAsync(file, crf, scalePercent);
         
         return Results.Ok(new CompressionResult
         {
