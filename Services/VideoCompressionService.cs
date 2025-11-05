@@ -63,7 +63,10 @@ public class VideoCompressionService
         var originalFilename = videoFile.FileName;
         var safeStem = Path.GetFileNameWithoutExtension(string.IsNullOrWhiteSpace(originalFilename) ? jobId : originalFilename);
         var inputPath = Path.Combine(_tempUploadPath, $"{jobId}_{originalFilename}");
-        var outputFilename = $"{jobId}_compressed_{safeStem}{codecConfig.FileExtension}";
+        var targetSizePrefix = normalizedRequest.TargetSizeMb.HasValue
+            ? $"{normalizedRequest.TargetSizeMb.Value:F0}MB"
+            : "auto";
+        var outputFilename = $"{targetSizePrefix}_compressed_{safeStem}{codecConfig.FileExtension}";
         var outputPath = Path.Combine(_tempOutputPath, outputFilename);
 
         await using (var stream = new FileStream(inputPath, FileMode.Create))
