@@ -23,7 +23,7 @@ public class VideoCompressionService
         Directory.CreateDirectory(_tempOutputPath);
     }
 
-    public async Task<string> CompressVideoAsync(IFormFile videoFile, CompressionRequest request)
+        public async Task<string> CompressVideoAsync(IFormFile videoFile, CompressionRequest request)
     {
         _logger.LogInformation("Compression request received - Mode: {Mode}, Codec: {Codec}, TargetSizeMb: {TargetSizeMb}, SourceDuration: {SourceDuration}, Crf: {Crf}", 
             request.Mode, request.Codec, request.TargetSizeMb, request.SourceDuration, request.Crf);
@@ -31,10 +31,15 @@ public class VideoCompressionService
         var normalizedRequest = NormalizeRequest(request);
         var codecConfig = GetCodecConfig(normalizedRequest.Codec);
 
-        if (normalizedRequest.Mode == "simple" &&
-            normalizedRequest.TargetSizeMb.HasValue &&
-            normalizedRequest.SourceDuration.HasValue &&
-            normalizedRequest.SourceDuration.Value > 0)
+        // Determine whether to treat this as simple mode. For "auto" we choose simple
+        // only when a target size and source duration are available.
+        var isSimpleMode = normalizedRequest.Mode == "simple" ||
+            (normalizedRequest.Mode == "auto" &&
+             normalizedRequest.TargetSizeMb.HasValue &&
+             normalizedRequest.SourceDuration.HasValue &&
+             normalizedRequest.SourceDuration.Value > 0);
+
+        if (isSimpleMode)
         {
             // Calculate target bitrate in bits per second, then convert to kbps
             var targetBitsTotal = (normalizedRequest.TargetSizeMb.Value * 1024 * 1024 * 8);
@@ -94,11 +99,19 @@ public class VideoCompressionService
         return jobId;
     }
 
-    private async Task RunFfmpegCompressionAsync(string jobId, JobMetadata job, CompressionRequest request, CodecConfig codec)
+        private async Task RunFfmpegCompressionAsync(string jobId, JobMetadata job, CompressionRequest request, CodecConfig codec)
     {
         try
         {
-            var mode = string.Equals(request.Mode, "simple", StringComparison.OrdinalIgnoreCase) ? "simple" : "advanced";
+            // Decide effective mode. If request.Mode is "auto" choose simple only when
+            // target size and duration are available; otherwise treat as advanced.
+            var mode = request.Mode?.ToLowerInvariant() switch
+            {
+                "simple" => "simple",
+                "auto" => (request.TargetSizeMb.HasValue && request.SourceDuration.HasValue && request.SourceDuration.Value > 0) ? "simple" : "advanced",
+                _ => "advanced"
+            };
+
             job.Mode = mode;
 
             // Apply scaling for both modes if specified
@@ -277,11 +290,18 @@ public class VideoCompressionService
         }
     }
 
-    private static CompressionRequest NormalizeRequest(CompressionRequest request)
+        private static CompressionRequest NormalizeRequest(CompressionRequest request)
     {
         var normalized = new CompressionRequest
         {
-            Mode = string.Equals(request.Mode, "simple", StringComparison.OrdinalIgnoreCase) ? "simple" : "advanced",
+            // Preserve "auto" explicitly so the pipeline can decide later whether to
+            // use simple or advanced behavior based on available metadata.
+            Mode = request.Mode?.ToLowerInvariant() switch
+            {
+                "simple" => "simple",
+                "auto" => "auto",
+                _ => "advanced"
+            },
             Codec = NormalizeCodec(request.Codec),
             Crf = request.Crf,
             ScalePercent = request.ScalePercent,

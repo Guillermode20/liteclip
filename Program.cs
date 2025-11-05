@@ -1,8 +1,24 @@
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Server.Kestrel.Core;
 using smart_compressor.Models;
 using smart_compressor.Services;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// Configure Kestrel to accept large files (up to 2 GB)
+builder.Services.Configure<KestrelServerOptions>(options =>
+{
+    options.Limits.MaxRequestBodySize = 2_147_483_648; // 2 GB
+});
+
+// Configure form options for large file uploads
+builder.Services.Configure<FormOptions>(options =>
+{
+    options.MultipartBodyLengthLimit = 2_147_483_648; // 2 GB
+    options.ValueLengthLimit = int.MaxValue;
+    options.MultipartHeadersLengthLimit = int.MaxValue;
+});
 
 // Add services to the container.
 builder.Services.AddOpenApi();
@@ -32,11 +48,20 @@ app.MapPost("/api/compress", async (
     [FromForm] int? sourceWidth,
     [FromForm] int? sourceHeight,
     [FromForm] long? originalSizeBytes,
-    VideoCompressionService compressionService) =>
+    VideoCompressionService compressionService,
+    IConfiguration configuration) =>
 {
     if (file == null || file.Length == 0)
     {
         return Results.BadRequest(new { error = "No file uploaded" });
+    }
+
+    // Validate file size
+    var maxFileSize = configuration.GetValue<long>("FileUpload:MaxFileSizeBytes", 2_147_483_648);
+    if (file.Length > maxFileSize)
+    {
+        var maxSizeMb = maxFileSize / (1024.0 * 1024.0);
+        return Results.BadRequest(new { error = $"File is too large. Maximum allowed size is {maxSizeMb:F0} MB." });
     }
 
     try
