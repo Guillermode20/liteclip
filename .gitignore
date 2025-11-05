@@ -86,7 +86,6 @@ Icon
 [Tt]est[Rr]esults/
 *.trx
 *.xml
-*.html
 
 # Coverage
 coverage/
