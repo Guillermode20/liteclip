@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
+using System.Linq;
 using System.Text;
 using smart_compressor.Models;
 
@@ -114,8 +115,20 @@ public class VideoCompressionService
 
             job.Mode = mode;
 
-            // Apply scaling for both modes if specified
-            var scalePercent = Math.Clamp(request.ScalePercent ?? 100, 10, 100);
+			// Apply scaling for both modes; in auto mode, decide scale if not provided
+			int scalePercent;
+			int? autoCrfOverride = null;
+			if (request.Mode?.Equals("auto", StringComparison.OrdinalIgnoreCase) == true && request.ScalePercent is null)
+			{
+				var auto = DecideAutoScaleAndCrf(request, codec);
+				scalePercent = Math.Clamp(auto.ScalePercent, 10, 100);
+				autoCrfOverride = auto.CrfOverride;
+				_logger.LogInformation("Auto mode decision for job {JobId}: scale={Scale}%{CrfNote}", jobId, scalePercent, autoCrfOverride.HasValue ? $", crfAdj={autoCrfOverride.Value}" : string.Empty);
+			}
+			else
+			{
+				scalePercent = Math.Clamp(request.ScalePercent ?? 100, 10, 100);
+			}
             job.ScalePercent = scalePercent;
 
             string? scaleFilter = null;
@@ -166,9 +179,10 @@ public class VideoCompressionService
                 arguments.AddRange(new[] { "-vf", scaleFilter });
             }
 
-            if (mode == "advanced")
+			if (mode == "advanced")
             {
-                var advancedResult = BuildAdvancedVideoArgs(codec, request.Crf);
+				var effectiveCrf = autoCrfOverride ?? request.Crf;
+				var advancedResult = BuildAdvancedVideoArgs(codec, effectiveCrf);
                 job.Crf = advancedResult.AppliedCrf;
                 job.TargetSizeMb = null;
                 job.TargetBitrateKbps = null;
@@ -206,6 +220,7 @@ public class VideoCompressionService
 
             var outputBuilder = new StringBuilder();
             var errorBuilder = new StringBuilder();
+            double? totalDuration = request.SourceDuration;
 
             process.OutputDataReceived += (_, e) =>
             {
@@ -220,6 +235,24 @@ public class VideoCompressionService
                 if (!string.IsNullOrEmpty(e.Data))
                 {
                     errorBuilder.AppendLine(e.Data);
+
+                    // Parse FFmpeg progress output for real-time progress
+                    string line = e.Data.Trim();
+                    if (line.StartsWith("frame=") || line.Contains("time="))
+                    {
+                        try
+                        {
+                            var progress = ParseFfmpegProgress(line, totalDuration);
+                            if (progress.HasValue)
+                            {
+                                job.Progress = Math.Clamp(progress.Value, 0, 100);
+                            }
+                        }
+                        catch
+                        {
+                            // Ignore parsing errors, continue with compression
+                        }
+                    }
                 }
             };
 
@@ -480,6 +513,110 @@ public class VideoCompressionService
         return (int)Math.Round(mapped);
     }
 
+	private static (int ScalePercent, int? CrfOverride) DecideAutoScaleAndCrf(CompressionRequest request, CodecConfig codec)
+	{
+		var srcW = Math.Max(16, request.SourceWidth ?? 1920);
+		var srcH = Math.Max(16, request.SourceHeight ?? 1080);
+		var fps = Math.Clamp((int)Math.Round((double)(request.SourceDuration.HasValue && request.SourceDuration.Value > 0 ? 30 : 30)), 10, 120);
+
+		double? videoKbps = request.VideoBitrateKbps;
+		if (!videoKbps.HasValue && request.TargetBitrateKbps.HasValue)
+		{
+			videoKbps = Math.Max(100, request.TargetBitrateKbps.Value - codec.AudioBitrateKbps);
+		}
+		if (!videoKbps.HasValue && request.OriginalSizeBytes.HasValue && request.SourceDuration.HasValue && request.SourceDuration.Value > 0)
+		{
+			var totalKbps = (request.OriginalSizeBytes.Value * 8.0) / 1000.0 / request.SourceDuration.Value;
+			videoKbps = Math.Max(100, totalKbps - codec.AudioBitrateKbps);
+		}
+		videoKbps ??= 2000; // reasonable fallback
+
+		(double targetBpp, double floorBpp) = codec.Key switch
+		{
+			"h265" => (0.070, 0.050),
+			"vp9" => (0.060, 0.045),
+			"av1" => (0.055, 0.040),
+			_ => (0.100, 0.070) // h264
+		};
+
+		var candidates = new List<int>();
+		var standardHeights = new[] { 2160, 1440, 1080, 900, 720, 540, 480, 360 };
+		candidates.Add(srcH);
+		foreach (var h in standardHeights)
+		{
+			if (h <= srcH && !candidates.Contains(h))
+			{
+				candidates.Add(h);
+			}
+		}
+		candidates = candidates.Distinct().OrderByDescending(h => h).ToList();
+
+		int chosenH = candidates.Last(); // default to smallest
+		double chosenBpp = 0;
+		foreach (var h in candidates)
+		{
+			var w = (int)Math.Round(srcW * (h / (double)srcH));
+			var pixelsPerSecond = (double)w * h * fps;
+			if (pixelsPerSecond <= 0)
+			{
+				continue;
+			}
+			var bpp = (videoKbps.Value * 1000.0) / pixelsPerSecond;
+			if (bpp >= floorBpp)
+			{
+				chosenH = h;
+				chosenBpp = bpp;
+				break; // highest height that meets floor
+			}
+		}
+
+		var scalePercent = (int)Math.Clamp(Math.Round((double)chosenH * 100.0 / srcH), 10, 100);
+
+		int? crfOverride = null;
+		// If advanced mode ends up being used, bias CRF toward quality when we downscale hard or bpp is tight
+		if (scalePercent <= 50)
+		{
+			crfOverride = (request.Crf ?? 28) - 2;
+		}
+		else if (chosenBpp < targetBpp)
+		{
+			crfOverride = (request.Crf ?? 28) - 1;
+		}
+
+		return (scalePercent, crfOverride);
+	}
+
+    private static double? ParseFfmpegProgress(string line, double? totalDuration)
+    {
+        if (string.IsNullOrEmpty(line) || !totalDuration.HasValue || totalDuration.Value <= 0)
+        {
+            return null;
+        }
+
+        try
+        {
+            // Look for time= pattern like "time=00:01:23.45"
+            var timeMatch = System.Text.RegularExpressions.Regex.Match(line, @"time=(\d{2}):(\d{2}):(\d{2}(?:\.\d+)?)");
+            if (timeMatch.Success)
+            {
+                var hours = double.Parse(timeMatch.Groups[1].Value);
+                var minutes = double.Parse(timeMatch.Groups[2].Value);
+                var seconds = double.Parse(timeMatch.Groups[3].Value);
+
+                var currentTime = hours * 3600 + minutes * 60 + seconds;
+                var progress = (currentTime / totalDuration.Value) * 100;
+
+                return Math.Clamp(progress, 0, 100);
+            }
+        }
+        catch
+        {
+            // Parsing failed, return null
+        }
+
+        return null;
+    }
+
     private static string NormalizeCodec(string? codec)
     {
         return codec?.ToLowerInvariant() switch
@@ -523,6 +660,7 @@ public class JobMetadata
     public int? SourceWidth { get; set; }
     public int? SourceHeight { get; set; }
     public long? OriginalSizeBytes { get; set; }
+    public double Progress { get; set; } = 0;
     public string? ErrorMessage { get; set; }
 }
 

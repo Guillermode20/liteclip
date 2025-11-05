@@ -95,7 +95,8 @@ app.MapPost("/api/compress", async (
             TargetSizeMb = job?.TargetSizeMb,
             TargetBitrateKbps = job?.TargetBitrateKbps,
             OutputFilename = job?.OutputFilename,
-            OutputMimeType = job?.OutputMimeType
+            OutputMimeType = job?.OutputMimeType,
+            Progress = job?.Progress ?? 0
         });
     }
     catch (Exception ex)
@@ -135,7 +136,7 @@ app.MapGet("/api/status/{jobId}", (string jobId, VideoCompressionService compres
         Status = job.Status,
         Message = job.Status switch
         {
-            "processing" => "Video compression is in progress.",
+            "processing" => $"Video compression is in progress ({job.Progress:F1}%).",
             "completed" => "Video compression completed successfully.",
             "failed" => $"Video compression failed: {job.ErrorMessage}",
             _ => "Unknown status"
@@ -147,7 +148,8 @@ app.MapGet("/api/status/{jobId}", (string jobId, VideoCompressionService compres
         TargetSizeMb = job.TargetSizeMb,
         TargetBitrateKbps = job.TargetBitrateKbps,
         OutputFilename = job.OutputFilename,
-        OutputMimeType = job.OutputMimeType
+        OutputMimeType = job.OutputMimeType,
+        Progress = job.Progress
     });
 })
 .WithName("GetJobStatus");

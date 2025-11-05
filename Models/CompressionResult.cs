@@ -14,6 +14,7 @@ public class CompressionResult
     public double? TargetBitrateKbps { get; set; }
     public string? OutputFilename { get; set; }
     public string? OutputMimeType { get; set; }
+    public double Progress { get; set; } = 0;
 }
 
 
