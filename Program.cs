@@ -23,7 +23,7 @@ builder.Services.Configure<FormOptions>(options =>
 });
 
 // Add services to the container.
-builder.Services.AddOpenApi();
+// OpenAPI removed for faster startup (not needed for desktop app)
 builder.Services.AddSingleton<FfmpegPathResolver>();
 builder.Services.AddSingleton<VideoCompressionService>();
 builder.Services.AddHostedService<JobCleanupService>();
@@ -31,10 +31,7 @@ builder.Services.AddHostedService<JobCleanupService>();
 var app = builder.Build();
 
 // Configure the HTTP request pipeline.
-if (app.Environment.IsDevelopment())
-{
-    app.MapOpenApi();
-}
+// OpenAPI endpoint removed for faster startup
 
 // Disable HTTPS redirection for local webview
 // app.UseHttpsRedirection();
@@ -319,20 +316,17 @@ app.Lifetime.ApplicationStarted.Register(() =>
     Console.WriteLine($"📡 Server URL: {url}");
     Console.WriteLine($"🪟 Opening native window...\n");
     
-    // Reduced delay for faster startup
-    Task.Delay(500).ContinueWith(_ =>
+    // Open window immediately for faster startup
+    if (OperatingSystem.IsWindows())
     {
-        if (OperatingSystem.IsWindows())
-        {
-            OpenWindowsWebView(url, app);
-        }
-        else
-        {
-            Console.WriteLine($"⚠️ This application only supports Windows.");
-            Console.WriteLine($"🌐 Server is running at: {url}");
-            Console.WriteLine($"Open this URL in your browser.");
-        }
-    });
+        OpenWindowsWebView(url, app);
+    }
+    else
+    {
+        Console.WriteLine($"⚠️ This application only supports Windows.");
+        Console.WriteLine($"🌐 Server is running at: {url}");
+        Console.WriteLine($"Open this URL in your browser.");
+    }
 });
 
 // Run the application (blocks until stopped)
@@ -375,8 +369,8 @@ static void OpenWindowsWebView(string url, WebApplication app)
         
         // Set thread to STA (Single-Threaded Apartment) mode required by WebView2
         thread.SetApartmentState(System.Threading.ApartmentState.STA);
-        thread.Start();
-        thread.Join(); // Wait for the thread to complete
+        thread.IsBackground = false; // Keep app alive while window is open
+        thread.Start(); // Non-blocking start for faster startup
     }
     catch (Exception ex)
     {

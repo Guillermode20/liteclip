@@ -25,7 +25,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="9.0.10" />
+    <!-- OpenApi removed for faster startup -->
     <PackageReference Include="Microsoft.Extensions.FileProviders.Embedded" Version="9.0.0" />
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2792.45" />
   </ItemGroup>
