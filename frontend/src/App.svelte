@@ -596,7 +596,8 @@
         on:dragover={handleDragOver}
         on:dragleave={handleDragLeave}
         on:drop={handleDrop}
-        on:click|self={() => document.getElementById('fileInput')?.click()}
+        on:click={() => document.getElementById('fileInput')?.click()}
+        on:keydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); document.getElementById('fileInput')?.click(); } }}
         role="button"
         tabindex="0"
     >
