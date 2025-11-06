@@ -823,10 +823,16 @@
                 <div class="content-card">
                     <h2 class="section-title">// compressed_output</h2>
                     <div class="video-container">
-                        <video controls>
+                        <video
+                            controls
+                            preload="none"
+                            aria-label="Compressed video preview"
+                            tabindex="0"
+                        >
                             {#if videoPreviewUrl}
                                 <source src={videoPreviewUrl} type={downloadMimeType || 'video/mp4'}>
                             {/if}
+                            <track kind="captions" srclang="en" label="English" default>
                             Your browser does not support the video tag.
                         </video>
                     </div>

@@ -21,16 +21,14 @@ body {
 
 #app {
     width: 100%;
-    height: 100vh;
-    overflow: hidden;
+    min-height: 100vh;
 }
 
 /* Main Layout */
 .app-layout {
     display: flex;
     flex-direction: column;
-    height: 100vh;
-    overflow: hidden;
+    min-height: 100vh;
 }
 
 .app-header {
@@ -49,28 +47,55 @@ body {
     font-weight: 600;
     color: #fafafa;
     letter-spacing: -0.02em;
+    word-break: break-word;
+    overflow-wrap: break-word;
 }
 
 .subtitle {
     margin: 4px 0 0 0;
     font-size: 13px;
     color: #71717a;
+    word-break: break-word;
+    overflow-wrap: break-word;
 }
 
 .main-layout {
     display: flex;
     flex: 1;
-    overflow: hidden;
+    min-width: 0;
+}
+
+@media (min-width: 769px) {
+    #app {
+        height: 100vh;
+        overflow: hidden;
+    }
+
+    .app-layout {
+        height: 100vh;
+        overflow: hidden;
+    }
+
+    .main-layout {
+        overflow: hidden;
+    }
 }
 
 /* Sidebar */
 .sidebar {
     width: 420px;
+    min-width: 0;
     border-right: 1px solid #27272a;
     background: rgba(9, 9, 11, 0.6);
     backdrop-filter: blur(8px);
-    overflow-y: auto;
-    overflow-x: hidden;
+    flex-shrink: 0;
+}
+
+@media (min-width: 769px) {
+    .sidebar {
+        overflow-y: auto;
+        overflow-x: hidden;
+    }
 }
 
 .sidebar-content {
@@ -96,11 +121,17 @@ body {
 /* Main Content */
 .main-content {
     flex: 1;
-    overflow-y: auto;
+    min-width: 0;
     padding: 32px;
     display: flex;
     flex-direction: column;
     gap: 20px;
+}
+
+@media (min-width: 769px) {
+    .main-content {
+        overflow-y: auto;
+    }
 }
 
 .content-card {
@@ -110,6 +141,9 @@ body {
     border-radius: 12px;
     padding: 24px;
     animation: fadeIn 0.3s ease-out;
+    min-width: 0;
+    overflow-wrap: break-word;
+    word-break: break-word;
 }
 
 .content-placeholder {
@@ -155,6 +189,8 @@ body {
     cursor: pointer;
     position: relative;
     outline: none;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
 }
 
 .upload-area:hover {
@@ -196,6 +232,8 @@ body {
     display: inline-block;
     max-width: 100%;
     word-break: break-word;
+    overflow-wrap: break-word;
+    hyphens: auto;
 }
 
 /* Metadata */
@@ -255,6 +293,9 @@ body {
 .setting-value {
     color: #71717a;
     font-size: 13px;
+    text-align: right;
+    word-break: break-word;
+    overflow-wrap: break-word;
 }
 
 .preset-buttons {
@@ -277,6 +318,8 @@ body {
     font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
     font-weight: 500;
     outline: none;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
 }
 
 .preset-btn:hover {
@@ -327,6 +370,7 @@ input[type="range"]::-webkit-slider-thumb {
     border: 2px solid #09090b;
     box-shadow: 0 2px 4px rgba(0, 0, 0, 0.6);
     transition: all 0.2s ease;
+    touch-action: none;
 }
 
 input[type="range"]::-webkit-slider-thumb:hover {
@@ -354,6 +398,7 @@ input[type="range"]::-moz-range-thumb {
     border: 2px solid #09090b;
     box-shadow: 0 2px 4px rgba(0, 0, 0, 0.6);
     transition: all 0.2s ease;
+    touch-action: none;
 }
 
 input[type="range"]::-moz-range-thumb:hover {
@@ -421,6 +466,8 @@ select option {
     transition: all 0.2s ease;
     outline: none;
     border: none;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
 }
 
 .action-btn.primary {
@@ -540,7 +587,10 @@ select option {
 
 .status-message {
     flex: 1;
+    min-width: 0;
     font-size: 14px;
+    word-break: break-word;
+    overflow-wrap: break-word;
 }
 
 .status-card.status-processing {
@@ -573,8 +623,10 @@ select option {
 
 .video-container video {
     width: 100%;
+    height: auto;
     display: block;
     max-height: 70vh;
+    object-fit: contain;
 }
 
 /* Metadata Section */
@@ -599,12 +651,14 @@ select option {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
     gap: 12px;
+    min-width: 0;
 }
 
 .metadata-item {
     display: flex;
     flex-direction: column;
     gap: 4px;
+    min-width: 0;
 }
 
 .metadata-label {
@@ -619,6 +673,8 @@ select option {
     color: #a1a1aa;
     font-weight: 600;
     font-family: 'Courier New', monospace;
+    word-break: break-word;
+    overflow-wrap: break-word;
 }
 
 .metadata-value.positive {
@@ -636,6 +692,7 @@ select option {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
     gap: 16px;
+    min-width: 0;
 }
 
 .info-card {
@@ -663,6 +720,7 @@ select option {
 
 .info-content {
     flex: 1;
+    min-width: 0;
 }
 
 .info-content h4 {
@@ -687,6 +745,8 @@ select option {
     color: #71717a;
     margin: 0;
     line-height: 1.4;
+    word-break: break-word;
+    overflow-wrap: break-word;
 }
 
 /* Tips Section */
@@ -719,6 +779,14 @@ select option {
     font-size: 13px;
     color: #a1a1aa;
     line-height: 1.5;
+    min-width: 0;
+}
+
+.tips-list li span {
+    flex: 1;
+    min-width: 0;
+    word-break: break-word;
+    overflow-wrap: break-word;
 }
 
 .tip-icon {
@@ -776,25 +844,74 @@ select option {
 }
 
 /* Responsive Design */
-@media (max-width: 1024px) {
+@media (max-width: 1400px) {
+    .sidebar {
+        width: 380px;
+    }
+}
+
+@media (max-width: 1200px) {
     .sidebar {
         width: 360px;
     }
 
     .main-content {
+        padding: 28px;
+    }
+
+    .info-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+}
+
+@media (max-width: 1024px) {
+    .sidebar {
+        width: 340px;
+    }
+
+    .main-content {
         padding: 24px;
+    }
+
+    .metadata-grid {
+        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    }
+}
+
+@media (max-width: 900px) {
+    .sidebar {
+        width: 320px;
+    }
+
+    .app-header {
+        padding: 20px 24px;
+    }
+
+    .app-header h1 {
+        font-size: 22px;
+    }
+
+    .subtitle {
+        font-size: 12px;
     }
 }
 
 @media (max-width: 768px) {
+    #app {
+        height: auto;
+        overflow: visible;
+    }
+
     .app-layout {
         height: auto;
         min-height: 100vh;
+        overflow: visible;
     }
 
     .main-layout {
         flex-direction: column;
         overflow: visible;
+        flex: none;
     }
 
     .sidebar {
@@ -802,6 +919,9 @@ select option {
         border-right: none;
         border-bottom: 1px solid #27272a;
         overflow-y: visible;
+        overflow-x: visible;
+        max-height: none;
+        flex-shrink: 0;
     }
 
     .sidebar-content {
@@ -809,7 +929,7 @@ select option {
     }
 
     .app-header {
-        padding: 20px;
+        padding: 18px 20px;
     }
 
     .app-header h1 {
@@ -823,6 +943,8 @@ select option {
     .main-content {
         padding: 20px;
         overflow-y: visible;
+        overflow-x: visible;
+        flex: none;
     }
 
     .content-card {
@@ -834,16 +956,22 @@ select option {
         gap: 10px;
     }
 
+    .action-btn {
+        width: 100%;
+    }
+
     .video-container video {
         max-height: 50vh;
+        object-fit: contain;
     }
 
     .metadata-grid {
         grid-template-columns: repeat(2, 1fr);
+        gap: 10px;
     }
 
     .metadata-section {
-        padding: 12px;
+        padding: 14px;
     }
 
     .metadata-title {
@@ -860,10 +988,11 @@ select option {
 
     .info-grid {
         grid-template-columns: 1fr;
+        gap: 12px;
     }
 
     .info-card {
-        padding: 12px;
+        padding: 14px;
     }
 
     .info-stat {
@@ -873,11 +1002,357 @@ select option {
     .tips-list li {
         font-size: 12px;
     }
+
+    .preset-buttons {
+        gap: 6px;
+    }
+
+    .preset-btn {
+        font-size: 11px;
+        padding: 8px 10px;
+    }
+
+    .upload-area {
+        padding: 28px 20px;
+    }
+
+    .section-title {
+        font-size: 13px;
+    }
+}
+
+/* Touch-friendly improvements for mobile */
+@media (hover: none) and (pointer: coarse) {
+    .preset-btn,
+    .action-btn,
+    .upload-area {
+        min-height: 44px;
+    }
+
+    input[type="range"] {
+        height: 12px;
+    }
+
+    input[type="range"]::-webkit-slider-thumb {
+        width: 24px;
+        height: 24px;
+    }
+
+    input[type="range"]::-moz-range-thumb {
+        width: 24px;
+        height: 24px;
+    }
+}
+
+@media (max-width: 640px) {
+    .app-header {
+        padding: 16px 18px;
+    }
+
+    .app-header h1 {
+        font-size: 18px;
+    }
+
+    .subtitle {
+        font-size: 11px;
+    }
+
+    .sidebar-content {
+        padding: 18px;
+    }
+
+    .main-content {
+        padding: 18px;
+    }
+
+    .content-card {
+        padding: 18px;
+    }
+
+    .upload-area {
+        padding: 24px 16px;
+    }
+
+    .upload-icon {
+        width: 28px;
+        height: 28px;
+    }
+
+    .upload-text {
+        font-size: 13px;
+    }
+
+    .file-info {
+        font-size: 11px;
+        padding: 6px 10px;
+    }
+
+    .metadata {
+        padding: 14px;
+        font-size: 12px;
+    }
+
+    .metadata strong {
+        min-width: 80px;
+        font-size: 11px;
+    }
+
+    .preset-btn {
+        font-size: 10px;
+        padding: 7px 8px;
+    }
+
+    .action-btn {
+        padding: 11px 16px;
+        font-size: 13px;
+    }
+
+    .info-stat {
+        font-size: 15px;
+    }
+
+    .info-content h4 {
+        font-size: 12px;
+    }
+
+    .info-detail {
+        font-size: 11px;
+    }
+
+    .tips-title {
+        font-size: 12px;
+    }
+
+    .tips-list li {
+        font-size: 11px;
+    }
+
+    .video-container video {
+        max-height: 40vh;
+    }
+
+    .metadata-grid {
+        grid-template-columns: 1fr;
+        gap: 8px;
+    }
+
+    .metadata-item {
+        flex-direction: row;
+        justify-content: space-between;
+        align-items: center;
+        padding: 6px 0;
+        border-bottom: 1px solid #27272a;
+    }
+
+    .metadata-item:last-child {
+        border-bottom: none;
+    }
+
+    .metadata-label {
+        font-size: 11px;
+    }
+
+    .metadata-value {
+        font-size: 12px;
+    }
+
+    .status-card {
+        padding: 14px 16px;
+        flex-wrap: wrap;
+    }
+
+    .status-message {
+        font-size: 13px;
+        width: 100%;
+        margin-top: 8px;
+    }
+
+    .progress-text {
+        font-size: 13px;
+    }
 }
 
 @media (max-width: 480px) {
     .app-header {
+        padding: 14px 16px;
+    }
+
+    .app-header h1 {
+        font-size: 17px;
+    }
+
+    .subtitle {
+        font-size: 10px;
+    }
+
+    .sidebar-content {
         padding: 16px;
+    }
+
+    .main-content {
+        padding: 16px;
+    }
+
+    .content-card {
+        padding: 16px;
+    }
+
+    .upload-area {
+        padding: 20px 14px;
+    }
+
+    .upload-icon {
+        width: 24px;
+        height: 24px;
+        margin-bottom: 10px;
+    }
+
+    .upload-text {
+        font-size: 12px;
+    }
+
+    .file-info {
+        font-size: 10px;
+        padding: 5px 8px;
+        margin-top: 10px;
+    }
+
+    .section-title {
+        font-size: 12px;
+        margin-bottom: 12px;
+    }
+
+    .preset-btn {
+        font-size: 9px;
+        padding: 6px 6px;
+    }
+
+    .action-btn {
+        padding: 10px 14px;
+        font-size: 12px;
+    }
+
+    .info-stat {
+        font-size: 14px;
+    }
+
+    .info-content h4 {
+        font-size: 11px;
+    }
+
+    .info-detail {
+        font-size: 10px;
+    }
+
+    .info-icon {
+        width: 24px;
+        height: 24px;
+    }
+
+    .tips-title {
+        font-size: 11px;
+    }
+
+    .tips-list li {
+        font-size: 10px;
+        gap: 8px;
+    }
+
+    .tip-icon {
+        width: 14px;
+        height: 14px;
+    }
+
+    .video-container video {
+        max-height: 35vh;
+    }
+
+    .metadata-section {
+        padding: 12px;
+    }
+
+    .metadata-title {
+        font-size: 11px;
+    }
+
+    .status-card {
+        padding: 12px 14px;
+    }
+
+    .status-icon {
+        width: 18px;
+        height: 18px;
+    }
+
+    .status-message {
+        font-size: 12px;
+    }
+
+    .progress-text {
+        font-size: 12px;
+    }
+
+    .helper-text {
+        font-size: 11px;
+    }
+
+    .estimate-line {
+        font-size: 11px;
+    }
+
+    .setting-label {
+        flex-wrap: wrap;
+        gap: 4px;
+    }
+
+    .setting-value {
+        font-size: 12px;
+        width: 100%;
+        text-align: right;
+    }
+}
+
+@media (max-width: 360px) {
+    .app-header {
+        padding: 12px 14px;
+    }
+
+    .app-header h1 {
+        font-size: 16px;
+    }
+
+    .subtitle {
+        font-size: 9px;
+    }
+
+    .sidebar-content,
+    .main-content {
+        padding: 14px;
+    }
+
+    .content-card {
+        padding: 14px;
+    }
+
+    .upload-area {
+        padding: 18px 12px;
+    }
+
+    .preset-btn {
+        font-size: 8px;
+        padding: 5px 4px;
+    }
+
+    .action-btn {
+        padding: 9px 12px;
+        font-size: 11px;
+    }
+}
+
+/* Landscape orientation adjustments for mobile */
+@media (max-height: 600px) and (orientation: landscape) {
+    .app-header {
+        padding: 12px 20px;
     }
 
     .app-header h1 {
@@ -900,29 +1375,19 @@ select option {
         padding: 16px;
     }
 
-    .upload-area {
-        padding: 24px 16px;
+    .video-container video {
+        max-height: 50vh;
+    }
+}
+
+/* Very wide screens */
+@media (min-width: 1920px) {
+    .main-content {
+        max-width: 1600px;
+        margin: 0 auto;
     }
 
-    .preset-btn {
-        font-size: 11px;
-        padding: 7px 10px;
-    }
-
-    .action-btn {
-        padding: 11px 18px;
-        font-size: 13px;
-    }
-
-    .info-stat {
-        font-size: 14px;
-    }
-
-    .info-content h4 {
-        font-size: 12px;
-    }
-
-    .tips-title {
-        font-size: 12px;
+    .sidebar {
+        max-width: 480px;
     }
 }
