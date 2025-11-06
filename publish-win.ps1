@@ -7,6 +7,22 @@ param(
     [string]$FFmpegPath = ""
 )
 
+# Set error action preference to stop on errors
+$ErrorActionPreference = "Stop"
+
+# Trap any unhandled errors
+trap {
+    Write-Host ""
+    Write-Host "========================================" -ForegroundColor Red
+    Write-Host "ERROR: An unexpected error occurred!" -ForegroundColor Red
+    Write-Host "========================================" -ForegroundColor Red
+    Write-Host $_.Exception.Message -ForegroundColor Red
+    Write-Host ""
+    Write-Host "Press any key to exit..." -ForegroundColor Gray
+    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    exit 1
+}
+
 Write-Host "=== Smart Video Compressor - Windows Build Script ===" -ForegroundColor Cyan
 Write-Host ""
 
@@ -17,6 +33,9 @@ try {
     Write-Host "Found .NET SDK version: $dotnetVersion" -ForegroundColor Green
 } catch {
     Write-Host "ERROR: .NET SDK not found. Please install .NET 9.0 SDK or later." -ForegroundColor Red
+    Write-Host ""
+    Write-Host "Press any key to exit..." -ForegroundColor Gray
+    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
     exit 1
 }
 
@@ -27,6 +46,9 @@ try {
     Write-Host "Found Node.js version: $nodeVersion" -ForegroundColor Green
 } catch {
     Write-Host "ERROR: Node.js not found. Please install Node.js to build the frontend." -ForegroundColor Red
+    Write-Host ""
+    Write-Host "Press any key to exit..." -ForegroundColor Gray
+    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
     exit 1
 }
 
@@ -62,10 +84,29 @@ try {
 } catch {
     Write-Host "ERROR: Frontend build failed: $_" -ForegroundColor Red
     Pop-Location
+    Write-Host ""
+    Write-Host "Press any key to exit..." -ForegroundColor Gray
+    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
     exit 1
 } finally {
     Pop-Location
 }
+
+# Restore NuGet packages
+Write-Host ""
+Write-Host "Restoring NuGet packages..." -ForegroundColor Yellow
+dotnet restore
+
+if ($LASTEXITCODE -ne 0) {
+    Write-Host ""
+    Write-Host "ERROR: NuGet restore failed" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "Press any key to exit..." -ForegroundColor Gray
+    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    exit 1
+}
+
+Write-Host "Packages restored successfully" -ForegroundColor Green
 
 # Publish .NET application
 Write-Host ""
@@ -82,13 +123,19 @@ $publishArgs = @(
     "/p:PublishSingleFile=true",
     "/p:IncludeNativeLibrariesForSelfExtract=true",
     "/p:EnableCompressionInSingleFile=true",
-    "/p:PublishReadyToRun=true"
+    "/p:PublishReadyToRun=false",
+    "/maxcpucount",
+    "--no-restore"
 )
 
 dotnet @publishArgs
 
 if ($LASTEXITCODE -ne 0) {
+    Write-Host ""
     Write-Host "ERROR: .NET publish failed" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "Press any key to exit..." -ForegroundColor Gray
+    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
     exit 1
 }
 
@@ -106,7 +153,7 @@ Write-Host "Creating run script..." -ForegroundColor Yellow
 $runScriptContent = @"
 @echo off
 echo Starting Smart Video Compressor...
-echo Your browser will open automatically!
+echo A native window will open automatically!
 echo.
 smart-compressor.exe --urls "http://localhost:5000"
 "@
@@ -129,9 +176,19 @@ Write-Host ""
 Write-Host "To run the application:" -ForegroundColor Yellow
 Write-Host "  1. Copy 'smart-compressor.exe' anywhere you want" -ForegroundColor White
 Write-Host "  2. Double-click it or run from command line" -ForegroundColor White
-Write-Host "  3. Browser will open automatically!" -ForegroundColor White
+Write-Host "  3. A native desktop window will open automatically!" -ForegroundColor White
+Write-Host ""
+Write-Host "Note: WebView2 Runtime required (pre-installed on Windows 10/11)" -ForegroundColor Cyan
 Write-Host ""
 
-Write-Host "Press any key to exit..." -ForegroundColor Gray
-$null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+Write-Host "========================================" -ForegroundColor Green
+Write-Host "Press any key to exit..." -ForegroundColor Yellow
+Write-Host "========================================" -ForegroundColor Green
+
+# Use Read-Host as fallback if RawUI.ReadKey doesn't work
+try {
+    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+} catch {
+    Read-Host "Press Enter to exit"
+}
 

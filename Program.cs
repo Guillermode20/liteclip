@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.FileProviders;
 using smart_compressor.Models;
 using smart_compressor.Services;
+using System.Windows.Forms;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -35,45 +36,27 @@ if (app.Environment.IsDevelopment())
     app.MapOpenApi();
 }
 
-app.UseHttpsRedirection();
+// Disable HTTPS redirection for local webview
+// app.UseHttpsRedirection();
 
 // Use embedded static files from the assembly
-var embeddedProvider = new ManifestEmbeddedFileProvider(typeof(Program).Assembly, "wwwroot");
-app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = embeddedProvider });
-app.UseStaticFiles(new StaticFileOptions { FileProvider = embeddedProvider });
-
-// Open browser automatically when app starts
-app.Lifetime.ApplicationStarted.Register(() =>
+try
 {
-    var urls = app.Urls;
-    var url = urls.FirstOrDefault() ?? "http://localhost:5000";
+    var embeddedProvider = new ManifestEmbeddedFileProvider(typeof(Program).Assembly, "wwwroot");
+    app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = embeddedProvider });
+    app.UseStaticFiles(new StaticFileOptions { FileProvider = embeddedProvider });
     
-    // Replace https with http if not in production
-    if (!app.Environment.IsProduction() && url.StartsWith("https://"))
-    {
-        url = url.Replace("https://", "http://");
-    }
+    Console.WriteLine("✓ Embedded static files configured");
+}
+catch (Exception ex)
+{
+    Console.WriteLine($"⚠️ Error configuring embedded files: {ex.Message}");
+    Console.WriteLine("Falling back to physical file provider...");
     
-    try
-    {
-        // Open the default browser
-        var processInfo = new System.Diagnostics.ProcessStartInfo
-        {
-            FileName = url,
-            UseShellExecute = true
-        };
-        System.Diagnostics.Process.Start(processInfo);
-        
-        Console.WriteLine($"\n🎉 Smart Video Compressor is running!");
-        Console.WriteLine($"🌐 Opening browser at: {url}");
-        Console.WriteLine($"⏹️  Press Ctrl+C to stop\n");
-    }
-    catch
-    {
-        Console.WriteLine($"\n🎉 Smart Video Compressor is running at: {url}");
-        Console.WriteLine($"⏹️  Press Ctrl+C to stop\n");
-    }
-});
+    // Fallback to physical files
+    app.UseDefaultFiles();
+    app.UseStaticFiles();
+}
 
 // POST endpoint to upload and compress video
 app.MapPost("/api/compress", async (
@@ -324,7 +307,89 @@ app.MapGet("/api/download/{jobId}", async (string jobId, VideoCompressionService
 })
 .WithName("DownloadCompressedVideo");
 
+// Handle application startup - open window once server is ready
+app.Lifetime.ApplicationStarted.Register(() =>
+{
+    var urls = app.Urls;
+    var url = urls.FirstOrDefault() ?? "http://localhost:5000";
+    
+    // Replace https with http for webview
+    if (url.StartsWith("https://"))
+    {
+        url = url.Replace("https://", "http://");
+    }
+    
+    Console.WriteLine($"\n🎉 Smart Video Compressor is starting...");
+    Console.WriteLine($"📡 Server URL: {url}");
+    Console.WriteLine($"🪟 Opening native window...\n");
+    
+    // Delay to ensure server is fully ready
+    Task.Delay(1500).ContinueWith(_ =>
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            OpenWindowsWebView(url, app);
+        }
+        else
+        {
+            Console.WriteLine($"⚠️ This application only supports Windows.");
+            Console.WriteLine($"🌐 Server is running at: {url}");
+            Console.WriteLine($"Open this URL in your browser.");
+        }
+    });
+});
+
+// Run the application (blocks until stopped)
 app.Run();
+
+[System.Runtime.Versioning.SupportedOSPlatform("windows6.1")]
+static void OpenWindowsWebView(string url, WebApplication app)
+{
+    try
+    {
+        Console.WriteLine($"Creating WebView2 window for URL: {url}");
+        
+        // Set the apartment state for COM (required for WebView2)
+        var thread = new System.Threading.Thread(() =>
+        {
+            try
+            {
+                // Enable visual styles for WinForms
+                Application.EnableVisualStyles();
+                Application.SetCompatibleTextRenderingDefault(false);
+                
+                // Create and show the WebView2 window
+                var form = new smart_compressor.WebViewWindow(url);
+                
+                form.FormClosed += (sender, e) =>
+                {
+                    Console.WriteLine("\n👋 Window closed. Shutting down...");
+                    app.Lifetime.StopApplication();
+                };
+                
+                // Run the WinForms application
+                Application.Run(form);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Error in WebView thread: {ex.Message}");
+                Console.WriteLine($"Stack trace: {ex.StackTrace}");
+            }
+        });
+        
+        // Set thread to STA (Single-Threaded Apartment) mode required by WebView2
+        thread.SetApartmentState(System.Threading.ApartmentState.STA);
+        thread.Start();
+        thread.Join(); // Wait for the thread to complete
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"❌ Error creating window: {ex.Message}");
+        Console.WriteLine($"Stack trace: {ex.StackTrace}");
+        Console.WriteLine($"🌐 Server is still running at: {url}");
+        Console.WriteLine($"⏹️  Press Ctrl+C to stop\n");
+    }
+}
 
 static string FormatTimeRemaining(int seconds)
 {

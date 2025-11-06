@@ -1,6 +1,6 @@
 # Smart Video Compressor
 
-A powerful, user-friendly desktop application for compressing videos with intelligent quality optimization. Built with ASP.NET Core and Svelte, featuring an embedded FFmpeg engine for professional-grade video compression.
+A powerful, user-friendly desktop application for compressing videos with intelligent quality optimization. Built with ASP.NET Core, Svelte, and Photino for a native window experience. Features an embedded FFmpeg engine for professional-grade video compression.
 
 ## Features
 
@@ -22,15 +22,15 @@ A powerful, user-friendly desktop application for compressing videos with intell
   - Job queuing system
   - Drag-and-drop interface
   - Video preview before and after compression
-  - Automatic browser launch
+  - Native desktop window (no browser required)
 
 ## For End Users
 
 ### Quick Start
 
 1. **Download** the latest release (`smart-compressor.exe`)
-2. **Run** the executable - your browser will automatically open
-3. **Upload** a video file (up to 2GB)
+2. **Run** the executable - a native window will open
+3. **Upload** a video file (up to 2GB) via drag-and-drop or file picker
 4. **Choose** your compression settings:
    - Select a codec
    - Choose compression mode
@@ -41,6 +41,8 @@ A powerful, user-friendly desktop application for compressing videos with intell
 
 - Windows 10/11 (64-bit)
 - No additional software required - FFmpeg is embedded
+- WebView2 Runtime (typically pre-installed on Windows 10/11)
+  - If not installed, download from [Microsoft](https://developer.microsoft.com/en-us/microsoft-edge/webview2/#download-section)
 
 ### Compression Modes Explained
 
@@ -64,6 +66,17 @@ Full control using CRF values:
 - Enable **two-pass encoding** when targeting specific file sizes
 - Scale resolution to **720p** or **540p** for significant size reduction with minimal quality loss
 
+### Troubleshooting
+
+**Window doesn't open:**
+- Ensure WebView2 Runtime is installed (pre-installed on most modern Windows systems)
+- Check console output for error messages
+- Try running as administrator if permission issues occur
+
+**App closes immediately:**
+- Check if port 5000 is already in use by another application
+- Review the console output before the window closes
+
 ## For Developers
 
 ### Prerequisites
@@ -82,7 +95,19 @@ git clone https://github.com/yourusername/smart-compressor.git
 cd smart-compressor
 ```
 
-2. Run the build script:
+2. Run the build script (choose one method):
+
+**Method 1: Using the batch file (Recommended)**
+```cmd
+build.bat
+```
+
+**Method 2: Using PowerShell directly**
+```powershell
+powershell -ExecutionPolicy Bypass -File publish-win.ps1
+```
+
+**Method 3: From PowerShell prompt**
 ```powershell
 .\publish-win.ps1
 ```
@@ -94,6 +119,8 @@ The script will:
 - Compile and publish the .NET application as a single-file executable
 - Embed FFmpeg and the frontend into the executable
 - Output to the `publish-win` directory
+
+> **Note:** If the script window closes immediately, use `build.bat` which handles errors better and keeps the window open.
 
 #### Manual Build Steps
 
@@ -119,6 +146,16 @@ Ensure `ffmpeg/ffmpeg.exe` exists before building (it will be embedded automatic
 
 Run the backend and frontend separately for development:
 
+**Option 1: Run with native window (production mode):**
+```bash
+dotnet run
+```
+
+This will start the ASP.NET Core server and open a native desktop window.
+
+**Option 2: Development mode with browser:**
+To develop with hot-reload, temporarily comment out the Photino window code in `Program.cs` and uncomment `app.UseHttpsRedirection()`, then:
+
 **Backend:**
 ```bash
 dotnet run
@@ -130,7 +167,7 @@ cd frontend
 npm run dev
 ```
 
-The backend will run on `http://localhost:5000` (or check console output), and the frontend dev server typically runs on `http://localhost:5173`. Update the frontend API base URL if needed.
+The backend will run on `http://localhost:5000` (or check console output), and the frontend dev server typically runs on `http://localhost:5173`.
 
 ### Project Structure
 
@@ -153,6 +190,24 @@ smart-compressor/
 ├── smart-compressor.csproj
 └── publish-win.ps1      # Windows build script
 ```
+
+### Build Troubleshooting
+
+**PowerShell script closes immediately:**
+- Use `build.bat` instead - it has better error handling
+- Or run from PowerShell with: `powershell -ExecutionPolicy Bypass -NoExit -File publish-win.ps1`
+- Check that you have .NET 9 SDK and Node.js installed
+- Ensure you're running from the project root directory
+
+**Execution Policy errors:**
+```powershell
+# Run this in PowerShell as Administrator (one time only)
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+```
+
+**Frontend build fails:**
+- Delete `frontend/node_modules` and let the script reinstall dependencies
+- Ensure Node.js version is 18 or higher
 
 ### Configuration
 
@@ -191,6 +246,7 @@ Settings can be modified in `appsettings.json`:
 - **Frontend**: Svelte 5 + TypeScript
 - **Build Tool**: Vite (with Rolldown)
 - **Video Processing**: FFmpeg (embedded)
+- **Desktop Framework**: Photino.NET (native webview)
 - **Deployment**: Single-file executable with embedded static files
 
 ## Contributing

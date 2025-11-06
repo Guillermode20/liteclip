@@ -5,6 +5,11 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>smart_compressor</RootNamespace>
+    <OutputType>WinExe</OutputType>
+    
+    <!-- Build optimization -->
+    <UseAppHost>true</UseAppHost>
+    <ProduceReferenceAssembly>false</ProduceReferenceAssembly>
     
     <!-- Single-file deployment configuration -->
     <PublishSingleFile>true</PublishSingleFile>
@@ -14,7 +19,7 @@
     <IncludeAllContentForSelfExtract>true</IncludeAllContentForSelfExtract>
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
     <PublishTrimmed>false</PublishTrimmed>
-    <PublishReadyToRun>true</PublishReadyToRun>
+    <PublishReadyToRun>false</PublishReadyToRun>
     
     <!-- Enable embedded file manifest for static files -->
     <GenerateEmbeddedFilesManifest>true</GenerateEmbeddedFilesManifest>
@@ -23,6 +28,11 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="9.0.10" />
     <PackageReference Include="Microsoft.Extensions.FileProviders.Embedded" Version="9.0.0" />
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2792.45" />
+  </ItemGroup>
+  
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.WindowsDesktop.App.WindowsForms" />
   </ItemGroup>
 
   <!-- Embed wwwroot files into the assembly -->
@@ -35,10 +45,16 @@
     <EmbeddedResource Include="ffmpeg\ffmpeg.exe" />
   </ItemGroup>
 
-  <!-- Build frontend before publish -->
-  <Target Name="BuildFrontend" BeforeTargets="BeforeBuild">
+  <!-- Build frontend only when source files change -->
+  <Target Name="BuildFrontend" BeforeTargets="BeforeBuild" Inputs="frontend/src/**/*;frontend/index.html;frontend/package.json" Outputs="wwwroot/index.html">
     <Exec Command="cd frontend &amp;&amp; npm install" Condition="!Exists('frontend/node_modules')" />
+    <Message Importance="high" Text="Building frontend..." />
     <Exec Command="cd frontend &amp;&amp; npm run build" />
+  </Target>
+  
+  <!-- Skip frontend build if wwwroot is up to date -->
+  <Target Name="CheckFrontendUpToDate" BeforeTargets="BuildFrontend">
+    <Message Importance="high" Text="Checking if frontend build is needed..." Condition="Exists('wwwroot/index.html')" />
   </Target>
 
 </Project>
