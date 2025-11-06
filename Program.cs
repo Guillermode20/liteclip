@@ -265,8 +265,8 @@ app.MapGet("/api/download/{jobId}", async (string jobId, VideoCompressionService
             
             logger.LogInformation("Serving file for job: {JobId}, Size: {Size} bytes", jobId, fileBytes.Length);
             
-            // Clean up files after reading
-            compressionService.CleanupJob(jobId);
+            // Note: Cleanup is handled by JobCleanupService after the retention period
+            // This allows multiple downloads and preview before automatic cleanup
             
             var mimeType = !string.IsNullOrWhiteSpace(job.OutputMimeType) ? job.OutputMimeType : "video/mp4";
             return Results.File(fileBytes, mimeType, fileName);
