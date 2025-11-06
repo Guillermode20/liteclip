@@ -143,8 +143,10 @@ Write-Host ("Publish duration: {0:mm\:ss\.fff}" -f $sw.Elapsed) -ForegroundColor
 # FFmpeg status (Release)
 Write-Host ""
 Write-Host "=== FFmpeg Status ===" -ForegroundColor Cyan
-Write-Host "FFmpeg is embedded in the executable (Release)." -ForegroundColor Green
-Write-Host "The exe may extract resources on first run if needed." -ForegroundColor Green
+Write-Host "FFmpeg must be installed separately or available in system PATH." -ForegroundColor Yellow
+Write-Host "The app will look for FFmpeg in:" -ForegroundColor Yellow
+Write-Host "  1. FFmpeg:Path configuration setting" -ForegroundColor Gray
+Write-Host "  2. System PATH environment variable" -ForegroundColor Gray
 
 # Create a run script
 Write-Host ""
@@ -169,8 +171,9 @@ Write-Host "Output location: $OutputDir" -ForegroundColor Cyan
 Write-Host "Executable: smart-compressor.exe" -ForegroundColor White
 Write-Host ""
 Write-Host "✨ Portable Release build (single-file per csproj settings)." -ForegroundColor Green
-Write-Host "   Frontend and FFmpeg are embedded." -ForegroundColor Green
-Write-Host "   You can move it anywhere and it will work!" -ForegroundColor Green
+Write-Host "   Frontend is embedded." -ForegroundColor Green
+Write-Host "   FFmpeg must be installed separately (system PATH or config)." -ForegroundColor Yellow
+Write-Host "   You can move the exe anywhere and it will work!" -ForegroundColor Green
 Write-Host ""
 Write-Host "To run the application:" -ForegroundColor Yellow
 Write-Host "  1. Copy 'smart-compressor.exe' anywhere you want" -ForegroundColor White

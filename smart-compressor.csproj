@@ -19,6 +19,9 @@
     
     <!-- Embedded files manifest only needed in Release when embedding -->
     <GenerateEmbeddedFilesManifest>false</GenerateEmbeddedFilesManifest>
+    
+    <!-- Trimming options -->
+    <IlcOptimizationPreference>Size</IlcOptimizationPreference>
   </PropertyGroup>
 
   <ItemGroup>
@@ -31,15 +34,9 @@
     <FrameworkReference Include="Microsoft.WindowsDesktop.App.WindowsForms" />
   </ItemGroup>
 
-  <!-- Release: embed static content and FFmpeg into the assembly -->
+  <!-- Release: embed static content into the assembly -->
   <ItemGroup Condition="'$(Configuration)'=='Release'">
     <EmbeddedResource Include="wwwroot\**\*" />
-    <EmbeddedResource Include="ffmpeg\ffmpeg.exe" />
-  </ItemGroup>
-
-  <!-- Debug: copy FFmpeg locally for instant startup -->
-  <ItemGroup Condition="'$(Configuration)'=='Debug'">
-    <Content Include="ffmpeg\ffmpeg.exe" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <!-- Build frontend only when source files change -->
@@ -73,7 +70,20 @@
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <PublishReadyToRun>true</PublishReadyToRun>
     <GenerateEmbeddedFilesManifest>true</GenerateEmbeddedFilesManifest>
+    
+    <!-- Enable trimming for smaller size -->
+    <PublishTrimmed>true</PublishTrimmed>
+    <TrimMode>partial</TrimMode>
+    <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
+    <SuppressTrimAnalysisWarnings>false</SuppressTrimAnalysisWarnings>
   </PropertyGroup>
+  
+  <!-- Preserve assemblies that use reflection (prevent trim issues) -->
+  <ItemGroup Condition="'$(Configuration)'=='Release'">
+    <TrimmerRootAssembly Include="Microsoft.AspNetCore.Components" />
+    <TrimmerRootAssembly Include="Microsoft.Extensions.FileProviders.Embedded" />
+    <TrimmerRootAssembly Include="Microsoft.Web.WebView2" />
+  </ItemGroup>
 
   <!-- Exclude files from publish output (they're embedded) -->
   <ItemGroup Condition="'$(Configuration)'=='Release'">
