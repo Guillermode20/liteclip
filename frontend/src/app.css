@@ -1,0 +1,309 @@
+* {
+    font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+}
+
+body {
+    font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+    max-width: 800px;
+    margin: 0 auto;
+    padding: 20px;
+    background-color: #1e1e1e;
+    color: #d4d4d4;
+}
+
+#app {
+    max-width: 800px;
+    margin: 0 auto;
+    padding: 0;
+}
+
+.container {
+    background-color: #252526;
+    padding: 30px;
+    border-radius: 8px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.5);
+    border: 1px solid #3e3e42;
+}
+
+h1 {
+    color: #569cd6;
+    text-align: center;
+    margin-bottom: 30px;
+}
+
+.upload-area {
+    border: 2px dashed #3e3e42;
+    border-radius: 8px;
+    padding: 40px;
+    text-align: center;
+    margin-bottom: 20px;
+    transition: border-color 0.3s;
+    background-color: #1e1e1e;
+    color: #d4d4d4;
+    cursor: pointer;
+}
+
+.upload-area:hover {
+    border-color: #569cd6;
+}
+
+.upload-area.dragover {
+    border-color: #569cd6;
+    background-color: #2d2d30;
+}
+
+#fileInput {
+    margin-bottom: 10px;
+}
+
+#uploadBtn {
+    background-color: #0e639c;
+    color: #ffffff;
+    border: none;
+    padding: 12px 24px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 16px;
+    margin-top: 10px;
+    font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+}
+
+#uploadBtn:hover {
+    background-color: #1177bb;
+}
+
+#uploadBtn:disabled {
+    background-color: #3e3e42;
+    color: #858585;
+    cursor: not-allowed;
+}
+
+#status {
+    margin-top: 20px;
+    padding: 10px;
+    border-radius: 4px;
+}
+
+.status-processing {
+    background-color: #4a4a2a;
+    color: #dcdcaa;
+    border: 1px solid #6a6a3a;
+}
+
+.status-success {
+    background-color: #2d4a2d;
+    color: #9cdcfe;
+    border: 1px solid #4d6a4d;
+}
+
+.status-error {
+    background-color: #4a2d2d;
+    color: #f48771;
+    border: 1px solid #6a4d4d;
+}
+
+#downloadBtn {
+    background-color: #0e7c0e;
+    color: #ffffff;
+    border: none;
+    padding: 12px 24px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 16px;
+    margin-top: 10px;
+    font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+}
+
+#downloadBtn:hover {
+    background-color: #117711;
+}
+
+.progress {
+    margin-top: 10px;
+}
+
+.progress-bar {
+    width: 100%;
+    height: 20px;
+    background-color: #1e1e1e;
+    border-radius: 10px;
+    overflow: hidden;
+    border: 1px solid #3e3e42;
+}
+
+.progress-fill {
+    height: 100%;
+    background-color: #569cd6;
+    width: 0%;
+    transition: width 0.3s;
+}
+
+.progress-fill.compressing {
+    background: linear-gradient(90deg, #569cd6 0%, #0e639c 50%, #569cd6 100%);
+    background-size: 200% 100%;
+    animation: pulse 2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+    0%, 100% { background-position: 0% 0%; }
+    50% { background-position: 100% 0%; }
+}
+
+.file-info {
+    margin-top: 10px;
+    font-size: 14px;
+    color: #858585;
+}
+
+.mode-toggle {
+    display: flex;
+    gap: 16px;
+    align-items: center;
+    margin-bottom: 12px;
+}
+
+.mode-toggle label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 14px;
+    color: #d4d4d4;
+    cursor: pointer;
+}
+
+.codec-select {
+    margin-bottom: 12px;
+}
+
+.codec-select select {
+    width: 100%;
+    padding: 8px;
+    border-radius: 4px;
+    border: 1px solid #3e3e42;
+    font-size: 14px;
+    background-color: #1e1e1e;
+    color: #d4d4d4;
+    font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+}
+
+.codec-select select option {
+    background-color: #252526;
+    color: #d4d4d4;
+}
+
+.helper-text {
+    font-size: 12px;
+    color: #858585;
+}
+
+.estimate-line {
+    font-size: 12px;
+    color: #d4d4d4;
+    margin-top: 4px;
+}
+
+.preset-btn {
+    padding: 6px 12px;
+    border: 1px solid #569cd6;
+    background-color: #252526;
+    color: #569cd6;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+    transition: all 0.2s;
+    font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+}
+
+.preset-btn:hover {
+    background-color: #569cd6;
+    color: #1e1e1e;
+}
+
+.preset-btn:active {
+    transform: scale(0.95);
+}
+
+input[type="range"] {
+    background-color: #1e1e1e;
+    -webkit-appearance: none;
+    appearance: none;
+    height: 8px;
+    border-radius: 4px;
+    outline: none;
+}
+
+input[type="range"]::-webkit-slider-runnable-track {
+    background: #3e3e42;
+    height: 8px;
+    border-radius: 4px;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background-color: #569cd6;
+    cursor: pointer;
+    margin-top: -5px;
+}
+
+input[type="range"]::-moz-range-track {
+    background: #3e3e42;
+    height: 8px;
+    border-radius: 4px;
+}
+
+input[type="range"]::-moz-range-thumb {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background-color: #569cd6;
+    cursor: pointer;
+    border: none;
+}
+
+#metadata {
+    color: #d4d4d4;
+    margin-top: 12px;
+    margin-bottom: 16px;
+    text-align: left;
+    font-size: 14px;
+}
+
+#metadata strong {
+    color: #569cd6;
+}
+
+label strong {
+    color: #569cd6;
+}
+
+.controls {
+    margin-bottom: 20px;
+    text-align: left;
+}
+
+.video-preview {
+    margin-bottom: 20px;
+    padding: 20px;
+    background-color: #1e1e1e;
+    border-radius: 8px;
+    border: 1px solid #3e3e42;
+}
+
+.video-preview h3 {
+    color: #569cd6;
+    margin-bottom: 10px;
+    text-align: center;
+}
+
+.video-preview video {
+    width: 100%;
+    max-width: 800px;
+    border-radius: 8px;
+    border: 1px solid #3e3e42;
+    display: block;
+    margin: 0 auto;
+}
