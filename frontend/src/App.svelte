@@ -99,11 +99,11 @@
             const durationText = duration ? `${duration.toFixed(2)}s` : 'Unknown';
             const bitrateText = kbps ? `${kbps} kbps (approx)` : 'Unknown';
             metadataContent = `
-                <div><strong>File size</strong>: ${formatFileSize(file.size)}</div>
-                <div><strong>Type</strong>: ${file.type || 'Unknown'}</div>
-                <div><strong>Duration</strong>: ${durationText}</div>
-                <div><strong>Resolution</strong>: ${dimsText}</div>
-                <div><strong>Bitrate</strong>: ${bitrateText}</div>
+                <div><strong>file_size</strong>: ${formatFileSize(file.size)}</div>
+                <div><strong>type</strong>: ${file.type || 'unknown'}</div>
+                <div><strong>duration</strong>: ${durationText}</div>
+                <div><strong>resolution</strong>: ${dimsText}</div>
+                <div><strong>bitrate</strong>: ${bitrateText}</div>
             `;
             metadataVisible = true;
             
@@ -472,7 +472,7 @@
 </script>
 
 <div class="container">
-    <h1>Video Compressor</h1>
+    <h1>// video-compressor</h1>
 
     <div 
         class="upload-area" 
@@ -491,8 +491,10 @@
             style="display: none;"
             on:change={handleFileInputChange}
         />
-        <p>Drag and drop a video file here, or click to select</p>
-        <div class="file-info">{fileInfo}</div>
+        <p style="font-size: 15px;">$ drag & drop video file or click to select</p>
+        {#if fileInfo}
+            <div class="file-info">→ {fileInfo}</div>
+        {/if}
     </div>
 
     {#if metadataVisible}
@@ -503,12 +505,14 @@
 
     {#if controlsVisible}
         <div class="controls" id="controls">
-            <div style="margin-bottom: 16px;">
-                <label for="outputSizeSlider"><strong>Target output size</strong>: <span id="outputSizeValue">{outputSizeValue}</span></label>
-                <div style="display: flex; gap: 8px; margin-top: 8px; margin-bottom: 8px; flex-wrap: wrap;">
-                    <button type="button" class="preset-btn" on:click={() => handlePresetClick('25')}>75% smaller</button>
-                    <button type="button" class="preset-btn" on:click={() => handlePresetClick('50')}>50% smaller</button>
-                    <button type="button" class="preset-btn" on:click={() => handlePresetClick('75')}>25% smaller</button>
+            <div style="margin-bottom: 24px;">
+                <label for="outputSizeSlider" style="display: block; margin-bottom: 12px;">
+                    <strong>target_output_size</strong>: <span id="outputSizeValue" style="color: #71717a;">{outputSizeValue}</span>
+                </label>
+                <div style="display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap;">
+                    <button type="button" class="preset-btn" on:click={() => handlePresetClick('25')}>-75%</button>
+                    <button type="button" class="preset-btn" on:click={() => handlePresetClick('50')}>-50%</button>
+                    <button type="button" class="preset-btn" on:click={() => handlePresetClick('75')}>-25%</button>
                 </div>
                 <input 
                     type="range" 
@@ -521,30 +525,36 @@
                     on:input={updateOutputSizeDisplay}
                     style="width: 100%;"
                 />
-                <div class="helper-text">Drag left to compress more. Automatically adjusts quality and resolution.</div>
-                <div class="estimate-line" id="outputSizeDetails">{outputSizeDetails}</div>
+                <div class="helper-text">// drag left to compress more · auto-adjusts quality + resolution</div>
+                {#if outputSizeDetails}
+                    <div class="estimate-line">→ {outputSizeDetails}</div>
+                {/if}
             </div>
             <div class="codec-select">
-                <label for="codecSelect"><strong>Codec</strong></label>
+                <label for="codecSelect" style="display: block; margin-bottom: 8px;"><strong>codec</strong></label>
                 <select id="codecSelect" bind:value={codecSelectValue} on:change={() => { updateCodecHelper(); updateOutputSizeDisplay(); }}>
-                    <option value="h264">H.264 (MP4)</option>
-                    <option value="h265">H.265 / HEVC (MP4)</option>
-                    <option value="vp9">VP9 (WebM)</option>
-                    <option value="av1">AV1 (WebM)</option>
+                    <option value="h264">h264 (mp4)</option>
+                    <option value="h265">h265 / hevc (mp4)</option>
+                    <option value="vp9">vp9 (webm)</option>
+                    <option value="av1">av1 (webm)</option>
                 </select>
-                <div class="helper-text" id="codecHelper">{codecHelperText}</div>
+                {#if codecHelperText}
+                    <div class="helper-text">// {codecHelperText}</div>
+                {/if}
             </div>
         </div>
     {/if}
 
-    <button 
-        id="uploadBtn" 
-        disabled={uploadBtnDisabled}
-        on:click={handleUpload}
-        style="width: 100%; margin-bottom: 20px;"
-    >
-        {uploadBtnText}
-    </button>
+    {#if !videoPreviewVisible}
+        <button 
+            id="uploadBtn" 
+            disabled={uploadBtnDisabled}
+            on:click={handleUpload}
+            style="width: 100%; margin-bottom: 24px;"
+        >
+            $ {uploadBtnText.toLowerCase().replace('&', '+')}
+        </button>
+    {/if}
 
     {#if progressVisible}
         <div class="progress" id="progress">
@@ -556,25 +566,23 @@
 
     {#if statusVisible}
         <div id="status" class="status-{statusType}">
-            {statusMessage}
+            → {statusMessage}
         </div>
     {/if}
 
     {#if videoPreviewVisible}
         <div class="video-preview">
-            <h3 style="color: #569cd6; margin-bottom: 10px;">Preview Compressed Video</h3>
-            <video controls style="width: 100%; max-width: 800px; border-radius: 8px; border: 1px solid #3e3e42;">
+            <h3>// compressed_output</h3>
+            <video controls style="width: 100%; border-radius: 8px; border: 1px solid #27272a;">
                 {#if videoPreviewUrl}
                     <source src={videoPreviewUrl} type={downloadMimeType || 'video/mp4'}>
                 {/if}
                 Your browser does not support the video tag.
             </video>
         </div>
-    {/if}
 
-    {#if downloadVisible}
-        <button id="downloadBtn" on:click={handleDownload}>
-            Download Compressed Video
+        <button id="downloadBtn" on:click={handleDownload} style="width: 100%; margin-bottom: 24px;">
+            $ download_compressed_video
         </button>
     {/if}
 </div>
