@@ -323,8 +323,8 @@ app.Lifetime.ApplicationStarted.Register(() =>
     Console.WriteLine($"📡 Server URL: {url}");
     Console.WriteLine($"🪟 Opening native window...\n");
     
-    // Delay to ensure server is fully ready
-    Task.Delay(1500).ContinueWith(_ =>
+    // Reduced delay for faster startup
+    Task.Delay(500).ContinueWith(_ =>
     {
         if (OperatingSystem.IsWindows())
         {

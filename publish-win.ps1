@@ -123,7 +123,7 @@ $publishArgs = @(
     "/p:PublishSingleFile=true",
     "/p:IncludeNativeLibrariesForSelfExtract=true",
     "/p:EnableCompressionInSingleFile=true",
-    "/p:PublishReadyToRun=false",
+    "/p:PublishReadyToRun=true",
     "/maxcpucount",
     "--no-restore"
 )
