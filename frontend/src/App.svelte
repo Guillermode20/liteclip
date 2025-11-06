@@ -885,6 +885,103 @@
                         </button>
                     </div>
                 </div>
+            {:else if controlsVisible && !videoPreviewVisible}
+                <!-- Preview/Info Panel -->
+                <div class="content-card preview-panel">
+                    <h2 class="section-title">// compression_preview</h2>
+                    
+                    <div class="info-grid">
+                        <div class="info-card">
+                            <svg class="info-icon" xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <polygon points="23 7 16 12 23 17 23 7"></polygon>
+                                <rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>
+                            </svg>
+                            <div class="info-content">
+                                <h4>Original Video</h4>
+                                <p class="info-stat">{originalSizeMb?.toFixed(1)} MB</p>
+                                <p class="info-detail">{sourceVideoWidth}×{sourceVideoHeight} @ {sourceDuration?.toFixed(1)}s</p>
+                            </div>
+                        </div>
+
+                        <div class="info-card">
+                            <svg class="info-icon" xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <circle cx="12" cy="12" r="10"></circle>
+                                <polyline points="12 6 12 12 16 14"></polyline>
+                            </svg>
+                            <div class="info-content">
+                                <h4>Target Size</h4>
+                                <p class="info-stat">{outputSizeValue.split(' ')[0]} MB</p>
+                                <p class="info-detail">{outputSizeDetails}</p>
+                            </div>
+                        </div>
+
+                        <div class="info-card">
+                            <svg class="info-icon" xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <circle cx="12" cy="12" r="1"></circle>
+                                <path d="M12 1v6"></path>
+                                <path d="M12 17v6"></path>
+                                <path d="M4.22 4.22l4.24 4.24"></path>
+                                <path d="M15.54 15.54l4.24 4.24"></path>
+                                <path d="M1 12h6"></path>
+                                <path d="M17 12h6"></path>
+                                <path d="M4.22 19.78l4.24-4.24"></path>
+                                <path d="M15.54 8.46l4.24-4.24"></path>
+                            </svg>
+                            <div class="info-content">
+                                <h4>Codec</h4>
+                                <p class="info-stat">{codecSelectValue.toUpperCase()}</p>
+                                <p class="info-detail">{codecHelperText}</p>
+                            </div>
+                        </div>
+
+                        <div class="info-card">
+                            <svg class="info-icon" xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <circle cx="12" cy="12" r="10"></circle>
+                                <path d="M12 6v6l4 2"></path>
+                            </svg>
+                            <div class="info-content">
+                                <h4>Est. Compression</h4>
+                                <p class="info-stat">1-5 min</p>
+                                <p class="info-detail">Depends on video length & codec</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="tips-section">
+                        <h3 class="tips-title">// compression_tips</h3>
+                        <ul class="tips-list">
+                            <li>
+                                <svg class="tip-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <circle cx="12" cy="12" r="10"></circle>
+                                    <path d="M12 8v4l3 2"></path>
+                                </svg>
+                                <span><strong>Drag the slider</strong> to adjust target size. Moving left compresses more.</span>
+                            </li>
+                            <li>
+                                <svg class="tip-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <circle cx="12" cy="12" r="10"></circle>
+                                    <path d="M12 8v4l3 2"></path>
+                                </svg>
+                                <span><strong>Codec choice matters</strong> - AV1 is smallest, H.264 is most compatible.</span>
+                            </li>
+                            <li>
+                                <svg class="tip-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <circle cx="12" cy="12" r="10"></circle>
+                                    <path d="M12 8v4l3 2"></path>
+                                </svg>
+                                <span><strong>Two-pass encoding</strong> is enabled automatically for accurate file sizes.</span>
+                            </li>
+                            <li>
+                                <svg class="tip-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <circle cx="12" cy="12" r="10"></circle>
+                                    <path d="M12 8v4l3 2"></path>
+                                </svg>
+                                <span><strong>Resolution scales automatically</strong> to maintain quality at target size.</span>
+                            </li>
+                        </ul>
+                    </div>
+
+                </div>
             {:else if !controlsVisible}
                 <div class="content-placeholder">
                     <svg class="placeholder-icon" xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">

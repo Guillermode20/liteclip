@@ -625,6 +625,111 @@ select option {
     color: #4ade80;
 }
 
+/* Preview Panel */
+.preview-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+}
+
+.info-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 16px;
+}
+
+.info-card {
+    display: flex;
+    gap: 12px;
+    padding: 16px;
+    background-color: rgba(9, 9, 11, 0.6);
+    backdrop-filter: blur(8px);
+    border-radius: 8px;
+    border: 1px solid #27272a;
+    transition: all 0.2s ease;
+}
+
+.info-card:hover {
+    background-color: rgba(9, 9, 11, 0.8);
+    border-color: #3f3f46;
+    transform: translateY(-2px);
+}
+
+.info-icon {
+    flex-shrink: 0;
+    color: #fbbf24;
+    opacity: 0.8;
+}
+
+.info-content {
+    flex: 1;
+}
+
+.info-content h4 {
+    font-size: 13px;
+    font-weight: 600;
+    color: #fafafa;
+    margin: 0 0 6px 0;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.info-stat {
+    font-size: 18px;
+    font-weight: 700;
+    color: #fbbf24;
+    margin: 0 0 4px 0;
+    font-family: 'Courier New', monospace;
+}
+
+.info-detail {
+    font-size: 12px;
+    color: #71717a;
+    margin: 0;
+    line-height: 1.4;
+}
+
+/* Tips Section */
+.tips-section {
+    border-top: 1px solid #27272a;
+    padding-top: 16px;
+}
+
+.tips-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: #fafafa;
+    margin: 0 0 12px 0;
+    text-transform: lowercase;
+}
+
+.tips-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.tips-list li {
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+    font-size: 13px;
+    color: #a1a1aa;
+    line-height: 1.5;
+}
+
+.tip-icon {
+    flex-shrink: 0;
+    color: #71717a;
+}
+
+.tips-list strong {
+    color: #fafafa;
+}
+
 /* Animations */
 @keyframes fadeIn {
     from {
@@ -752,6 +857,22 @@ select option {
     .metadata-value {
         font-size: 13px;
     }
+
+    .info-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .info-card {
+        padding: 12px;
+    }
+
+    .info-stat {
+        font-size: 16px;
+    }
+
+    .tips-list li {
+        font-size: 12px;
+    }
 }
 
 @media (max-width: 480px) {
@@ -791,5 +912,17 @@ select option {
     .action-btn {
         padding: 11px 18px;
         font-size: 13px;
+    }
+
+    .info-stat {
+        font-size: 14px;
+    }
+
+    .info-content h4 {
+        font-size: 12px;
+    }
+
+    .tips-title {
+        font-size: 12px;
     }
 }
