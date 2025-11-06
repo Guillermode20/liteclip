@@ -156,7 +156,7 @@ $runScriptContent = @"
 echo Starting Smart Video Compressor...
 echo A native window will open automatically!
 echo.
-smart-compressor.exe --urls "http://localhost:5000"
+smart-compressor.exe
 "@
 
 $runScriptPath = Join-Path $OutputDir "run.bat"

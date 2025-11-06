@@ -167,7 +167,7 @@ cd frontend
 npm run dev
 ```
 
-The backend will run on `http://localhost:5000` (or check console output), and the frontend dev server typically runs on `http://localhost:5173`.
+The backend will run on a dynamically assigned port (check console output for the exact URL), and the frontend dev server typically runs on `http://localhost:5173`.
 
 ### Project Structure
 

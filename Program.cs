@@ -304,7 +304,13 @@ app.MapGet("/api/download/{jobId}", async (string jobId, VideoCompressionService
 app.Lifetime.ApplicationStarted.Register(() =>
 {
     var urls = app.Urls;
-    var url = urls.FirstOrDefault() ?? "http://localhost:5000";
+    var url = urls.FirstOrDefault();
+    
+    if (url == null)
+    {
+        Console.WriteLine($"\n⚠️ Warning: No URL configured. Application may not start correctly.");
+        return;
+    }
     
     // Replace https with http for webview
     if (url.StartsWith("https://"))
@@ -312,9 +318,10 @@ app.Lifetime.ApplicationStarted.Register(() =>
         url = url.Replace("https://", "http://");
     }
     
-    Console.WriteLine($"\n🎉 Smart Video Compressor is starting at {DateTime.Now:O}...");
-    Console.WriteLine($"📡 Server URL: {url}");
-    Console.WriteLine($"🪟 Opening native window...\n");
+    Console.WriteLine($"\n🎉 Smart Video Compressor - Intelligent Video Compression");
+    Console.WriteLine($"📅 Started at {DateTime.Now:O}");
+    Console.WriteLine($"📡 Server running at: {url}");
+    Console.WriteLine($"🪟 Opening native desktop window...\n");
     
     // Open window immediately for faster startup
     if (OperatingSystem.IsWindows())

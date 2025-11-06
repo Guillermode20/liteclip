@@ -588,7 +588,8 @@
 </script>
 
 <div class="container">
-    <h1>// video-compressor</h1>
+    <h1>// smart-video-compressor</h1>
+    <p style="text-align: center; color: #71717a; font-size: 14px; margin-top: -32px; margin-bottom: 48px;">intelligent video compression with smart quality optimization</p>
 
     <div 
         class="upload-area" 
