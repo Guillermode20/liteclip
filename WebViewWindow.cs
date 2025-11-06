@@ -77,7 +77,10 @@ public class WebViewWindow : Form
             // Create WebView2 environment with minimal settings for faster startup
             var environmentOptions = new CoreWebView2EnvironmentOptions
             {
-                AdditionalBrowserArguments = "--disable-web-security --disable-features=IsolateOrigins,AutofillServerCommunication --disable-background-networking"
+                AdditionalBrowserArguments = "--disable-web-security --disable-features=IsolateOrigins,AutofillServerCommunication --disable-background-networking --user-data-dir=\"" + Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "SmartCompressor",
+                    "WebView2") + "\""
             };
             
             // Use AppData Local folder with clean name (prevents exe-name folder creation)
@@ -86,6 +89,9 @@ public class WebViewWindow : Form
                 "SmartCompressor",
                 "WebView2"
             );
+            
+            // Ensure the directory exists
+            Directory.CreateDirectory(userDataFolder);
             
             webViewEnvironment = await CoreWebView2Environment.CreateAsync(
                 null, 
