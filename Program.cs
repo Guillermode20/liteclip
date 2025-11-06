@@ -22,7 +22,9 @@ builder.Services.Configure<FormOptions>(options =>
 
 // Add services to the container.
 builder.Services.AddOpenApi();
+builder.Services.AddSingleton<FfmpegPathResolver>();
 builder.Services.AddSingleton<VideoCompressionService>();
+builder.Services.AddHostedService<JobCleanupService>();
 
 var app = builder.Build();
 
@@ -48,6 +50,7 @@ app.MapPost("/api/compress", async (
     [FromForm] int? sourceWidth,
     [FromForm] int? sourceHeight,
     [FromForm] long? originalSizeBytes,
+    [FromForm] bool? twoPass,
     VideoCompressionService compressionService,
     IConfiguration configuration) =>
 {
@@ -76,7 +79,8 @@ app.MapPost("/api/compress", async (
             SourceDuration = sourceDuration,
             SourceWidth = sourceWidth,
             SourceHeight = sourceHeight,
-            OriginalSizeBytes = originalSizeBytes
+            OriginalSizeBytes = originalSizeBytes,
+            TwoPass = twoPass ?? false
         };
 
         var jobId = await compressionService.CompressVideoAsync(file, compressionRequest);
@@ -129,6 +133,8 @@ app.MapGet("/api/status/{jobId}", (string jobId, VideoCompressionService compres
         return Results.NotFound(new { error = $"Job not found. The job may have expired or the application was restarted. JobId: {jobId}" });
     }
 
+    var queuePosition = job.Status == "queued" ? compressionService.GetQueuePosition(jobId) : (int?)null;
+
     return Results.Ok(new CompressionResult
     {
         JobId = jobId,
@@ -136,9 +142,15 @@ app.MapGet("/api/status/{jobId}", (string jobId, VideoCompressionService compres
         Status = job.Status,
         Message = job.Status switch
         {
-            "processing" => $"Video compression is in progress ({job.Progress:F1}%).",
+            "queued" => queuePosition.HasValue && queuePosition.Value > 0 
+                ? $"Video is queued for compression (position {queuePosition.Value})."
+                : "Video is queued for compression.",
+            "processing" => job.EstimatedSecondsRemaining.HasValue && job.EstimatedSecondsRemaining.Value > 0
+                ? $"Video compression is in progress ({job.Progress:F1}%). Estimated time remaining: {FormatTimeRemaining(job.EstimatedSecondsRemaining.Value)}"
+                : $"Video compression is in progress ({job.Progress:F1}%).",
             "completed" => "Video compression completed successfully.",
             "failed" => $"Video compression failed: {job.ErrorMessage}",
+            "cancelled" => "Video compression was cancelled.",
             _ => "Unknown status"
         },
         Mode = job.Mode,
@@ -149,10 +161,44 @@ app.MapGet("/api/status/{jobId}", (string jobId, VideoCompressionService compres
         TargetBitrateKbps = job.TargetBitrateKbps,
         OutputFilename = job.OutputFilename,
         OutputMimeType = job.OutputMimeType,
-        Progress = job.Progress
+        Progress = job.Progress,
+        EstimatedSecondsRemaining = job.EstimatedSecondsRemaining,
+        QueuePosition = queuePosition
     });
 })
 .WithName("GetJobStatus");
+
+// POST endpoint to cancel a job
+app.MapPost("/api/cancel/{jobId}", (string jobId, VideoCompressionService compressionService, ILogger<Program> logger) =>
+{
+    logger.LogInformation("Cancel request for jobId: {JobId}", jobId);
+
+    if (string.IsNullOrWhiteSpace(jobId))
+    {
+        return Results.BadRequest(new { error = "Job ID is required" });
+    }
+
+    var success = compressionService.CancelJob(jobId);
+
+    if (!success)
+    {
+        var job = compressionService.GetJob(jobId);
+        if (job == null)
+        {
+            return Results.NotFound(new { error = "Job not found" });
+        }
+        
+        if (job.Status == "completed" || job.Status == "failed" || job.Status == "cancelled")
+        {
+            return Results.BadRequest(new { error = $"Cannot cancel job with status: {job.Status}" });
+        }
+
+        return Results.Problem("Failed to cancel job", statusCode: 500);
+    }
+
+    return Results.Ok(new { message = "Job cancelled successfully", jobId });
+})
+.WithName("CancelJob");
 
 // GET endpoint to check status and download compressed video
 app.MapGet("/api/download/{jobId}", async (string jobId, VideoCompressionService compressionService, ILogger<Program> logger) =>
@@ -242,3 +288,23 @@ app.MapGet("/api/download/{jobId}", async (string jobId, VideoCompressionService
 .WithName("DownloadCompressedVideo");
 
 app.Run();
+
+static string FormatTimeRemaining(int seconds)
+{
+    if (seconds < 60)
+    {
+        return $"{seconds}s";
+    }
+    else if (seconds < 3600)
+    {
+        var minutes = seconds / 60;
+        var secs = seconds % 60;
+        return secs > 0 ? $"{minutes}m {secs}s" : $"{minutes}m";
+    }
+    else
+    {
+        var hours = seconds / 3600;
+        var minutes = (seconds % 3600) / 60;
+        return minutes > 0 ? $"{hours}h {minutes}m" : $"{hours}h";
+    }
+}

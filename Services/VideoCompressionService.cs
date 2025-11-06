@@ -10,15 +10,25 @@ namespace smart_compressor.Services;
 public class VideoCompressionService
 {
     private readonly ConcurrentDictionary<string, JobMetadata> _jobs = new();
+    private readonly ConcurrentQueue<string> _jobQueue = new();
+    private readonly SemaphoreSlim _concurrencyLimiter;
     private readonly string _tempUploadPath;
     private readonly string _tempOutputPath;
     private readonly ILogger<VideoCompressionService> _logger;
+    private readonly FfmpegPathResolver _ffmpegResolver;
+    private readonly int _maxConcurrentJobs;
+    private readonly int _maxQueueSize;
 
-    public VideoCompressionService(IConfiguration configuration, ILogger<VideoCompressionService> logger)
+    public VideoCompressionService(IConfiguration configuration, ILogger<VideoCompressionService> logger, FfmpegPathResolver ffmpegResolver)
     {
         _logger = logger;
+        _ffmpegResolver = ffmpegResolver;
         _tempUploadPath = configuration["TempPaths:Uploads"] ?? Path.Combine(Path.GetTempPath(), "video-uploads");
         _tempOutputPath = configuration["TempPaths:Outputs"] ?? Path.Combine(Path.GetTempPath(), "video-outputs");
+        _maxConcurrentJobs = configuration.GetValue<int>("Compression:MaxConcurrentJobs", 2);
+        _maxQueueSize = configuration.GetValue<int>("Compression:MaxQueueSize", 10);
+
+        _concurrencyLimiter = new SemaphoreSlim(_maxConcurrentJobs, _maxConcurrentJobs);
 
         Directory.CreateDirectory(_tempUploadPath);
         Directory.CreateDirectory(_tempOutputPath);
@@ -74,6 +84,12 @@ public class VideoCompressionService
             await videoFile.CopyToAsync(stream);
         }
 
+        // Check queue size before accepting new job
+        if (_jobQueue.Count >= _maxQueueSize)
+        {
+            throw new InvalidOperationException($"Queue is full. Maximum queue size is {_maxQueueSize}. Please try again later.");
+        }
+
         var job = new JobMetadata
         {
             JobId = jobId,
@@ -82,7 +98,7 @@ public class VideoCompressionService
             OutputPath = outputPath,
             OutputFilename = outputFilename,
             OutputMimeType = codecConfig.MimeType,
-            Status = "processing",
+            Status = "queued",
             Mode = normalizedRequest.Mode,
             Codec = codecConfig.Key,
             Crf = normalizedRequest.Crf,
@@ -93,14 +109,87 @@ public class VideoCompressionService
             SourceDuration = normalizedRequest.SourceDuration,
             SourceWidth = normalizedRequest.SourceWidth,
             SourceHeight = normalizedRequest.SourceHeight,
-            OriginalSizeBytes = normalizedRequest.OriginalSizeBytes
+            OriginalSizeBytes = normalizedRequest.OriginalSizeBytes,
+            TwoPass = normalizedRequest.TwoPass,
+            CreatedAt = DateTime.UtcNow
         };
 
         _jobs[jobId] = job;
+        _jobQueue.Enqueue(jobId);
 
-        _ = Task.Run(async () => await RunFfmpegCompressionAsync(jobId, job, normalizedRequest, codecConfig));
+        _ = Task.Run(async () => await ProcessQueueAsync(jobId, normalizedRequest, codecConfig));
 
         return jobId;
+    }
+
+    private async Task ProcessQueueAsync(string jobId, CompressionRequest request, CodecConfig codecConfig)
+    {
+        try
+        {
+            // Wait for our turn
+            await _concurrencyLimiter.WaitAsync();
+
+            // Check if job was cancelled while waiting
+            if (!_jobs.TryGetValue(jobId, out var job) || job.Status == "cancelled")
+            {
+                _logger.LogInformation("Job {JobId} was cancelled before processing started", jobId);
+                return;
+            }
+
+            // Update status from queued to processing
+            job.Status = "processing";
+            job.StartedAt = DateTime.UtcNow;
+            _logger.LogInformation("Starting compression for job {JobId} (waited {WaitTime:F1}s in queue)", 
+                jobId, (job.StartedAt.Value - job.CreatedAt).TotalSeconds);
+
+            await RunFfmpegCompressionAsync(jobId, job, request, codecConfig);
+        }
+        finally
+        {
+            _concurrencyLimiter.Release();
+        }
+    }
+
+    public bool CancelJob(string jobId)
+    {
+        if (!_jobs.TryGetValue(jobId, out var job))
+        {
+            return false;
+        }
+
+        if (job.Status == "completed" || job.Status == "failed" || job.Status == "cancelled")
+        {
+            return false;
+        }
+
+        job.Status = "cancelled";
+        job.Process?.Kill();
+        
+        _logger.LogInformation("Job {JobId} cancelled", jobId);
+        return true;
+    }
+
+    public int GetQueuePosition(string jobId)
+    {
+        if (!_jobs.TryGetValue(jobId, out var job) || job.Status != "queued")
+        {
+            return 0;
+        }
+
+        var position = 1;
+        foreach (var queuedJobId in _jobQueue)
+        {
+            if (queuedJobId == jobId)
+            {
+                return position;
+            }
+            if (_jobs.TryGetValue(queuedJobId, out var queuedJob) && queuedJob.Status == "queued")
+            {
+                position++;
+            }
+        }
+
+        return 0;
     }
 
         private async Task RunFfmpegCompressionAsync(string jobId, JobMetadata job, CompressionRequest request, CodecConfig codec)
@@ -200,93 +289,19 @@ public class VideoCompressionService
 
             arguments.AddRange(BuildAudioArgs(codec));
             arguments.AddRange(BuildContainerArgs(codec));
-            arguments.Add(job.OutputPath);
-
-            var commandLine = $"ffmpeg {string.Join(" ", arguments.Select(a => a.Contains(" ") ? $"\"{a}\"" : a))}";
-            _logger.LogInformation("Executing FFmpeg command for job {JobId}: {Command}", jobId, commandLine);
-
-            var processStartInfo = new ProcessStartInfo
+            
+            // Two-pass encoding for simple mode when targeting specific size
+            var useTwoPass = job.TwoPass && mode == "simple" && videoBitrateKbps.HasValue;
+            
+            if (useTwoPass)
             {
-                FileName = "ffmpeg",
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
-
-            foreach (var arg in arguments)
-            {
-                processStartInfo.ArgumentList.Add(arg);
-            }
-
-            using var process = new Process { StartInfo = processStartInfo };
-
-            var outputBuilder = new StringBuilder();
-            var errorBuilder = new StringBuilder();
-            double? totalDuration = request.SourceDuration;
-
-            process.OutputDataReceived += (_, e) =>
-            {
-                if (!string.IsNullOrEmpty(e.Data))
-                {
-                    outputBuilder.AppendLine(e.Data);
-                }
-            };
-
-            process.ErrorDataReceived += (_, e) =>
-            {
-                if (!string.IsNullOrEmpty(e.Data))
-                {
-                    errorBuilder.AppendLine(e.Data);
-
-                    // Parse FFmpeg progress output for real-time progress
-                    string line = e.Data.Trim();
-                    if (line.StartsWith("frame=") || line.Contains("time="))
-                    {
-                        try
-                        {
-                            var progress = ParseFfmpegProgress(line, totalDuration);
-                            if (progress.HasValue)
-                            {
-                                job.Progress = Math.Clamp(progress.Value, 0, 100);
-                            }
-                        }
-                        catch
-                        {
-                            // Ignore parsing errors, continue with compression
-                        }
-                    }
-                }
-            };
-
-            process.Start();
-            process.BeginOutputReadLine();
-            process.BeginErrorReadLine();
-
-            await process.WaitForExitAsync();
-
-            if (process.ExitCode == 0)
-            {
-                job.Status = "completed";
-                
-                // Log output file size for verification
-                if (File.Exists(job.OutputPath))
-                {
-                    var outputSize = new FileInfo(job.OutputPath).Length;
-                    var outputSizeMb = outputSize / (1024.0 * 1024.0);
-                    _logger.LogInformation("Video compression completed for job {JobId} using {Codec} ({Mode} mode). Output size: {OutputSizeMb:F2} MB (Target: {TargetSizeMb} MB)", 
-                        jobId, job.Codec, job.Mode, outputSizeMb, job.TargetSizeMb?.ToString("F2") ?? "N/A");
-                }
-                else
-                {
-                    _logger.LogInformation("Video compression completed for job {JobId} using {Codec} ({Mode} mode).", jobId, job.Codec, job.Mode);
-                }
+                _logger.LogInformation("Using two-pass encoding for job {JobId}", jobId);
+                await RunTwoPassEncodingAsync(jobId, job, arguments, codec, request.SourceDuration);
             }
             else
             {
-                job.Status = "failed";
-                job.ErrorMessage = errorBuilder.ToString();
-                _logger.LogError("Video compression failed for job {JobId}. Exit code {ExitCode}. Error: {Error}", jobId, process.ExitCode, errorBuilder.ToString());
+                arguments.Add(job.OutputPath);
+                await RunSinglePassEncodingAsync(jobId, job, arguments, request.SourceDuration);
             }
         }
         catch (Exception ex)
@@ -295,12 +310,339 @@ public class VideoCompressionService
             job.ErrorMessage = ex.Message;
             _logger.LogError(ex, "Exception during video compression for job {JobId}", jobId);
         }
+        finally
+        {
+            job.CompletedAt = DateTime.UtcNow;
+            job.Process = null;
+        }
+    }
+
+    private async Task RunSinglePassEncodingAsync(string jobId, JobMetadata job, List<string> arguments, double? totalDuration)
+    {
+        var commandLine = $"ffmpeg {string.Join(" ", arguments.Select(a => a.Contains(" ") ? $"\"{a}\"" : a))}";
+        _logger.LogInformation("Executing FFmpeg command for job {JobId}: {Command}", jobId, commandLine);
+
+        var processStartInfo = new ProcessStartInfo
+        {
+            FileName = _ffmpegResolver.GetFfmpegPath(),
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+
+        foreach (var arg in arguments)
+        {
+            processStartInfo.ArgumentList.Add(arg);
+        }
+
+        using var process = new Process { StartInfo = processStartInfo };
+        job.Process = process;
+
+        var errorBuilder = new StringBuilder();
+        var startTime = DateTime.UtcNow;
+        var lastProgressUpdate = startTime;
+
+        process.OutputDataReceived += (_, e) =>
+        {
+            if (!string.IsNullOrEmpty(e.Data))
+            {
+                // Log output if needed
+            }
+        };
+
+        process.ErrorDataReceived += (_, e) =>
+        {
+            if (!string.IsNullOrEmpty(e.Data))
+            {
+                errorBuilder.AppendLine(e.Data);
+
+                // Parse FFmpeg progress output for real-time progress
+                string line = e.Data.Trim();
+                if (line.StartsWith("frame=") || line.Contains("time="))
+                {
+                    try
+                    {
+                        var now = DateTime.UtcNow;
+                        var progress = ParseFfmpegProgress(line, totalDuration, out var currentTimeSeconds);
+                        if (progress.HasValue)
+                        {
+                            job.Progress = Math.Clamp(progress.Value, 0, 100);
+                            
+                            // Calculate ETA every 2 seconds
+                            if ((now - lastProgressUpdate).TotalSeconds >= 2 && currentTimeSeconds.HasValue && totalDuration.HasValue)
+                            {
+                                var elapsed = (now - startTime).TotalSeconds;
+                                var speed = currentTimeSeconds.Value / elapsed; // x speed
+                                if (speed > 0)
+                                {
+                                    var remainingSeconds = (totalDuration.Value - currentTimeSeconds.Value) / speed;
+                                    job.EstimatedSecondsRemaining = (int)Math.Ceiling(remainingSeconds);
+                                }
+                                lastProgressUpdate = now;
+                            }
+                        }
+                    }
+                    catch
+                    {
+                        // Ignore parsing errors, continue with compression
+                    }
+                }
+            }
+        };
+
+        process.Start();
+        process.BeginOutputReadLine();
+        process.BeginErrorReadLine();
+
+        await process.WaitForExitAsync();
+
+        // Check for cancellation
+        if (job.Status == "cancelled")
+        {
+            _logger.LogInformation("Job {JobId} was cancelled", jobId);
+            return;
+        }
+
+        if (process.ExitCode == 0)
+        {
+            job.Status = "completed";
+            job.Progress = 100;
+            job.EstimatedSecondsRemaining = 0;
+            
+            // Log output file size for verification
+            if (File.Exists(job.OutputPath))
+            {
+                var outputSize = new FileInfo(job.OutputPath).Length;
+                var outputSizeMb = outputSize / (1024.0 * 1024.0);
+                _logger.LogInformation("Video compression completed for job {JobId} using {Codec} ({Mode} mode). Output size: {OutputSizeMb:F2} MB (Target: {TargetSizeMb} MB)", 
+                    jobId, job.Codec, job.Mode, outputSizeMb, job.TargetSizeMb?.ToString("F2") ?? "N/A");
+            }
+            else
+            {
+                _logger.LogInformation("Video compression completed for job {JobId} using {Codec} ({Mode} mode).", jobId, job.Codec, job.Mode);
+            }
+        }
+        else
+        {
+            job.Status = "failed";
+            job.ErrorMessage = errorBuilder.ToString();
+            _logger.LogError("Video compression failed for job {JobId}. Exit code {ExitCode}. Error: {Error}", jobId, process.ExitCode, errorBuilder.ToString());
+        }
+    }
+
+    private async Task RunTwoPassEncodingAsync(string jobId, JobMetadata job, List<string> baseArguments, CodecConfig codec, double? totalDuration)
+    {
+        var passLogFile = Path.Combine(_tempOutputPath, $"{jobId}_ffmpeg2pass");
+
+        // First pass
+        _logger.LogInformation("Starting first pass for job {JobId}", jobId);
+        var pass1Args = new List<string>(baseArguments);
+        
+        // Add pass-specific arguments
+        if (codec.Key == "h264" || codec.Key == "h265")
+        {
+            pass1Args.AddRange(new[] { "-pass", "1", "-passlogfile", passLogFile, "-f", codec.Key == "h264" ? "mp4" : "mp4" });
+        }
+        else if (codec.Key == "vp9")
+        {
+            pass1Args.AddRange(new[] { "-pass", "1", "-passlogfile", passLogFile, "-f", "webm" });
+        }
+        else if (codec.Key == "av1")
+        {
+            pass1Args.AddRange(new[] { "-pass", "1", "-passlogfile", passLogFile, "-f", "webm" });
+        }
+        
+        // Use null output for first pass
+        if (OperatingSystem.IsWindows())
+        {
+            pass1Args.Add("NUL");
+        }
+        else
+        {
+            pass1Args.Add("/dev/null");
+        }
+
+        var success = await RunPassAsync(jobId, job, pass1Args, totalDuration, 1, 2);
+        if (!success) return;
+
+        // Second pass
+        _logger.LogInformation("Starting second pass for job {JobId}", jobId);
+        var pass2Args = new List<string>(baseArguments);
+        
+        if (codec.Key == "h264" || codec.Key == "h265")
+        {
+            pass2Args.AddRange(new[] { "-pass", "2", "-passlogfile", passLogFile });
+        }
+        else if (codec.Key == "vp9" || codec.Key == "av1")
+        {
+            pass2Args.AddRange(new[] { "-pass", "2", "-passlogfile", passLogFile });
+        }
+        
+        pass2Args.Add(job.OutputPath);
+
+        await RunPassAsync(jobId, job, pass2Args, totalDuration, 2, 2);
+
+        // Cleanup pass log files
+        try
+        {
+            foreach (var file in Directory.GetFiles(_tempOutputPath, $"{jobId}_ffmpeg2pass*"))
+            {
+                File.Delete(file);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to cleanup pass log files for job {JobId}", jobId);
+        }
+    }
+
+    private async Task<bool> RunPassAsync(string jobId, JobMetadata job, List<string> arguments, double? totalDuration, int passNumber, int totalPasses)
+    {
+        var processStartInfo = new ProcessStartInfo
+        {
+            FileName = _ffmpegResolver.GetFfmpegPath(),
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+
+        foreach (var arg in arguments)
+        {
+            processStartInfo.ArgumentList.Add(arg);
+        }
+
+        using var process = new Process { StartInfo = processStartInfo };
+        job.Process = process;
+
+        var errorBuilder = new StringBuilder();
+        var startTime = DateTime.UtcNow;
+        var lastProgressUpdate = startTime;
+
+        process.ErrorDataReceived += (_, e) =>
+        {
+            if (!string.IsNullOrEmpty(e.Data))
+            {
+                errorBuilder.AppendLine(e.Data);
+
+                string line = e.Data.Trim();
+                if (line.StartsWith("frame=") || line.Contains("time="))
+                {
+                    try
+                    {
+                        var now = DateTime.UtcNow;
+                        var progress = ParseFfmpegProgress(line, totalDuration, out var currentTimeSeconds);
+                        if (progress.HasValue)
+                        {
+                            // Adjust progress based on pass number
+                            var adjustedProgress = ((passNumber - 1) * 100.0 / totalPasses) + (progress.Value / totalPasses);
+                            job.Progress = Math.Clamp(adjustedProgress, 0, 100);
+                            
+                            // Calculate ETA
+                            if ((now - lastProgressUpdate).TotalSeconds >= 2 && currentTimeSeconds.HasValue && totalDuration.HasValue)
+                            {
+                                var elapsed = (now - startTime).TotalSeconds;
+                                var speed = currentTimeSeconds.Value / elapsed;
+                                if (speed > 0)
+                                {
+                                    var remainingThisPass = (totalDuration.Value - currentTimeSeconds.Value) / speed;
+                                    var remainingPasses = (totalPasses - passNumber) * (totalDuration.Value / speed);
+                                    job.EstimatedSecondsRemaining = (int)Math.Ceiling(remainingThisPass + remainingPasses);
+                                }
+                                lastProgressUpdate = now;
+                            }
+                        }
+                    }
+                    catch
+                    {
+                        // Ignore parsing errors
+                    }
+                }
+            }
+        };
+
+        process.Start();
+        process.BeginOutputReadLine();
+        process.BeginErrorReadLine();
+
+        await process.WaitForExitAsync();
+
+        if (job.Status == "cancelled")
+        {
+            _logger.LogInformation("Job {JobId} was cancelled during pass {Pass}", jobId, passNumber);
+            return false;
+        }
+
+        if (process.ExitCode != 0)
+        {
+            job.Status = "failed";
+            job.ErrorMessage = $"Pass {passNumber} failed: {errorBuilder}";
+            _logger.LogError("Pass {Pass} failed for job {JobId}. Exit code {ExitCode}", passNumber, jobId, process.ExitCode);
+            return false;
+        }
+
+        if (passNumber == totalPasses)
+        {
+            job.Status = "completed";
+            job.Progress = 100;
+            job.EstimatedSecondsRemaining = 0;
+            
+            if (File.Exists(job.OutputPath))
+            {
+                var outputSize = new FileInfo(job.OutputPath).Length;
+                var outputSizeMb = outputSize / (1024.0 * 1024.0);
+                _logger.LogInformation("Two-pass compression completed for job {JobId}. Output size: {OutputSizeMb:F2} MB (Target: {TargetSizeMb} MB)", 
+                    jobId, outputSizeMb, job.TargetSizeMb?.ToString("F2") ?? "N/A");
+            }
+        }
+
+        return true;
+    }
+
+    private static double? ParseFfmpegProgress(string line, double? totalDuration, out double? currentTimeSeconds)
+    {
+        currentTimeSeconds = null;
+        
+        if (string.IsNullOrEmpty(line) || !totalDuration.HasValue || totalDuration.Value <= 0)
+        {
+            return null;
+        }
+
+        try
+        {
+            // Look for time= pattern like "time=00:01:23.45"
+            var timeMatch = System.Text.RegularExpressions.Regex.Match(line, @"time=(\d{2}):(\d{2}):(\d{2}(?:\.\d+)?)");
+            if (timeMatch.Success)
+            {
+                var hours = double.Parse(timeMatch.Groups[1].Value);
+                var minutes = double.Parse(timeMatch.Groups[2].Value);
+                var seconds = double.Parse(timeMatch.Groups[3].Value);
+
+                var currentTime = hours * 3600 + minutes * 60 + seconds;
+                currentTimeSeconds = currentTime;
+                var progress = (currentTime / totalDuration.Value) * 100;
+
+                return Math.Clamp(progress, 0, 100);
+            }
+        }
+        catch
+        {
+            // Parsing failed, return null
+        }
+
+        return null;
     }
 
     public JobMetadata? GetJob(string jobId)
     {
         _jobs.TryGetValue(jobId, out var job);
         return job;
+    }
+
+    public IEnumerable<JobMetadata> GetAllJobsInternal()
+    {
+        return _jobs.Values.ToList();
     }
 
     public void CleanupJob(string jobId)
@@ -665,5 +1007,11 @@ public class JobMetadata
     public long? OriginalSizeBytes { get; set; }
     public double Progress { get; set; } = 0;
     public string? ErrorMessage { get; set; }
+    public bool TwoPass { get; set; } = false;
+    public DateTime CreatedAt { get; set; }
+    public DateTime? StartedAt { get; set; }
+    public DateTime? CompletedAt { get; set; }
+    public int? EstimatedSecondsRemaining { get; set; }
+    public Process? Process { get; set; }
 }
 

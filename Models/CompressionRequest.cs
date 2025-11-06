@@ -13,5 +13,6 @@ public class CompressionRequest
     public long? OriginalSizeBytes { get; set; }
     public double? TargetBitrateKbps { get; set; }
     public double? VideoBitrateKbps { get; set; }
+    public bool TwoPass { get; set; } = false;
 }
 

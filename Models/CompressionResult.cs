@@ -15,6 +15,8 @@ public class CompressionResult
     public string? OutputFilename { get; set; }
     public string? OutputMimeType { get; set; }
     public double Progress { get; set; } = 0;
+    public int? EstimatedSecondsRemaining { get; set; }
+    public int? QueuePosition { get; set; }
 }
 
 

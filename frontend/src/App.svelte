@@ -32,6 +32,8 @@
     let outputSizeDetails = '';
     let outputSizeSliderValue = 100;
     let codecSelectValue = 'h264';
+    let showCancelButton = false;
+    let etaText = '';
     
     const codecDetails = {
         h264: {
@@ -320,10 +322,25 @@
             const response = await fetch(`/api/status/${jobId}`);
             if (response.ok) {
                 const result = await response.json();
-                if (result.status === 'processing') {
+                if (result.status === 'queued') {
+                    showCancelButton = true;
+                    const queueMsg = result.queuePosition > 0 
+                        ? `Queued for compression (position ${result.queuePosition})...`
+                        : 'Queued for compression...';
+                    showStatus(queueMsg, 'processing');
+                } else if (result.status === 'processing') {
+                    showCancelButton = true;
                     const progressPercentValue = Math.max(10, Math.min(95, result.progress || 0));
                     progressPercent = progressPercentValue;
-                    showStatus(`Compressing video... ${progressPercentValue.toFixed(1)}%`, 'processing');
+                    
+                    // Update ETA
+                    if (result.estimatedSecondsRemaining && result.estimatedSecondsRemaining > 0) {
+                        etaText = formatTimeRemaining(result.estimatedSecondsRemaining);
+                        showStatus(`Compressing video... ${progressPercentValue.toFixed(1)}% (ETA: ${etaText})`, 'processing');
+                    } else {
+                        etaText = '';
+                        showStatus(`Compressing video... ${progressPercentValue.toFixed(1)}%`, 'processing');
+                    }
                 } else if (result.status === 'completed') {
                     if (statusCheckInterval) {
                         clearInterval(statusCheckInterval);
@@ -331,6 +348,8 @@
                     }
                     progressPercent = 100;
                     isCompressing = false;
+                    showCancelButton = false;
+                    etaText = '';
                     downloadFileName = result.outputFilename || `compressed_${selectedFile?.name ?? jobId}`;
                     downloadMimeType = result.outputMimeType || 'video/mp4';
 
@@ -341,12 +360,26 @@
                     videoPreviewVisible = true;
                     downloadVisible = true;
                     progressVisible = false;
+                } else if (result.status === 'cancelled') {
+                    if (statusCheckInterval) {
+                        clearInterval(statusCheckInterval);
+                        statusCheckInterval = null;
+                    }
+                    isCompressing = false;
+                    showCancelButton = false;
+                    etaText = '';
+                    showStatus('Compression was cancelled.', 'error');
+                    uploadBtnDisabled = false;
+                    uploadBtnText = 'Upload & Compress Video';
+                    progressVisible = false;
                 } else if (result.status === 'failed') {
                     if (statusCheckInterval) {
                         clearInterval(statusCheckInterval);
                         statusCheckInterval = null;
                     }
                     isCompressing = false;
+                    showCancelButton = false;
+                    etaText = '';
                     showStatus('Compression failed: ' + (result.message || 'Unknown error'), 'error');
                     uploadBtnDisabled = false;
                     uploadBtnText = 'Upload & Compress Video';
@@ -386,6 +419,45 @@
             uploadBtnDisabled = false;
             uploadBtnText = 'Upload & Compress Video';
             progressVisible = false;
+        }
+    }
+    
+    async function handleCancelJob() {
+        if (!jobId) return;
+        
+        if (!confirm('Are you sure you want to cancel this compression job?')) {
+            return;
+        }
+
+        try {
+            const response = await fetch(`/api/cancel/${jobId}`, {
+                method: 'POST'
+            });
+
+            if (response.ok) {
+                showStatus('Cancelling compression...', 'processing');
+                // Status check will handle the rest
+            } else {
+                const error = await response.json();
+                showStatus('Failed to cancel: ' + (error.error || 'Unknown error'), 'error');
+            }
+        } catch (error) {
+            console.error('Cancel failed:', error);
+            showStatus('Failed to cancel compression', 'error');
+        }
+    }
+
+    function formatTimeRemaining(seconds: number): string {
+        if (seconds < 60) {
+            return `${seconds}s`;
+        } else if (seconds < 3600) {
+            const minutes = Math.floor(seconds / 60);
+            const secs = seconds % 60;
+            return secs > 0 ? `${minutes}m ${secs}s` : `${minutes}m`;
+        } else {
+            const hours = Math.floor(seconds / 3600);
+            const minutes = Math.floor((seconds % 3600) / 60);
+            return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
         }
     }
     
@@ -450,6 +522,8 @@
         metadataVisible = false;
         downloadFileName = null;
         downloadMimeType = null;
+        showCancelButton = false;
+        etaText = '';
         if (videoPreviewUrl) {
             URL.revokeObjectURL(videoPreviewUrl);
             videoPreviewUrl = null;
@@ -553,6 +627,16 @@
             style="width: 100%; margin-bottom: 24px;"
         >
             $ {uploadBtnText.toLowerCase().replace('&', '+')}
+        </button>
+    {/if}
+
+    {#if showCancelButton}
+        <button 
+            id="cancelBtn"
+            on:click={handleCancelJob}
+            style="width: 100%; margin-bottom: 24px; background-color: #dc2626; border-color: #dc2626;"
+        >
+            $ cancel compression
         </button>
     {/if}
 

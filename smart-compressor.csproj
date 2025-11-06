@@ -5,10 +5,25 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>smart_compressor</RootNamespace>
+    
+    <!-- Single-file deployment configuration -->
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <PublishTrimmed>false</PublishTrimmed>
+    <PublishReadyToRun>true</PublishReadyToRun>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="9.0.10" />
   </ItemGroup>
+
+  <!-- Build frontend before publish -->
+  <Target Name="BuildFrontend" BeforeTargets="BeforeBuild">
+    <Exec Command="cd frontend &amp;&amp; npm install" Condition="!Exists('frontend/node_modules')" />
+    <Exec Command="cd frontend &amp;&amp; npm run build" />
+  </Target>
 
 </Project>
