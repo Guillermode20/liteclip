@@ -20,6 +20,11 @@
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="9.0.10" />
   </ItemGroup>
 
+  <!-- Include FFmpeg binaries -->
+  <ItemGroup>
+    <None Include="ffmpeg\**" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
   <!-- Build frontend before publish -->
   <Target Name="BuildFrontend" BeforeTargets="BeforeBuild">
     <Exec Command="cd frontend &amp;&amp; npm install" Condition="!Exists('frontend/node_modules')" />

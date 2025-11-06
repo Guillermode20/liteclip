@@ -125,9 +125,7 @@ Write-Host "Creating run script..." -ForegroundColor Yellow
 $runScriptContent = @"
 @echo off
 echo Starting Smart Video Compressor...
-echo.
-echo The application will be available at: http://localhost:5000
-echo Press Ctrl+C to stop the server
+echo Your browser will open automatically!
 echo.
 smart-compressor.exe --urls "http://localhost:5000"
 "@

@@ -38,6 +38,39 @@ app.UseHttpsRedirection();
 app.UseDefaultFiles(); // Enables serving index.html at root URL
 app.UseStaticFiles();
 
+// Open browser automatically when app starts
+app.Lifetime.ApplicationStarted.Register(() =>
+{
+    var urls = app.Urls;
+    var url = urls.FirstOrDefault() ?? "http://localhost:5000";
+    
+    // Replace https with http if not in production
+    if (!app.Environment.IsProduction() && url.StartsWith("https://"))
+    {
+        url = url.Replace("https://", "http://");
+    }
+    
+    try
+    {
+        // Open the default browser
+        var processInfo = new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = url,
+            UseShellExecute = true
+        };
+        System.Diagnostics.Process.Start(processInfo);
+        
+        Console.WriteLine($"\n🎉 Smart Video Compressor is running!");
+        Console.WriteLine($"🌐 Opening browser at: {url}");
+        Console.WriteLine($"⏹️  Press Ctrl+C to stop\n");
+    }
+    catch
+    {
+        Console.WriteLine($"\n🎉 Smart Video Compressor is running at: {url}");
+        Console.WriteLine($"⏹️  Press Ctrl+C to stop\n");
+    }
+});
+
 // POST endpoint to upload and compress video
 app.MapPost("/api/compress", async (
     [FromForm] IFormFile file,
