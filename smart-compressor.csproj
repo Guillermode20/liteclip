@@ -70,8 +70,42 @@
     <SelfContained>true</SelfContained>
     <EnableCompressionInSingleFile>false</EnableCompressionInSingleFile>
     <IncludeAllContentForSelfExtract>false</IncludeAllContentForSelfExtract>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <PublishReadyToRun>true</PublishReadyToRun>
     <GenerateEmbeddedFilesManifest>true</GenerateEmbeddedFilesManifest>
   </PropertyGroup>
+
+  <!-- Exclude files from publish output (they're embedded) -->
+  <ItemGroup Condition="'$(Configuration)'=='Release'">
+    <!-- Exclude appsettings files (embed or exclude as needed) -->
+    <Content Update="appsettings.json" CopyToPublishDirectory="Never" />
+    <Content Update="appsettings.Development.json" CopyToPublishDirectory="Never" />
+    
+    <!-- Exclude web.config -->
+    <Content Update="web.config" CopyToPublishDirectory="Never" />
+  </ItemGroup>
+  
+  <!-- Custom target to clean up unnecessary published files in Release -->
+  <Target Name="CleanupPublishedFiles" AfterTargets="Publish" Condition="'$(Configuration)'=='Release'">
+    <!-- Remove wwwroot folder (it's embedded) -->
+    <RemoveDir Directories="$(PublishDir)wwwroot" />
+    
+    <!-- Remove frontend folder (not needed) -->
+    <RemoveDir Directories="$(PublishDir)frontend" />
+    
+    <!-- Remove XML documentation files -->
+    <ItemGroup>
+      <FilesToDelete Include="$(PublishDir)*.xml" />
+      <FilesToDelete Include="$(PublishDir)*.pdb" />
+      <FilesToDelete Include="$(PublishDir)web.config" />
+    </ItemGroup>
+    <Delete Files="@(FilesToDelete)" />
+    
+    <!-- Remove static web assets metadata files -->
+    <ItemGroup>
+      <StaticAssetFiles Include="$(PublishDir)*.staticwebassets.*" />
+    </ItemGroup>
+    <Delete Files="@(StaticAssetFiles)" />
+  </Target>
 
 </Project>
