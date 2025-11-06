@@ -35,6 +35,20 @@
     let showCancelButton = false;
     let etaText = '';
     
+    // Output metadata
+    let outputMetadata = {
+        outputSizeBytes: 0,
+        outputSizeMb: 0,
+        compressionRatio: 0,
+        targetBitrateKbps: 0,
+        videoBitrateKbps: 0,
+        estimatedVideoBitrateKbps: 0,
+        scalePercent: 100,
+        codec: 'h264',
+        mode: 'advanced',
+        encodingTime: 0,
+    };
+    
     const codecDetails = {
         h264: {
             helper: 'Best compatibility across browsers and devices.',
@@ -158,7 +172,8 @@
             return 100; // Return 100% scale if inputs are invalid
         }
         
-        const targetBitsTotal = (targetSizeMb * 1024 * 1024 * 8 * 0.9);
+        // Updated to match backend: 97% container overhead factor (3% overhead) for MP4
+        const targetBitsTotal = (targetSizeMb * 1024 * 1024 * 8 * 0.97);
         const targetBitrateKbps = targetBitsTotal / durationSec / 1000;
         const videoBitrateKbps = targetBitrateKbps - 128;
         
@@ -364,6 +379,9 @@
                     downloadFileName = result.outputFilename || `compressed_${selectedFile?.name ?? jobId}`;
                     downloadMimeType = result.outputMimeType || 'video/mp4';
 
+                    // Calculate and store output metadata
+                    calculateOutputMetadata(result);
+
                     // Load video for preview
                     loadVideoPreview();
 
@@ -472,6 +490,39 @@
         }
     }
     
+    function calculateOutputMetadata(result: any) {
+        if (!originalSizeMb || !sourceDuration) return;
+        
+        // Estimate output size based on available data
+        let estimatedOutputBytes = 0;
+        if (result.targetBitrateKbps && result.targetBitrateKbps > 0 && sourceDuration) {
+            estimatedOutputBytes = Math.round((result.targetBitrateKbps * 1000 * sourceDuration) / 8);
+        } else if (result.videoBitrateKbps && result.videoBitrateKbps > 0) {
+            // Account for audio bitrate (128 kbps default)
+            const totalBitrateKbps = result.videoBitrateKbps + 128;
+            estimatedOutputBytes = Math.round((totalBitrateKbps * 1000 * sourceDuration) / 8);
+        }
+        
+        const outputSizeMb = estimatedOutputBytes / (1024 * 1024);
+        const compressionRatio = (1 - outputSizeMb / originalSizeMb) * 100;
+        const startTime = new Date(result.createdAt || Date.now());
+        const completionTime = new Date(result.completedAt || Date.now());
+        const encodingSeconds = Math.max(0, (completionTime.getTime() - startTime.getTime()) / 1000);
+        
+        outputMetadata = {
+            outputSizeBytes: estimatedOutputBytes,
+            outputSizeMb: outputSizeMb,
+            compressionRatio: compressionRatio,
+            targetBitrateKbps: result.targetBitrateKbps || 0,
+            videoBitrateKbps: result.videoBitrateKbps || 0,
+            estimatedVideoBitrateKbps: result.videoBitrateKbps || 0,
+            scalePercent: result.scalePercent || 100,
+            codec: result.codec || 'h264',
+            mode: result.mode || 'advanced',
+            encodingTime: Math.round(encodingSeconds),
+        };
+    }
+    
     function handleClearResult() {
         // Clean up video preview URL
         if (videoPreviewUrl) {
@@ -491,6 +542,20 @@
         isCompressing = false;
         showCancelButton = false;
         etaText = '';
+        
+        // Reset output metadata
+        outputMetadata = {
+            outputSizeBytes: 0,
+            outputSizeMb: 0,
+            compressionRatio: 0,
+            targetBitrateKbps: 0,
+            videoBitrateKbps: 0,
+            estimatedVideoBitrateKbps: 0,
+            scalePercent: 100,
+            codec: 'h264',
+            mode: 'advanced',
+            encodingTime: 0,
+        };
         
         // Re-enable upload button to try again with different settings
         uploadBtnDisabled = false;
@@ -587,138 +652,249 @@
     }
 </script>
 
-<div class="container">
-    <h1>// smart-video-compressor</h1>
-    <p style="text-align: center; color: #71717a; font-size: 14px; margin-top: -32px; margin-bottom: 48px;">intelligent video compression with smart quality optimization</p>
+<div class="app-layout">
+    <!-- Header -->
+    <header class="app-header">
+        <h1>// smart-video-compressor</h1>
+        <p class="subtitle">intelligent video compression with smart quality optimization</p>
+    </header>
 
-    <div 
-        class="upload-area" 
-        class:dragover={isDragover}
-        on:dragover={handleDragOver}
-        on:dragleave={handleDragLeave}
-        on:drop={handleDrop}
-        on:click={() => document.getElementById('fileInput')?.click()}
-        on:keydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); document.getElementById('fileInput')?.click(); } }}
-        role="button"
-        tabindex="0"
-    >
-        <input 
-            type="file" 
-            id="fileInput" 
-            accept="video/*" 
-            style="display: none;"
-            on:change={handleFileInputChange}
-        />
-        <p style="font-size: 15px;">$ drag & drop video file or click to select</p>
-        {#if fileInfo}
-            <div class="file-info">→ {fileInfo}</div>
-        {/if}
-    </div>
+    <!-- Main Layout -->
+    <div class="main-layout">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="sidebar-content">
+                <!-- Upload Section -->
+                <section class="sidebar-section">
+                    <h2 class="section-title">// upload</h2>
+                    <div 
+                        class="upload-area" 
+                        class:dragover={isDragover}
+                        on:dragover={handleDragOver}
+                        on:dragleave={handleDragLeave}
+                        on:drop={handleDrop}
+                        on:click={() => document.getElementById('fileInput')?.click()}
+                        on:keydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); document.getElementById('fileInput')?.click(); } }}
+                        role="button"
+                        tabindex="0"
+                    >
+                        <input 
+                            type="file" 
+                            id="fileInput" 
+                            accept="video/*" 
+                            style="display: none;"
+                            on:change={handleFileInputChange}
+                        />
+                        <svg class="upload-icon" xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                            <polyline points="17 8 12 3 7 8"></polyline>
+                            <line x1="12" y1="3" x2="12" y2="15"></line>
+                        </svg>
+                        <p class="upload-text">Drop video or click</p>
+                        {#if fileInfo}
+                            <div class="file-info">→ {fileInfo}</div>
+                        {/if}
+                    </div>
+                </section>
 
-    {#if metadataVisible}
-        <div id="metadata" class="metadata">
-            {@html metadataContent}
-        </div>
-    {/if}
+                <!-- Metadata Section -->
+                {#if metadataVisible}
+                    <section class="sidebar-section">
+                        <h2 class="section-title">// file_info</h2>
+                        <div class="metadata">
+                            {@html metadataContent}
+                        </div>
+                    </section>
+                {/if}
 
-    {#if controlsVisible}
-        <div class="controls" id="controls">
-            <div style="margin-bottom: 24px;">
-                <label for="outputSizeSlider" style="display: block; margin-bottom: 12px;">
-                    <strong>target_output_size</strong>: <span id="outputSizeValue" style="color: #71717a;">{outputSizeValue}</span>
-                </label>
-                <div style="display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap;">
-                    <button type="button" class="preset-btn" on:click={() => handlePresetClick('25')}>-75%</button>
-                    <button type="button" class="preset-btn" on:click={() => handlePresetClick('50')}>-50%</button>
-                    <button type="button" class="preset-btn" on:click={() => handlePresetClick('75')}>-25%</button>
+                <!-- Settings Section -->
+                {#if controlsVisible}
+                    <section class="sidebar-section">
+                        <h2 class="section-title">// settings</h2>
+                        <div class="settings-group">
+                            <label for="outputSizeSlider" class="setting-label">
+                                <strong>target_size</strong>
+                                <span class="setting-value">{outputSizeValue}</span>
+                            </label>
+                            <div class="preset-buttons">
+                                <button type="button" class="preset-btn" on:click={() => handlePresetClick('25')}>-75%</button>
+                                <button type="button" class="preset-btn" on:click={() => handlePresetClick('50')}>-50%</button>
+                                <button type="button" class="preset-btn" on:click={() => handlePresetClick('75')}>-25%</button>
+                            </div>
+                            <input 
+                                type="range" 
+                                id="outputSizeSlider" 
+                                min="1" 
+                                max="100" 
+                                step="0.5" 
+                                bind:value={outputSizeSliderValue}
+                                disabled={outputSizeSliderDisabled}
+                                on:input={updateOutputSizeDisplay}
+                                class="size-slider"
+                            />
+                            <div class="helper-text">// drag to adjust compression</div>
+                            {#if outputSizeDetails}
+                                <div class="estimate-line">→ {outputSizeDetails}</div>
+                            {/if}
+                        </div>
+
+                        <div class="settings-group">
+                            <label for="codecSelect" class="setting-label">
+                                <strong>codec</strong>
+                            </label>
+                            <select id="codecSelect" bind:value={codecSelectValue} on:change={() => { updateCodecHelper(); updateOutputSizeDisplay(); }}>
+                                <option value="h264">h264 (mp4)</option>
+                                <option value="h265">h265 / hevc (mp4)</option>
+                                <option value="vp9">vp9 (webm)</option>
+                                <option value="av1">av1 (webm)</option>
+                            </select>
+                            {#if codecHelperText}
+                                <div class="helper-text">// {codecHelperText}</div>
+                            {/if}
+                        </div>
+                    </section>
+
+                    <!-- Action Buttons -->
+                    <section class="sidebar-section">
+                        {#if !videoPreviewVisible}
+                            <button 
+                                id="uploadBtn" 
+                                disabled={uploadBtnDisabled}
+                                on:click={handleUpload}
+                                class="action-btn primary"
+                            >
+                                $ {uploadBtnText.toLowerCase().replace('&', '+')}
+                            </button>
+                        {/if}
+
+                        {#if showCancelButton}
+                            <button 
+                                id="cancelBtn"
+                                on:click={handleCancelJob}
+                                class="action-btn danger"
+                            >
+                                $ cancel compression
+                            </button>
+                        {/if}
+                    </section>
+                {/if}
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            {#if progressVisible}
+                <div class="content-card">
+                    <h2 class="section-title">// processing</h2>
+                    <div class="progress-container">
+                        <div class="progress-bar">
+                            <div class="progress-fill" class:compressing={isCompressing} style="width: {progressPercent}%;"></div>
+                        </div>
+                        <div class="progress-text">{progressPercent.toFixed(1)}%</div>
+                    </div>
                 </div>
-                <input 
-                    type="range" 
-                    id="outputSizeSlider" 
-                    min="1" 
-                    max="100" 
-                    step="0.5" 
-                    bind:value={outputSizeSliderValue}
-                    disabled={outputSizeSliderDisabled}
-                    on:input={updateOutputSizeDisplay}
-                    style="width: 100%;"
-                />
-                <div class="helper-text">// drag left to compress more · auto-adjusts quality + resolution</div>
-                {#if outputSizeDetails}
-                    <div class="estimate-line">→ {outputSizeDetails}</div>
-                {/if}
-            </div>
-            <div class="codec-select">
-                <label for="codecSelect" style="display: block; margin-bottom: 8px;"><strong>codec</strong></label>
-                <select id="codecSelect" bind:value={codecSelectValue} on:change={() => { updateCodecHelper(); updateOutputSizeDisplay(); }}>
-                    <option value="h264">h264 (mp4)</option>
-                    <option value="h265">h265 / hevc (mp4)</option>
-                    <option value="vp9">vp9 (webm)</option>
-                    <option value="av1">av1 (webm)</option>
-                </select>
-                {#if codecHelperText}
-                    <div class="helper-text">// {codecHelperText}</div>
-                {/if}
-            </div>
-        </div>
-    {/if}
+            {/if}
 
-    {#if !videoPreviewVisible}
-        <button 
-            id="uploadBtn" 
-            disabled={uploadBtnDisabled}
-            on:click={handleUpload}
-            style="width: 100%; margin-bottom: 24px;"
-        >
-            $ {uploadBtnText.toLowerCase().replace('&', '+')}
-        </button>
-    {/if}
+            {#if statusVisible}
+                <div class="content-card status-card status-{statusType}">
+                    <div class="status-icon">
+                        {#if statusType === 'processing'}
+                            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <circle cx="12" cy="12" r="10"></circle>
+                                <polyline points="12 6 12 12 16 14"></polyline>
+                            </svg>
+                        {:else if statusType === 'success'}
+                            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <polyline points="20 6 9 17 4 12"></polyline>
+                            </svg>
+                        {:else}
+                            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <circle cx="12" cy="12" r="10"></circle>
+                                <line x1="15" y1="9" x2="9" y2="15"></line>
+                                <line x1="9" y1="9" x2="15" y2="15"></line>
+                            </svg>
+                        {/if}
+                    </div>
+                    <div class="status-message">{statusMessage}</div>
+                </div>
+            {/if}
 
-    {#if showCancelButton}
-        <button 
-            id="cancelBtn"
-            on:click={handleCancelJob}
-            style="width: 100%; margin-bottom: 24px; background-color: #dc2626; border-color: #dc2626;"
-        >
-            $ cancel compression
-        </button>
-    {/if}
-
-    {#if progressVisible}
-        <div class="progress" id="progress">
-            <div class="progress-bar">
-                <div class="progress-fill" class:compressing={isCompressing} style="width: {progressPercent}%;"></div>
-            </div>
-        </div>
-    {/if}
-
-    {#if statusVisible}
-        <div id="status" class="status-{statusType}">
-            → {statusMessage}
-        </div>
-    {/if}
-
-    {#if videoPreviewVisible}
-        <div class="video-preview">
-            <h3>// compressed_output</h3>
-            <video controls style="width: 100%; border-radius: 8px; border: 1px solid #27272a;">
-                {#if videoPreviewUrl}
-                    <source src={videoPreviewUrl} type={downloadMimeType || 'video/mp4'}>
-                {/if}
-                Your browser does not support the video tag.
-            </video>
-        </div>
-
-        <button id="downloadBtn" on:click={handleDownload} style="width: 100%; margin-bottom: 12px;">
-            $ download_compressed_video
-        </button>
-        
-        <button 
-            id="clearBtn"
-            on:click={handleClearResult}
-            style="width: 100%; margin-bottom: 24px; background-color: #3f3f46; border-color: #52525b;"
-        >
-            $ clear_result_and_try_again
-        </button>
-    {/if}
+            {#if videoPreviewVisible}
+                <div class="content-card">
+                    <h2 class="section-title">// compressed_output</h2>
+                    <div class="video-container">
+                        <video controls>
+                            {#if videoPreviewUrl}
+                                <source src={videoPreviewUrl} type={downloadMimeType || 'video/mp4'}>
+                            {/if}
+                            Your browser does not support the video tag.
+                        </video>
+                    </div>
+                    
+                    <!-- Output Metadata -->
+                    <div class="metadata-section">
+                        <h3 class="metadata-title">// compression_stats</h3>
+                        <div class="metadata-grid">
+                            <div class="metadata-item">
+                                <span class="metadata-label">output_size</span>
+                                <span class="metadata-value">{outputMetadata.outputSizeMb.toFixed(1)} MB</span>
+                            </div>
+                            <div class="metadata-item">
+                                <span class="metadata-label">compression</span>
+                                <span class="metadata-value" class:positive={outputMetadata.compressionRatio > 0}>
+                                    {outputMetadata.compressionRatio.toFixed(1)}%
+                                </span>
+                            </div>
+                            <div class="metadata-item">
+                                <span class="metadata-label">codec</span>
+                                <span class="metadata-value">{outputMetadata.codec.toUpperCase()}</span>
+                            </div>
+                            <div class="metadata-item">
+                                <span class="metadata-label">mode</span>
+                                <span class="metadata-value">{outputMetadata.mode}</span>
+                            </div>
+                            <div class="metadata-item">
+                                <span class="metadata-label">bitrate</span>
+                                <span class="metadata-value">{Math.round(outputMetadata.videoBitrateKbps)} kbps</span>
+                            </div>
+                            <div class="metadata-item">
+                                <span class="metadata-label">resolution</span>
+                                <span class="metadata-value">{outputMetadata.scalePercent}%</span>
+                            </div>
+                            <div class="metadata-item">
+                                <span class="metadata-label">original_size</span>
+                                <span class="metadata-value">{originalSizeMb?.toFixed(1)} MB</span>
+                            </div>
+                            <div class="metadata-item">
+                                <span class="metadata-label">encoding_time</span>
+                                <span class="metadata-value">{formatTimeRemaining(outputMetadata.encodingTime)}</span>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="action-buttons">
+                        <button id="downloadBtn" on:click={handleDownload} class="action-btn primary">
+                            $ download_compressed_video
+                        </button>
+                        <button 
+                            id="clearBtn"
+                            on:click={handleClearResult}
+                            class="action-btn secondary"
+                        >
+                            $ clear_and_compress_again
+                        </button>
+                    </div>
+                </div>
+            {:else if !controlsVisible}
+                <div class="content-placeholder">
+                    <svg class="placeholder-icon" xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                        <polygon points="23 7 16 12 23 17 23 7"></polygon>
+                        <rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>
+                    </svg>
+                    <h3>Select a video to get started</h3>
+                    <p>Upload a video file to compress it with smart quality optimization</p>
+                </div>
+            {/if}
+        </main>
+    </div>
 </div>

@@ -58,15 +58,18 @@ public class VideoCompressionService
             var totalKbps = targetBitsTotal / durationSec / 1000;
             
             // Reserve audio bitrate, use remaining for video
-            // Be conservative - aim for 90% of target to account for container overhead
-            var effectiveTargetKbps = totalKbps * 0.90;
+            // Container overhead varies by format:
+            // MP4: ~2-3%, WebM: ~1-2%
+            // Using 97% to be slightly conservative while maximizing accuracy
+            var containerOverheadFactor = codecConfig.FileExtension.Equals(".webm", StringComparison.OrdinalIgnoreCase) ? 0.98 : 0.97;
+            var effectiveTargetKbps = totalKbps * containerOverheadFactor;
             var videoKbps = Math.Max(100, effectiveTargetKbps - codecConfig.AudioBitrateKbps);
             
             normalizedRequest.TargetBitrateKbps = Math.Round(effectiveTargetKbps, 2);
             normalizedRequest.VideoBitrateKbps = Math.Round(videoKbps, 2);
             
-            _logger.LogInformation("Simple mode bitrate calculation: TargetSize={TargetMb}MB, Duration={Duration}s, TotalKbps={TotalKbps}, EffectiveKbps={EffectiveKbps}, VideoKbps={VideoKbps}, AudioKbps={AudioKbps}",
-                normalizedRequest.TargetSizeMb.Value, durationSec, Math.Round(totalKbps, 2), effectiveTargetKbps, videoKbps, codecConfig.AudioBitrateKbps);
+            _logger.LogInformation("Simple mode bitrate calculation: TargetSize={TargetMb}MB, Duration={Duration}s, TotalKbps={TotalKbps}, ContainerOverhead={ContainerOverheadPct}%, EffectiveKbps={EffectiveKbps}, VideoKbps={VideoKbps}, AudioKbps={AudioKbps}",
+                normalizedRequest.TargetSizeMb.Value, durationSec, Math.Round(totalKbps, 2), Math.Round((1 - containerOverheadFactor) * 100, 1), effectiveTargetKbps, videoKbps, codecConfig.AudioBitrateKbps);
         }
 
         var jobId = Guid.NewGuid().ToString();
@@ -90,6 +93,9 @@ public class VideoCompressionService
             throw new InvalidOperationException($"Queue is full. Maximum queue size is {_maxQueueSize}. Please try again later.");
         }
 
+        // Enable two-pass by default when using simple mode with target size for better accuracy
+        var enableTwoPass = normalizedRequest.TwoPass || (isSimpleMode && normalizedRequest.TargetSizeMb.HasValue);
+        
         var job = new JobMetadata
         {
             JobId = jobId,
@@ -110,7 +116,7 @@ public class VideoCompressionService
             SourceWidth = normalizedRequest.SourceWidth,
             SourceHeight = normalizedRequest.SourceHeight,
             OriginalSizeBytes = normalizedRequest.OriginalSizeBytes,
-            TwoPass = normalizedRequest.TwoPass,
+            TwoPass = enableTwoPass,
             CreatedAt = DateTime.UtcNow
         };
 
@@ -783,10 +789,13 @@ public class VideoCompressionService
     private static List<string> BuildSimpleVideoArgs(CodecConfig codec, double videoBitrateKbps)
     {
         var targetBitrate = Math.Max(100, Math.Round(videoBitrateKbps));
-        // Constrain maxrate tightly to prevent overshoot - allow only 5% variance
-        var maxRate = Math.Round(targetBitrate * 1.05);
-        // Use smaller buffer for tighter control
-        var buffer = Math.Round(targetBitrate * 1.5);
+        // Tighter bitrate control for more accurate file sizes
+        // maxrate: 3% variance (reduced from 5%)
+        // minrate: 97% of target (increased from 95%)
+        // bufsize: 1.0x for very tight control (reduced from 1.5x)
+        var maxRate = Math.Round(targetBitrate * 1.03);
+        var minRate = Math.Round(targetBitrate * 0.97);
+        var buffer = Math.Round(targetBitrate * 1.0);
 
         var args = new List<string>();
 
@@ -811,7 +820,7 @@ public class VideoCompressionService
             "-b:v", $"{targetBitrate}k",
             "-maxrate", $"{maxRate}k",
             "-bufsize", $"{buffer}k",
-            "-minrate", $"{Math.Round(targetBitrate * 0.95)}k"
+            "-minrate", $"{minRate}k"
         });
 
         return args;
