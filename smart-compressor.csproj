@@ -11,18 +11,28 @@
     <SelfContained>true</SelfContained>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <IncludeAllContentForSelfExtract>true</IncludeAllContentForSelfExtract>
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
     <PublishTrimmed>false</PublishTrimmed>
     <PublishReadyToRun>true</PublishReadyToRun>
+    
+    <!-- Enable embedded file manifest for static files -->
+    <GenerateEmbeddedFilesManifest>true</GenerateEmbeddedFilesManifest>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="9.0.10" />
+    <PackageReference Include="Microsoft.Extensions.FileProviders.Embedded" Version="9.0.0" />
   </ItemGroup>
 
-  <!-- Include FFmpeg binaries -->
+  <!-- Embed wwwroot files into the assembly -->
   <ItemGroup>
-    <None Include="ffmpeg\**" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <EmbeddedResource Include="wwwroot\**\*" />
+  </ItemGroup>
+
+  <!-- Embed FFmpeg binary as a resource -->
+  <ItemGroup>
+    <EmbeddedResource Include="ffmpeg\ffmpeg.exe" />
   </ItemGroup>
 
   <!-- Build frontend before publish -->

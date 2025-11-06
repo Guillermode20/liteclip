@@ -151,6 +151,13 @@
     }
     
     function calculateOptimalResolution(targetSizeMb: number, durationSec: number, width: number, height: number): number {
+        // Validate inputs
+        if (!Number.isFinite(targetSizeMb) || !Number.isFinite(durationSec) || 
+            !Number.isFinite(width) || !Number.isFinite(height) || 
+            targetSizeMb <= 0 || durationSec <= 0 || width <= 0 || height <= 0) {
+            return 100; // Return 100% scale if inputs are invalid
+        }
+        
         const targetBitsTotal = (targetSizeMb * 1024 * 1024 * 8 * 0.9);
         const targetBitrateKbps = targetBitsTotal / durationSec / 1000;
         const videoBitrateKbps = targetBitrateKbps - 128;
@@ -243,7 +250,11 @@
             sourceVideoWidth!,
             sourceVideoHeight!
         );
-        formData.append('scalePercent', calculatedScalePercent.toString());
+        
+        // Only append scalePercent if it's a valid number
+        if (Number.isFinite(calculatedScalePercent)) {
+            formData.append('scalePercent', calculatedScalePercent.toString());
+        }
         
         if (sourceDuration && isFinite(sourceDuration)) {
             formData.append('sourceDuration', sourceDuration.toFixed(3));
@@ -461,6 +472,37 @@
         }
     }
     
+    function handleClearResult() {
+        // Clean up video preview URL
+        if (videoPreviewUrl) {
+            URL.revokeObjectURL(videoPreviewUrl);
+            videoPreviewUrl = null;
+        }
+        
+        // Reset all state
+        jobId = null;
+        downloadFileName = null;
+        downloadMimeType = null;
+        videoPreviewVisible = false;
+        downloadVisible = false;
+        statusVisible = false;
+        progressVisible = false;
+        progressPercent = 0;
+        isCompressing = false;
+        showCancelButton = false;
+        etaText = '';
+        
+        // Re-enable upload button to try again with different settings
+        uploadBtnDisabled = false;
+        uploadBtnText = 'Upload & Compress Video';
+        
+        // Show success message
+        showStatus('Result cleared. You can adjust settings and compress again.', 'success');
+        setTimeout(() => {
+            statusVisible = false;
+        }, 3000);
+    }
+    
     async function loadVideoPreview() {
         if (!jobId) return;
 
@@ -665,8 +707,16 @@
             </video>
         </div>
 
-        <button id="downloadBtn" on:click={handleDownload} style="width: 100%; margin-bottom: 24px;">
+        <button id="downloadBtn" on:click={handleDownload} style="width: 100%; margin-bottom: 12px;">
             $ download_compressed_video
+        </button>
+        
+        <button 
+            id="clearBtn"
+            on:click={handleClearResult}
+            style="width: 100%; margin-bottom: 24px; background-color: #3f3f46; border-color: #52525b;"
+        >
+            $ clear_result_and_try_again
         </button>
     {/if}
 </div>

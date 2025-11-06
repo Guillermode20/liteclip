@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Runtime.InteropServices;
 
 namespace smart_compressor.Services;
@@ -7,6 +8,7 @@ public class FfmpegPathResolver
     private readonly ILogger<FfmpegPathResolver> _logger;
     private readonly IConfiguration _configuration;
     private string? _cachedFfmpegPath;
+    private bool _hasExtractedEmbedded = false;
 
     public FfmpegPathResolver(ILogger<FfmpegPathResolver> logger, IConfiguration configuration)
     {
@@ -30,7 +32,20 @@ public class FfmpegPathResolver
             return _cachedFfmpegPath;
         }
 
-        // 2. Check bundled FFmpeg in the same directory as the executable
+        // 2. Try to extract embedded FFmpeg resource
+        if (!_hasExtractedEmbedded)
+        {
+            var extractedPath = ExtractEmbeddedFfmpeg();
+            if (extractedPath != null)
+            {
+                _logger.LogInformation("Using embedded FFmpeg extracted to: {Path}", extractedPath);
+                _cachedFfmpegPath = extractedPath;
+                _hasExtractedEmbedded = true;
+                return _cachedFfmpegPath;
+            }
+        }
+
+        // 3. Check bundled FFmpeg in the same directory as the executable
         var executableDir = AppContext.BaseDirectory;
         var bundledPath = Path.Combine(executableDir, "ffmpeg", GetFfmpegExecutableName());
         if (File.Exists(bundledPath))
@@ -40,7 +55,7 @@ public class FfmpegPathResolver
             return _cachedFfmpegPath;
         }
 
-        // 3. Check ffmpeg folder next to executable (for portable deployments)
+        // 4. Check ffmpeg folder next to executable (for portable deployments)
         var portablePath = Path.Combine(executableDir, GetFfmpegExecutableName());
         if (File.Exists(portablePath))
         {
@@ -49,7 +64,7 @@ public class FfmpegPathResolver
             return _cachedFfmpegPath;
         }
 
-        // 4. Check system PATH
+        // 5. Check system PATH
         var systemFfmpeg = FindInSystemPath(GetFfmpegExecutableName());
         if (systemFfmpeg != null)
         {
@@ -58,11 +73,59 @@ public class FfmpegPathResolver
             return _cachedFfmpegPath;
         }
 
-        // 5. Default fallback - just use "ffmpeg" and hope it's in PATH
+        // 6. Default fallback - just use "ffmpeg" and hope it's in PATH
         _logger.LogWarning("FFmpeg not found in expected locations. Falling back to 'ffmpeg' command. " +
             "Please ensure FFmpeg is installed and available in system PATH, or configure FFmpeg:Path in appsettings.json");
         _cachedFfmpegPath = GetFfmpegExecutableName();
         return _cachedFfmpegPath;
+    }
+
+    private string? ExtractEmbeddedFfmpeg()
+    {
+        try
+        {
+            var assembly = Assembly.GetExecutingAssembly();
+            var resourceName = "smart_compressor.ffmpeg.ffmpeg.exe";
+            
+            // Check if the resource exists
+            var resourceNames = assembly.GetManifestResourceNames();
+            if (!resourceNames.Contains(resourceName))
+            {
+                _logger.LogDebug("Embedded FFmpeg resource not found in assembly");
+                return null;
+            }
+
+            // Extract to temp directory
+            var tempDir = Path.Combine(Path.GetTempPath(), "smart-compressor-ffmpeg");
+            Directory.CreateDirectory(tempDir);
+            
+            var extractedPath = Path.Combine(tempDir, GetFfmpegExecutableName());
+            
+            // Only extract if it doesn't exist or is different
+            if (!File.Exists(extractedPath))
+            {
+                _logger.LogInformation("Extracting embedded FFmpeg to: {Path}", extractedPath);
+                
+                using var resourceStream = assembly.GetManifestResourceStream(resourceName);
+                if (resourceStream == null)
+                {
+                    _logger.LogWarning("Failed to open embedded FFmpeg resource stream");
+                    return null;
+                }
+                
+                using var fileStream = File.Create(extractedPath);
+                resourceStream.CopyTo(fileStream);
+                
+                _logger.LogInformation("Successfully extracted embedded FFmpeg ({Size} bytes)", new FileInfo(extractedPath).Length);
+            }
+            
+            return extractedPath;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to extract embedded FFmpeg");
+            return null;
+        }
     }
 
     public bool VerifyFfmpegAvailable()

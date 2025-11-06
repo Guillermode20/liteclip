@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
+using Microsoft.Extensions.FileProviders;
 using smart_compressor.Models;
 using smart_compressor.Services;
 
@@ -35,8 +36,11 @@ if (app.Environment.IsDevelopment())
 }
 
 app.UseHttpsRedirection();
-app.UseDefaultFiles(); // Enables serving index.html at root URL
-app.UseStaticFiles();
+
+// Use embedded static files from the assembly
+var embeddedProvider = new ManifestEmbeddedFileProvider(typeof(Program).Assembly, "wwwroot");
+app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = embeddedProvider });
+app.UseStaticFiles(new StaticFileOptions { FileProvider = embeddedProvider });
 
 // Open browser automatically when app starts
 app.Lifetime.ApplicationStarted.Register(() =>

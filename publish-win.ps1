@@ -94,30 +94,11 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host ".NET application published successfully" -ForegroundColor Green
 
-# Copy or remind about FFmpeg
+# FFmpeg is now embedded in the exe!
 Write-Host ""
-Write-Host "=== FFmpeg Setup ===" -ForegroundColor Cyan
-
-if ($IncludeFFmpeg -and $FFmpegPath -ne "" -and (Test-Path $FFmpegPath)) {
-    Write-Host "Copying FFmpeg from: $FFmpegPath" -ForegroundColor Yellow
-    $ffmpegDir = Join-Path $OutputDir "ffmpeg"
-    New-Item -ItemType Directory -Force -Path $ffmpegDir | Out-Null
-    Copy-Item $FFmpegPath (Join-Path $ffmpegDir "ffmpeg.exe")
-    Write-Host "FFmpeg copied to output directory" -ForegroundColor Green
-} elseif ($IncludeFFmpeg) {
-    Write-Host "WARNING: -IncludeFFmpeg specified but FFmpegPath not provided or invalid" -ForegroundColor Yellow
-    Write-Host "Please manually copy ffmpeg.exe to: $OutputDir\ffmpeg\" -ForegroundColor Yellow
-} else {
-    Write-Host "FFmpeg not included in the build." -ForegroundColor Yellow
-    Write-Host ""
-    Write-Host "To include FFmpeg in your distribution:" -ForegroundColor Cyan
-    Write-Host "  1. Download FFmpeg from: https://www.gyan.dev/ffmpeg/builds/" -ForegroundColor White
-    Write-Host "  2. Extract ffmpeg.exe" -ForegroundColor White
-    Write-Host "  3. Create a 'ffmpeg' folder in the output directory: $OutputDir\ffmpeg\" -ForegroundColor White
-    Write-Host "  4. Copy ffmpeg.exe to that folder" -ForegroundColor White
-    Write-Host ""
-    Write-Host "Or run this script again with: -IncludeFFmpeg -FFmpegPath ""C:\path\to\ffmpeg.exe""" -ForegroundColor White
-}
+Write-Host "=== FFmpeg Status ===" -ForegroundColor Cyan
+Write-Host "FFmpeg is embedded in the executable!" -ForegroundColor Green
+Write-Host "The exe will automatically extract FFmpeg on first run." -ForegroundColor Green
 
 # Create a run script
 Write-Host ""
@@ -141,15 +122,15 @@ Write-Host ""
 Write-Host "Output location: $OutputDir" -ForegroundColor Cyan
 Write-Host "Executable: smart-compressor.exe" -ForegroundColor White
 Write-Host ""
-Write-Host "To run the application:" -ForegroundColor Yellow
-Write-Host "  1. Navigate to: $OutputDir" -ForegroundColor White
-Write-Host "  2. Double-click 'run.bat' or run 'smart-compressor.exe'" -ForegroundColor White
-Write-Host "  3. Open browser to: http://localhost:5000" -ForegroundColor White
+Write-Host "✨ This is a portable single-file executable!" -ForegroundColor Green
+Write-Host "   Frontend and FFmpeg are embedded." -ForegroundColor Green
+Write-Host "   You can move it anywhere and it will work!" -ForegroundColor Green
 Write-Host ""
-
-if (-not $IncludeFFmpeg -or $FFmpegPath -eq "") {
-    Write-Host "IMPORTANT: Don't forget to add FFmpeg!" -ForegroundColor Red
-}
+Write-Host "To run the application:" -ForegroundColor Yellow
+Write-Host "  1. Copy 'smart-compressor.exe' anywhere you want" -ForegroundColor White
+Write-Host "  2. Double-click it or run from command line" -ForegroundColor White
+Write-Host "  3. Browser will open automatically!" -ForegroundColor White
+Write-Host ""
 
 Write-Host "Press any key to exit..." -ForegroundColor Gray
 $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
