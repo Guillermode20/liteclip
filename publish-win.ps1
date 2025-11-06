@@ -1,8 +1,8 @@
 # PowerShell script to build and publish smart-compressor as a Windows executable
 
 param(
-    [string]$Configuration = "Release",
-    [string]$OutputDir = "publish-win",
+    [string]$Configuration = 'Release',
+    [string]$OutputDir = 'publish-win',
     [switch]$IncludeFFmpeg,
     [string]$FFmpegPath = ""
 )
@@ -25,6 +25,8 @@ trap {
 
 Write-Host "=== Smart Video Compressor - Windows Build Script ===" -ForegroundColor Cyan
 Write-Host ""
+Write-Host "Configuration: $Configuration" -ForegroundColor Cyan
+Write-Host "Output directory: $OutputDir" -ForegroundColor Cyan
 
 # Check if .NET SDK is available
 Write-Host "Checking .NET SDK..." -ForegroundColor Yellow
@@ -52,7 +54,7 @@ try {
     exit 1
 }
 
-# Clean previous builds
+# Clean previous builds (always for Release)
 Write-Host ""
 Write-Host "Cleaning previous builds..." -ForegroundColor Yellow
 if (Test-Path $OutputDir) {
@@ -111,24 +113,20 @@ Write-Host "Packages restored successfully" -ForegroundColor Green
 # Publish .NET application
 Write-Host ""
 Write-Host "Publishing .NET application..." -ForegroundColor Yellow
-Write-Host "Configuration: $Configuration" -ForegroundColor Cyan
-Write-Host "Output directory: $OutputDir" -ForegroundColor Cyan
 
+# Let csproj control single-file, self-contained, R2R, compression, etc.
 $publishArgs = @(
-    "publish",
-    "--configuration", $Configuration,
-    "--runtime", "win-x64",
-    "--self-contained", "true",
-    "--output", $OutputDir,
-    "/p:PublishSingleFile=true",
-    "/p:IncludeNativeLibrariesForSelfExtract=true",
-    "/p:EnableCompressionInSingleFile=true",
-    "/p:PublishReadyToRun=true",
-    "/maxcpucount",
-    "--no-restore"
+    'publish',
+    '--configuration', $Configuration,
+    '--runtime', 'win-x64',
+    '--output', $OutputDir,
+    '--no-restore',
+    '/maxcpucount'
 )
 
+$sw = [System.Diagnostics.Stopwatch]::StartNew()
 dotnet @publishArgs
+$sw.Stop()
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host ""
@@ -140,12 +138,13 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host ".NET application published successfully" -ForegroundColor Green
+Write-Host ("Publish duration: {0:mm\:ss\.fff}" -f $sw.Elapsed) -ForegroundColor Cyan
 
-# FFmpeg is now embedded in the exe!
+# FFmpeg status (Release)
 Write-Host ""
 Write-Host "=== FFmpeg Status ===" -ForegroundColor Cyan
-Write-Host "FFmpeg is embedded in the executable!" -ForegroundColor Green
-Write-Host "The exe will automatically extract FFmpeg on first run." -ForegroundColor Green
+Write-Host "FFmpeg is embedded in the executable (Release)." -ForegroundColor Green
+Write-Host "The exe may extract resources on first run if needed." -ForegroundColor Green
 
 # Create a run script
 Write-Host ""
@@ -169,7 +168,7 @@ Write-Host ""
 Write-Host "Output location: $OutputDir" -ForegroundColor Cyan
 Write-Host "Executable: smart-compressor.exe" -ForegroundColor White
 Write-Host ""
-Write-Host "✨ This is a portable single-file executable!" -ForegroundColor Green
+Write-Host "✨ Portable Release build (single-file per csproj settings)." -ForegroundColor Green
 Write-Host "   Frontend and FFmpeg are embedded." -ForegroundColor Green
 Write-Host "   You can move it anywhere and it will work!" -ForegroundColor Green
 Write-Host ""

@@ -11,20 +11,14 @@
     <UseAppHost>true</UseAppHost>
     <ProduceReferenceAssembly>false</ProduceReferenceAssembly>
     
-    <!-- Single-file deployment configuration -->
-    <PublishSingleFile>true</PublishSingleFile>
-    <SelfContained>true</SelfContained>
+    <!-- Runtime target -->
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
-    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
-    <IncludeAllContentForSelfExtract>true</IncludeAllContentForSelfExtract>
-    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
     <PublishTrimmed>false</PublishTrimmed>
-    <PublishReadyToRun>true</PublishReadyToRun>
     <TieredCompilation>true</TieredCompilation>
     <TieredCompilationQuickJit>true</TieredCompilationQuickJit>
     
-    <!-- Enable embedded file manifest for static files -->
-    <GenerateEmbeddedFilesManifest>true</GenerateEmbeddedFilesManifest>
+    <!-- Embedded files manifest only needed in Release when embedding -->
+    <GenerateEmbeddedFilesManifest>false</GenerateEmbeddedFilesManifest>
   </PropertyGroup>
 
   <ItemGroup>
@@ -37,14 +31,15 @@
     <FrameworkReference Include="Microsoft.WindowsDesktop.App.WindowsForms" />
   </ItemGroup>
 
-  <!-- Embed wwwroot files into the assembly -->
-  <ItemGroup>
+  <!-- Release: embed static content and FFmpeg into the assembly -->
+  <ItemGroup Condition="'$(Configuration)'=='Release'">
     <EmbeddedResource Include="wwwroot\**\*" />
+    <EmbeddedResource Include="ffmpeg\ffmpeg.exe" />
   </ItemGroup>
 
-  <!-- Embed FFmpeg binary as a resource -->
-  <ItemGroup>
-    <EmbeddedResource Include="ffmpeg\ffmpeg.exe" />
+  <!-- Debug: copy FFmpeg locally for instant startup -->
+  <ItemGroup Condition="'$(Configuration)'=='Debug'">
+    <Content Include="ffmpeg\ffmpeg.exe" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <!-- Build frontend only when source files change -->
@@ -58,5 +53,25 @@
   <Target Name="CheckFrontendUpToDate" BeforeTargets="BuildFrontend">
     <Message Importance="high" Text="Checking if frontend build is needed..." Condition="Exists('wwwroot/index.html')" />
   </Target>
+
+  <!-- Speed-focused Debug settings -->
+  <PropertyGroup Condition="'$(Configuration)'=='Debug'">
+    <PublishSingleFile>false</PublishSingleFile>
+    <SelfContained>false</SelfContained>
+    <PublishReadyToRun>false</PublishReadyToRun>
+    <EnableCompressionInSingleFile>false</EnableCompressionInSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>false</IncludeNativeLibrariesForSelfExtract>
+    <GenerateEmbeddedFilesManifest>false</GenerateEmbeddedFilesManifest>
+  </PropertyGroup>
+
+  <!-- Release tuning: keep single-file, avoid compression and content extraction -->
+  <PropertyGroup Condition="'$(Configuration)'=='Release'">
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <EnableCompressionInSingleFile>false</EnableCompressionInSingleFile>
+    <IncludeAllContentForSelfExtract>false</IncludeAllContentForSelfExtract>
+    <PublishReadyToRun>true</PublishReadyToRun>
+    <GenerateEmbeddedFilesManifest>true</GenerateEmbeddedFilesManifest>
+  </PropertyGroup>
 
 </Project>

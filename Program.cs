@@ -39,23 +39,19 @@ if (app.Environment.IsDevelopment())
 // Disable HTTPS redirection for local webview
 // app.UseHttpsRedirection();
 
-// Use embedded static files from the assembly
-try
+// Serve static files: physical in Development, embedded in non-Development
+if (app.Environment.IsDevelopment())
+{
+    app.UseDefaultFiles();
+    app.UseStaticFiles();
+    Console.WriteLine("✓ Using physical static files (Development)");
+}
+else
 {
     var embeddedProvider = new ManifestEmbeddedFileProvider(typeof(Program).Assembly, "wwwroot");
     app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = embeddedProvider });
     app.UseStaticFiles(new StaticFileOptions { FileProvider = embeddedProvider });
-    
-    Console.WriteLine("✓ Embedded static files configured");
-}
-catch (Exception ex)
-{
-    Console.WriteLine($"⚠️ Error configuring embedded files: {ex.Message}");
-    Console.WriteLine("Falling back to physical file provider...");
-    
-    // Fallback to physical files
-    app.UseDefaultFiles();
-    app.UseStaticFiles();
+    Console.WriteLine("✓ Using embedded static files (Non-Development)");
 }
 
 // POST endpoint to upload and compress video
@@ -319,7 +315,7 @@ app.Lifetime.ApplicationStarted.Register(() =>
         url = url.Replace("https://", "http://");
     }
     
-    Console.WriteLine($"\n🎉 Smart Video Compressor is starting...");
+    Console.WriteLine($"\n🎉 Smart Video Compressor is starting at {DateTime.Now:O}...");
     Console.WriteLine($"📡 Server URL: {url}");
     Console.WriteLine($"🪟 Opening native window...\n");
     
