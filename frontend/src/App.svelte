@@ -45,6 +45,8 @@
         estimatedVideoBitrateKbps: 0,
         scalePercent: 100,
         codec: 'h264',
+        encoderName: null,
+        encoderIsHardware: false,
         encodingTime: 0,
     };
     
@@ -364,6 +366,14 @@
                         etaText = '';
                         showStatus(`Compressing video... ${progressPercentValue.toFixed(1)}%`, 'processing');
                     }
+                    // If encoder/codec info is available while processing, surface it in the UI
+                    try {
+                        outputMetadata.codec = result.codec || outputMetadata.codec;
+                        outputMetadata.encoderName = result.encoderName || outputMetadata.encoderName;
+                        outputMetadata.encoderIsHardware = result.encoderIsHardware ?? outputMetadata.encoderIsHardware;
+                    } catch (e) {
+                        // ignore if outputMetadata isn't available for some reason
+                    }
                 } else if (result.status === 'completed') {
                     if (statusCheckInterval) {
                         clearInterval(statusCheckInterval);
@@ -515,6 +525,8 @@
             estimatedVideoBitrateKbps: result.videoBitrateKbps || 0,
             scalePercent: result.scalePercent || 100,
             codec: result.codec || 'h264',
+            encoderName: result.encoderName || null,
+            encoderIsHardware: result.encoderIsHardware ?? false,
             encodingTime: Math.round(encodingSeconds),
         };
     }
@@ -549,6 +561,8 @@
             estimatedVideoBitrateKbps: 0,
             scalePercent: 100,
             codec: 'h264',
+            encoderName: null,
+            encoderIsHardware: false,
             encodingTime: 0,
         };
         
@@ -848,7 +862,12 @@
                             </div>
                             <div class="metadata-item">
                                 <span class="metadata-label">codec</span>
-                                <span class="metadata-value">{outputMetadata.codec.toUpperCase()}</span>
+                                <span class="metadata-value">
+                                    {outputMetadata.codec.toUpperCase()}
+                                    {#if outputMetadata.encoderName}
+                                        &nbsp;—&nbsp;{outputMetadata.encoderName}{outputMetadata.encoderIsHardware ? ' (hardware)' : ' (software)'}
+                                    {/if}
+                                </span>
                             </div>
                             <div class="metadata-item">
                                 <span class="metadata-label">bitrate</span>

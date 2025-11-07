@@ -22,10 +22,16 @@ public class Av1Strategy : ICompressionStrategy
         var args = new List<string>
         {
             "-c:v", VideoCodec,
-            "-c:v", VideoCodec,
-            // For highest quality prefer lowest cpu-used (slower) for libaom-av1
-            "-cpu-used", "0",
+            // cpu-used 3 for libaom-av1 is much faster than 0 (5-10x speedup)
+            // Still produces excellent quality at constrained bitrates
+            "-cpu-used", "3",
             "-row-mt", "1",
+            // Enable tiles for better multi-threading
+            "-tile-columns", "2",
+            "-tile-rows", "1",
+            // GOP settings
+            "-g", "240",
+            "-sc_threshold", "0",
             "-b:v", $"{targetBitrate}k",
             "-maxrate", $"{maxRate}k",
             "-bufsize", $"{buffer}k",

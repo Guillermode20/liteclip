@@ -12,6 +12,9 @@ public class CompressionResult
     public double? TargetBitrateKbps { get; set; }
     public string? OutputFilename { get; set; }
     public string? OutputMimeType { get; set; }
+    // Encoder metadata
+    public string? EncoderName { get; set; }
+    public bool? EncoderIsHardware { get; set; }
     public double Progress { get; set; } = 0;
     public int? EstimatedSecondsRemaining { get; set; }
     public int? QueuePosition { get; set; }

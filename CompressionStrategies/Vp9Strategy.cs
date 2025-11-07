@@ -22,12 +22,16 @@ public class Vp9Strategy : ICompressionStrategy
         var args = new List<string>
         {
             "-c:v", VideoCodec,
-            "-c:v", VideoCodec,
             "-deadline", "good",
-            // Lower cpu-used for better quality (slower)
-            "-cpu-used", "1",
+            // cpu-used 2 provides 30-40% faster encoding than cpu-used 1
+            // with minimal quality difference at constrained bitrates
+            "-cpu-used", "2",
             "-row-mt", "1",
-            "-tile-columns", "1",
+            // Use 2 tile columns for better threading on multi-core CPUs
+            "-tile-columns", "2",
+            // GOP and scene detection
+            "-g", "240",
+            "-sc_threshold", "0",
             "-b:v", $"{targetBitrate}k",
             "-maxrate", $"{maxRate}k",
             "-bufsize", $"{buffer}k",

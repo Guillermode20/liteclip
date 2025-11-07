@@ -230,19 +230,26 @@ public class VideoCompressionService : IVideoCompressionService
 
             var arguments = new List<string> { "-y", "-i", job.InputPath };
 
-            // Merge scale filter (if any) with enforced fps filter. Use the requested fps or default (normalized) value.
+            // Smart filter chain: only apply filters that are actually needed
             var fpsToUse = request.TargetFps ?? 30;
-            string vfCombined;
+            var filters = new List<string>();
+            
             if (!string.IsNullOrWhiteSpace(scaleFilter))
             {
-                vfCombined = $"{scaleFilter},fps={fpsToUse}";
+                filters.Add(scaleFilter);
             }
-            else
+            
+            // Only force FPS if target is specified (don't waste time on unnecessary reencoding)
+            if (request.TargetFps.HasValue)
             {
-                vfCombined = $"fps={fpsToUse}";
+                filters.Add($"fps={fpsToUse}");
             }
-
-            arguments.AddRange(new[] { "-vf", vfCombined });
+            
+            // Apply filter chain only if we have filters
+            if (filters.Count > 0)
+            {
+                arguments.AddRange(new[] { "-vf", string.Join(",", filters) });
+            }
 
             // Prefer a registered compression strategy if available; fall back to legacy builders.
             ICompressionStrategy? strategy = null;
@@ -261,6 +268,18 @@ public class VideoCompressionService : IVideoCompressionService
                 arguments.AddRange(strategy.BuildVideoArgs(videoBitrateKbps));
                 arguments.AddRange(strategy.BuildAudioArgs());
                 arguments.AddRange(strategy.BuildContainerArgs());
+
+                // Populate encoder metadata on the job if available
+                try
+                {
+                    var encoderName = strategy.VideoCodec;
+                    job.EncoderName = encoderName;
+                    job.EncoderIsHardware = !(encoderName == "libx264" || encoderName == "libx265" || encoderName == "libvpx-vp9" || encoderName == "libaom-av1");
+                }
+                catch
+                {
+                    // ignore
+                }
             }
             else
             {
@@ -268,8 +287,18 @@ public class VideoCompressionService : IVideoCompressionService
                 arguments.AddRange(videoArgs);
                 arguments.AddRange(BuildAudioArgs(codec));
                 arguments.AddRange(BuildContainerArgs(codec));
+
+                // Populate encoder metadata from codec fallback
+                try
+                {
+                    job.EncoderName = codec.VideoCodec;
+                    job.EncoderIsHardware = false;
+                }
+                catch
+                {
+                    // ignore
+                }
             }
-            
             // Two-pass encoding for accurate target size
             var useTwoPass = job.TwoPass;
             
@@ -868,5 +897,8 @@ public class JobMetadata
     public DateTime? CompletedAt { get; set; }
     public int? EstimatedSecondsRemaining { get; set; }
     public Process? Process { get; set; }
+        // Encoder metadata
+        public string? EncoderName { get; set; }
+        public bool? EncoderIsHardware { get; set; }
 }
 

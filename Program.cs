@@ -113,7 +113,9 @@ app.MapPost("/api/compress", async (
             TargetBitrateKbps = job?.TargetBitrateKbps,
             OutputFilename = job?.OutputFilename,
             OutputMimeType = job?.OutputMimeType,
-            Progress = job?.Progress ?? 0
+            Progress = job?.Progress ?? 0,
+            EncoderName = job?.EncoderName,
+            EncoderIsHardware = job?.EncoderIsHardware
         });
     }
     catch (Exception ex)
@@ -174,7 +176,9 @@ app.MapGet("/api/status/{jobId}", (string jobId, VideoCompressionService compres
         OutputMimeType = job.OutputMimeType,
         Progress = job.Progress,
         EstimatedSecondsRemaining = job.EstimatedSecondsRemaining,
-        QueuePosition = queuePosition
+        QueuePosition = queuePosition,
+        EncoderName = job.EncoderName,
+        EncoderIsHardware = job.EncoderIsHardware
     });
 })
 .WithName("GetJobStatus");
@@ -246,6 +250,10 @@ app.MapGet("/api/download/{jobId}", async (string jobId, VideoCompressionService
             TargetBitrateKbps = job.TargetBitrateKbps,
             OutputFilename = job.OutputFilename,
             OutputMimeType = job.OutputMimeType
+        ,
+            Progress = job.Progress,
+            EncoderName = job.EncoderName,
+            EncoderIsHardware = job.EncoderIsHardware
         });
     }
 
