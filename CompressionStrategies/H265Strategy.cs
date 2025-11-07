@@ -43,30 +43,54 @@ public class H265Strategy : ICompressionStrategy
     {
         try
         {
-            // Actually test if encoder can initialize (not just if it's compiled in)
-            var psi = new ProcessStartInfo
+            // Try two more robust tests before falling back to a minimal one:
+            // 1) testsrc with NV12 pix_fmt, reasonable resolution/frame-rate and GOP (-g)
+            // 2) fallback to the older minimal color test if the first fails
+            var attempts = new[]
             {
-                FileName = "ffmpeg",
-                Arguments = $"-f lavfi -i color=black:s=64x64:d=0.1 -c:v {encoderName} -f null -",
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
+                // Use testsrc (video test signal) and set NV12 pixel format which AMF expects
+                $"-loglevel error -f lavfi -i testsrc=duration=0.5:size=1280x720:rate=30 -pix_fmt nv12 -c:v {encoderName} -g 60 -b:v 2000k -bf 0 -f null -",
+                // Fallback minimal test (keeps previous behavior)
+                $"-f lavfi -i color=black:s=64x64:d=0.1 -c:v {encoderName} -f null -"
             };
-            
-            using var process = Process.Start(psi);
-            if (process == null) return false;
-            
-            process.StandardOutput.ReadToEnd();
-            var error = process.StandardError.ReadToEnd();
-            process.WaitForExit();
-            
-            // Check for success and common failure messages
-            return process.ExitCode == 0 && 
-                   !error.Contains("Cannot load") && 
-                   !error.Contains("not available") &&
-                   !error.Contains("No NVENC") &&
-                   !error.Contains("failed");
+
+            foreach (var args in attempts)
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "ffmpeg",
+                    Arguments = args,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+
+                using var process = Process.Start(psi);
+                if (process == null) continue;
+
+                // Read stderr (some encoders print diagnostics there)
+                var stdOut = process.StandardOutput.ReadToEnd();
+                var error = process.StandardError.ReadToEnd();
+                process.WaitForExit();
+
+                // If exit code is zero, the encoder initialized successfully
+                if (process.ExitCode == 0)
+                {
+                    return true;
+                }
+
+                // If the error clearly indicates the encoder is unavailable, break early
+                var errLower = error.ToLowerInvariant();
+                if (errLower.Contains("not available") || errLower.Contains("cannot load") || errLower.Contains("no nvenc") )
+                {
+                    return false;
+                }
+
+                // Otherwise try the next attempt (the fallback may succeed for some drivers)
+            }
+
+            return false;
         }
         catch
         {
@@ -127,8 +151,11 @@ public class H265Strategy : ICompressionStrategy
             {
                 args.AddRange(new[]
                 {
-                    "-quality", "balanced",
-                    "-rc", "vbr_latency",
+                    "-quality", "quality",
+                    "-rc", "vbr_peak",
+                    "-qmin", "18",
+                    "-qmax", "51",
+                    "-preanalysis", "1",
                     "-g", "60",
                     "-bf", "3",
                     "-tag:v", "hvc1"
@@ -137,19 +164,19 @@ public class H265Strategy : ICompressionStrategy
         }
         else
         {
-            // Software: Use medium preset for 2-3x speedup
+            // Software: Use slower preset for highest quality
             args.AddRange(new[]
             {
-                "-preset", "medium",
+                "-preset", "slower",
                 "-pix_fmt", "yuv420p",
                 "-tag:v", "hvc1",
                 "-g", "60",
                 "-sc_threshold", "0",
                 "-bf", "4",
-                "-refs", "4",
+                "-refs", "5",
                 "-minrate", $"{minRate}k",
-                // Reduced lookahead from 60 to 40
-                "-x265-params", $"vbv-bufsize={buffer}:vbv-maxrate={maxRate}:aq-mode=3:aq-strength=1.0:psy-rd=2.0:rc-lookahead=40"
+                // Maximum lookahead and psychovisual tuning for best quality
+                "-x265-params", $"vbv-bufsize={buffer}:vbv-maxrate={maxRate}:aq-mode=3:aq-strength=1.0:psy-rd=2.0:psy-rdoq=1.0:rc-lookahead=60:me=star:subme=7:rd=6"
             });
         }
 
