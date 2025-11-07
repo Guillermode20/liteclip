@@ -230,10 +230,19 @@ public class VideoCompressionService : IVideoCompressionService
 
             var arguments = new List<string> { "-y", "-i", job.InputPath };
 
+            // Merge scale filter (if any) with enforced fps filter. Use the requested fps or default (normalized) value.
+            var fpsToUse = request.TargetFps ?? 30;
+            string vfCombined;
             if (!string.IsNullOrWhiteSpace(scaleFilter))
             {
-                arguments.AddRange(new[] { "-vf", scaleFilter });
+                vfCombined = $"{scaleFilter},fps={fpsToUse}";
             }
+            else
+            {
+                vfCombined = $"fps={fpsToUse}";
+            }
+
+            arguments.AddRange(new[] { "-vf", vfCombined });
 
             // Prefer a registered compression strategy if available; fall back to legacy builders.
             ICompressionStrategy? strategy = null;
@@ -671,6 +680,7 @@ public class VideoCompressionService : IVideoCompressionService
         {
             Codec = NormalizeCodec(request.Codec),
             ScalePercent = request.ScalePercent,
+            TargetFps = request.TargetFps,
             TargetSizeMb = request.TargetSizeMb,
             SourceDuration = request.SourceDuration
         };
@@ -688,6 +698,16 @@ public class VideoCompressionService : IVideoCompressionService
         if (normalized.SourceDuration.HasValue && normalized.SourceDuration.Value <= 0)
         {
             normalized.SourceDuration = null;
+        }
+
+        // Normalize target framerate: clamp to reasonable range and default to 30 if not provided
+        if (normalized.TargetFps.HasValue)
+        {
+            normalized.TargetFps = Math.Clamp(normalized.TargetFps.Value, 1, 240);
+        }
+        else
+        {
+            normalized.TargetFps = 30;
         }
 
         return normalized;
