@@ -24,8 +24,13 @@ builder.Services.Configure<FormOptions>(options =>
 
 // Add services to the container.
 // OpenAPI removed for faster startup (not needed for desktop app)
+// Register concrete implementations and expose their interfaces for DI compatibility.
 builder.Services.AddSingleton<FfmpegPathResolver>();
+builder.Services.AddSingleton<IFfmpegPathResolver>(sp => sp.GetRequiredService<FfmpegPathResolver>());
+
 builder.Services.AddSingleton<VideoCompressionService>();
+builder.Services.AddSingleton<IVideoCompressionService>(sp => sp.GetRequiredService<VideoCompressionService>());
+
 builder.Services.AddHostedService<JobCleanupService>();
 
 var app = builder.Build();

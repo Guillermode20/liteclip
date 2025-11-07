@@ -3,7 +3,7 @@ using System.Runtime.InteropServices;
 
 namespace smart_compressor.Services;
 
-public class FfmpegPathResolver
+public class FfmpegPathResolver : IFfmpegPathResolver
 {
     private readonly ILogger<FfmpegPathResolver> _logger;
     private readonly IConfiguration _configuration;
@@ -78,6 +78,14 @@ public class FfmpegPathResolver
             "Please ensure FFmpeg is installed and available in system PATH, or configure FFmpeg:Path in appsettings.json");
         _cachedFfmpegPath = GetFfmpegExecutableName();
         return _cachedFfmpegPath;
+    }
+
+    /// <summary>
+    /// Adapter for <see cref="IFfmpegPathResolver"/> - returns the resolved ffmpeg path.
+    /// </summary>
+    public string? ResolveFfmpegPath()
+    {
+        return GetFfmpegPath();
     }
 
     private string? ExtractEmbeddedFfmpeg()

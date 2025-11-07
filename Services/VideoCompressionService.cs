@@ -7,7 +7,7 @@ using smart_compressor.Models;
 
 namespace smart_compressor.Services;
 
-public class VideoCompressionService
+public class VideoCompressionService : IVideoCompressionService
 {
     private readonly ConcurrentDictionary<string, JobMetadata> _jobs = new();
     private readonly ConcurrentQueue<string> _jobQueue = new();
@@ -590,6 +590,15 @@ public class VideoCompressionService
     public IEnumerable<JobMetadata> GetAllJobsInternal()
     {
         return _jobs.Values.ToList();
+    }
+
+    /// <summary>
+    /// Public accessor to obtain all tracked jobs.
+    /// Implemented to satisfy <see cref="IVideoCompressionService"/>.
+    /// </summary>
+    public IEnumerable<JobMetadata> GetAllJobs()
+    {
+        return GetAllJobsInternal();
     }
 
     public void CleanupJob(string jobId)
