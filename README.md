@@ -1,223 +1,102 @@
 # Smart Video Compressor
 
-A powerful, user-friendly desktop application for compressing videos with intelligent quality optimization. Built with ASP.NET Core, Svelte, and Photino for a native window experience. Features an embedded FFmpeg engine for professional-grade video compression.
+A fast, lightweight desktop application for compressing videos. Built with ASP.NET Core, Svelte, and WebView2—no browser needed.
+
+## Quick Start
+
+1. Download `smart-compressor.exe` from releases
+2. Ensure FFmpeg is installed and available in PATH (or place `ffmpeg.exe` in the `ffmpeg/` directory)
+3. Run the executable—a native window opens automatically
+4. Upload a video (drag & drop or file picker)
+5. Adjust the target size slider and pick a codec
+6. Compress and download
 
 ## Features
 
-- **Smart Compression Modes**
-  - **Auto Mode**: Intelligently balances quality and file size based on video characteristics
-  - **Simple Mode**: Target a specific file size with automatic bitrate calculation
-  - **Advanced Mode**: Fine-tune quality using CRF (Constant Rate Factor)
+- **Codec Selection**: H.264, H.265, VP9, AV1
+- **Target Size Slider**: Drag to set compression target (1-100% of original)
+- **Automatic Optimization**: Resolution scales automatically to hit target size
+- **Video Preview**: Play compressed result before downloading
+- **Drag & Drop Upload**: Easy file selection
+- **Real-Time Progress**: Live status with ETA during compression
+- **Native Desktop Window**: WebView2-based UI, no browser required
+- **Single Executable**: Self-contained app
 
-- **Multiple Codec Support**
-  - H.264 (Best compatibility)
-  - H.265/HEVC (Higher efficiency)
-  - VP9 (Web-optimized)
-  - AV1 (Next-generation compression)
+## System Requirements
 
-- **Additional Features**
-  - Resolution scaling (10-100%)
-  - Two-pass encoding for precise size targeting
-  - Real-time progress tracking with ETA
-  - Job queuing system
-  - Drag-and-drop interface
-  - Video preview before and after compression
-  - Native desktop window (no browser required)
+- **Windows 10/11** (64-bit)
+- **WebView2 Runtime** (usually pre-installed; if missing, download [here](https://developer.microsoft.com/en-us/microsoft-edge/webview2/#download-section))
+- **FFmpeg**: Install via your package manager or download from [ffmpeg.org](https://ffmpeg.org/download.html)
 
-## For End Users
-
-### Quick Start
-
-1. **Download** the latest release (`smart-compressor.exe`)
-2. **Run** the executable - a native window will open
-3. **Upload** a video file (up to 2GB) via drag-and-drop or file picker
-4. **Choose** your compression settings:
-   - Select a codec
-   - Choose compression mode
-   - Adjust target size or quality
-5. **Compress** and download your optimized video
-
-### System Requirements
-
-- Windows 10/11 (64-bit)
-- No additional software required - FFmpeg is embedded
-- WebView2 Runtime (typically pre-installed on Windows 10/11)
-  - If not installed, download from [Microsoft](https://developer.microsoft.com/en-us/microsoft-edge/webview2/#download-section)
-
-### Compression Modes Explained
-
-#### Auto Mode (Recommended)
-Automatically determines the best compression strategy based on your video's properties. Ideal for most users.
-
-#### Simple Mode
-Set a target file size (e.g., 25MB for Discord uploads). The app calculates optimal settings to reach that size while maintaining the best possible quality.
-
-#### Advanced Mode
-Full control using CRF values:
-- **18-22**: Nearly lossless quality (larger files)
-- **23-28**: High quality (balanced, **default: 28**)
-- **29-35**: Good quality (smaller files)
-- **36-45**: Lower quality (smallest files)
-
-### Tips for Best Results
-
-- Use **H.264** for maximum compatibility
-- Use **H.265** for smaller files (50% better compression than H.264)
-- Enable **two-pass encoding** when targeting specific file sizes
-- Scale resolution to **720p** or **540p** for significant size reduction with minimal quality loss
-
-### Troubleshooting
-
-**Window doesn't open:**
-- Ensure WebView2 Runtime is installed (pre-installed on most modern Windows systems)
-- Check console output for error messages
-- Try running as administrator if permission issues occur
-
-**App closes immediately:**
-- Check if port 5000 is already in use by another application
-- Review the console output before the window closes
-
-## For Developers
+## Developer Setup
 
 ### Prerequisites
 
 - [.NET 9.0 SDK](https://dotnet.microsoft.com/download/dotnet/9.0) or later
-- [Node.js](https://nodejs.org/) 18+ (for building the frontend)
-- [FFmpeg](https://ffmpeg.org/) executable (placed in `ffmpeg/ffmpeg.exe` directory)
+- [Node.js](https://nodejs.org/) 18+
+- [FFmpeg](https://ffmpeg.org/) executable at `ffmpeg/ffmpeg.exe`
 
-### Building from Source
+### Build
 
-#### Windows
-
-1. Clone the repository:
-```bash
-git clone https://github.com/yourusername/smart-compressor.git
-cd smart-compressor
-```
-
-2. Run the build script (choose one method):
-
-**Method 1: Using the batch file (Recommended)**
-```cmd
-build.bat
-```
-
-**Method 2: Using PowerShell directly**
+**Windows (PowerShell or Command Prompt):**
 ```powershell
-powershell -ExecutionPolicy Bypass -File publish-win.ps1
+.\build.bat
 ```
 
-**Method 3: From PowerShell prompt**
-```powershell
-.\publish-win.ps1
-```
-
-The script will:
-- Verify .NET SDK and Node.js are installed
-- Install frontend dependencies
-- Build the Svelte frontend
-- Compile and publish the .NET application as a single-file executable
-- Embed FFmpeg and the frontend into the executable
-- Output to the `publish-win` directory
-
-> **Note:** If the script window closes immediately, use `build.bat` which handles errors better and keeps the window open.
-
-#### Manual Build Steps
-
-If you prefer to build manually:
-
-1. **Build the frontend:**
+Or manually:
 ```bash
-cd frontend
-npm install
-npm run build
-cd ..
+cd frontend && npm install && npm run build && cd ..
+dotnet publish -c Release -r win-x64 -o publish-win /p:PublishSingleFile=true
 ```
 
-2. **Publish the .NET application:**
-```bash
-dotnet publish --configuration Release --runtime win-x64 --self-contained true --output publish-win /p:PublishSingleFile=true
-```
+Output: `publish-win/smart-compressor.exe`
 
-3. **Place FFmpeg:**
-Ensure `ffmpeg/ffmpeg.exe` exists before building (it will be embedded automatically).
+### Development
 
-### Development Mode
-
-Run the backend and frontend separately for development:
-
-**Option 1: Run with native window (production mode):**
+Run the app with the native window:
 ```bash
 dotnet run
 ```
 
-This will start the ASP.NET Core server and open a native desktop window.
-
-**Option 2: Development mode with browser:**
-To develop with hot-reload, temporarily comment out the Photino window code in `Program.cs` and uncomment `app.UseHttpsRedirection()`, then:
-
-**Backend:**
+For live frontend editing (requires commenting out WebView code in `Program.cs`):
 ```bash
+# Terminal 1
 dotnet run
+
+# Terminal 2
+cd frontend && npm run dev
 ```
 
-**Frontend** (in a separate terminal):
-```bash
-cd frontend
-npm run dev
-```
+Backend runs on a dynamic port (shown in console); frontend dev server typically at `http://localhost:5173`.
 
-The backend will run on a dynamically assigned port (check console output for the exact URL), and the frontend dev server typically runs on `http://localhost:5173`.
-
-### Project Structure
+### Project Layout
 
 ```
 smart-compressor/
-├── Controllers/          # (Future API controllers)
-├── Models/              # Data models (CompressionRequest, CompressionResult)
-├── Services/            # Core business logic
-│   ├── VideoCompressionService.cs    # Main compression engine
-│   ├── FfmpegPathResolver.cs         # FFmpeg path management
-│   └── JobCleanupService.cs          # Background cleanup service
-├── frontend/            # Svelte frontend
-│   ├── src/
-│   │   ├── App.svelte   # Main application component
-│   │   └── main.ts      # Entry point
-│   └── vite.config.ts   # Vite configuration
-├── ffmpeg/              # FFmpeg binaries (embedded)
-├── wwwroot/             # Built frontend assets (embedded)
-├── Program.cs           # ASP.NET Core entry point
-├── smart-compressor.csproj
-└── publish-win.ps1      # Windows build script
+├── Program.cs                 # ASP.NET Core app & WebView2 setup
+├── Services/
+│   ├── VideoCompressionService.cs    # Core compression logic
+│   ├── FfmpegPathResolver.cs         # FFmpeg binary locator
+│   └── JobCleanupService.cs          # Background cleanup
+├── Models/                    # CompressionRequest, CompressionResult
+├── frontend/                  # Svelte UI (Vite-built)
+│   └── src/App.svelte        # Main component
+├── ffmpeg/                    # FFmpeg binaries (embedded in release)
+├── wwwroot/                   # Built UI assets (embedded)
+├── appsettings.json           # Configuration
+└── smart-compressor.csproj
 ```
-
-### Build Troubleshooting
-
-**PowerShell script closes immediately:**
-- Use `build.bat` instead - it has better error handling
-- Or run from PowerShell with: `powershell -ExecutionPolicy Bypass -NoExit -File publish-win.ps1`
-- Check that you have .NET 9 SDK and Node.js installed
-- Ensure you're running from the project root directory
-
-**Execution Policy errors:**
-```powershell
-# Run this in PowerShell as Administrator (one time only)
-Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
-```
-
-**Frontend build fails:**
-- Delete `frontend/node_modules` and let the script reinstall dependencies
-- Ensure Node.js version is 18 or higher
 
 ### Configuration
 
-Settings can be modified in `appsettings.json`:
+Edit `appsettings.json`:
 
 ```json
 {
   "Compression": {
     "MaxConcurrentJobs": 2,
-    "MaxQueueSize": 10
+    "MaxQueueSize": 10,
+    "JobRetentionMinutes": 30
   },
   "FileUpload": {
     "MaxFileSizeBytes": 2147483648
@@ -225,41 +104,26 @@ Settings can be modified in `appsettings.json`:
   "TempPaths": {
     "Uploads": "temp/uploads",
     "Outputs": "temp/outputs"
-  },
-  "Cleanup": {
-    "RetentionMinutes": 60,
-    "CleanupIntervalMinutes": 10
   }
 }
 ```
 
 ### API Endpoints
 
-- `POST /api/compress` - Upload and compress video
-- `GET /api/status/{jobId}` - Check compression status
-- `GET /api/download/{jobId}` - Download compressed video
-- `POST /api/cancel/{jobId}` - Cancel compression job
+- `POST /api/compress` – Upload and start compression
+- `GET /api/status/{jobId}` – Check job status
+- `GET /api/download/{jobId}` – Download compressed video
+- `POST /api/cancel/{jobId}` – Cancel a job
 
-### Technology Stack
+## Tech Stack
 
-- **Backend**: ASP.NET Core 9.0 (C#)
+- **Backend**: ASP.NET Core 9.0
 - **Frontend**: Svelte 5 + TypeScript
-- **Build Tool**: Vite (with Rolldown)
-- **Video Processing**: FFmpeg (embedded)
-- **Desktop Framework**: Photino.NET (native webview)
-- **Deployment**: Single-file executable with embedded static files
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit issues or pull requests.
+- **Build**: Vite
+- **Video Processing**: FFmpeg
+- **Desktop UI**: WebView2 (native Windows control)
 
 ## License
 
-This project is provided as-is for personal and educational use.
-
-## Acknowledgments
-
-- Built with [FFmpeg](https://ffmpeg.org/)
-- Frontend powered by [Svelte](https://svelte.dev/)
-- Backend powered by [ASP.NET Core](https://dotnet.microsoft.com/apps/aspnet)
+Provided as-is for personal and educational use.
 

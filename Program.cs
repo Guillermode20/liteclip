@@ -54,7 +54,6 @@ else
 // POST endpoint to upload and compress video
 app.MapPost("/api/compress", async (
     [FromForm] IFormFile file,
-    [FromForm] int? crf,
     [FromForm] int? scalePercent,
     [FromForm] string? codec,
     [FromForm] double? targetSizeMb,
@@ -84,7 +83,6 @@ app.MapPost("/api/compress", async (
         var compressionRequest = new CompressionRequest
         {
             Codec = codec ?? "h264",
-            Crf = crf,
             ScalePercent = scalePercent,
             TargetSizeMb = targetSizeMb,
             SourceDuration = sourceDuration,
@@ -104,7 +102,6 @@ app.MapPost("/api/compress", async (
             Status = job?.Status ?? "processing",
             Message = "Video compression started. Use the jobId to download the result.",
             Codec = job?.Codec ?? compressionRequest.Codec,
-            Crf = job?.Crf,
             ScalePercent = job?.ScalePercent,
             TargetSizeMb = job?.TargetSizeMb,
             TargetBitrateKbps = job?.TargetBitrateKbps,
@@ -164,7 +161,6 @@ app.MapGet("/api/status/{jobId}", (string jobId, VideoCompressionService compres
             _ => "Unknown status"
         },
         Codec = job.Codec,
-        Crf = job.Crf,
         ScalePercent = job.ScalePercent,
         TargetSizeMb = job.TargetSizeMb,
         TargetBitrateKbps = job.TargetBitrateKbps,
@@ -239,7 +235,6 @@ app.MapGet("/api/download/{jobId}", async (string jobId, VideoCompressionService
             Status = "processing",
             Message = "Video compression is still in progress. Please try again later.",
             Codec = job.Codec,
-            Crf = job.Crf,
             ScalePercent = job.ScalePercent,
             TargetSizeMb = job.TargetSizeMb,
             TargetBitrateKbps = job.TargetBitrateKbps,

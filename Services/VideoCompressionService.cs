@@ -34,10 +34,10 @@ public class VideoCompressionService
         Directory.CreateDirectory(_tempOutputPath);
     }
 
-        public async Task<string> CompressVideoAsync(IFormFile videoFile, CompressionRequest request)
+    public async Task<string> CompressVideoAsync(IFormFile videoFile, CompressionRequest request)
     {
-        _logger.LogInformation("Compression request received - Codec: {Codec}, TargetSizeMb: {TargetSizeMb}, SourceDuration: {SourceDuration}, Crf: {Crf}", 
-            request.Codec, request.TargetSizeMb, request.SourceDuration, request.Crf);
+        _logger.LogInformation("Compression request received - Codec: {Codec}, TargetSizeMb: {TargetSizeMb}, SourceDuration: {SourceDuration}", 
+            request.Codec, request.TargetSizeMb, request.SourceDuration);
         
         var normalizedRequest = NormalizeRequest(request);
         var codecConfig = GetCodecConfig(normalizedRequest.Codec);
@@ -101,7 +101,6 @@ public class VideoCompressionService
             OutputMimeType = codecConfig.MimeType,
             Status = "queued",
             Codec = codecConfig.Key,
-            Crf = normalizedRequest.Crf,
             ScalePercent = normalizedRequest.ScalePercent,
             TargetSizeMb = normalizedRequest.TargetSizeMb,
             TargetBitrateKbps = normalizedRequest.TargetBitrateKbps,
@@ -196,11 +195,14 @@ public class VideoCompressionService
     {
         try
         {
-            // Decide whether to use bitrate-based or CRF-based encoding
-            var useTargetBitrate = request.TargetSizeMb.HasValue && 
-                                  request.SourceDuration.HasValue && 
-                                  request.SourceDuration.Value > 0 &&
-                                  request.VideoBitrateKbps.HasValue;
+            // Always use bitrate-based encoding (required by frontend)
+            if (!request.TargetSizeMb.HasValue || 
+                !request.SourceDuration.HasValue || 
+                request.SourceDuration.Value <= 0 ||
+                !request.VideoBitrateKbps.HasValue)
+            {
+                throw new InvalidOperationException("Target size, duration, and video bitrate are required for compression");
+            }
 
 			// Apply scaling
 			int scalePercent = Math.Clamp(request.ScalePercent ?? 100, 10, 100);
@@ -216,19 +218,12 @@ public class VideoCompressionService
                 _logger.LogInformation("Applying resolution scaling for job {JobId}: {ScalePercent}%", jobId, scalePercent);
             }
 
-            double? targetBitrateKbps = null;
-            double? videoBitrateKbps = null;
+            var targetBitrateKbps = request.TargetBitrateKbps ?? 0;
+            var videoBitrateKbps = request.VideoBitrateKbps.Value;
 
-            if (useTargetBitrate)
-            {
-                targetBitrateKbps = request.TargetBitrateKbps ?? 0;
-                videoBitrateKbps = request.VideoBitrateKbps ?? 0;
-
-                job.TargetSizeMb = Math.Round(request.TargetSizeMb!.Value, 2);
-                job.TargetBitrateKbps = targetBitrateKbps;
-                job.VideoBitrateKbps = videoBitrateKbps;
-                job.Crf = null;
-            }
+            job.TargetSizeMb = Math.Round(request.TargetSizeMb.Value, 2);
+            job.TargetBitrateKbps = targetBitrateKbps;
+            job.VideoBitrateKbps = videoBitrateKbps;
 
             var arguments = new List<string> { "-y", "-i", job.InputPath };
 
@@ -237,27 +232,13 @@ public class VideoCompressionService
                 arguments.AddRange(new[] { "-vf", scaleFilter });
             }
 
-            if (!useTargetBitrate)
-            {
-				var effectiveCrf = request.Crf;
-				var advancedResult = BuildAdvancedVideoArgs(codec, effectiveCrf);
-                job.Crf = advancedResult.AppliedCrf;
-                job.TargetSizeMb = null;
-                job.TargetBitrateKbps = null;
-                job.VideoBitrateKbps = null;
-                arguments.AddRange(advancedResult.Args);
-            }
-            else
-            {
-                var simpleArgs = BuildSimpleVideoArgs(codec, videoBitrateKbps ?? 0);
-                arguments.AddRange(simpleArgs);
-            }
-
+            var videoArgs = BuildSimpleVideoArgs(codec, videoBitrateKbps);
+            arguments.AddRange(videoArgs);
             arguments.AddRange(BuildAudioArgs(codec));
             arguments.AddRange(BuildContainerArgs(codec));
             
-            // Two-pass encoding when targeting specific size
-            var useTwoPass = job.TwoPass && useTargetBitrate && videoBitrateKbps.HasValue;
+            // Two-pass encoding for accurate target size
+            var useTwoPass = job.TwoPass;
             
             if (useTwoPass)
             {
@@ -639,7 +620,6 @@ public class VideoCompressionService
         var normalized = new CompressionRequest
         {
             Codec = NormalizeCodec(request.Codec),
-            Crf = request.Crf,
             ScalePercent = request.ScalePercent,
             TargetSizeMb = request.TargetSizeMb,
             SourceDuration = request.SourceDuration,
@@ -648,7 +628,6 @@ public class VideoCompressionService
             OriginalSizeBytes = request.OriginalSizeBytes
         };
 
-        normalized.Crf = Math.Clamp(normalized.Crf ?? 28, 18, 45);
         if (normalized.ScalePercent.HasValue)
         {
             normalized.ScalePercent = Math.Clamp(normalized.ScalePercent.Value, 10, 100);
@@ -710,33 +689,7 @@ public class VideoCompressionService
         };
     }
 
-    private static (List<string> Args, int AppliedCrf) BuildAdvancedVideoArgs(CodecConfig codec, int? requestedCrf)
-    {
-        var args = new List<string>();
-        int appliedCrf;
 
-        switch (codec.Key)
-        {
-            case "h265":
-                appliedCrf = MapCrf(requestedCrf, 20, 37, 28, true);
-                args.AddRange(new[] { "-c:v", codec.VideoCodec, "-preset", "medium", "-crf", appliedCrf.ToString(CultureInfo.InvariantCulture), "-tag:v", "hvc1", "-pix_fmt", "yuv420p" });
-                break;
-            case "vp9":
-                appliedCrf = MapCrf(requestedCrf, 32, 45, 36, true);
-                args.AddRange(new[] { "-c:v", codec.VideoCodec, "-crf", appliedCrf.ToString(CultureInfo.InvariantCulture), "-b:v", "0", "-deadline", "good", "-cpu-used", "2", "-row-mt", "1", "-tile-columns", "1" });
-                break;
-            case "av1":
-                appliedCrf = MapCrf(requestedCrf, 28, 45, 32, true);
-                args.AddRange(new[] { "-c:v", codec.VideoCodec, "-crf", appliedCrf.ToString(CultureInfo.InvariantCulture), "-b:v", "0", "-cpu-used", "4", "-row-mt", "1" });
-                break;
-            default:
-                appliedCrf = MapCrf(requestedCrf, 18, 45, 28, false);
-                args.AddRange(new[] { "-c:v", codec.VideoCodec, "-preset", "veryfast", "-crf", appliedCrf.ToString(CultureInfo.InvariantCulture), "-pix_fmt", "yuv420p" });
-                break;
-        }
-
-        return (args, appliedCrf);
-    }
 
     private static List<string> BuildSimpleVideoArgs(CodecConfig codec, double videoBitrateKbps)
     {
@@ -800,55 +753,7 @@ public class VideoCompressionService
         return Array.Empty<string>();
     }
 
-    private static int MapCrf(int? requestedCrf, int codecMin, int codecMax, int codecDefault, bool scaleFromSlider)
-    {
-        if (requestedCrf is null)
-        {
-            return codecDefault;
-        }
 
-        var clamped = Math.Clamp(requestedCrf.Value, 18, 45);
-
-        if (!scaleFromSlider)
-        {
-            return Math.Clamp(clamped, codecMin, codecMax);
-        }
-
-        var normalized = (clamped - 18d) / (45d - 18d);
-        var mapped = codecMin + normalized * (codecMax - codecMin);
-        return (int)Math.Round(mapped);
-    }
-
-    private static double? ParseFfmpegProgress(string line, double? totalDuration)
-    {
-        if (string.IsNullOrEmpty(line) || !totalDuration.HasValue || totalDuration.Value <= 0)
-        {
-            return null;
-        }
-
-        try
-        {
-            // Look for time= pattern like "time=00:01:23.45"
-            var timeMatch = System.Text.RegularExpressions.Regex.Match(line, @"time=(\d{2}):(\d{2}):(\d{2}(?:\.\d+)?)");
-            if (timeMatch.Success)
-            {
-                var hours = double.Parse(timeMatch.Groups[1].Value);
-                var minutes = double.Parse(timeMatch.Groups[2].Value);
-                var seconds = double.Parse(timeMatch.Groups[3].Value);
-
-                var currentTime = hours * 3600 + minutes * 60 + seconds;
-                var progress = (currentTime / totalDuration.Value) * 100;
-
-                return Math.Clamp(progress, 0, 100);
-            }
-        }
-        catch
-        {
-            // Parsing failed, return null
-        }
-
-        return null;
-    }
 
     private static string NormalizeCodec(string? codec)
     {
@@ -883,7 +788,6 @@ public class JobMetadata
     public string OutputMimeType { get; set; } = "video/mp4";
     public string Status { get; set; } = string.Empty;
     public string Codec { get; set; } = "h264";
-    public int? Crf { get; set; }
     public int? ScalePercent { get; set; }
     public double? TargetSizeMb { get; set; }
     public double? TargetBitrateKbps { get; set; }

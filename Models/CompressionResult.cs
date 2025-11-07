@@ -7,7 +7,6 @@ public class CompressionResult
     public string Status { get; set; } = string.Empty;
     public string? Message { get; set; }
     public string Codec { get; set; } = "h264";
-    public int? Crf { get; set; }
     public int? ScalePercent { get; set; }
     public double? TargetSizeMb { get; set; }
     public double? TargetBitrateKbps { get; set; }
