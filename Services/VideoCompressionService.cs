@@ -264,7 +264,7 @@ public class VideoCompressionService : IVideoCompressionService
             }
             else
             {
-                var videoArgs = BuildSimpleVideoArgs(codec, videoBitrateKbps);
+                var videoArgs = BuildSimpleVideoArgs(codec, videoBitrateKbps, fpsToUse);
                 arguments.AddRange(videoArgs);
                 arguments.AddRange(BuildAudioArgs(codec));
                 arguments.AddRange(BuildContainerArgs(codec));
@@ -758,7 +758,7 @@ public class VideoCompressionService : IVideoCompressionService
 
 
 
-    private static List<string> BuildSimpleVideoArgs(CodecConfig codec, double videoBitrateKbps)
+    private static List<string> BuildSimpleVideoArgs(CodecConfig codec, double videoBitrateKbps, int fps)
     {
         var targetBitrate = Math.Max(100, Math.Round(videoBitrateKbps));
         // Tighter bitrate control for more accurate file sizes
@@ -774,16 +774,16 @@ public class VideoCompressionService : IVideoCompressionService
         switch (codec.Key)
         {
             case "h265":
-                args.AddRange(new[] { "-c:v", codec.VideoCodec, "-preset", "medium", "-pix_fmt", "yuv420p", "-tag:v", "hvc1", "-x265-params", "vbv-bufsize=" + buffer + ":vbv-maxrate=" + maxRate });
+                args.AddRange(new[] { "-c:v", codec.VideoCodec, "-preset", "slower", "-pix_fmt", "yuv420p", "-tag:v", "hvc1", "-g", (fps * 2).ToString(), "-sc_threshold", "0", "-bf", "4", "-refs", "5", "-x265-params", "vbv-bufsize=" + buffer + ":vbv-maxrate=" + maxRate + ":aq-mode=3:aq-strength=1.0:psy-rd=2.0:rc-lookahead=60" });
                 break;
             case "vp9":
-                args.AddRange(new[] { "-c:v", codec.VideoCodec, "-deadline", "good", "-cpu-used", "2", "-row-mt", "1", "-tile-columns", "1" });
+                args.AddRange(new[] { "-c:v", codec.VideoCodec, "-deadline", "good", "-cpu-used", "1", "-row-mt", "1", "-tile-columns", "1", "-g", (fps * 2).ToString(), "-sc_threshold", "0" });
                 break;
             case "av1":
-                args.AddRange(new[] { "-c:v", codec.VideoCodec, "-cpu-used", "5", "-row-mt", "1" });
+                args.AddRange(new[] { "-c:v", codec.VideoCodec, "-cpu-used", "0", "-row-mt", "1", "-g", (fps * 2).ToString(), "-sc_threshold", "0" });
                 break;
             default:
-                args.AddRange(new[] { "-c:v", codec.VideoCodec, "-preset", "medium", "-pix_fmt", "yuv420p" });
+                args.AddRange(new[] { "-c:v", codec.VideoCodec, "-preset", "slower", "-pix_fmt", "yuv420p", "-g", (fps * 2).ToString(), "-sc_threshold", "0", "-bf", "4", "-refs", "5" });
                 break;
         }
 

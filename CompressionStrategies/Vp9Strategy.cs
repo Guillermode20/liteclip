@@ -22,8 +22,10 @@ public class Vp9Strategy : ICompressionStrategy
         var args = new List<string>
         {
             "-c:v", VideoCodec,
+            "-c:v", VideoCodec,
             "-deadline", "good",
-            "-cpu-used", "2",
+            // Lower cpu-used for better quality (slower)
+            "-cpu-used", "1",
             "-row-mt", "1",
             "-tile-columns", "1",
             "-b:v", $"{targetBitrate}k",

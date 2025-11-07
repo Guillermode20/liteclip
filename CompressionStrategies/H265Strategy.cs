@@ -22,10 +22,15 @@ public class H265Strategy : ICompressionStrategy
         var args = new List<string>
         {
             "-c:v", VideoCodec,
-            "-preset", "medium",
+            "-c:v", VideoCodec,
+            "-preset", "slower",
             "-pix_fmt", "yuv420p",
             "-tag:v", "hvc1",
-            "-x265-params", $"vbv-bufsize={buffer}:vbv-maxrate={maxRate}",
+            "-g", "60",
+            "-sc_threshold", "0",
+            "-bf", "4",
+            "-refs", "5",
+            "-x265-params", $"vbv-bufsize={buffer}:vbv-maxrate={maxRate}:aq-mode=3:aq-strength=1.0:psy-rd=2.0:rc-lookahead=60",
             "-b:v", $"{targetBitrate}k",
             "-maxrate", $"{maxRate}k",
             "-bufsize", $"{buffer}k",

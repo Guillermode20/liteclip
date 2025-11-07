@@ -22,7 +22,9 @@ public class Av1Strategy : ICompressionStrategy
         var args = new List<string>
         {
             "-c:v", VideoCodec,
-            "-cpu-used", "5",
+            "-c:v", VideoCodec,
+            // For highest quality prefer lowest cpu-used (slower) for libaom-av1
+            "-cpu-used", "0",
             "-row-mt", "1",
             "-b:v", $"{targetBitrate}k",
             "-maxrate", $"{maxRate}k",
