@@ -4,6 +4,7 @@ using System.Globalization;
 using System.Linq;
 using System.Text;
 using smart_compressor.Models;
+using smart_compressor.CompressionStrategies;
 
 namespace smart_compressor.Services;
 
@@ -16,13 +17,15 @@ public class VideoCompressionService : IVideoCompressionService
     private readonly string _tempOutputPath;
     private readonly ILogger<VideoCompressionService> _logger;
     private readonly FfmpegPathResolver _ffmpegResolver;
+    private readonly ICompressionStrategyFactory _strategyFactory;
     private readonly int _maxConcurrentJobs;
     private readonly int _maxQueueSize;
 
-    public VideoCompressionService(IConfiguration configuration, ILogger<VideoCompressionService> logger, FfmpegPathResolver ffmpegResolver)
+    public VideoCompressionService(IConfiguration configuration, ILogger<VideoCompressionService> logger, FfmpegPathResolver ffmpegResolver, ICompressionStrategyFactory strategyFactory)
     {
         _logger = logger;
         _ffmpegResolver = ffmpegResolver;
+        _strategyFactory = strategyFactory;
         _tempUploadPath = configuration["TempPaths:Uploads"] ?? Path.Combine(Path.GetTempPath(), "video-uploads");
         _tempOutputPath = configuration["TempPaths:Outputs"] ?? Path.Combine(Path.GetTempPath(), "video-outputs");
         _maxConcurrentJobs = configuration.GetValue<int>("Compression:MaxConcurrentJobs", 2);
@@ -232,10 +235,31 @@ public class VideoCompressionService : IVideoCompressionService
                 arguments.AddRange(new[] { "-vf", scaleFilter });
             }
 
-            var videoArgs = BuildSimpleVideoArgs(codec, videoBitrateKbps);
-            arguments.AddRange(videoArgs);
-            arguments.AddRange(BuildAudioArgs(codec));
-            arguments.AddRange(BuildContainerArgs(codec));
+            // Prefer a registered compression strategy if available; fall back to legacy builders.
+            ICompressionStrategy? strategy = null;
+            try
+            {
+                strategy = _strategyFactory?.GetStrategy(codec.Key);
+            }
+            catch
+            {
+                // Ignore factory errors and fall back
+                strategy = null;
+            }
+
+            if (strategy != null)
+            {
+                arguments.AddRange(strategy.BuildVideoArgs(videoBitrateKbps));
+                arguments.AddRange(strategy.BuildAudioArgs());
+                arguments.AddRange(strategy.BuildContainerArgs());
+            }
+            else
+            {
+                var videoArgs = BuildSimpleVideoArgs(codec, videoBitrateKbps);
+                arguments.AddRange(videoArgs);
+                arguments.AddRange(BuildAudioArgs(codec));
+                arguments.AddRange(BuildContainerArgs(codec));
+            }
             
             // Two-pass encoding for accurate target size
             var useTwoPass = job.TwoPass;
@@ -385,21 +409,30 @@ public class VideoCompressionService : IVideoCompressionService
         // First pass
         _logger.LogInformation("Starting first pass for job {JobId}", jobId);
         var pass1Args = new List<string>(baseArguments);
-        
-        // Add pass-specific arguments
-        if (codec.Key == "h264" || codec.Key == "h265")
+
+        // Ask strategy for pass-specific extras when available
+        var strategy = _strategyFactory?.GetStrategy(codec.Key);
+        if (strategy != null)
         {
-            pass1Args.AddRange(new[] { "-pass", "1", "-passlogfile", passLogFile, "-f", codec.Key == "h264" ? "mp4" : "mp4" });
+            pass1Args.AddRange(strategy.GetPassExtras(1, passLogFile));
         }
-        else if (codec.Key == "vp9")
+        else
         {
-            pass1Args.AddRange(new[] { "-pass", "1", "-passlogfile", passLogFile, "-f", "webm" });
+            // Legacy fallback
+            if (codec.Key == "h264" || codec.Key == "h265")
+            {
+                pass1Args.AddRange(new[] { "-pass", "1", "-passlogfile", passLogFile, "-f", codec.Key == "h264" ? "mp4" : "mp4" });
+            }
+            else if (codec.Key == "vp9")
+            {
+                pass1Args.AddRange(new[] { "-pass", "1", "-passlogfile", passLogFile, "-f", "webm" });
+            }
+            else if (codec.Key == "av1")
+            {
+                pass1Args.AddRange(new[] { "-pass", "1", "-passlogfile", passLogFile, "-f", "webm" });
+            }
         }
-        else if (codec.Key == "av1")
-        {
-            pass1Args.AddRange(new[] { "-pass", "1", "-passlogfile", passLogFile, "-f", "webm" });
-        }
-        
+
         // Use null output for first pass
         if (OperatingSystem.IsWindows())
         {
@@ -416,16 +449,24 @@ public class VideoCompressionService : IVideoCompressionService
         // Second pass
         _logger.LogInformation("Starting second pass for job {JobId}", jobId);
         var pass2Args = new List<string>(baseArguments);
-        
-        if (codec.Key == "h264" || codec.Key == "h265")
+
+        if (strategy != null)
         {
-            pass2Args.AddRange(new[] { "-pass", "2", "-passlogfile", passLogFile });
+            pass2Args.AddRange(strategy.GetPassExtras(2, passLogFile));
         }
-        else if (codec.Key == "vp9" || codec.Key == "av1")
+        else
         {
-            pass2Args.AddRange(new[] { "-pass", "2", "-passlogfile", passLogFile });
+            // Legacy fallback
+            if (codec.Key == "h264" || codec.Key == "h265")
+            {
+                pass2Args.AddRange(new[] { "-pass", "2", "-passlogfile", passLogFile });
+            }
+            else if (codec.Key == "vp9" || codec.Key == "av1")
+            {
+                pass2Args.AddRange(new[] { "-pass", "2", "-passlogfile", passLogFile });
+            }
         }
-        
+
         pass2Args.Add(job.OutputPath);
 
         await RunPassAsync(jobId, job, pass2Args, totalDuration, 2, 2);

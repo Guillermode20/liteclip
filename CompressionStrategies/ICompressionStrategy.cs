@@ -3,23 +3,25 @@ using System.Collections.Generic;
 namespace smart_compressor.CompressionStrategies;
 
 /// <summary>
-/// Strategy interface for codec-specific compression argument generation.
-/// Implementations produce ffmpeg arguments and metadata for a codec.
+/// Strategy interface for codec-specific compression argument generation and metadata.
 /// </summary>
 public interface ICompressionStrategy
 {
-    /// <summary>Short codec key (eg. "h264").</summary>
+    // Metadata
     string CodecKey { get; }
-
-    /// <summary>File extension to use for output (eg. ".mp4").</summary>
     string OutputExtension { get; }
-
-    /// <summary>Mime type to present for downloads.</summary>
     string MimeType { get; }
+    string VideoCodec { get; }
+    string AudioCodec { get; }
+    int AudioBitrateKbps { get; }
 
+    // Argument builders
+    IEnumerable<string> BuildVideoArgs(double videoBitrateKbps);
+    IEnumerable<string> BuildAudioArgs();
+    IEnumerable<string> BuildContainerArgs();
     /// <summary>
-    /// Build ffmpeg arguments for the provided settings.
-    /// Returns an ordered list of arguments (without the executable path).
+    /// Returns extra ffmpeg arguments required for the given pass number when performing two-pass encoding.
+    /// For example: "-pass 1 -passlogfile <log> -f mp4" or similar. Return empty collection when no extras are required.
     /// </summary>
-    IEnumerable<string> BuildArguments(object settings);
+    IEnumerable<string> GetPassExtras(int passNumber, string passLogFile);
 }

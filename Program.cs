@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.FileProviders;
 using smart_compressor.Models;
 using smart_compressor.Services;
+using smart_compressor.CompressionStrategies;
 using System.Windows.Forms;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -30,6 +31,13 @@ builder.Services.AddSingleton<IFfmpegPathResolver>(sp => sp.GetRequiredService<F
 
 builder.Services.AddSingleton<VideoCompressionService>();
 builder.Services.AddSingleton<IVideoCompressionService>(sp => sp.GetRequiredService<VideoCompressionService>());
+
+// Compression strategies and factory
+builder.Services.AddSingleton<ICompressionStrategy, H264Strategy>();
+builder.Services.AddSingleton<ICompressionStrategy, H265Strategy>();
+builder.Services.AddSingleton<ICompressionStrategy, Vp9Strategy>();
+builder.Services.AddSingleton<ICompressionStrategy, Av1Strategy>();
+builder.Services.AddSingleton<ICompressionStrategyFactory, CompressionStrategyFactory>();
 
 builder.Services.AddHostedService<JobCleanupService>();
 
