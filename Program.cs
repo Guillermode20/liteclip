@@ -56,7 +56,6 @@ app.MapPost("/api/compress", async (
     [FromForm] IFormFile file,
     [FromForm] int? crf,
     [FromForm] int? scalePercent,
-    [FromForm] string? mode,
     [FromForm] string? codec,
     [FromForm] double? targetSizeMb,
     [FromForm] double? sourceDuration,
@@ -84,7 +83,6 @@ app.MapPost("/api/compress", async (
     {
         var compressionRequest = new CompressionRequest
         {
-            Mode = mode ?? "advanced",
             Codec = codec ?? "h264",
             Crf = crf,
             ScalePercent = scalePercent,
@@ -105,7 +103,6 @@ app.MapPost("/api/compress", async (
             OriginalFilename = file.FileName,
             Status = job?.Status ?? "processing",
             Message = "Video compression started. Use the jobId to download the result.",
-            Mode = job?.Mode ?? compressionRequest.Mode,
             Codec = job?.Codec ?? compressionRequest.Codec,
             Crf = job?.Crf,
             ScalePercent = job?.ScalePercent,
@@ -166,7 +163,6 @@ app.MapGet("/api/status/{jobId}", (string jobId, VideoCompressionService compres
             "cancelled" => "Video compression was cancelled.",
             _ => "Unknown status"
         },
-        Mode = job.Mode,
         Codec = job.Codec,
         Crf = job.Crf,
         ScalePercent = job.ScalePercent,
@@ -242,7 +238,6 @@ app.MapGet("/api/download/{jobId}", async (string jobId, VideoCompressionService
             OriginalFilename = job.OriginalFilename,
             Status = "processing",
             Message = "Video compression is still in progress. Please try again later.",
-            Mode = job.Mode,
             Codec = job.Codec,
             Crf = job.Crf,
             ScalePercent = job.ScalePercent,

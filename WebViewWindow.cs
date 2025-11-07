@@ -118,8 +118,14 @@ public class WebViewWindow : Form
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"❌ Error initializing WebView2: {ex.Message}");
-            MessageBox.Show($"Error loading application:\n{ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            Console.WriteLine($"❌ Error initializing WebView2: {ex.GetType().Name}");
+            Console.WriteLine($"   Message: {ex.Message}");
+            Console.WriteLine($"   Stack: {ex.StackTrace}");
+            if (ex.InnerException != null)
+            {
+                Console.WriteLine($"   Inner: {ex.InnerException.Message}");
+            }
+            MessageBox.Show($"Error loading application:\n\n{ex.GetType().Name}\n{ex.Message}\n\nStack:\n{ex.StackTrace}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
 

@@ -45,7 +45,6 @@
         estimatedVideoBitrateKbps: 0,
         scalePercent: 100,
         codec: 'h264',
-        mode: 'advanced',
         encodingTime: 0,
     };
     
@@ -252,7 +251,6 @@
         
         const formData = new FormData();
         formData.append('file', selectedFile);
-        formData.append('mode', 'simple');
         formData.append('codec', codecSelectValue);
         
         const percent = parseFloat(outputSizeSliderValue.toString());
@@ -283,7 +281,6 @@
         formData.append('originalSizeBytes', selectedFile.size.toString());
         
         console.log('Compression request:', {
-            mode: 'simple',
             codec: codecSelectValue,
             targetSizeMb: targetSizeMb.toFixed(2),
             targetPercent: percent,
@@ -518,7 +515,6 @@
             estimatedVideoBitrateKbps: result.videoBitrateKbps || 0,
             scalePercent: result.scalePercent || 100,
             codec: result.codec || 'h264',
-            mode: result.mode || 'advanced',
             encodingTime: Math.round(encodingSeconds),
         };
     }
@@ -553,7 +549,6 @@
             estimatedVideoBitrateKbps: 0,
             scalePercent: 100,
             codec: 'h264',
-            mode: 'advanced',
             encodingTime: 0,
         };
         
@@ -854,10 +849,6 @@
                             <div class="metadata-item">
                                 <span class="metadata-label">codec</span>
                                 <span class="metadata-value">{outputMetadata.codec.toUpperCase()}</span>
-                            </div>
-                            <div class="metadata-item">
-                                <span class="metadata-label">mode</span>
-                                <span class="metadata-value">{outputMetadata.mode}</span>
                             </div>
                             <div class="metadata-item">
                                 <span class="metadata-label">bitrate</span>

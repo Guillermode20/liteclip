@@ -112,15 +112,20 @@ Write-Host "Packages restored successfully" -ForegroundColor Green
 
 # Publish .NET application
 Write-Host ""
-Write-Host "Publishing .NET application..." -ForegroundColor Yellow
+Write-Host "Publishing .NET application with optimized settings..." -ForegroundColor Yellow
 
-# Let csproj control single-file, self-contained, R2R, compression, etc.
+# Optimized publish args for fast startup (no compression, no R2R)
 $publishArgs = @(
     'publish',
+    'smart-compressor.csproj',
     '--configuration', $Configuration,
     '--runtime', 'win-x64',
+    '--self-contained', 'true',
     '--output', $OutputDir,
     '--no-restore',
+    '/p:PublishSingleFile=true',
+    '/p:EnableCompressionInSingleFile=false',
+    '/p:PublishReadyToRun=false',
     '/maxcpucount'
 )
 

@@ -36,32 +36,20 @@ public class VideoCompressionService
 
         public async Task<string> CompressVideoAsync(IFormFile videoFile, CompressionRequest request)
     {
-        _logger.LogInformation("Compression request received - Mode: {Mode}, Codec: {Codec}, TargetSizeMb: {TargetSizeMb}, SourceDuration: {SourceDuration}, Crf: {Crf}", 
-            request.Mode, request.Codec, request.TargetSizeMb, request.SourceDuration, request.Crf);
+        _logger.LogInformation("Compression request received - Codec: {Codec}, TargetSizeMb: {TargetSizeMb}, SourceDuration: {SourceDuration}, Crf: {Crf}", 
+            request.Codec, request.TargetSizeMb, request.SourceDuration, request.Crf);
         
         var normalizedRequest = NormalizeRequest(request);
         var codecConfig = GetCodecConfig(normalizedRequest.Codec);
 
-        // Determine whether to treat this as simple mode. For "auto" we choose simple
-        // only when a target size and source duration are available. Note: when the
-        // client explicitly requests "simple" mode but doesn't provide size/duration
-        // we will fallback to advanced to avoid null-value accesses below.
-        var isSimpleMode = normalizedRequest.Mode == "simple" ||
-            (normalizedRequest.Mode == "auto" &&
-             normalizedRequest.TargetSizeMb.HasValue &&
-             normalizedRequest.SourceDuration.HasValue &&
-             normalizedRequest.SourceDuration.Value > 0);
-
-        // If explicit "simple" mode was requested but required metadata is missing,
-        // fall back to advanced mode to prevent nullable-value errors.
-        if (isSimpleMode && !(normalizedRequest.TargetSizeMb.HasValue && normalizedRequest.SourceDuration.HasValue && normalizedRequest.SourceDuration.Value > 0))
+        // Calculate bitrates for simple mode with target size
+        if (normalizedRequest.TargetSizeMb.HasValue && 
+            normalizedRequest.SourceDuration.HasValue && 
+            normalizedRequest.SourceDuration.Value > 0)
         {
-            _logger.LogWarning("Simple mode requested but missing TargetSizeMb or SourceDuration - falling back to advanced mode");
-            isSimpleMode = false;
-        }
+            var targetSize = normalizedRequest.TargetSizeMb.Value;
+            var duration = normalizedRequest.SourceDuration.Value;
 
-        if (isSimpleMode && normalizedRequest.TargetSizeMb is double targetSize && normalizedRequest.SourceDuration is double duration && duration > 0)
-        {
             // Calculate target bitrate in bits per second, then convert to kbps
             var targetBitsTotal = (targetSize * 1024 * 1024 * 8);
             var durationSec = duration;
@@ -75,7 +63,7 @@ public class VideoCompressionService
             normalizedRequest.TargetBitrateKbps = Math.Round(effectiveTargetKbps, 2);
             normalizedRequest.VideoBitrateKbps = Math.Round(videoKbps, 2);
 
-            _logger.LogInformation("Simple mode bitrate calculation: TargetSize={TargetMb}MB, Duration={Duration}s, TotalKbps={TotalKbps}, ContainerOverhead={ContainerOverheadPct}%, EffectiveKbps={EffectiveKbps}, VideoKbps={VideoKbps}, AudioKbps={AudioKbps}",
+            _logger.LogInformation("Bitrate calculation: TargetSize={TargetMb}MB, Duration={Duration}s, TotalKbps={TotalKbps}, ContainerOverhead={ContainerOverheadPct}%, EffectiveKbps={EffectiveKbps}, VideoKbps={VideoKbps}, AudioKbps={AudioKbps}",
                 targetSize, durationSec, Math.Round(totalKbps, 2), Math.Round((1 - containerOverheadFactor) * 100, 1), effectiveTargetKbps, videoKbps, codecConfig.AudioBitrateKbps);
         }
 
@@ -100,8 +88,8 @@ public class VideoCompressionService
             throw new InvalidOperationException($"Queue is full. Maximum queue size is {_maxQueueSize}. Please try again later.");
         }
 
-        // Enable two-pass by default when using simple mode with target size for better accuracy
-        var enableTwoPass = normalizedRequest.TwoPass || (isSimpleMode && normalizedRequest.TargetSizeMb.HasValue);
+        // Enable two-pass by default when using target size for better accuracy
+        var enableTwoPass = normalizedRequest.TwoPass || normalizedRequest.TargetSizeMb.HasValue;
         
         var job = new JobMetadata
         {
@@ -112,7 +100,6 @@ public class VideoCompressionService
             OutputFilename = outputFilename,
             OutputMimeType = codecConfig.MimeType,
             Status = "queued",
-            Mode = normalizedRequest.Mode,
             Codec = codecConfig.Key,
             Crf = normalizedRequest.Crf,
             ScalePercent = normalizedRequest.ScalePercent,
@@ -209,31 +196,14 @@ public class VideoCompressionService
     {
         try
         {
-            // Decide effective mode. If request.Mode is "auto" choose simple only when
-            // target size and duration are available; otherwise treat as advanced.
-            var mode = request.Mode?.ToLowerInvariant() switch
-            {
-                "simple" => "simple",
-                "auto" => (request.TargetSizeMb.HasValue && request.SourceDuration.HasValue && request.SourceDuration.Value > 0) ? "simple" : "advanced",
-                _ => "advanced"
-            };
+            // Decide whether to use bitrate-based or CRF-based encoding
+            var useTargetBitrate = request.TargetSizeMb.HasValue && 
+                                  request.SourceDuration.HasValue && 
+                                  request.SourceDuration.Value > 0 &&
+                                  request.VideoBitrateKbps.HasValue;
 
-            job.Mode = mode;
-
-			// Apply scaling for both modes; in auto mode, decide scale if not provided
-			int scalePercent;
-			int? autoCrfOverride = null;
-			if (request.Mode?.Equals("auto", StringComparison.OrdinalIgnoreCase) == true && request.ScalePercent is null)
-			{
-				var auto = DecideAutoScaleAndCrf(request, codec);
-				scalePercent = Math.Clamp(auto.ScalePercent, 10, 100);
-				autoCrfOverride = auto.CrfOverride;
-				_logger.LogInformation("Auto mode decision for job {JobId}: scale={Scale}%{CrfNote}", jobId, scalePercent, autoCrfOverride.HasValue ? $", crfAdj={autoCrfOverride.Value}" : string.Empty);
-			}
-			else
-			{
-				scalePercent = Math.Clamp(request.ScalePercent ?? 100, 10, 100);
-			}
+			// Apply scaling
+			int scalePercent = Math.Clamp(request.ScalePercent ?? 100, 10, 100);
             job.ScalePercent = scalePercent;
 
             string? scaleFilter = null;
@@ -243,38 +213,21 @@ public class VideoCompressionService
                 var factorStr = factor.ToString(CultureInfo.InvariantCulture);
                 scaleFilter = $"scale=trunc(iw*{factorStr}/2)*2:trunc(ih*{factorStr}/2)*2:flags=lanczos";
                 
-                _logger.LogInformation("Applying resolution scaling for job {JobId}: {ScalePercent}% (mode: {Mode})", jobId, scalePercent, mode);
+                _logger.LogInformation("Applying resolution scaling for job {JobId}: {ScalePercent}%", jobId, scalePercent);
             }
 
             double? targetBitrateKbps = null;
             double? videoBitrateKbps = null;
 
-            if (mode == "simple")
+            if (useTargetBitrate)
             {
-                var duration = request.SourceDuration;
-                var targetSize = request.TargetSizeMb;
+                targetBitrateKbps = request.TargetBitrateKbps ?? 0;
+                videoBitrateKbps = request.VideoBitrateKbps ?? 0;
 
-                _logger.LogInformation("Simple mode check for job {JobId}: Duration={Duration}, TargetSize={TargetSize}, HasBitrates={HasBitrates}", 
-                    jobId, duration, targetSize, request.VideoBitrateKbps.HasValue);
-
-                if (duration.HasValue && duration.Value > 0 && targetSize.HasValue && targetSize.Value > 0)
-                {
-                    // Use pre-calculated bitrates from request normalization
-                    targetBitrateKbps = request.TargetBitrateKbps ?? 0;
-                    videoBitrateKbps = request.VideoBitrateKbps ?? 0;
-
-                    job.TargetSizeMb = Math.Round(targetSize.Value, 2);
-                    job.TargetBitrateKbps = targetBitrateKbps;
-                    job.VideoBitrateKbps = videoBitrateKbps;
-                    job.Crf = null;
-                }
-                else
-                {
-                    _logger.LogWarning("Insufficient metadata for simple mode on job {JobId} (Duration={Duration}, TargetSize={TargetSize}). Falling back to advanced mode.", 
-                        jobId, duration, targetSize);
-                    mode = "advanced";
-                    job.Mode = "advanced";
-                }
+                job.TargetSizeMb = Math.Round(request.TargetSizeMb!.Value, 2);
+                job.TargetBitrateKbps = targetBitrateKbps;
+                job.VideoBitrateKbps = videoBitrateKbps;
+                job.Crf = null;
             }
 
             var arguments = new List<string> { "-y", "-i", job.InputPath };
@@ -284,9 +237,9 @@ public class VideoCompressionService
                 arguments.AddRange(new[] { "-vf", scaleFilter });
             }
 
-			if (mode == "advanced")
+            if (!useTargetBitrate)
             {
-				var effectiveCrf = autoCrfOverride ?? request.Crf;
+				var effectiveCrf = request.Crf;
 				var advancedResult = BuildAdvancedVideoArgs(codec, effectiveCrf);
                 job.Crf = advancedResult.AppliedCrf;
                 job.TargetSizeMb = null;
@@ -303,8 +256,8 @@ public class VideoCompressionService
             arguments.AddRange(BuildAudioArgs(codec));
             arguments.AddRange(BuildContainerArgs(codec));
             
-            // Two-pass encoding for simple mode when targeting specific size
-            var useTwoPass = job.TwoPass && mode == "simple" && videoBitrateKbps.HasValue;
+            // Two-pass encoding when targeting specific size
+            var useTwoPass = job.TwoPass && useTargetBitrate && videoBitrateKbps.HasValue;
             
             if (useTwoPass)
             {
@@ -428,12 +381,12 @@ public class VideoCompressionService
             {
                 var outputSize = new FileInfo(job.OutputPath).Length;
                 var outputSizeMb = outputSize / (1024.0 * 1024.0);
-                _logger.LogInformation("Video compression completed for job {JobId} using {Codec} ({Mode} mode). Output size: {OutputSizeMb:F2} MB (Target: {TargetSizeMb} MB)", 
-                    jobId, job.Codec, job.Mode, outputSizeMb, job.TargetSizeMb?.ToString("F2") ?? "N/A");
+                _logger.LogInformation("Video compression completed for job {JobId} using {Codec}. Output size: {OutputSizeMb:F2} MB (Target: {TargetSizeMb} MB)", 
+                    jobId, job.Codec, outputSizeMb, job.TargetSizeMb?.ToString("F2") ?? "N/A");
             }
             else
             {
-                _logger.LogInformation("Video compression completed for job {JobId} using {Codec} ({Mode} mode).", jobId, job.Codec, job.Mode);
+                _logger.LogInformation("Video compression completed for job {JobId} using {Codec}.", jobId, job.Codec);
             }
         }
         else
@@ -685,14 +638,6 @@ public class VideoCompressionService
     {
         var normalized = new CompressionRequest
         {
-            // Preserve "auto" explicitly so the pipeline can decide later whether to
-            // use simple or advanced behavior based on available metadata.
-            Mode = request.Mode?.ToLowerInvariant() switch
-            {
-                "simple" => "simple",
-                "auto" => "auto",
-                _ => "advanced"
-            },
             Codec = NormalizeCodec(request.Codec),
             Crf = request.Crf,
             ScalePercent = request.ScalePercent,
@@ -874,79 +819,6 @@ public class VideoCompressionService
         return (int)Math.Round(mapped);
     }
 
-	private static (int ScalePercent, int? CrfOverride) DecideAutoScaleAndCrf(CompressionRequest request, CodecConfig codec)
-	{
-		var srcW = Math.Max(16, request.SourceWidth ?? 1920);
-		var srcH = Math.Max(16, request.SourceHeight ?? 1080);
-		var fps = Math.Clamp((int)Math.Round((double)(request.SourceDuration.HasValue && request.SourceDuration.Value > 0 ? 30 : 30)), 10, 120);
-
-		double? videoKbps = request.VideoBitrateKbps;
-		if (!videoKbps.HasValue && request.TargetBitrateKbps.HasValue)
-		{
-			videoKbps = Math.Max(100, request.TargetBitrateKbps.Value - codec.AudioBitrateKbps);
-		}
-		if (!videoKbps.HasValue && request.OriginalSizeBytes.HasValue && request.SourceDuration.HasValue && request.SourceDuration.Value > 0)
-		{
-			var totalKbps = (request.OriginalSizeBytes.Value * 8.0) / 1000.0 / request.SourceDuration.Value;
-			videoKbps = Math.Max(100, totalKbps - codec.AudioBitrateKbps);
-		}
-		videoKbps ??= 2000; // reasonable fallback
-
-		(double targetBpp, double floorBpp) = codec.Key switch
-		{
-			"h265" => (0.070, 0.050),
-			"vp9" => (0.060, 0.045),
-			"av1" => (0.055, 0.040),
-			_ => (0.100, 0.070) // h264
-		};
-
-		var candidates = new List<int>();
-		var standardHeights = new[] { 2160, 1440, 1080, 900, 720, 540, 480, 360 };
-		candidates.Add(srcH);
-		foreach (var h in standardHeights)
-		{
-			if (h <= srcH && !candidates.Contains(h))
-			{
-				candidates.Add(h);
-			}
-		}
-		candidates = candidates.Distinct().OrderByDescending(h => h).ToList();
-
-		int chosenH = candidates.Last(); // default to smallest
-		double chosenBpp = 0;
-		foreach (var h in candidates)
-		{
-			var w = (int)Math.Round(srcW * (h / (double)srcH));
-			var pixelsPerSecond = (double)w * h * fps;
-			if (pixelsPerSecond <= 0)
-			{
-				continue;
-			}
-			var bpp = (videoKbps.Value * 1000.0) / pixelsPerSecond;
-			if (bpp >= floorBpp)
-			{
-				chosenH = h;
-				chosenBpp = bpp;
-				break; // highest height that meets floor
-			}
-		}
-
-		var scalePercent = (int)Math.Clamp(Math.Round((double)chosenH * 100.0 / srcH), 10, 100);
-
-		int? crfOverride = null;
-		// If advanced mode ends up being used, bias CRF toward quality when we downscale hard or bpp is tight
-		if (scalePercent <= 50)
-		{
-			crfOverride = (request.Crf ?? 28) - 2;
-		}
-		else if (chosenBpp < targetBpp)
-		{
-			crfOverride = (request.Crf ?? 28) - 1;
-		}
-
-		return (scalePercent, crfOverride);
-	}
-
     private static double? ParseFfmpegProgress(string line, double? totalDuration)
     {
         if (string.IsNullOrEmpty(line) || !totalDuration.HasValue || totalDuration.Value <= 0)
@@ -1010,7 +882,6 @@ public class JobMetadata
     public string OutputFilename { get; set; } = string.Empty;
     public string OutputMimeType { get; set; } = "video/mp4";
     public string Status { get; set; } = string.Empty;
-    public string Mode { get; set; } = "advanced";
     public string Codec { get; set; } = "h264";
     public int? Crf { get; set; }
     public int? ScalePercent { get; set; }

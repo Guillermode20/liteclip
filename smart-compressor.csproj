@@ -13,7 +13,6 @@
     
     <!-- Runtime target -->
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
-    <PublishTrimmed>false</PublishTrimmed>
     <TieredCompilation>true</TieredCompilation>
     <TieredCompilationQuickJit>true</TieredCompilationQuickJit>
     
@@ -61,28 +60,29 @@
     <GenerateEmbeddedFilesManifest>false</GenerateEmbeddedFilesManifest>
   </PropertyGroup>
 
-  <!-- Release tuning: keep single-file, avoid compression and content extraction -->
+  <!-- Release tuning: optimized for fast startup -->
   <PropertyGroup Condition="'$(Configuration)'=='Release'">
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>
     <EnableCompressionInSingleFile>false</EnableCompressionInSingleFile>
     <IncludeAllContentForSelfExtract>false</IncludeAllContentForSelfExtract>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
-    <PublishReadyToRun>true</PublishReadyToRun>
+    <PublishReadyToRun>false</PublishReadyToRun>
     <GenerateEmbeddedFilesManifest>true</GenerateEmbeddedFilesManifest>
-    
-    <!-- Enable trimming for smaller size -->
-    <PublishTrimmed>true</PublishTrimmed>
-    <TrimMode>partial</TrimMode>
-    <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
-    <SuppressTrimAnalysisWarnings>false</SuppressTrimAnalysisWarnings>
   </PropertyGroup>
   
   <!-- Preserve assemblies that use reflection (prevent trim issues) -->
   <ItemGroup Condition="'$(Configuration)'=='Release'">
-    <TrimmerRootAssembly Include="Microsoft.AspNetCore.Components" />
+    <TrimmerRootAssembly Include="smart-compressor" />
+    <TrimmerRootAssembly Include="Microsoft.AspNetCore.Server.Kestrel" />
+    <TrimmerRootAssembly Include="Microsoft.AspNetCore.Routing" />
+    <TrimmerRootAssembly Include="Microsoft.AspNetCore.StaticFiles" />
     <TrimmerRootAssembly Include="Microsoft.Extensions.FileProviders.Embedded" />
-    <TrimmerRootAssembly Include="Microsoft.Web.WebView2" />
+    <TrimmerRootAssembly Include="System.Text.Json" />
+    <TrimmerRootAssembly Include="System.Windows.Forms" />
+    <TrimmerRootAssembly Include="System.Windows.Forms.Primitives" />
+    <TrimmerRootAssembly Include="Microsoft.Web.WebView2.Core" />
+    <TrimmerRootAssembly Include="Microsoft.Web.WebView2.WinForms" />
   </ItemGroup>
 
   <!-- Exclude files from publish output (they're embedded) -->
