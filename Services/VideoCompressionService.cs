@@ -43,6 +43,8 @@ public class VideoCompressionService
         var codecConfig = GetCodecConfig(normalizedRequest.Codec);
 
         // Calculate bitrates for simple mode with target size
+        double? computedTargetKbps = null;
+        double? computedVideoKbps = null;
         if (normalizedRequest.TargetSizeMb.HasValue && 
             normalizedRequest.SourceDuration.HasValue && 
             normalizedRequest.SourceDuration.Value > 0)
@@ -60,11 +62,12 @@ public class VideoCompressionService
             var effectiveTargetKbps = totalKbps * containerOverheadFactor;
             var videoKbps = Math.Max(100, effectiveTargetKbps - codecConfig.AudioBitrateKbps);
 
-            normalizedRequest.TargetBitrateKbps = Math.Round(effectiveTargetKbps, 2);
-            normalizedRequest.VideoBitrateKbps = Math.Round(videoKbps, 2);
-
             _logger.LogInformation("Bitrate calculation: TargetSize={TargetMb}MB, Duration={Duration}s, TotalKbps={TotalKbps}, ContainerOverhead={ContainerOverheadPct}%, EffectiveKbps={EffectiveKbps}, VideoKbps={VideoKbps}, AudioKbps={AudioKbps}",
                 targetSize, durationSec, Math.Round(totalKbps, 2), Math.Round((1 - containerOverheadFactor) * 100, 1), effectiveTargetKbps, videoKbps, codecConfig.AudioBitrateKbps);
+
+            // Store for job creation below
+            computedTargetKbps = Math.Round(effectiveTargetKbps, 2);
+            computedVideoKbps = Math.Round(videoKbps, 2);
         }
 
         var jobId = Guid.NewGuid().ToString();
@@ -89,7 +92,7 @@ public class VideoCompressionService
         }
 
         // Enable two-pass by default when using target size for better accuracy
-        var enableTwoPass = normalizedRequest.TwoPass || normalizedRequest.TargetSizeMb.HasValue;
+        var enableTwoPass = normalizedRequest.TargetSizeMb.HasValue;
         
         var job = new JobMetadata
         {
@@ -103,12 +106,9 @@ public class VideoCompressionService
             Codec = codecConfig.Key,
             ScalePercent = normalizedRequest.ScalePercent,
             TargetSizeMb = normalizedRequest.TargetSizeMb,
-            TargetBitrateKbps = normalizedRequest.TargetBitrateKbps,
-            VideoBitrateKbps = normalizedRequest.VideoBitrateKbps,
+            TargetBitrateKbps = computedTargetKbps,
+            VideoBitrateKbps = computedVideoKbps,
             SourceDuration = normalizedRequest.SourceDuration,
-            SourceWidth = normalizedRequest.SourceWidth,
-            SourceHeight = normalizedRequest.SourceHeight,
-            OriginalSizeBytes = normalizedRequest.OriginalSizeBytes,
             TwoPass = enableTwoPass,
             CreatedAt = DateTime.UtcNow
         };
@@ -196,10 +196,10 @@ public class VideoCompressionService
         try
         {
             // Always use bitrate-based encoding (required by frontend)
-            if (!request.TargetSizeMb.HasValue || 
-                !request.SourceDuration.HasValue || 
-                request.SourceDuration.Value <= 0 ||
-                !request.VideoBitrateKbps.HasValue)
+            if (!job.TargetSizeMb.HasValue || 
+                !job.SourceDuration.HasValue || 
+                job.SourceDuration.Value <= 0 ||
+                !job.VideoBitrateKbps.HasValue)
             {
                 throw new InvalidOperationException("Target size, duration, and video bitrate are required for compression");
             }
@@ -218,10 +218,10 @@ public class VideoCompressionService
                 _logger.LogInformation("Applying resolution scaling for job {JobId}: {ScalePercent}%", jobId, scalePercent);
             }
 
-            var targetBitrateKbps = request.TargetBitrateKbps ?? 0;
-            var videoBitrateKbps = request.VideoBitrateKbps.Value;
+            var targetBitrateKbps = job.TargetBitrateKbps ?? 0;
+            var videoBitrateKbps = job.VideoBitrateKbps.Value;
 
-            job.TargetSizeMb = Math.Round(request.TargetSizeMb.Value, 2);
+            job.TargetSizeMb = Math.Round(job.TargetSizeMb.Value, 2);
             job.TargetBitrateKbps = targetBitrateKbps;
             job.VideoBitrateKbps = videoBitrateKbps;
 
@@ -243,12 +243,12 @@ public class VideoCompressionService
             if (useTwoPass)
             {
                 _logger.LogInformation("Using two-pass encoding for job {JobId}", jobId);
-                await RunTwoPassEncodingAsync(jobId, job, arguments, codec, request.SourceDuration);
+                await RunTwoPassEncodingAsync(jobId, job, arguments, codec, job.SourceDuration);
             }
             else
             {
                 arguments.Add(job.OutputPath);
-                await RunSinglePassEncodingAsync(jobId, job, arguments, request.SourceDuration);
+                await RunSinglePassEncodingAsync(jobId, job, arguments, job.SourceDuration);
             }
         }
         catch (Exception ex)
@@ -622,10 +622,7 @@ public class VideoCompressionService
             Codec = NormalizeCodec(request.Codec),
             ScalePercent = request.ScalePercent,
             TargetSizeMb = request.TargetSizeMb,
-            SourceDuration = request.SourceDuration,
-            SourceWidth = request.SourceWidth,
-            SourceHeight = request.SourceHeight,
-            OriginalSizeBytes = request.OriginalSizeBytes
+            SourceDuration = request.SourceDuration
         };
 
         if (normalized.ScalePercent.HasValue)
@@ -793,9 +790,6 @@ public class JobMetadata
     public double? TargetBitrateKbps { get; set; }
     public double? VideoBitrateKbps { get; set; }
     public double? SourceDuration { get; set; }
-    public int? SourceWidth { get; set; }
-    public int? SourceHeight { get; set; }
-    public long? OriginalSizeBytes { get; set; }
     public double Progress { get; set; } = 0;
     public string? ErrorMessage { get; set; }
     public bool TwoPass { get; set; } = false;

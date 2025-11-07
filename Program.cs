@@ -58,10 +58,7 @@ app.MapPost("/api/compress", async (
     [FromForm] string? codec,
     [FromForm] double? targetSizeMb,
     [FromForm] double? sourceDuration,
-    [FromForm] int? sourceWidth,
-    [FromForm] int? sourceHeight,
-    [FromForm] long? originalSizeBytes,
-    [FromForm] bool? twoPass,
+    
     VideoCompressionService compressionService,
     IConfiguration configuration) =>
 {
@@ -86,10 +83,6 @@ app.MapPost("/api/compress", async (
             ScalePercent = scalePercent,
             TargetSizeMb = targetSizeMb,
             SourceDuration = sourceDuration,
-            SourceWidth = sourceWidth,
-            SourceHeight = sourceHeight,
-            OriginalSizeBytes = originalSizeBytes,
-            TwoPass = twoPass ?? false
         };
 
         var jobId = await compressionService.CompressVideoAsync(file, compressionRequest);

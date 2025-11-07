@@ -128,36 +128,6 @@ public class FfmpegPathResolver
         }
     }
 
-    public bool VerifyFfmpegAvailable()
-    {
-        try
-        {
-            var ffmpegPath = GetFfmpegPath();
-            var startInfo = new System.Diagnostics.ProcessStartInfo
-            {
-                FileName = ffmpegPath,
-                Arguments = "-version",
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
-
-            using var process = System.Diagnostics.Process.Start(startInfo);
-            if (process == null)
-            {
-                return false;
-            }
-
-            process.WaitForExit(5000); // 5 second timeout
-            return process.ExitCode == 0;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to verify FFmpeg availability");
-            return false;
-        }
-    }
 
     private static string GetFfmpegExecutableName()
     {
@@ -193,9 +163,5 @@ public class FfmpegPathResolver
         return null;
     }
 
-    public void ClearCache()
-    {
-        _cachedFfmpegPath = null;
-    }
 }
 
