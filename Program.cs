@@ -301,6 +301,7 @@ app.MapGet("/api/download/{jobId}", async (string jobId, VideoCompressionService
 .WithName("DownloadCompressedVideo");
 
 // Handle application startup - open window once server is ready
+#pragma warning disable CA1416 // Platform-specific API usage guarded at runtime
 app.Lifetime.ApplicationStarted.Register(() =>
 {
     var urls = app.Urls;
@@ -335,10 +336,14 @@ app.Lifetime.ApplicationStarted.Register(() =>
         Console.WriteLine($"Open this URL in your browser.");
     }
 });
+#pragma warning restore CA1416
 
 // Run the application (blocks until stopped)
 app.Run();
 
+// Suppress CA1416 for the Windows-only WebView creation; runtime guard checks are
+// in place before this method is invoked.
+#pragma warning disable CA1416
 [System.Runtime.Versioning.SupportedOSPlatform("windows6.1")]
 static void OpenWindowsWebView(string url, WebApplication app)
 {
@@ -379,6 +384,7 @@ static void OpenWindowsWebView(string url, WebApplication app)
         thread.IsBackground = false; // Keep app alive while window is open
         thread.Start(); // Non-blocking start for faster startup
     }
+#pragma warning restore CA1416
     catch (Exception ex)
     {
         Console.WriteLine($"❌ Error creating window: {ex.Message}");

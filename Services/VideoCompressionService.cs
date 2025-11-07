@@ -43,33 +43,40 @@ public class VideoCompressionService
         var codecConfig = GetCodecConfig(normalizedRequest.Codec);
 
         // Determine whether to treat this as simple mode. For "auto" we choose simple
-        // only when a target size and source duration are available.
+        // only when a target size and source duration are available. Note: when the
+        // client explicitly requests "simple" mode but doesn't provide size/duration
+        // we will fallback to advanced to avoid null-value accesses below.
         var isSimpleMode = normalizedRequest.Mode == "simple" ||
             (normalizedRequest.Mode == "auto" &&
              normalizedRequest.TargetSizeMb.HasValue &&
              normalizedRequest.SourceDuration.HasValue &&
              normalizedRequest.SourceDuration.Value > 0);
 
-        if (isSimpleMode)
+        // If explicit "simple" mode was requested but required metadata is missing,
+        // fall back to advanced mode to prevent nullable-value errors.
+        if (isSimpleMode && !(normalizedRequest.TargetSizeMb.HasValue && normalizedRequest.SourceDuration.HasValue && normalizedRequest.SourceDuration.Value > 0))
+        {
+            _logger.LogWarning("Simple mode requested but missing TargetSizeMb or SourceDuration - falling back to advanced mode");
+            isSimpleMode = false;
+        }
+
+        if (isSimpleMode && normalizedRequest.TargetSizeMb is double targetSize && normalizedRequest.SourceDuration is double duration && duration > 0)
         {
             // Calculate target bitrate in bits per second, then convert to kbps
-            var targetBitsTotal = (normalizedRequest.TargetSizeMb.Value * 1024 * 1024 * 8);
-            var durationSec = normalizedRequest.SourceDuration.Value;
+            var targetBitsTotal = (targetSize * 1024 * 1024 * 8);
+            var durationSec = duration;
             var totalKbps = targetBitsTotal / durationSec / 1000;
-            
+
             // Reserve audio bitrate, use remaining for video
-            // Container overhead varies by format:
-            // MP4: ~2-3%, WebM: ~1-2%
-            // Using 97% to be slightly conservative while maximizing accuracy
             var containerOverheadFactor = codecConfig.FileExtension.Equals(".webm", StringComparison.OrdinalIgnoreCase) ? 0.98 : 0.97;
             var effectiveTargetKbps = totalKbps * containerOverheadFactor;
             var videoKbps = Math.Max(100, effectiveTargetKbps - codecConfig.AudioBitrateKbps);
-            
+
             normalizedRequest.TargetBitrateKbps = Math.Round(effectiveTargetKbps, 2);
             normalizedRequest.VideoBitrateKbps = Math.Round(videoKbps, 2);
-            
+
             _logger.LogInformation("Simple mode bitrate calculation: TargetSize={TargetMb}MB, Duration={Duration}s, TotalKbps={TotalKbps}, ContainerOverhead={ContainerOverheadPct}%, EffectiveKbps={EffectiveKbps}, VideoKbps={VideoKbps}, AudioKbps={AudioKbps}",
-                normalizedRequest.TargetSizeMb.Value, durationSec, Math.Round(totalKbps, 2), Math.Round((1 - containerOverheadFactor) * 100, 1), effectiveTargetKbps, videoKbps, codecConfig.AudioBitrateKbps);
+                targetSize, durationSec, Math.Round(totalKbps, 2), Math.Round((1 - containerOverheadFactor) * 100, 1), effectiveTargetKbps, videoKbps, codecConfig.AudioBitrateKbps);
         }
 
         var jobId = Guid.NewGuid().ToString();
@@ -289,7 +296,7 @@ public class VideoCompressionService
             }
             else
             {
-                var simpleArgs = BuildSimpleVideoArgs(codec, videoBitrateKbps!.Value);
+                var simpleArgs = BuildSimpleVideoArgs(codec, videoBitrateKbps ?? 0);
                 arguments.AddRange(simpleArgs);
             }
 
