@@ -58,8 +58,28 @@ try {
 Write-Host ""
 Write-Host "Cleaning previous builds..." -ForegroundColor Yellow
 if (Test-Path $OutputDir) {
-    Remove-Item -Recurse -Force $OutputDir
-    Write-Host "Removed existing output directory" -ForegroundColor Green
+    try {
+        Remove-Item -Recurse -Force $OutputDir -ErrorAction Stop
+        Write-Host "Removed existing output directory" -ForegroundColor Green
+    } catch {
+        # If removal fails (file locked), try alternative approach
+        Write-Host "Directory is in use, attempting graceful cleanup..." -ForegroundColor Yellow
+        
+        # Close any handles to the directory (PowerShell-specific)
+        Get-Item $OutputDir -ErrorAction SilentlyContinue | ForEach-Object {
+            # Wait a moment for any locks to release
+            Start-Sleep -Milliseconds 500
+        }
+        
+        # Try again with a fresh attempt
+        try {
+            Remove-Item -Recurse -Force $OutputDir -ErrorAction Stop
+            Write-Host "Directory cleaned successfully" -ForegroundColor Green
+        } catch {
+            Write-Host "WARNING: Could not fully clean output directory, proceeding anyway..." -ForegroundColor Yellow
+            Write-Host "If build fails, manually delete: $OutputDir" -ForegroundColor Yellow
+        }
+    }
 }
 
 # Build frontend

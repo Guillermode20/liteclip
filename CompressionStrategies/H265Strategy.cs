@@ -101,9 +101,10 @@ public class H265Strategy : ICompressionStrategy
     public IEnumerable<string> BuildVideoArgs(double videoBitrateKbps)
     {
         var targetBitrate = Math.Max(100, Math.Round(videoBitrateKbps));
-        var maxRate = Math.Round(targetBitrate * 1.03);
-        var minRate = Math.Round(targetBitrate * 0.97);
-        var buffer = Math.Round(targetBitrate * 1.0);
+        // Tighter bitrate control to prevent file size overshoot
+        var maxRate = Math.Round(targetBitrate * 1.01);
+        var minRate = Math.Round(targetBitrate * 0.99);
+        var buffer = Math.Round(targetBitrate * 0.8);
         
         var encoder = GetBestEncoder();
         var isHardware = encoder != "libx265";

@@ -22,18 +22,18 @@ public class Av1Strategy : ICompressionStrategy
         var args = new List<string>
         {
             "-c:v", VideoCodec,
-            // cpu-used 0 for highest quality (slowest)
-            "-cpu-used", "0",
-            "-row-mt", "1",
-            // Enable tiles for better multi-threading
-            "-tile-columns", "2",
-            "-tile-rows", "1",
-            // Enable cdef and restoration for better quality
-            "-enable-cdef", "1",
-            "-enable-restoration", "1",
-            "-lag-in-frames", "35",
+            // cpu-used 5 for faster speed (still good quality)
+            "-cpu-used", "5",
+            // Disable lookahead for much faster encoding on short clips
+            "-lag-in-frames", "0",
+            // Use 1 tile column for faster processing
+            "-tile-columns", "1",
+            "-tile-rows", "0",
+            // Disable restoration for speed
+            "-enable-cdef", "0",
+            "-enable-restoration", "0",
             // GOP settings
-            "-g", "240",
+            "-g", "120",
             "-sc_threshold", "0",
             "-b:v", $"{targetBitrate}k",
             "-maxrate", $"{maxRate}k",

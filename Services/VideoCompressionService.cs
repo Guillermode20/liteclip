@@ -61,7 +61,33 @@ public class VideoCompressionService : IVideoCompressionService
             var totalKbps = targetBitsTotal / durationSec / 1000;
 
             // Reserve audio bitrate, use remaining for video
-            var containerOverheadFactor = codecConfig.FileExtension.Equals(".webm", StringComparison.OrdinalIgnoreCase) ? 0.98 : 0.97;
+            // Container overhead varies by format and file size:
+            // - WebM is more efficient (2% overhead)
+            // - MP4 has significant overhead (moov atom, faststart, etc.) especially for small files
+            //   Empirical testing shows we need aggressive compensation to hit target sizes
+            double containerOverheadFactor;
+            if (codecConfig.FileExtension.Equals(".webm", StringComparison.OrdinalIgnoreCase))
+            {
+                containerOverheadFactor = 0.98;
+            }
+            else
+            {
+                // MP4: very aggressive overhead compensation based on target size
+                // The maxrate variance (3%) combined with container overhead requires
+                // substantial bitrate reduction to hit target file sizes accurately
+                // Small files (< 3MB): 15% overhead (0.85)
+                // Small-medium (3-8MB): 12% overhead (0.88)
+                // Medium (8-20MB): 8% overhead (0.92)
+                // Large (> 20MB): 5% overhead (0.95)
+                if (targetSize < 3.0)
+                    containerOverheadFactor = 0.85;
+                else if (targetSize < 8.0)
+                    containerOverheadFactor = 0.88;
+                else if (targetSize < 20.0)
+                    containerOverheadFactor = 0.92;
+                else
+                    containerOverheadFactor = 0.95;
+            }
             var effectiveTargetKbps = totalKbps * containerOverheadFactor;
             var videoKbps = Math.Max(100, effectiveTargetKbps - codecConfig.AudioBitrateKbps);
 
@@ -78,7 +104,7 @@ public class VideoCompressionService : IVideoCompressionService
         var safeStem = Path.GetFileNameWithoutExtension(string.IsNullOrWhiteSpace(originalFilename) ? jobId : originalFilename);
         var inputPath = Path.Combine(_tempUploadPath, $"{jobId}_{originalFilename}");
         var targetSizePrefix = normalizedRequest.TargetSizeMb.HasValue
-            ? $"{normalizedRequest.TargetSizeMb.Value:F0}MB"
+            ? $"{Math.Round(normalizedRequest.TargetSizeMb.Value, MidpointRounding.AwayFromZero)}MB"
             : "auto";
         var outputFilename = $"{targetSizePrefix}_compressed_{safeStem}{codecConfig.FileExtension}";
         var outputPath = Path.Combine(_tempOutputPath, outputFilename);
@@ -165,7 +191,39 @@ public class VideoCompressionService : IVideoCompressionService
         }
 
         job.Status = "cancelled";
-        job.Process?.Kill();
+        
+        // Properly terminate the FFmpeg process
+        if (job.Process != null)
+        {
+            try
+            {
+                // Try graceful termination first
+                if (!job.Process.HasExited)
+                {
+                    job.Process.Kill(entireProcessTree: true);
+                    // Wait for process to actually terminate with timeout
+                    if (!job.Process.WaitForExit(5000))
+                    {
+                        _logger.LogWarning("Process for job {JobId} did not terminate after 5s", jobId);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Error while terminating process for job {JobId}", jobId);
+            }
+            finally
+            {
+                try
+                {
+                    job.Process.Dispose();
+                }
+                catch
+                {
+                    // Ignore disposal errors
+                }
+            }
+        }
         
         _logger.LogInformation("Job {JobId} cancelled", jobId);
         return true;
@@ -212,13 +270,23 @@ public class VideoCompressionService : IVideoCompressionService
             job.ScalePercent = scalePercent;
 
             string? scaleFilter = null;
+            string? unsharpFilter = null;
             if (scalePercent < 100)
             {
                 var factor = scalePercent / 100.0;
                 var factorStr = factor.ToString(CultureInfo.InvariantCulture);
                 scaleFilter = $"scale=trunc(iw*{factorStr}/2)*2:trunc(ih*{factorStr}/2)*2:flags=lanczos";
                 
-                _logger.LogInformation("Applying resolution scaling for job {JobId}: {ScalePercent}%", jobId, scalePercent);
+                // Calculate adaptive unsharp strength based on downscaling level
+                // Base: unsharp=3:3:0.5 for 50% downscale
+                // Adjust strength proportionally: less aggressive for mild downscaling, more for heavy downscaling
+                var downscaleFactor = 1.0 - factor; // 0.0 (no downscale) to 0.9 (10% of original)
+                var unsharpStrength = Math.Round(0.5 + (downscaleFactor * 1.5), 2); // Range: 0.5 to 1.85
+                var unsharpStrengthStr = unsharpStrength.ToString(CultureInfo.InvariantCulture);
+                unsharpFilter = $"unsharp=3:3:{unsharpStrengthStr}";
+                
+                _logger.LogInformation("Applying Lanczos scaling for job {JobId}: {ScalePercent}% with unsharp strength {UnsharpStrength}", 
+                    jobId, scalePercent, unsharpStrength);
             }
 
             var targetBitrateKbps = job.TargetBitrateKbps ?? 0;
@@ -237,6 +305,12 @@ public class VideoCompressionService : IVideoCompressionService
             if (!string.IsNullOrWhiteSpace(scaleFilter))
             {
                 filters.Add(scaleFilter);
+            }
+            
+            // Apply unsharp filter after scaling (only if we downscaled)
+            if (!string.IsNullOrWhiteSpace(unsharpFilter))
+            {
+                filters.Add(unsharpFilter);
             }
             
             // Only force FPS if target is specified (don't waste time on unnecessary reencoding)
@@ -322,6 +396,35 @@ public class VideoCompressionService : IVideoCompressionService
         finally
         {
             job.CompletedAt = DateTime.UtcNow;
+            
+            // Ensure process is properly disposed
+            if (job.Process != null)
+            {
+                try
+                {
+                    if (!job.Process.HasExited)
+                    {
+                        job.Process.Kill(entireProcessTree: true);
+                        job.Process.WaitForExit(3000);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Error disposing process for job {JobId}", jobId);
+                }
+                finally
+                {
+                    try
+                    {
+                        job.Process.Dispose();
+                    }
+                    catch
+                    {
+                        // Ignore disposal errors
+                    }
+                }
+            }
+            
             job.Process = null;
         }
     }

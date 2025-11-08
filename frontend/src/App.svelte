@@ -31,7 +31,7 @@
     let outputSizeValue = '--';
     let outputSizeDetails = '';
     let outputSizeSliderValue = 100;
-    let codecSelectValue = 'h264';
+    let codecSelectValue = 'h265';
     let showCancelButton = false;
     let etaText = '';
     
@@ -648,7 +648,7 @@
         outputSizeSliderValue = 100;
         outputSizeValue = '--';
         outputSizeDetails = '';
-        codecSelectValue = 'h264';
+        codecSelectValue = 'h265';
         updateCodecHelper();
         sourceVideoWidth = null;
         sourceVideoHeight = null;
@@ -754,8 +754,6 @@
                             <select id="codecSelect" bind:value={codecSelectValue} on:change={() => { updateCodecHelper(); updateOutputSizeDisplay(); }}>
                                 <option value="h264">h264 (mp4)</option>
                                 <option value="h265">h265 / hevc (mp4)</option>
-                                <option value="vp9">vp9 (webm)</option>
-                                <option value="av1">av1 (webm)</option>
                             </select>
                             {#if codecHelperText}
                                 <div class="helper-text">// {codecHelperText}</div>
