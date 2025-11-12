@@ -5,117 +5,41 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>smart_compressor</RootNamespace>
-    <OutputType>WinExe</OutputType>
+    <OutputType>Exe</OutputType>
     
     <!-- Build optimization -->
     <UseAppHost>true</UseAppHost>
     <ProduceReferenceAssembly>false</ProduceReferenceAssembly>
-    
-    <!-- Runtime target -->
-    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
-    <TieredCompilation>true</TieredCompilation>
-    <TieredCompilationQuickJit>true</TieredCompilationQuickJit>
-    
-    <!-- Embedded files manifest only needed in Release when embedding -->
-    <GenerateEmbeddedFilesManifest>false</GenerateEmbeddedFilesManifest>
     
     <!-- Trimming options -->
     <IlcOptimizationPreference>Size</IlcOptimizationPreference>
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- OpenApi removed for faster startup -->
-    <PackageReference Include="Microsoft.Extensions.FileProviders.Embedded" Version="9.0.0" />
-    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2792.45" />
-  </ItemGroup>
-  
-  <ItemGroup>
-    <FrameworkReference Include="Microsoft.WindowsDesktop.App.WindowsForms" />
+    <!-- Minimal dependencies for API-only backend -->
   </ItemGroup>
 
-  <!-- Release: embed static content into the assembly -->
-  <ItemGroup Condition="'$(Configuration)'=='Release'">
-    <EmbeddedResource Include="wwwroot\**\*" />
-  </ItemGroup>
-
-  <!-- Build frontend only when source files change -->
-  <Target Name="BuildFrontend" BeforeTargets="BeforeBuild" Inputs="frontend/src/**/*;frontend/index.html;frontend/package.json" Outputs="wwwroot/index.html">
-    <Exec Command="cd frontend &amp;&amp; npm install" Condition="!Exists('frontend/node_modules')" />
-    <Message Importance="high" Text="Building frontend..." />
-    <Exec Command="cd frontend &amp;&amp; npm run build" />
-  </Target>
-  
-  <!-- Skip frontend build if wwwroot is up to date -->
-  <Target Name="CheckFrontendUpToDate" BeforeTargets="BuildFrontend">
-    <Message Importance="high" Text="Checking if frontend build is needed..." Condition="Exists('wwwroot/index.html')" />
-  </Target>
-
-  <!-- Speed-focused Debug settings -->
-  <PropertyGroup Condition="'$(Configuration)'=='Debug'">
-    <PublishSingleFile>false</PublishSingleFile>
-    <SelfContained>false</SelfContained>
-    <PublishReadyToRun>false</PublishReadyToRun>
-    <EnableCompressionInSingleFile>false</EnableCompressionInSingleFile>
-    <IncludeNativeLibrariesForSelfExtract>false</IncludeNativeLibrariesForSelfExtract>
-    <GenerateEmbeddedFilesManifest>false</GenerateEmbeddedFilesManifest>
-  </PropertyGroup>
-
-  <!-- Release tuning: optimized for fast startup -->
+  <!-- Release settings: Single-file self-contained executable for Tauri sidecar -->
   <PropertyGroup Condition="'$(Configuration)'=='Release'">
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>
     <EnableCompressionInSingleFile>false</EnableCompressionInSingleFile>
-    <IncludeAllContentForSelfExtract>false</IncludeAllContentForSelfExtract>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <PublishReadyToRun>false</PublishReadyToRun>
-    <GenerateEmbeddedFilesManifest>true</GenerateEmbeddedFilesManifest>
   </PropertyGroup>
   
-  <!-- Preserve assemblies that use reflection (prevent trim issues) -->
+  <!-- Debug settings: Not self-contained for faster iteration -->
+  <PropertyGroup Condition="'$(Configuration)'=='Debug'">
+    <PublishSingleFile>false</PublishSingleFile>
+    <SelfContained>false</SelfContained>
+  </PropertyGroup>
+  
+  <!-- Preserve assemblies that use reflection -->
   <ItemGroup Condition="'$(Configuration)'=='Release'">
     <TrimmerRootAssembly Include="smart-compressor" />
     <TrimmerRootAssembly Include="Microsoft.AspNetCore.Server.Kestrel" />
     <TrimmerRootAssembly Include="Microsoft.AspNetCore.Routing" />
-    <TrimmerRootAssembly Include="Microsoft.AspNetCore.StaticFiles" />
-    <TrimmerRootAssembly Include="Microsoft.Extensions.FileProviders.Embedded" />
     <TrimmerRootAssembly Include="System.Text.Json" />
-    <TrimmerRootAssembly Include="System.Windows.Forms" />
-    <TrimmerRootAssembly Include="System.Windows.Forms.Primitives" />
-    <TrimmerRootAssembly Include="Microsoft.Web.WebView2.Core" />
-    <TrimmerRootAssembly Include="Microsoft.Web.WebView2.WinForms" />
   </ItemGroup>
-
-  <!-- Exclude files from publish output (they're embedded) -->
-  <ItemGroup Condition="'$(Configuration)'=='Release'">
-    <!-- Exclude appsettings files (embed or exclude as needed) -->
-    <Content Update="appsettings.json" CopyToPublishDirectory="Never" />
-    <Content Update="appsettings.Development.json" CopyToPublishDirectory="Never" />
-    
-    <!-- Exclude web.config -->
-    <Content Update="web.config" CopyToPublishDirectory="Never" />
-  </ItemGroup>
-  
-  <!-- Custom target to clean up unnecessary published files in Release -->
-  <Target Name="CleanupPublishedFiles" AfterTargets="Publish" Condition="'$(Configuration)'=='Release'">
-    <!-- Remove wwwroot folder (it's embedded) -->
-    <RemoveDir Directories="$(PublishDir)wwwroot" />
-    
-    <!-- Remove frontend folder (not needed) -->
-    <RemoveDir Directories="$(PublishDir)frontend" />
-    
-    <!-- Remove XML documentation files -->
-    <ItemGroup>
-      <FilesToDelete Include="$(PublishDir)*.xml" />
-      <FilesToDelete Include="$(PublishDir)*.pdb" />
-      <FilesToDelete Include="$(PublishDir)web.config" />
-    </ItemGroup>
-    <Delete Files="@(FilesToDelete)" />
-    
-    <!-- Remove static web assets metadata files -->
-    <ItemGroup>
-      <StaticAssetFiles Include="$(PublishDir)*.staticwebassets.*" />
-    </ItemGroup>
-    <Delete Files="@(StaticAssetFiles)" />
-  </Target>
 
 </Project>

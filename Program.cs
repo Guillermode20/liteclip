@@ -1,13 +1,14 @@
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
-using Microsoft.Extensions.FileProviders;
 using smart_compressor.Models;
 using smart_compressor.Services;
 using smart_compressor.CompressionStrategies;
-using System.Windows.Forms;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// Configure to listen on fixed port for Tauri sidecar
+builder.WebHost.UseUrls("http://localhost:5333");
 
 // Configure Kestrel to accept large files (up to 2 GB)
 builder.Services.Configure<KestrelServerOptions>(options =>
@@ -44,25 +45,12 @@ builder.Services.AddHostedService<JobCleanupService>();
 var app = builder.Build();
 
 // Configure the HTTP request pipeline.
-// OpenAPI endpoint removed for faster startup
+// Static files now served by Tauri frontend
+// This backend is API-only
 
-// Disable HTTPS redirection for local webview
-// app.UseHttpsRedirection();
-
-// Serve static files: physical in Development, embedded in non-Development
-if (app.Environment.IsDevelopment())
-{
-    app.UseDefaultFiles();
-    app.UseStaticFiles();
-    Console.WriteLine("✓ Using physical static files (Development)");
-}
-else
-{
-    var embeddedProvider = new ManifestEmbeddedFileProvider(typeof(Program).Assembly, "wwwroot");
-    app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = embeddedProvider });
-    app.UseStaticFiles(new StaticFileOptions { FileProvider = embeddedProvider });
-    Console.WriteLine("✓ Using embedded static files (Non-Development)");
-}
+// Add health check endpoint for Tauri to verify backend is ready
+app.MapGet("/api/health", () => Results.Ok(new { status = "healthy", timestamp = DateTime.UtcNow }))
+    .WithName("HealthCheck");
 
 // POST endpoint to upload and compress video
 app.MapPost("/api/compress", async (
@@ -304,99 +292,20 @@ app.MapGet("/api/download/{jobId}", async (string jobId, VideoCompressionService
 })
 .WithName("DownloadCompressedVideo");
 
-// Handle application startup - open window once server is ready
-#pragma warning disable CA1416 // Platform-specific API usage guarded at runtime
+// Handle application startup
 app.Lifetime.ApplicationStarted.Register(() =>
 {
     var urls = app.Urls;
     var url = urls.FirstOrDefault();
     
-    if (url == null)
-    {
-        Console.WriteLine($"\n⚠️ Warning: No URL configured. Application may not start correctly.");
-        return;
-    }
-    
-    // Replace https with http for webview
-    if (url.StartsWith("https://"))
-    {
-        url = url.Replace("https://", "http://");
-    }
-    
-    Console.WriteLine($"\n🎉 Smart Video Compressor - Intelligent Video Compression");
+    Console.WriteLine($"\n🎉 Smart Video Compressor Backend - API Server");
     Console.WriteLine($"📅 Started at {DateTime.Now:O}");
-    Console.WriteLine($"📡 Server running at: {url}");
-    Console.WriteLine($"🪟 Opening native desktop window...\n");
-    
-    // Open window immediately for faster startup
-    if (OperatingSystem.IsWindows())
-    {
-        OpenWindowsWebView(url, app);
-    }
-    else
-    {
-        Console.WriteLine($"⚠️ This application only supports Windows.");
-        Console.WriteLine($"🌐 Server is running at: {url}");
-        Console.WriteLine($"Open this URL in your browser.");
-    }
+    Console.WriteLine($"📡 API server running at: {url}");
+    Console.WriteLine($"🚀 Ready to accept compression requests\n");
 });
-#pragma warning restore CA1416
 
 // Run the application (blocks until stopped)
 app.Run();
-
-// Suppress CA1416 for the Windows-only WebView creation; runtime guard checks are
-// in place before this method is invoked.
-#pragma warning disable CA1416
-[System.Runtime.Versioning.SupportedOSPlatform("windows6.1")]
-static void OpenWindowsWebView(string url, WebApplication app)
-{
-    try
-    {
-        Console.WriteLine($"Creating WebView2 window for URL: {url}");
-        
-        // Set the apartment state for COM (required for WebView2)
-        var thread = new System.Threading.Thread(() =>
-        {
-            try
-            {
-                // Enable visual styles for WinForms
-                Application.EnableVisualStyles();
-                Application.SetCompatibleTextRenderingDefault(false);
-                
-                // Create and show the WebView2 window
-                var form = new smart_compressor.WebViewWindow(url);
-                
-                form.FormClosed += (sender, e) =>
-                {
-                    Console.WriteLine("\n👋 Window closed. Shutting down...");
-                    app.Lifetime.StopApplication();
-                };
-                
-                // Run the WinForms application
-                Application.Run(form);
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"❌ Error in WebView thread: {ex.Message}");
-                Console.WriteLine($"Stack trace: {ex.StackTrace}");
-            }
-        });
-        
-        // Set thread to STA (Single-Threaded Apartment) mode required by WebView2
-        thread.SetApartmentState(System.Threading.ApartmentState.STA);
-        thread.IsBackground = false; // Keep app alive while window is open
-        thread.Start(); // Non-blocking start for faster startup
-    }
-#pragma warning restore CA1416
-    catch (Exception ex)
-    {
-        Console.WriteLine($"❌ Error creating window: {ex.Message}");
-        Console.WriteLine($"Stack trace: {ex.StackTrace}");
-        Console.WriteLine($"🌐 Server is still running at: {url}");
-        Console.WriteLine($"⏹️  Press Ctrl+C to stop\n");
-    }
-}
 
 static string FormatTimeRemaining(int seconds)
 {
