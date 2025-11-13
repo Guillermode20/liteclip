@@ -7,6 +7,16 @@ using smart_compressor.Services;
 using smart_compressor.CompressionStrategies;
 using Photino.NET;
 using System.Drawing;
+using System.Runtime.InteropServices;
+
+// Linux-specific performance optimizations
+if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+{
+    // Force hardware acceleration for WebKit on Linux
+    Environment.SetEnvironmentVariable("WEBKIT_DISABLE_COMPOSITING_MODE", "0");
+    Environment.SetEnvironmentVariable("WEBKIT_USE_SINGLE_WEB_PROCESS", "0");
+    Console.WriteLine("✓ Linux WebKit environment optimizations applied");
+}
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -356,8 +366,25 @@ var window = new PhotinoWindow()
     .SetUseOsDefaultLocation(false)
     .SetResizable(true)
     .SetDevToolsEnabled(true)
-    .SetContextMenuEnabled(true)
-    .RegisterWebMessageReceivedHandler((sender, message) =>
+    .SetContextMenuEnabled(true);
+
+// Linux-specific performance optimizations using WebKit2GTK settings
+if (PhotinoWindow.IsLinuxPlatform)
+{
+    // Enable hardware acceleration and GPU rendering for smooth performance
+    var webkitSettings = @"{
+        ""hardware_acceleration_policy"": 1,
+        ""enable_webgl"": true,
+        ""enable_accelerated_2d_canvas"": true,
+        ""enable_smooth_scrolling"": true,
+        ""enable_page_cache"": true,
+        ""enable_write_console_messages_to_stdout"": false
+    }";
+    window.SetBrowserControlInitParameters(webkitSettings);
+    Console.WriteLine("✓ Linux hardware acceleration enabled");
+}
+
+window.RegisterWebMessageReceivedHandler((sender, message) =>
     {
         Console.WriteLine($"Message received from frontend: {message}");
         

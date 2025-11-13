@@ -855,90 +855,92 @@
             {/if}
         </main>
 
-        <!-- Sidebar -->
-        <aside class="sidebar">
-            <div class="sidebar-content">
+        <!-- Sidebar - Only display when a video is selected -->
+        {#if selectedFile}
+            <aside class="sidebar">
+                <div class="sidebar-content">
 
-                <!-- Metadata Section -->
-                {#if metadataVisible}
-                    <section class="sidebar-section">
-                        <h2 class="section-title">// file_info</h2>
-                        <div class="metadata">
-                            {@html metadataContent}
-                        </div>
-                    </section>
-                {/if}
-
-                <!-- Settings Section -->
-                {#if controlsVisible}
-                    <section class="sidebar-section">
-                        <h2 class="section-title">// settings</h2>
-                        <div class="settings-group">
-                            <label for="outputSizeSlider" class="setting-label">
-                                <strong>target_size</strong>
-                                <span class="setting-value">{outputSizeValue}</span>
-                            </label>
-                            <div class="preset-buttons">
-                                <button type="button" class="preset-btn" on:click={() => handlePresetClick('25')}>-75%</button>
-                                <button type="button" class="preset-btn" on:click={() => handlePresetClick('50')}>-50%</button>
-                                <button type="button" class="preset-btn" on:click={() => handlePresetClick('75')}>-25%</button>
+                    <!-- Metadata Section -->
+                    {#if metadataVisible}
+                        <section class="sidebar-section">
+                            <h2 class="section-title">// file_info</h2>
+                            <div class="metadata">
+                                {@html metadataContent}
                             </div>
-                            <input 
-                                type="range" 
-                                id="outputSizeSlider" 
-                                min="1" 
-                                max="100" 
-                                step="0.5" 
-                                bind:value={outputSizeSliderValue}
-                                disabled={outputSizeSliderDisabled}
-                                on:input={updateOutputSizeDisplay}
-                                class="size-slider"
-                            />
-                            <div class="helper-text">// drag to adjust compression</div>
-                            {#if outputSizeDetails}
-                                <div class="estimate-line">→ {outputSizeDetails}</div>
+                        </section>
+                    {/if}
+
+                    <!-- Settings Section -->
+                    {#if controlsVisible}
+                        <section class="sidebar-section">
+                            <h2 class="section-title">// settings</h2>
+                            <div class="settings-group">
+                                <label for="outputSizeSlider" class="setting-label">
+                                    <strong>target_size</strong>
+                                    <span class="setting-value">{outputSizeValue}</span>
+                                </label>
+                                <div class="preset-buttons">
+                                    <button type="button" class="preset-btn" on:click={() => handlePresetClick('25')}>-75%</button>
+                                    <button type="button" class="preset-btn" on:click={() => handlePresetClick('50')}>-50%</button>
+                                    <button type="button" class="preset-btn" on:click={() => handlePresetClick('75')}>-25%</button>
+                                </div>
+                                <input 
+                                    type="range" 
+                                    id="outputSizeSlider" 
+                                    min="1" 
+                                    max="100" 
+                                    step="0.5" 
+                                    bind:value={outputSizeSliderValue}
+                                    disabled={outputSizeSliderDisabled}
+                                    on:input={updateOutputSizeDisplay}
+                                    class="size-slider"
+                                />
+                                <div class="helper-text">// drag to adjust compression</div>
+                                {#if outputSizeDetails}
+                                    <div class="estimate-line">→ {outputSizeDetails}</div>
+                                {/if}
+                            </div>
+
+                            <div class="settings-group">
+                                <label for="codecSelect" class="setting-label">
+                                    <strong>codec</strong>
+                                </label>
+                                <select id="codecSelect" bind:value={codecSelectValue} on:change={() => { updateCodecHelper(); updateOutputSizeDisplay(); }}>
+                                    <option value="h264">h264 (mp4)</option>
+                                    <option value="h265">h265 / hevc (mp4)</option>
+                                </select>
+                                {#if codecHelperText}
+                                    <div class="helper-text">// {codecHelperText}</div>
+                                {/if}
+                            </div>
+                        </section>
+
+                        <!-- Action Buttons -->
+                        <section class="sidebar-section">
+                            {#if !videoPreviewVisible}
+                                <button 
+                                    id="uploadBtn" 
+                                    disabled={uploadBtnDisabled}
+                                    on:click={handleUpload}
+                                    class="action-btn primary"
+                                >
+                                    $ {uploadBtnText.toLowerCase().replace('&', '+')}
+                                </button>
                             {/if}
-                        </div>
 
-                        <div class="settings-group">
-                            <label for="codecSelect" class="setting-label">
-                                <strong>codec</strong>
-                            </label>
-                            <select id="codecSelect" bind:value={codecSelectValue} on:change={() => { updateCodecHelper(); updateOutputSizeDisplay(); }}>
-                                <option value="h264">h264 (mp4)</option>
-                                <option value="h265">h265 / hevc (mp4)</option>
-                            </select>
-                            {#if codecHelperText}
-                                <div class="helper-text">// {codecHelperText}</div>
+                            {#if showCancelButton}
+                                <button 
+                                    id="cancelBtn"
+                                    on:click={handleCancelJob}
+                                    class="action-btn danger"
+                                >
+                                    $ cancel compression
+                                </button>
                             {/if}
-                        </div>
-                    </section>
-
-                    <!-- Action Buttons -->
-                    <section class="sidebar-section">
-                        {#if !videoPreviewVisible}
-                            <button 
-                                id="uploadBtn" 
-                                disabled={uploadBtnDisabled}
-                                on:click={handleUpload}
-                                class="action-btn primary"
-                            >
-                                $ {uploadBtnText.toLowerCase().replace('&', '+')}
-                            </button>
-                        {/if}
-
-                        {#if showCancelButton}
-                            <button 
-                                id="cancelBtn"
-                                on:click={handleCancelJob}
-                                class="action-btn danger"
-                            >
-                                $ cancel compression
-                            </button>
-                        {/if}
-                    </section>
-                {/if}
-            </div>
-        </aside>
+                        </section>
+                    {/if}
+                </div>
+            </aside>
+        {/if}
     </div>
 </div>

@@ -41,16 +41,11 @@
     <EmbeddedResource Include="wwwroot\**\*" />
   </ItemGroup>
 
-  <!-- Build frontend only when source files change -->
-  <Target Name="BuildFrontend" BeforeTargets="BeforeBuild" Inputs="frontend/src/**/*;frontend/index.html;frontend/package.json" Outputs="wwwroot/index.html">
-    <Exec Command="cd frontend &amp;&amp; npm install" Condition="!Exists('frontend/node_modules')" />
+  <!-- Build frontend automatically before each build -->
+  <Target Name="BuildFrontend" BeforeTargets="BeforeBuild">
     <Message Importance="high" Text="Building frontend..." />
-    <Exec Command="cd frontend &amp;&amp; npm run build" />
-  </Target>
-  
-  <!-- Skip frontend build if wwwroot is up to date -->
-  <Target Name="CheckFrontendUpToDate" BeforeTargets="BuildFrontend">
-    <Message Importance="high" Text="Checking if frontend build is needed..." Condition="Exists('wwwroot/index.html')" />
+    <Exec Command="npm install" WorkingDirectory="frontend" Condition="!Exists('frontend/node_modules')" />
+    <Exec Command="npm run build" WorkingDirectory="frontend" />
   </Target>
 
   <!-- Speed-focused Debug settings -->
