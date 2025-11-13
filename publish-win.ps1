@@ -188,12 +188,37 @@ $runScriptPath = Join-Path $OutputDir "run.bat"
 Set-Content -Path $runScriptPath -Value $runScriptContent -Encoding ASCII
 Write-Host "Created run.bat script" -ForegroundColor Green
 
+# Copy portable exe to dist directory with versioned name
+$DistDir = "dist"
+$Version = "1.0.0"
+$PortableName = "liteclip-$Version-portable-win-x64.exe"
+
+Write-Host ""
+Write-Host "Copying portable executable to dist directory..." -ForegroundColor Yellow
+if (-not (Test-Path $DistDir)) {
+    New-Item -ItemType Directory -Path $DistDir | Out-Null
+    Write-Host "Created dist directory" -ForegroundColor Green
+}
+
+$SourceExe = Join-Path $OutputDir "liteclip.exe"
+$DestExe = Join-Path $DistDir $PortableName
+
+if (Test-Path $SourceExe) {
+    Copy-Item -Path $SourceExe -Destination $DestExe -Force
+    Write-Host "Copied to: $DestExe" -ForegroundColor Green
+}
+else {
+    Write-Host "WARNING: Could not find $SourceExe to copy to dist" -ForegroundColor Yellow
+}
+
 # Display summary
 Write-Host ""
 Write-Host "=== Build Complete ===" -ForegroundColor Green
 Write-Host ""
 Write-Host "Output location: $OutputDir" -ForegroundColor Cyan
 Write-Host "Executable: liteclip.exe" -ForegroundColor White
+Write-Host ""
+Write-Host "Portable version: $DestExe" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "✨ Portable Release build (single-file per csproj settings)." -ForegroundColor Green
 Write-Host "   Frontend is embedded." -ForegroundColor Green
