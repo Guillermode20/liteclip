@@ -664,8 +664,8 @@
 <div class="app-layout">
     <!-- Header -->
     <header class="app-header">
-        <h1>// smart-video-compressor</h1>
-        <p class="subtitle">intelligent video compression with smart quality optimization</p>
+        <h1>// liteclip</h1>
+        <p class="subtitle">fast video compression with intelligent optimization</p>
     </header>
 
     <!-- Main Layout -->

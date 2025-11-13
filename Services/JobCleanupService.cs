@@ -1,6 +1,6 @@
-using smart_compressor.Services;
+using liteclip.Services;
 
-namespace smart_compressor.Services;
+namespace liteclip.Services;
 
 public class JobCleanupService : BackgroundService
 {

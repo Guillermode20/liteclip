@@ -1,9 +1,9 @@
 using Microsoft.AspNetCore.Http;
-using smart_compressor.Models;
+using liteclip.Models;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 
-namespace smart_compressor.Services;
+namespace liteclip.Services;
 
 /// <summary>
 /// Public contract for the video compression service.

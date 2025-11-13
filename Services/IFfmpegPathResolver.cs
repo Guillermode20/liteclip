@@ -1,4 +1,4 @@
-namespace smart_compressor.Services;
+namespace liteclip.Services;
 
 /// <summary>
 /// Abstraction for resolving a path to an ffmpeg executable.

@@ -1,6 +1,0 @@
-@smart_compressor_HostAddress = http://localhost:5025
-
-GET {{smart_compressor_HostAddress}}/weatherforecast/
-Accept: application/json
-
-###

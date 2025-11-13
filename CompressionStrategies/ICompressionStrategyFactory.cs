@@ -1,4 +1,4 @@
-namespace smart_compressor.CompressionStrategies;
+namespace liteclip.CompressionStrategies;
 
 /// <summary>
 /// Factory abstraction to obtain the appropriate <see cref="ICompressionStrategy"/> for a codec.

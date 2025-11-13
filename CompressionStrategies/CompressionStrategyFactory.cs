@@ -1,7 +1,7 @@
 using System.Collections.Generic;
 using System.Linq;
 
-namespace smart_compressor.CompressionStrategies;
+namespace liteclip.CompressionStrategies;
 
 /// <summary>
 /// Default implementation of <see cref="ICompressionStrategyFactory"/> which

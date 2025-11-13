@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 
-namespace smart_compressor.CompressionStrategies;
+namespace liteclip.CompressionStrategies;
 
 public class Vp9Strategy : ICompressionStrategy
 {

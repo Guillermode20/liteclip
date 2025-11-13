@@ -2,7 +2,7 @@ Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
 VisualStudioVersion = 17.5.2.0
 MinimumVisualStudioVersion = 10.0.40219.1
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "smart-compressor", "smart-compressor.csproj", "{14397163-5529-6416-422D-1780DF6F1F99}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "liteclip", "liteclip.csproj", "{14397163-5529-6416-422D-1780DF6F1F99}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution

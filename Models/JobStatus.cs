@@ -1,4 +1,4 @@
-namespace smart_compressor.Models;
+namespace liteclip.Models;
 
 /// <summary>
 /// Represents the lifecycle status of a compression job.

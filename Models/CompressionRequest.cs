@@ -1,4 +1,4 @@
-namespace smart_compressor.Models;
+namespace liteclip.Models;
 
 public class CompressionRequest
 {

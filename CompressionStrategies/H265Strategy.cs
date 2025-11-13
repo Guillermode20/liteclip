@@ -2,7 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 
-namespace smart_compressor.CompressionStrategies;
+namespace liteclip.CompressionStrategies;
 
 public class H265Strategy : ICompressionStrategy
 {

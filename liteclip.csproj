@@ -4,7 +4,7 @@
     <TargetFramework>net9.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <RootNamespace>smart_compressor</RootNamespace>
+    <RootNamespace>liteclip</RootNamespace>
     <OutputType>Exe</OutputType>
     
         <!-- Build optimization -->
@@ -71,7 +71,7 @@
   
   <!-- Preserve assemblies that use reflection (prevent trim issues) -->
   <ItemGroup Condition="'$(Configuration)'=='Release'">
-    <TrimmerRootAssembly Include="smart-compressor" />
+    <TrimmerRootAssembly Include="liteclip" />
     <TrimmerRootAssembly Include="Microsoft.AspNetCore.Server.Kestrel" />
     <TrimmerRootAssembly Include="Microsoft.AspNetCore.Routing" />
     <TrimmerRootAssembly Include="Microsoft.AspNetCore.StaticFiles" />

@@ -4,7 +4,7 @@ REM This ensures the PowerShell script runs in a visible window and doesn't clos
 
 echo.
 echo ================================================
-echo Smart Video Compressor - Build Script Launcher
+echo LiteClip - Build Script Launcher
 echo ================================================
 echo.
 echo Starting PowerShell build script...

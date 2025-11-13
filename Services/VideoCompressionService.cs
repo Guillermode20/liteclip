@@ -3,10 +3,10 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
 using System.Text;
-using smart_compressor.Models;
-using smart_compressor.CompressionStrategies;
+using liteclip.Models;
+using liteclip.CompressionStrategies;
 
-namespace smart_compressor.Services;
+namespace liteclip.Services;
 
 public class VideoCompressionService : IVideoCompressionService
 {

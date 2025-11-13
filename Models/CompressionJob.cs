@@ -1,4 +1,4 @@
-namespace smart_compressor.Models;
+namespace liteclip.Models;
 
 /// <summary>
 /// Represents an in-memory compression job and its runtime metadata.

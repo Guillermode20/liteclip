@@ -1,6 +1,6 @@
 using System.Collections.Generic;
 
-namespace smart_compressor.CompressionStrategies;
+namespace liteclip.CompressionStrategies;
 
 /// <summary>
 /// Strategy interface for codec-specific compression argument generation and metadata.

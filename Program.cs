@@ -2,9 +2,9 @@ using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.FileProviders;
-using smart_compressor.Models;
-using smart_compressor.Services;
-using smart_compressor.CompressionStrategies;
+using liteclip.Models;
+using liteclip.Services;
+using liteclip.CompressionStrategies;
 using Photino.NET;
 using System.Drawing;
 using System.Runtime.InteropServices;
@@ -337,7 +337,7 @@ app.Lifetime.ApplicationStarted.Register(() =>
         url = url.Replace("https://", "http://");
     }
     
-    Console.WriteLine($"\n🎉 Smart Video Compressor - Intelligent Video Compression");
+    Console.WriteLine($"\n🎉 LiteClip - Fast Video Compression");
     Console.WriteLine($"📅 Started at {DateTime.Now:O}");
     Console.WriteLine($"📡 Server running at: {url}");
     Console.WriteLine($"🪟 Creating native desktop window...\n");
@@ -361,7 +361,7 @@ while (!serverReady)
 
 // Create and show Photino window (blocks on main thread)
 var window = new PhotinoWindow()
-    .SetTitle("Smart Video Compressor - Intelligent Video Compression")
+    .SetTitle("LiteClip - Fast Video Compression")
     .SetUseOsDefaultSize(false)
     .SetUseOsDefaultLocation(false)
     .SetResizable(true)

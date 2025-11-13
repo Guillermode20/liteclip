@@ -1,4 +1,4 @@
-# PowerShell script to build and publish smart-compressor as a Windows executable
+# PowerShell script to build and publish LiteClip as a Windows executable
 
 param(
     [string]$Configuration = 'Release',
@@ -23,7 +23,7 @@ trap {
     exit 1
 }
 
-Write-Host "=== Smart Video Compressor - Windows Build Script ===" -ForegroundColor Cyan
+Write-Host "=== LiteClip - Windows Build Script ===" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "Configuration: $Configuration" -ForegroundColor Cyan
 Write-Host "Output directory: $OutputDir" -ForegroundColor Cyan
@@ -137,7 +137,7 @@ Write-Host "Publishing .NET application with optimized settings..." -ForegroundC
 # Optimized publish args for fast startup (no compression, no R2R)
 $publishArgs = @(
     'publish',
-    'smart-compressor.csproj',
+    'liteclip.csproj',
     '--configuration', $Configuration,
     '--runtime', 'win-x64',
     '--self-contained', 'true',
@@ -178,10 +178,10 @@ Write-Host ""
 Write-Host "Creating run script..." -ForegroundColor Yellow
 $runScriptContent = @"
 @echo off
-echo Starting Smart Video Compressor...
+echo Starting LiteClip...
 echo A native window will open automatically!
 echo.
-smart-compressor.exe
+liteclip.exe
 "@
 
 $runScriptPath = Join-Path $OutputDir "run.bat"
@@ -193,7 +193,7 @@ Write-Host ""
 Write-Host "=== Build Complete ===" -ForegroundColor Green
 Write-Host ""
 Write-Host "Output location: $OutputDir" -ForegroundColor Cyan
-Write-Host "Executable: smart-compressor.exe" -ForegroundColor White
+Write-Host "Executable: liteclip.exe" -ForegroundColor White
 Write-Host ""
 Write-Host "✨ Portable Release build (single-file per csproj settings)." -ForegroundColor Green
 Write-Host "   Frontend is embedded." -ForegroundColor Green
@@ -201,7 +201,7 @@ Write-Host "   FFmpeg must be installed separately (system PATH or config)." -Fo
 Write-Host "   You can move the exe anywhere and it will work!" -ForegroundColor Green
 Write-Host ""
 Write-Host "To run the application:" -ForegroundColor Yellow
-Write-Host "  1. Copy 'smart-compressor.exe' anywhere you want" -ForegroundColor White
+Write-Host "  1. Copy 'liteclip.exe' anywhere you want" -ForegroundColor White
 Write-Host "  2. Double-click it or run from command line" -ForegroundColor White
 Write-Host "  3. A native desktop window will open automatically!" -ForegroundColor White
 Write-Host ""

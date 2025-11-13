@@ -1,7 +1,7 @@
 using System.Reflection;
 using System.Runtime.InteropServices;
 
-namespace smart_compressor.Services;
+namespace liteclip.Services;
 
 public class FfmpegPathResolver : IFfmpegPathResolver
 {
@@ -93,7 +93,7 @@ public class FfmpegPathResolver : IFfmpegPathResolver
         try
         {
             var assembly = Assembly.GetExecutingAssembly();
-            var resourceName = "smart_compressor.ffmpeg.ffmpeg.exe";
+            var resourceName = "liteclip.ffmpeg.ffmpeg.exe";
             
             // Check if the resource exists
             var resourceNames = assembly.GetManifestResourceNames();
@@ -104,7 +104,7 @@ public class FfmpegPathResolver : IFfmpegPathResolver
             }
 
             // Extract to temp directory
-            var tempDir = Path.Combine(Path.GetTempPath(), "smart-compressor-ffmpeg");
+            var tempDir = Path.Combine(Path.GetTempPath(), "liteclip-ffmpeg");
             Directory.CreateDirectory(tempDir);
             
             var extractedPath = Path.Combine(tempDir, GetFfmpegExecutableName());

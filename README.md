@@ -1,10 +1,10 @@
-# Smart Video Compressor
+# LiteClip
 
 A fast, lightweight desktop application for compressing videos. Built with ASP.NET Core, Svelte, and WebView2—no browser needed.
 
 ## Quick Start
 
-1. Download `smart-compressor.exe` from releases
+1. Download `liteclip.exe` from releases
 2. Ensure FFmpeg is installed and available in PATH (or place `ffmpeg.exe` in the `ffmpeg/` directory)
 3. Run the executable—a native window opens automatically
 4. Upload a video (drag & drop or file picker)
@@ -49,7 +49,7 @@ cd frontend && npm install && npm run build && cd ..
 dotnet publish -c Release -r win-x64 -o publish-win /p:PublishSingleFile=true
 ```
 
-Output: `publish-win/smart-compressor.exe`
+Output: `publish-win/liteclip.exe`
 
 ### Development
 
@@ -72,7 +72,7 @@ Backend runs on a dynamic port (shown in console); frontend dev server typically
 ### Project Layout
 
 ```
-smart-compressor/
+liteclip/
 ├── Program.cs                 # ASP.NET Core app & WebView2 setup
 ├── Services/
 │   ├── VideoCompressionService.cs    # Core compression logic
@@ -84,7 +84,7 @@ smart-compressor/
 ├── ffmpeg/                    # FFmpeg binaries (embedded in release)
 ├── wwwroot/                   # Built UI assets (embedded)
 ├── appsettings.json           # Configuration
-└── smart-compressor.csproj
+└── liteclip.csproj
 ```
 
 ### Configuration
