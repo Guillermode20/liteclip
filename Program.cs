@@ -5,7 +5,8 @@ using Microsoft.Extensions.FileProviders;
 using smart_compressor.Models;
 using smart_compressor.Services;
 using smart_compressor.CompressionStrategies;
-using System.Windows.Forms;
+using Photino.NET;
+using System.Drawing;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -304,8 +305,11 @@ app.MapGet("/api/download/{jobId}", async (string jobId, VideoCompressionService
 })
 .WithName("DownloadCompressedVideo");
 
-// Handle application startup - open window once server is ready
-#pragma warning disable CA1416 // Platform-specific API usage guarded at runtime
+// Flag to track when server is ready
+var serverReady = false;
+var serverUrl = "";
+
+// Handle application startup - mark server as ready
 app.Lifetime.ApplicationStarted.Register(() =>
 {
     var urls = app.Urls;
@@ -317,7 +321,7 @@ app.Lifetime.ApplicationStarted.Register(() =>
         return;
     }
     
-    // Replace https with http for webview
+    // Replace https with http for Photino
     if (url.StartsWith("https://"))
     {
         url = url.Replace("https://", "http://");
@@ -326,77 +330,55 @@ app.Lifetime.ApplicationStarted.Register(() =>
     Console.WriteLine($"\n🎉 Smart Video Compressor - Intelligent Video Compression");
     Console.WriteLine($"📅 Started at {DateTime.Now:O}");
     Console.WriteLine($"📡 Server running at: {url}");
-    Console.WriteLine($"🪟 Opening native desktop window...\n");
+    Console.WriteLine($"🪟 Creating native desktop window...\n");
     
-    // Open window immediately for faster startup
-    if (OperatingSystem.IsWindows())
-    {
-        OpenWindowsWebView(url, app);
-    }
-    else
-    {
-        Console.WriteLine($"⚠️ This application only supports Windows.");
-        Console.WriteLine($"🌐 Server is running at: {url}");
-        Console.WriteLine($"Open this URL in your browser.");
-    }
+    serverUrl = url;
+    serverReady = true;
 });
-#pragma warning restore CA1416
 
-// Run the application (blocks until stopped)
-app.Run();
-
-// Suppress CA1416 for the Windows-only WebView creation; runtime guard checks are
-// in place before this method is invoked.
-#pragma warning disable CA1416
-[System.Runtime.Versioning.SupportedOSPlatform("windows6.1")]
-static void OpenWindowsWebView(string url, WebApplication app)
+// Start the web server in a background thread
+var serverThread = new Thread(() =>
 {
-    try
-    {
-        Console.WriteLine($"Creating WebView2 window for URL: {url}");
-        
-        // Set the apartment state for COM (required for WebView2)
-        var thread = new System.Threading.Thread(() =>
-        {
-            try
-            {
-                // Enable visual styles for WinForms
-                Application.EnableVisualStyles();
-                Application.SetCompatibleTextRenderingDefault(false);
-                
-                // Create and show the WebView2 window
-                var form = new smart_compressor.WebViewWindow(url);
-                
-                form.FormClosed += (sender, e) =>
-                {
-                    Console.WriteLine("\n👋 Window closed. Shutting down...");
-                    app.Lifetime.StopApplication();
-                };
-                
-                // Run the WinForms application
-                Application.Run(form);
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"❌ Error in WebView thread: {ex.Message}");
-                Console.WriteLine($"Stack trace: {ex.StackTrace}");
-            }
-        });
-        
-        // Set thread to STA (Single-Threaded Apartment) mode required by WebView2
-        thread.SetApartmentState(System.Threading.ApartmentState.STA);
-        thread.IsBackground = false; // Keep app alive while window is open
-        thread.Start(); // Non-blocking start for faster startup
-    }
-#pragma warning restore CA1416
-    catch (Exception ex)
-    {
-        Console.WriteLine($"❌ Error creating window: {ex.Message}");
-        Console.WriteLine($"Stack trace: {ex.StackTrace}");
-        Console.WriteLine($"🌐 Server is still running at: {url}");
-        Console.WriteLine($"⏹️  Press Ctrl+C to stop\n");
-    }
+    app.Run();
+});
+serverThread.Start();
+
+// Wait for server to be ready
+while (!serverReady)
+{
+    Thread.Sleep(100);
 }
+
+// Create and show Photino window (blocks on main thread)
+var window = new PhotinoWindow()
+    .SetTitle("Smart Video Compressor - Intelligent Video Compression")
+    .SetUseOsDefaultSize(false)
+    .SetUseOsDefaultLocation(false)
+    .SetResizable(true)
+    .SetDevToolsEnabled(true)
+    .SetContextMenuEnabled(true)
+    .RegisterWebMessageReceivedHandler((sender, message) =>
+    {
+        Console.WriteLine($"Message received from frontend: {message}");
+        
+        // Handle window close message
+        if (message == "close-app")
+        {
+            Environment.Exit(0);
+        }
+    })
+    .Load(serverUrl);
+
+// Set size after load and before showing
+window.SetSize(1200, 800);
+window.Center();
+
+// Show window and wait for it to close (blocks)
+window.WaitForClose();
+
+// Stop the ASP.NET Core server when window is closed
+Console.WriteLine("\n👋 Window closed. Shutting down...");
+Environment.Exit(0);
 
 static string FormatTimeRemaining(int seconds)
 {

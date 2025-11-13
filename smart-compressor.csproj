@@ -5,19 +5,21 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>smart_compressor</RootNamespace>
-    <OutputType>WinExe</OutputType>
+    <OutputType>Exe</OutputType>
     
-    <!-- Build optimization -->
+        <!-- Build optimization -->
     <UseAppHost>true</UseAppHost>
     <ProduceReferenceAssembly>false</ProduceReferenceAssembly>
     
-    <!-- Runtime target -->
-    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <!-- Enable cross-platform support (no fixed RuntimeIdentifier) -->
     <TieredCompilation>true</TieredCompilation>
     <TieredCompilationQuickJit>true</TieredCompilationQuickJit>
     
     <!-- Embedded files manifest only needed in Release when embedding -->
     <GenerateEmbeddedFilesManifest>false</GenerateEmbeddedFilesManifest>
+    
+    <!-- Disable default content items to avoid conflicts with explicit Content includes -->
+    <EnableDefaultContentItems>false</EnableDefaultContentItems>
     
     <!-- Trimming options -->
     <IlcOptimizationPreference>Size</IlcOptimizationPreference>
@@ -26,11 +28,12 @@
   <ItemGroup>
     <!-- OpenApi removed for faster startup -->
     <PackageReference Include="Microsoft.Extensions.FileProviders.Embedded" Version="9.0.0" />
-    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2792.45" />
+    <PackageReference Include="Photino.NET" Version="4.0.16" />
   </ItemGroup>
-  
-  <ItemGroup>
-    <FrameworkReference Include="Microsoft.WindowsDesktop.App.WindowsForms" />
+
+  <!-- Development: copy wwwroot to output directory -->
+  <ItemGroup Condition="'$(Configuration)'=='Debug'">
+    <Content Include="wwwroot\**" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <!-- Release: embed static content into the assembly -->
@@ -79,10 +82,7 @@
     <TrimmerRootAssembly Include="Microsoft.AspNetCore.StaticFiles" />
     <TrimmerRootAssembly Include="Microsoft.Extensions.FileProviders.Embedded" />
     <TrimmerRootAssembly Include="System.Text.Json" />
-    <TrimmerRootAssembly Include="System.Windows.Forms" />
-    <TrimmerRootAssembly Include="System.Windows.Forms.Primitives" />
-    <TrimmerRootAssembly Include="Microsoft.Web.WebView2.Core" />
-    <TrimmerRootAssembly Include="Microsoft.Web.WebView2.WinForms" />
+    <TrimmerRootAssembly Include="Photino.NET" />
   </ItemGroup>
 
   <!-- Exclude files from publish output (they're embedded) -->
