@@ -209,7 +209,7 @@
         const targetSizeMb = (originalSizeMb * percent) / 100;
         
         const displayValue = targetSizeMb >= 10 ? targetSizeMb.toFixed(0) : targetSizeMb.toFixed(1);
-        outputSizeValue = `${displayValue} MB (${percent.toFixed(0)}% of original)`;
+        outputSizeValue = `${displayValue} MB`;
         
         if (!sourceDuration || !sourceVideoWidth || !sourceVideoHeight) {
             outputSizeDetails = 'Waiting for video metadata...';
