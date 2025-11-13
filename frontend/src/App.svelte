@@ -670,22 +670,21 @@
 
     <!-- Main Layout -->
     <div class="main-layout">
-        <!-- Sidebar -->
-        <aside class="sidebar">
-            <div class="sidebar-content">
-                <!-- Upload Section -->
-                <section class="sidebar-section">
-                    <h2 class="section-title">// upload</h2>
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Upload Section (always visible) -->
+            {#if !videoPreviewVisible && !progressVisible}
+                <div class="content-card">
+                    <h2 class="section-title">// upload_video</h2>
                     <div 
                         class="upload-area" 
                         class:dragover={isDragover}
+                        class:has-video={selectedFile && objectUrl}
                         on:dragover={handleDragOver}
                         on:dragleave={handleDragLeave}
                         on:drop={handleDrop}
-                        on:click={() => document.getElementById('fileInput')?.click()}
-                        on:keydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); document.getElementById('fileInput')?.click(); } }}
-                        role="button"
-                        tabindex="0"
+                        role="region"
+                        aria-label="Video upload area"
                     >
                         <input 
                             type="file" 
@@ -694,102 +693,56 @@
                             style="display: none;"
                             on:change={handleFileInputChange}
                         />
-                        <svg class="upload-icon" xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                            <polyline points="17 8 12 3 7 8"></polyline>
-                            <line x1="12" y1="3" x2="12" y2="15"></line>
-                        </svg>
-                        <p class="upload-text">Drop video or click</p>
-                        {#if fileInfo}
-                            <div class="file-info">→ {fileInfo}</div>
+                        
+                        {#if selectedFile && objectUrl && controlsVisible}
+                            <!-- Video Preview -->
+                            <div class="video-preview-wrapper">
+                                <video
+                                    src={objectUrl}
+                                    controls
+                                    preload="metadata"
+                                    aria-label="Source video preview"
+                                    tabindex="0"
+                                    class="preview-video"
+                                >
+                                    <track kind="captions" srclang="en" label="English" default>
+                                    Your browser does not support the video tag.
+                                </video>
+                                <button 
+                                    type="button"
+                                    class="remove-video-btn"
+                                    on:click={(e) => { e.stopPropagation(); resetInterface(); }}
+                                    aria-label="Remove video"
+                                >
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                        <circle cx="12" cy="12" r="10"></circle>
+                                        <line x1="15" y1="9" x2="9" y2="15"></line>
+                                        <line x1="9" y1="9" x2="15" y2="15"></line>
+                                    </svg>
+                                    remove video
+                                </button>
+                            </div>
+                        {:else}
+                            <!-- Upload Prompt -->
+                            <div 
+                                class="upload-prompt"
+                                on:click={() => document.getElementById('fileInput')?.click()}
+                                on:keydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); document.getElementById('fileInput')?.click(); } }}
+                                role="button"
+                                tabindex="0"
+                            >
+                                <svg class="upload-icon" xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                                    <polyline points="17 8 12 3 7 8"></polyline>
+                                    <line x1="12" y1="3" x2="12" y2="15"></line>
+                                </svg>
+                                <p class="upload-text">Drop video or click to select</p>
+                            </div>
                         {/if}
                     </div>
-                </section>
+                </div>
+            {/if}
 
-                <!-- Metadata Section -->
-                {#if metadataVisible}
-                    <section class="sidebar-section">
-                        <h2 class="section-title">// file_info</h2>
-                        <div class="metadata">
-                            {@html metadataContent}
-                        </div>
-                    </section>
-                {/if}
-
-                <!-- Settings Section -->
-                {#if controlsVisible}
-                    <section class="sidebar-section">
-                        <h2 class="section-title">// settings</h2>
-                        <div class="settings-group">
-                            <label for="outputSizeSlider" class="setting-label">
-                                <strong>target_size</strong>
-                                <span class="setting-value">{outputSizeValue}</span>
-                            </label>
-                            <div class="preset-buttons">
-                                <button type="button" class="preset-btn" on:click={() => handlePresetClick('25')}>-75%</button>
-                                <button type="button" class="preset-btn" on:click={() => handlePresetClick('50')}>-50%</button>
-                                <button type="button" class="preset-btn" on:click={() => handlePresetClick('75')}>-25%</button>
-                            </div>
-                            <input 
-                                type="range" 
-                                id="outputSizeSlider" 
-                                min="1" 
-                                max="100" 
-                                step="0.5" 
-                                bind:value={outputSizeSliderValue}
-                                disabled={outputSizeSliderDisabled}
-                                on:input={updateOutputSizeDisplay}
-                                class="size-slider"
-                            />
-                            <div class="helper-text">// drag to adjust compression</div>
-                            {#if outputSizeDetails}
-                                <div class="estimate-line">→ {outputSizeDetails}</div>
-                            {/if}
-                        </div>
-
-                        <div class="settings-group">
-                            <label for="codecSelect" class="setting-label">
-                                <strong>codec</strong>
-                            </label>
-                            <select id="codecSelect" bind:value={codecSelectValue} on:change={() => { updateCodecHelper(); updateOutputSizeDisplay(); }}>
-                                <option value="h264">h264 (mp4)</option>
-                                <option value="h265">h265 / hevc (mp4)</option>
-                            </select>
-                            {#if codecHelperText}
-                                <div class="helper-text">// {codecHelperText}</div>
-                            {/if}
-                        </div>
-                    </section>
-
-                    <!-- Action Buttons -->
-                    <section class="sidebar-section">
-                        {#if !videoPreviewVisible}
-                            <button 
-                                id="uploadBtn" 
-                                disabled={uploadBtnDisabled}
-                                on:click={handleUpload}
-                                class="action-btn primary"
-                            >
-                                $ {uploadBtnText.toLowerCase().replace('&', '+')}
-                            </button>
-                        {/if}
-
-                        {#if showCancelButton}
-                            <button 
-                                id="cancelBtn"
-                                on:click={handleCancelJob}
-                                class="action-btn danger"
-                            >
-                                $ cancel compression
-                            </button>
-                        {/if}
-                    </section>
-                {/if}
-            </div>
-        </aside>
-
-        <!-- Main Content -->
-        <main class="main-content">
             {#if progressVisible}
                 <div class="content-card">
                     <h2 class="section-title">// processing</h2>
@@ -899,113 +852,93 @@
                         </button>
                     </div>
                 </div>
-            {:else if controlsVisible && !videoPreviewVisible}
-                <!-- Preview/Info Panel -->
-                <div class="content-card preview-panel">
-                    <h2 class="section-title">// compression_preview</h2>
-                    
-                    <div class="info-grid">
-                        <div class="info-card">
-                            <svg class="info-icon" xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                <polygon points="23 7 16 12 23 17 23 7"></polygon>
-                                <rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>
-                            </svg>
-                            <div class="info-content">
-                                <h4>Original Video</h4>
-                                <p class="info-stat">{originalSizeMb?.toFixed(1)} MB</p>
-                                <p class="info-detail">{sourceVideoWidth}×{sourceVideoHeight} @ {sourceDuration?.toFixed(1)}s</p>
-                            </div>
-                        </div>
-
-                        <div class="info-card">
-                            <svg class="info-icon" xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                <circle cx="12" cy="12" r="10"></circle>
-                                <polyline points="12 6 12 12 16 14"></polyline>
-                            </svg>
-                            <div class="info-content">
-                                <h4>Target Size</h4>
-                                <p class="info-stat">{outputSizeValue.split(' ')[0]} MB</p>
-                                <p class="info-detail">{outputSizeDetails}</p>
-                            </div>
-                        </div>
-
-                        <div class="info-card">
-                            <svg class="info-icon" xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                <circle cx="12" cy="12" r="1"></circle>
-                                <path d="M12 1v6"></path>
-                                <path d="M12 17v6"></path>
-                                <path d="M4.22 4.22l4.24 4.24"></path>
-                                <path d="M15.54 15.54l4.24 4.24"></path>
-                                <path d="M1 12h6"></path>
-                                <path d="M17 12h6"></path>
-                                <path d="M4.22 19.78l4.24-4.24"></path>
-                                <path d="M15.54 8.46l4.24-4.24"></path>
-                            </svg>
-                            <div class="info-content">
-                                <h4>Codec</h4>
-                                <p class="info-stat">{codecSelectValue.toUpperCase()}</p>
-                                <p class="info-detail">{codecHelperText}</p>
-                            </div>
-                        </div>
-
-                        <div class="info-card">
-                            <svg class="info-icon" xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                <circle cx="12" cy="12" r="10"></circle>
-                                <path d="M12 6v6l4 2"></path>
-                            </svg>
-                            <div class="info-content">
-                                <h4>Est. Compression</h4>
-                                <p class="info-stat">1-5 min</p>
-                                <p class="info-detail">Depends on video length & codec</p>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="tips-section">
-                        <h3 class="tips-title">// compression_tips</h3>
-                        <ul class="tips-list">
-                            <li>
-                                <svg class="tip-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                    <circle cx="12" cy="12" r="10"></circle>
-                                    <path d="M12 8v4l3 2"></path>
-                                </svg>
-                                <span><strong>Drag the slider</strong> to adjust target size. Moving left compresses more.</span>
-                            </li>
-                            <li>
-                                <svg class="tip-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                    <circle cx="12" cy="12" r="10"></circle>
-                                    <path d="M12 8v4l3 2"></path>
-                                </svg>
-                                <span><strong>Codec choice matters</strong> - AV1 is smallest, H.264 is most compatible.</span>
-                            </li>
-                            <li>
-                                <svg class="tip-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                    <circle cx="12" cy="12" r="10"></circle>
-                                    <path d="M12 8v4l3 2"></path>
-                                </svg>
-                                <span><strong>Two-pass encoding</strong> is enabled automatically for accurate file sizes.</span>
-                            </li>
-                            <li>
-                                <svg class="tip-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                    <circle cx="12" cy="12" r="10"></circle>
-                                    <path d="M12 8v4l3 2"></path>
-                                </svg>
-                                <span><strong>Resolution scales automatically</strong> to maintain quality at target size.</span>
-                            </li>
-                        </ul>
-                    </div>
-
-                </div>
-            {:else if !controlsVisible}
-                <div class="content-placeholder">
-                    <svg class="placeholder-icon" xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                        <polygon points="23 7 16 12 23 17 23 7"></polygon>
-                        <rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>
-                    </svg>
-                    <h3>Select a video to get started</h3>
-                    <p>Upload a video file to compress it with smart quality optimization</p>
-                </div>
             {/if}
         </main>
+
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="sidebar-content">
+
+                <!-- Metadata Section -->
+                {#if metadataVisible}
+                    <section class="sidebar-section">
+                        <h2 class="section-title">// file_info</h2>
+                        <div class="metadata">
+                            {@html metadataContent}
+                        </div>
+                    </section>
+                {/if}
+
+                <!-- Settings Section -->
+                {#if controlsVisible}
+                    <section class="sidebar-section">
+                        <h2 class="section-title">// settings</h2>
+                        <div class="settings-group">
+                            <label for="outputSizeSlider" class="setting-label">
+                                <strong>target_size</strong>
+                                <span class="setting-value">{outputSizeValue}</span>
+                            </label>
+                            <div class="preset-buttons">
+                                <button type="button" class="preset-btn" on:click={() => handlePresetClick('25')}>-75%</button>
+                                <button type="button" class="preset-btn" on:click={() => handlePresetClick('50')}>-50%</button>
+                                <button type="button" class="preset-btn" on:click={() => handlePresetClick('75')}>-25%</button>
+                            </div>
+                            <input 
+                                type="range" 
+                                id="outputSizeSlider" 
+                                min="1" 
+                                max="100" 
+                                step="0.5" 
+                                bind:value={outputSizeSliderValue}
+                                disabled={outputSizeSliderDisabled}
+                                on:input={updateOutputSizeDisplay}
+                                class="size-slider"
+                            />
+                            <div class="helper-text">// drag to adjust compression</div>
+                            {#if outputSizeDetails}
+                                <div class="estimate-line">→ {outputSizeDetails}</div>
+                            {/if}
+                        </div>
+
+                        <div class="settings-group">
+                            <label for="codecSelect" class="setting-label">
+                                <strong>codec</strong>
+                            </label>
+                            <select id="codecSelect" bind:value={codecSelectValue} on:change={() => { updateCodecHelper(); updateOutputSizeDisplay(); }}>
+                                <option value="h264">h264 (mp4)</option>
+                                <option value="h265">h265 / hevc (mp4)</option>
+                            </select>
+                            {#if codecHelperText}
+                                <div class="helper-text">// {codecHelperText}</div>
+                            {/if}
+                        </div>
+                    </section>
+
+                    <!-- Action Buttons -->
+                    <section class="sidebar-section">
+                        {#if !videoPreviewVisible}
+                            <button 
+                                id="uploadBtn" 
+                                disabled={uploadBtnDisabled}
+                                on:click={handleUpload}
+                                class="action-btn primary"
+                            >
+                                $ {uploadBtnText.toLowerCase().replace('&', '+')}
+                            </button>
+                        {/if}
+
+                        {#if showCancelButton}
+                            <button 
+                                id="cancelBtn"
+                                on:click={handleCancelJob}
+                                class="action-btn danger"
+                            >
+                                $ cancel compression
+                            </button>
+                        {/if}
+                    </section>
+                {/if}
+            </div>
+        </aside>
     </div>
 </div>
