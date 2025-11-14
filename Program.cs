@@ -7,7 +7,6 @@ using liteclip.Services;
 using liteclip.CompressionStrategies;
 using Photino.NET;
 using System.Drawing;
-using System.Runtime.InteropServices;
 // Add missing 'using' statements that were previously implicit
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
@@ -35,14 +34,6 @@ namespace liteclip
         // All of your previous Program.cs logic is now inside this async method
         static async Task RunServerAndWindow(string[] args)
         {
-            // Linux-specific performance optimizations
-            if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
-            {
-                // Force hardware acceleration for WebKit on Linux
-                Environment.SetEnvironmentVariable("WEBKIT_DISABLE_COMPOSITING_MODE", "0");
-                Environment.SetEnvironmentVariable("WEBKIT_USE_SINGLE_WEB_PROCESS", "0");
-                Console.WriteLine("✓ Linux WebKit environment optimizations applied");
-            }
 
             var builder = WebApplication.CreateBuilder(args);
 
@@ -395,19 +386,6 @@ namespace liteclip
                 .SetContextMenuEnabled(true)
                 .SetLogVerbosity(4);
 
-            if (PhotinoWindow.IsLinuxPlatform)
-            {
-                var webkitSettings = @"{
-                    ""hardware_acceleration_policy"": 1,
-                    ""enable_webgl"": true,
-                    ""enable_accelerated_2d_canvas"": true,
-                    ""enable_smooth_scrolling"": true,
-                    ""enable_page_cache"": true,
-                    ""enable_write_console_messages_to_stdout"": false
-                }";
-                window.SetBrowserControlInitParameters(webkitSettings);
-                Console.WriteLine("✓ Linux hardware acceleration enabled");
-            }
 
             window.RegisterWebMessageReceivedHandler((sender, message) =>
                 {

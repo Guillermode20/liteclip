@@ -20,7 +20,8 @@
     <UseAppHost>true</UseAppHost>
     <ProduceReferenceAssembly>false</ProduceReferenceAssembly>
     
-    <!-- Enable cross-platform support (no fixed RuntimeIdentifier) -->
+    <!-- Windows portable exe only -->
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <TieredCompilation>true</TieredCompilation>
     <TieredCompilationQuickJit>true</TieredCompilationQuickJit>
     
