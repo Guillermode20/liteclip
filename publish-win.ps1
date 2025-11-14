@@ -122,10 +122,10 @@ try {
     Pop-Location
 }
 
-# Restore NuGet packages
+# Restore NuGet packages with R2R support
 Write-Host ""
 Write-Host "Restoring NuGet packages..." -ForegroundColor Yellow
-dotnet restore
+dotnet restore --runtime win-x64 /p:PublishReadyToRun=true
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host ""
@@ -142,7 +142,7 @@ Write-Host "Packages restored successfully" -ForegroundColor Green
 Write-Host ""
 Write-Host "Publishing .NET application with optimized settings..." -ForegroundColor Yellow
 
-# Optimized publish args for fast startup (no compression, no R2R)
+# Optimized publish args for fast startup (R2R compilation enabled)
 $publishArgs = @(
     'publish',
     'liteclip.csproj',
@@ -153,7 +153,7 @@ $publishArgs = @(
     '--no-restore',
     '/p:PublishSingleFile=true',
     '/p:EnableCompressionInSingleFile=false',
-    '/p:PublishReadyToRun=false',
+    '/p:PublishReadyToRun=true',
     '/p:PublishTrimmed=true',
     '/p:TrimMode=link',
     '/maxcpucount'

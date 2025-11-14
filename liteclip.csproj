@@ -86,7 +86,7 @@
     <EnableCompressionInSingleFile>false</EnableCompressionInSingleFile>
     <IncludeAllContentForSelfExtract>false</IncludeAllContentForSelfExtract>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
-    <PublishReadyToRun>false</PublishReadyToRun>
+    <PublishReadyToRun>true</PublishReadyToRun>
     <GenerateEmbeddedFilesManifest>true</GenerateEmbeddedFilesManifest>
     <!-- Native AOT disabled - incompatible with ASP.NET Core and Photino -->
     <PublishAot>false</PublishAot>
