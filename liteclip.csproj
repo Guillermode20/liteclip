@@ -1,6 +1,15 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
 
   <PropertyGroup>
+    <!-- 
+      This prevents the .NET SDK from auto-generating assembly attributes
+      to fix the 'CS0579: Duplicate attribute' build errors.
+    -->
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <GenerateTargetFrameworkAttribute>false</GenerateTargetFrameworkAttribute>
+  </PropertyGroup>
+
+  <PropertyGroup>
     <TargetFramework>net9.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
@@ -33,7 +42,7 @@
 
   <!-- Development: copy wwwroot to output directory -->
   <ItemGroup Condition="'$(Configuration)'=='Debug'">
-    <Content Include="wwwroot\**" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="wwwroot\**\*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <!-- Release: embed static content into the assembly -->
@@ -41,12 +50,23 @@
     <EmbeddedResource Include="wwwroot\**\*" />
   </ItemGroup>
 
-  <!-- Build frontend automatically before each build -->
+  <!-- 
+    REMOVED: The redundant <EmbeddedResource> ItemGroup was here.
+    It's no longer needed because the conditional groups above handle it.
+  -->
+
+  <!-- 
+    DEBUGGING: The auto-build target is commented out to remove
+    it as a variable. Remember to run 'npm run build' manually
+    in your 'frontend' folder before running 'dotnet run'.
+  -->
+  <!--
   <Target Name="BuildFrontend" BeforeTargets="BeforeBuild">
     <Message Importance="high" Text="Building frontend..." />
     <Exec Command="npm install" WorkingDirectory="frontend" Condition="!Exists('frontend/node_modules')" />
     <Exec Command="npm run build" WorkingDirectory="frontend" />
   </Target>
+  -->
 
   <!-- Speed-focused Debug settings -->
   <PropertyGroup Condition="'$(Configuration)'=='Debug'">
