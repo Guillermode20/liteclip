@@ -14,7 +14,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>liteclip</RootNamespace>
-    <OutputType>Exe</OutputType>
+    <OutputType>WinExe</OutputType>
     
         <!-- Build optimization -->
     <UseAppHost>true</UseAppHost>
@@ -88,18 +88,44 @@
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <PublishReadyToRun>false</PublishReadyToRun>
     <GenerateEmbeddedFilesManifest>true</GenerateEmbeddedFilesManifest>
+    <!-- Native AOT disabled - incompatible with ASP.NET Core and Photino -->
+    <PublishAot>false</PublishAot>
+    <!-- Trimming enabled with partial mode for better compatibility -->
+    <PublishTrimmed>true</PublishTrimmed>
+    <TrimMode>partial</TrimMode>
+    <!-- Suppress trimming warnings -->
+    <SuppressTrimAnalysisWarnings>false</SuppressTrimAnalysisWarnings>
+    <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
+    <!-- Optimize startup -->
+    <EventSourceSupport>false</EventSourceSupport>
+    <HttpActivityPropagationSupport>false</HttpActivityPropagationSupport>
+    <MetricsSupport>false</MetricsSupport>
   </PropertyGroup>
   
   <!-- Preserve assemblies that use reflection (prevent trim issues) -->
   <ItemGroup Condition="'$(Configuration)'=='Release'">
     <TrimmerRootAssembly Include="liteclip" />
+    <TrimmerRootAssembly Include="Microsoft.AspNetCore" />
+    <TrimmerRootAssembly Include="Microsoft.AspNetCore.Hosting" />
     <TrimmerRootAssembly Include="Microsoft.AspNetCore.Server.Kestrel" />
+    <TrimmerRootAssembly Include="Microsoft.AspNetCore.Server.Kestrel.Core" />
     <TrimmerRootAssembly Include="Microsoft.AspNetCore.Routing" />
     <TrimmerRootAssembly Include="Microsoft.AspNetCore.StaticFiles" />
+    <TrimmerRootAssembly Include="Microsoft.AspNetCore.Http" />
+    <TrimmerRootAssembly Include="Microsoft.AspNetCore.Http.Results" />
     <TrimmerRootAssembly Include="Microsoft.Extensions.FileProviders.Embedded" />
+    <TrimmerRootAssembly Include="Microsoft.Extensions.DependencyInjection" />
+    <TrimmerRootAssembly Include="Microsoft.Extensions.Logging" />
     <TrimmerRootAssembly Include="System.Text.Json" />
     <TrimmerRootAssembly Include="Photino.NET" />
   </ItemGroup>
+
+  <!-- rd.xml is for Native AOT, not needed with partial trimming -->
+  <!--
+  <ItemGroup Condition="'$(Configuration)'=='Release'">
+    <TrimmerRootDescriptorFiles Include="rd.xml" />
+  </ItemGroup>
+  -->
 
   <!-- Exclude files from publish output (they're embedded) -->
   <ItemGroup Condition="'$(Configuration)'=='Release'">
@@ -123,7 +149,6 @@
     <ItemGroup>
       <FilesToDelete Include="$(PublishDir)*.xml" />
       <FilesToDelete Include="$(PublishDir)*.pdb" />
-      <FilesToDelete Include="$(PublishDir)web.config" />
     </ItemGroup>
     <Delete Files="@(FilesToDelete)" />
     
@@ -132,6 +157,9 @@
       <StaticAssetFiles Include="$(PublishDir)*.staticwebassets.*" />
     </ItemGroup>
     <Delete Files="@(StaticAssetFiles)" />
+    
+    <!-- Remove web.config (must be deleted separately after other operations) -->
+    <Delete Files="$(PublishDir)web.config" Condition="Exists('$(PublishDir)web.config')" />
   </Target>
 
 </Project>

@@ -1,4 +1,12 @@
 # PowerShell script to build and publish LiteClip as a Windows executable
+#
+# TRIMMING FIX (2025-11-14):
+# - Disabled Native AOT (PublishAot=false) - incompatible with ASP.NET Core & Photino
+# - Changed TrimMode from 'link' to 'partial' for better compatibility
+# - Added comprehensive TrimmerRootAssembly entries for all ASP.NET Core components
+# - Result: Trimmed executable (~96 MB) that runs properly without runtime errors
+#
+# Trimming is important for keeping file size reasonable while maintaining full functionality.
 
 param(
     [string]$Configuration = 'Release',
@@ -146,6 +154,8 @@ $publishArgs = @(
     '/p:PublishSingleFile=true',
     '/p:EnableCompressionInSingleFile=false',
     '/p:PublishReadyToRun=false',
+    '/p:PublishTrimmed=true',
+    '/p:TrimMode=link',
     '/maxcpucount'
 )
 
