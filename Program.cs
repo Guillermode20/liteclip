@@ -95,6 +95,7 @@ namespace liteclip
                 [FromForm] string? codec,
                 [FromForm] double? targetSizeMb,
                 [FromForm] double? sourceDuration,
+                [FromForm] string? segments,
                 
                 VideoCompressionService compressionService,
                 IConfiguration configuration) =>
@@ -114,12 +115,32 @@ namespace liteclip
 
                 try
                 {
+                    // Parse segments if provided
+                    List<VideoSegment>? videoSegments = null;
+                    if (!string.IsNullOrWhiteSpace(segments))
+                    {
+                        try
+                        {
+                            var jsonOptions = new System.Text.Json.JsonSerializerOptions
+                            {
+                                PropertyNameCaseInsensitive = true,
+                                NumberHandling = System.Text.Json.Serialization.JsonNumberHandling.AllowReadingFromString
+                            };
+                            videoSegments = System.Text.Json.JsonSerializer.Deserialize<List<VideoSegment>>(segments, jsonOptions);
+                        }
+                        catch (Exception ex)
+                        {
+                            return Results.BadRequest(new { error = $"Invalid segments format: {ex.Message}" });
+                        }
+                    }
+                    
                     var compressionRequest = new CompressionRequest
                     {
                         Codec = codec ?? "h264",
                         ScalePercent = scalePercent,
                         TargetSizeMb = targetSizeMb,
                         SourceDuration = sourceDuration,
+                        Segments = videoSegments
                     };
 
                     var jobId = await compressionService.CompressVideoAsync(file, compressionRequest);

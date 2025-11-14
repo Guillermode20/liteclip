@@ -1,4 +1,6 @@
 <script lang="ts">
+    import VideoEditor from './VideoEditor.svelte';
+
     let selectedFile: File | null = null;
     let jobId: string | null = null;
     let statusCheckInterval: number | null = null;
@@ -34,6 +36,10 @@
     let codecSelectValue = 'h265';
     let showCancelButton = false;
     let etaText = '';
+    
+    // Video editor state
+    let showVideoEditor = false;
+    let videoSegments: Array<{start: number, end: number}> = [];
     
     // Output metadata
     let outputMetadata = {
@@ -92,6 +98,7 @@
         uploadBtnText = 'Upload & Compress Video';
         controlsVisible = true;
         metadataVisible = false;
+        showVideoEditor = true;
         
         outputSizeSliderDisabled = true;
         outputSizeValue = '--';
@@ -162,6 +169,22 @@
             codecHelperText = details.helper;
         } else {
             codecHelperText = '';
+        }
+    }
+    
+    function handleSegmentsChange(segments: Array<{start: number, end: number}>) {
+        videoSegments = segments;
+        
+        // Update sourceDuration to reflect edited duration
+        if (segments.length > 0) {
+            const totalEditedDuration = segments.reduce((sum, seg) => sum + (seg.end - seg.start), 0);
+            // Store original duration if not already stored
+            if (!sourceDuration) {
+                // sourceDuration will be set by video metadata load
+            } else {
+                // Update the output size estimate based on edited duration
+                updateOutputSizeDisplay();
+            }
         }
     }
     
@@ -282,14 +305,10 @@
         }
         formData.append('originalSizeBytes', selectedFile.size.toString());
         
-        console.log('Compression request:', {
-            codec: codecSelectValue,
-            targetSizeMb: targetSizeMb.toFixed(2),
-            targetPercent: percent,
-            sourceDuration: sourceDuration,
-            originalSizeMb: originalSizeMb!.toFixed(2),
-            scalePercent: calculatedScalePercent
-        });
+        // Add video segments - always send if we have them
+        if (videoSegments && videoSegments.length > 0) {
+            formData.append('segments', JSON.stringify(videoSegments));
+        }
         
         try {
             const response = await fetch('/api/compress', {
@@ -658,6 +677,8 @@
             URL.revokeObjectURL(objectUrl);
         }
         objectUrl = null;
+        showVideoEditor = false;
+        videoSegments = [];
     }
 </script>
 
@@ -740,6 +761,16 @@
                             </div>
                         {/if}
                     </div>
+                </div>
+            {/if}
+
+            <!-- Video Editor -->
+            {#if showVideoEditor && selectedFile && !videoPreviewVisible && !progressVisible}
+                <div class="content-card">
+                    <VideoEditor 
+                        videoFile={selectedFile} 
+                        onSegmentsChange={handleSegmentsChange}
+                    />
                 </div>
             {/if}
 

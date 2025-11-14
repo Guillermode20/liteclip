@@ -114,6 +114,79 @@ public class VideoCompressionService : IVideoCompressionService
             await videoFile.CopyToAsync(stream);
         }
 
+        // Process video segments if provided
+        string actualInputPath = inputPath;
+        if (normalizedRequest.Segments != null && normalizedRequest.Segments.Count > 0)
+        {
+            // Check if segments represent the full unedited video (single segment from start to end)
+            var isFullVideo = normalizedRequest.Segments.Count == 1 && 
+                             normalizedRequest.Segments[0].Start == 0 &&
+                             normalizedRequest.SourceDuration.HasValue &&
+                             Math.Abs(normalizedRequest.Segments[0].End - normalizedRequest.SourceDuration.Value) < 0.1;
+            
+            if (!isFullVideo)
+            {
+                _logger.LogInformation("Processing {Count} video segments for job {JobId}", normalizedRequest.Segments.Count, jobId);
+                
+                // Log each segment for debugging
+                for (int i = 0; i < normalizedRequest.Segments.Count; i++)
+                {
+                    var seg = normalizedRequest.Segments[i];
+                    _logger.LogInformation("Segment {Index}: {Start}s - {End}s (duration: {Duration}s)", 
+                        i + 1, seg.Start, seg.End, seg.End - seg.Start);
+                }
+                
+                actualInputPath = await MergeVideoSegmentsAsync(jobId, inputPath, normalizedRequest.Segments);
+                
+                // Update source duration to reflect edited duration
+                var totalEditedDuration = normalizedRequest.Segments.Sum(s => s.End - s.Start);
+                _logger.LogInformation("Updated source duration from segments: {Duration}s (original was {OriginalDuration}s)", 
+                    totalEditedDuration, normalizedRequest.SourceDuration);
+                normalizedRequest.SourceDuration = totalEditedDuration;
+            
+            // Recalculate bitrates with new duration
+            if (normalizedRequest.TargetSizeMb.HasValue && totalEditedDuration > 0)
+            {
+                var targetSize = normalizedRequest.TargetSizeMb.Value;
+                var targetBitsTotal = (targetSize * 1024 * 1024 * 8);
+                var totalKbps = targetBitsTotal / totalEditedDuration / 1000;
+                
+                double containerOverheadFactor;
+                if (codecConfig.FileExtension.Equals(".webm", StringComparison.OrdinalIgnoreCase))
+                {
+                    containerOverheadFactor = 0.98;
+                }
+                else
+                {
+                    if (targetSize < 3.0)
+                        containerOverheadFactor = 0.85;
+                    else if (targetSize < 8.0)
+                        containerOverheadFactor = 0.88;
+                    else if (targetSize < 20.0)
+                        containerOverheadFactor = 0.92;
+                    else
+                        containerOverheadFactor = 0.95;
+                }
+                var effectiveTargetKbps = totalKbps * containerOverheadFactor;
+                var videoKbps = Math.Max(100, effectiveTargetKbps - codecConfig.AudioBitrateKbps);
+                
+                computedTargetKbps = Math.Round(effectiveTargetKbps, 2);
+                computedVideoKbps = Math.Round(videoKbps, 2);
+                
+                _logger.LogInformation("Recalculated bitrate for edited video: Duration={Duration}s, VideoKbps={VideoKbps}", 
+                    totalEditedDuration, computedVideoKbps);
+                }
+            }
+            else
+            {
+                _logger.LogInformation("Segments represent full video - not processing segments for job {JobId}", jobId);
+            }
+        }
+        else
+        {
+            _logger.LogInformation("No segments provided - using full video for job {JobId}", jobId);
+        }
+
         // Check queue size before accepting new job
         if (_jobQueue.Count >= _maxQueueSize)
         {
@@ -127,7 +200,7 @@ public class VideoCompressionService : IVideoCompressionService
         {
             JobId = jobId,
             OriginalFilename = originalFilename,
-            InputPath = inputPath,
+            InputPath = actualInputPath,
             OutputPath = outputPath,
             OutputFilename = outputFilename,
             OutputMimeType = codecConfig.MimeType,
@@ -814,7 +887,8 @@ public class VideoCompressionService : IVideoCompressionService
             ScalePercent = request.ScalePercent,
             TargetFps = request.TargetFps,
             TargetSizeMb = request.TargetSizeMb,
-            SourceDuration = request.SourceDuration
+            SourceDuration = request.SourceDuration,
+            Segments = NormalizeSegments(request.Segments, request.SourceDuration)
         };
 
         if (normalized.ScalePercent.HasValue)
@@ -953,6 +1027,262 @@ public class VideoCompressionService : IVideoCompressionService
     }
 
 
+
+    private async Task<string> MergeVideoSegmentsAsync(string jobId, string inputPath, List<VideoSegment> segments)
+    {
+        var segmentFiles = new List<string>();
+        var mergedOutputPath = Path.Combine(_tempOutputPath, $"{jobId}_merged.mp4");
+        
+        try
+        {
+            // Extract each segment to a temporary file
+            for (int i = 0; i < segments.Count; i++)
+            {
+                var segment = segments[i];
+                var segmentPath = Path.Combine(_tempOutputPath, $"{jobId}_segment_{i}.mp4");
+                segmentFiles.Add(segmentPath);
+                
+                var duration = segment.End - segment.Start;
+                
+                // Use ffmpeg to extract the segment via stream copy to keep quality
+                var arguments = new List<string>
+                {
+                    "-y", // Overwrite output file
+                    "-ss", segment.Start.ToString("F3", System.Globalization.CultureInfo.InvariantCulture),
+                    "-i", inputPath,
+                    "-t", duration.ToString("F3", System.Globalization.CultureInfo.InvariantCulture),
+                    "-c", "copy", // Stream copy for speed
+                    "-avoid_negative_ts", "make_zero", // Ensure proper timestamps
+                    segmentPath
+                };
+                
+                var processStartInfo = new ProcessStartInfo
+                {
+                    FileName = _ffmpegResolver.GetFfmpegPath(),
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+                
+                foreach (var arg in arguments)
+                {
+                    processStartInfo.ArgumentList.Add(arg);
+                }
+                
+                _logger.LogInformation("Extracting segment {Index}/{Total}: {Start}s to {End}s (duration: {Duration}s)", 
+                    i + 1, segments.Count, segment.Start, segment.End, duration);
+                
+                using var process = new Process { StartInfo = processStartInfo };
+                process.Start();
+                
+                var errorOutput = await process.StandardError.ReadToEndAsync();
+                await process.WaitForExitAsync();
+                
+                if (process.ExitCode != 0)
+                {
+                    _logger.LogError("Failed to extract segment {Index}: {Error}", i, errorOutput);
+                    throw new InvalidOperationException($"Failed to extract segment {i + 1}: ffmpeg exited with code {process.ExitCode}");
+                }
+                
+                _logger.LogInformation("Segment {Index} extracted successfully", i + 1);
+            }
+            
+            // Create concat demuxer file with proper Windows path handling
+            var concatFilePath = Path.Combine(_tempOutputPath, $"{jobId}_concat.txt");
+            var concatContent = new StringBuilder();
+            foreach (var segmentFile in segmentFiles)
+            {
+                // Use absolute paths and convert to forward slashes for ffmpeg compatibility
+                var absolutePath = Path.GetFullPath(segmentFile);
+                var normalizedPath = absolutePath.Replace("\\", "/");
+                concatContent.AppendLine($"file '{normalizedPath}'");
+            }
+            await File.WriteAllTextAsync(concatFilePath, concatContent.ToString());
+            
+            _logger.LogInformation("Created concat file at {Path} with {Count} segments", concatFilePath, segmentFiles.Count);
+            _logger.LogInformation("Concat file contents:\n{Contents}", await File.ReadAllTextAsync(concatFilePath));
+            
+            // Verify all segment files exist before merging
+            foreach (var segFile in segmentFiles)
+            {
+                if (!File.Exists(segFile))
+                {
+                    _logger.LogError("Segment file does not exist: {Path}", segFile);
+                    throw new InvalidOperationException($"Segment file not found: {segFile}");
+                }
+                _logger.LogInformation("Verified segment exists: {Path} ({Size} bytes)", segFile, new FileInfo(segFile).Length);
+            }
+            
+            // Merge segments using concat demuxer with stream copy
+            var mergeArguments = new List<string>
+            {
+                "-y",
+                "-f", "concat",
+                "-safe", "0",
+                "-i", concatFilePath,
+                "-c", "copy",
+                mergedOutputPath
+            };
+            
+            var mergeProcessStartInfo = new ProcessStartInfo
+            {
+                FileName = _ffmpegResolver.GetFfmpegPath(),
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            
+            foreach (var arg in mergeArguments)
+            {
+                mergeProcessStartInfo.ArgumentList.Add(arg);
+            }
+            
+            _logger.LogInformation("Merging {Count} segments into single file", segmentFiles.Count);
+            
+            var ffmpegCommand = $"{_ffmpegResolver.GetFfmpegPath()} {string.Join(" ", mergeArguments.Select(a => a.Contains(" ") ? $"\"{a}\"" : a))}";
+            _logger.LogInformation("Running ffmpeg command: {Command}", ffmpegCommand);
+            
+            using var mergeProcess = new Process { StartInfo = mergeProcessStartInfo };
+            mergeProcess.Start();
+            
+            var mergeStdOutput = await mergeProcess.StandardOutput.ReadToEndAsync();
+            var mergeErrorOutput = await mergeProcess.StandardError.ReadToEndAsync();
+            await mergeProcess.WaitForExitAsync();
+            
+            if (mergeProcess.ExitCode != 0)
+            {
+                _logger.LogError("Failed to merge segments. Exit code: {ExitCode}", mergeProcess.ExitCode);
+                _logger.LogError("FFmpeg stdout: {StdOut}", mergeStdOutput);
+                _logger.LogError("FFmpeg stderr: {StdErr}", mergeErrorOutput);
+                throw new InvalidOperationException($"Failed to merge segments: ffmpeg exited with code {mergeProcess.ExitCode}. Error: {mergeErrorOutput}");
+            }
+            
+            _logger.LogInformation("Segments merged successfully to {Path}", mergedOutputPath);
+            
+            // Clean up segment files and concat file
+            foreach (var segmentFile in segmentFiles)
+            {
+                try
+                {
+                    if (File.Exists(segmentFile))
+                    {
+                        File.Delete(segmentFile);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to delete segment file {Path}", segmentFile);
+                }
+            }
+            
+            try
+            {
+                if (File.Exists(concatFilePath))
+                {
+                    File.Delete(concatFilePath);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to delete concat file {Path}", concatFilePath);
+            }
+            
+            return mergedOutputPath;
+        }
+        catch (Exception ex)
+        {
+            // Clean up on error
+            _logger.LogError(ex, "Error during segment merging");
+            
+            foreach (var segmentFile in segmentFiles)
+            {
+                try
+                {
+                    if (File.Exists(segmentFile))
+                    {
+                        File.Delete(segmentFile);
+                    }
+                }
+                catch
+                {
+                    // Ignore cleanup errors
+                }
+            }
+            
+            throw;
+        }
+    }
+
+    private static List<VideoSegment>? NormalizeSegments(List<VideoSegment>? segments, double? sourceDuration)
+    {
+        if (segments == null || segments.Count == 0)
+        {
+            return null;
+        }
+
+        var normalized = new List<VideoSegment>();
+        foreach (var segment in segments)
+        {
+            if (segment == null)
+            {
+                continue;
+            }
+
+            var start = double.IsFinite(segment.Start) ? Math.Max(0, segment.Start) : 0;
+            var end = double.IsFinite(segment.End) ? Math.Max(0, segment.End) : 0;
+
+            if (sourceDuration.HasValue)
+            {
+                start = Math.Min(start, sourceDuration.Value);
+                end = Math.Min(end, sourceDuration.Value);
+            }
+
+            if (end - start < 0.05)
+            {
+                continue;
+            }
+
+            normalized.Add(new VideoSegment
+            {
+                Start = start,
+                End = end
+            });
+        }
+
+        if (normalized.Count == 0)
+        {
+            return null;
+        }
+
+        normalized = normalized
+            .OrderBy(s => s.Start)
+            .ThenBy(s => s.End)
+            .ToList();
+
+        var merged = new List<VideoSegment>();
+        foreach (var segment in normalized)
+        {
+            if (merged.Count == 0)
+            {
+                merged.Add(new VideoSegment { Start = segment.Start, End = segment.End });
+                continue;
+            }
+
+            var last = merged[^1];
+            if (segment.Start <= last.End + 0.01)
+            {
+                last.End = Math.Max(last.End, segment.End);
+            }
+            else
+            {
+                merged.Add(new VideoSegment { Start = segment.Start, End = segment.End });
+            }
+        }
+
+        return merged;
+    }
 
     private static string NormalizeCodec(string? codec)
     {
