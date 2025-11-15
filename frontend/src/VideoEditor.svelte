@@ -13,6 +13,8 @@
     let currentTime: number = 0;
     let isPlaying: boolean = false;
     let isReady: boolean = false;
+    let isDragging: boolean = false;
+    let wasPlayingBeforeDrag: boolean = false;
     
     // Trim segments (kept segments)
     let segments: Array<{start: number, end: number, id: string}> = [];
@@ -24,6 +26,14 @@
         if (videoFile) {
             loadVideo();
         }
+        window.addEventListener('keydown', handleKeyDown);
+        window.addEventListener('mouseup', handleMouseUp);
+        window.addEventListener('mousemove', handleMouseMove);
+        return () => {
+            window.removeEventListener('keydown', handleKeyDown);
+            window.removeEventListener('mouseup', handleMouseUp);
+            window.removeEventListener('mousemove', handleMouseMove);
+        };
     });
 
     function loadVideo() {
@@ -48,6 +58,7 @@
     }
 
     function handleTimeUpdate() {
+        if (isDragging) return;
         currentTime = videoElement.currentTime;
     }
 
@@ -64,14 +75,61 @@
         videoElement.currentTime = Math.max(0, Math.min(time, duration));
     }
 
-    function handleTimelineClick(event: MouseEvent) {
+    function pauseVideo() {
+        if (videoElement && !videoElement.paused) {
+            videoElement.pause();
+        }
+        isPlaying = false;
+    }
+
+    function handleTimelineMouseDown(event: MouseEvent) {
         if (!isReady) return;
-        
+        wasPlayingBeforeDrag = isPlaying;
+        isDragging = true;
+        pauseVideo();
+        const time = updateCurrentTimeFromMouse(event);
+        if (time !== undefined) {
+            seekTo(time);
+        }
+    }
+
+    function handleMouseMove(event: MouseEvent) {
+        if (!isDragging || !isReady || !timelineContainer) return;
+        updateCurrentTimeFromMouse(event);
+    }
+
+    function handleMouseUp() {
+        if (!isDragging || !isReady) return;
+        isDragging = false;
+        seekTo(currentTime);
+        if (wasPlayingBeforeDrag) {
+            videoElement?.play();
+            isPlaying = true;
+        }
+        wasPlayingBeforeDrag = false;
+    }
+
+    function updateCurrentTimeFromMouse(event: MouseEvent) {
+        const time = calculateTimeFromMouse(event);
+        if (time === null) return;
+        currentTime = time;
+        return time;
+    }
+
+    function calculateTimeFromMouse(event: MouseEvent) {
+        if (!timelineContainer) return null;
         const rect = timelineContainer.getBoundingClientRect();
         const x = event.clientX - rect.left;
-        const clickedTime = (x / rect.width) * duration;
-        
-        seekTo(clickedTime);
+        const rawTime = (x / rect.width) * duration;
+        return Math.max(0, Math.min(rawTime, duration));
+    }
+
+    function handleTimelineClick(event: MouseEvent) {
+        if (!isReady) return;
+        const time = updateCurrentTimeFromMouse(event);
+        if (time !== undefined) {
+            seekTo(time);
+        }
     }
 
     function cutAtCurrentTime() {
@@ -134,6 +192,30 @@
     function handleRemoveClick() {
         if (onRemoveVideo) {
             onRemoveVideo();
+        }
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+        if (!isReady) return;
+        
+        // Don't trigger shortcuts if user is typing in an input
+        if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) {
+            return;
+        }
+
+        switch (event.code) {
+            case 'Space':
+                event.preventDefault();
+                handlePlayPause();
+                break;
+            case 'KeyC':
+                event.preventDefault();
+                cutAtCurrentTime();
+                break;
+            case 'KeyR':
+                event.preventDefault();
+                resetSegments();
+                break;
         }
     }
 
@@ -201,7 +283,7 @@
             on:play={() => isPlaying = true}
             on:pause={() => isPlaying = false}
             class="editor-video"
-        />
+        ></video>
         
         <div class="video-controls">
             <button 
@@ -209,6 +291,7 @@
                 on:click={handlePlayPause} 
                 disabled={!isReady}
                 class="control-btn"
+                title="Play/Pause (Space)"
             >
                 {#if isPlaying}
                     <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -231,7 +314,7 @@
                 on:click={cutAtCurrentTime}
                 disabled={!isReady || currentTime <= 0 || currentTime >= duration}
                 class="control-btn cut-btn"
-                title="Cut at current time"
+                title="Cut at current time (C)"
             >
                 <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <circle cx="6" cy="6" r="3"></circle>
@@ -247,7 +330,7 @@
                 on:click={resetSegments}
                 disabled={!isReady}
                 class="control-btn"
-                title="Reset to full video"
+                title="Reset to full video (R)"
             >
                 <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <polyline points="23 4 23 10 17 10"></polyline>
@@ -258,15 +341,18 @@
     </div>
 
     <!-- Timeline -->
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
     <div class="timeline-section">
         <div class="timeline-help">
-            // Click timeline to seek • Use scissors button to cut at playhead • Click X to delete segments
+            // Space: play/pause • C: cut • R: reset • Drag scrubber to seek
         </div>
         
         <div 
             class="timeline-container"
+            class:dragging={isDragging}
             bind:this={timelineContainer}
             on:click={handleTimelineClick}
+            on:mousedown={handleTimelineMouseDown}
             role="slider"
             tabindex="0"
             aria-label="Video timeline"
@@ -352,10 +438,6 @@
 <style>
     .video-editor {
         width: 100%;
-        background: #1a1a1a;
-        border-radius: 8px;
-        padding: 1.5rem;
-        margin-bottom: 1.5rem;
     }
 
     .editor-header {
@@ -372,17 +454,18 @@
     }
 
     .editor-title {
-        font-size: 1.1rem;
-        color: #00ff88;
+        font-size: 1rem;
+        color: #fafafa;
         font-weight: 600;
         margin: 0;
+        text-transform: lowercase;
     }
 
     .editor-info {
         display: flex;
         gap: 0.5rem;
         font-size: 0.9rem;
-        color: #888;
+        color: #71717a;
     }
 
     .editor-remove-btn {
@@ -390,7 +473,7 @@
         gap: 6px;
         align-items: center;
         padding: 6px 10px;
-        border-radius: 4px;
+        border-radius: 2px;
         background: rgba(220, 38, 38, 0.9);
         border: 1px solid rgba(185, 28, 28, 0.8);
         color: #fafafa;
@@ -400,6 +483,8 @@
         cursor: pointer;
         transition: all 0.2s ease;
         outline: none;
+        -webkit-tap-highlight-color: transparent;
+        touch-action: manipulation;
     }
 
     .editor-remove-btn:hover {
@@ -413,7 +498,8 @@
 
     .video-preview {
         position: relative;
-        background: #000;
+        background: #09090b;
+        border: 1px solid #27272a;
         border-radius: 4px;
         margin-bottom: 1.5rem;
         overflow: hidden;
@@ -421,9 +507,10 @@
 
     .editor-video {
         width: 100%;
+        height: auto;
         display: block;
         max-height: 400px;
-        object-fit: contain;
+        object-fit: cover;
     }
 
     .video-controls {
@@ -431,25 +518,28 @@
         align-items: center;
         gap: 1rem;
         padding: 0.75rem 1rem;
-        background: rgba(0, 0, 0, 0.8);
+        background: rgba(9, 9, 11, 0.8);
+        border-top: 1px solid #27272a;
     }
 
     .control-btn {
         background: rgba(255, 255, 255, 0.1);
         border: 1px solid rgba(255, 255, 255, 0.2);
-        color: white;
+        color: #fafafa;
         padding: 0.5rem;
-        border-radius: 4px;
+        border-radius: 2px;
         cursor: pointer;
         display: flex;
         align-items: center;
         justify-content: center;
         transition: all 0.2s;
+        outline: none;
+        -webkit-tap-highlight-color: transparent;
     }
 
     .control-btn:hover:not(:disabled) {
-        background: rgba(0, 255, 136, 0.2);
-        border-color: #00ff88;
+        background: rgba(24, 24, 27, 0.8);
+        border-color: #3f3f46;
     }
 
     .control-btn:disabled {
@@ -458,19 +548,22 @@
     }
 
     .cut-btn:not(:disabled) {
-        background: rgba(0, 255, 136, 0.2);
-        border-color: #00ff88;
+        background: rgba(24, 24, 27, 0.8);
+        border-color: #3f3f46;
     }
 
     .cut-btn:hover:not(:disabled) {
-        background: rgba(0, 255, 136, 0.3);
+        background: rgba(39, 39, 42, 0.8);
+        border-color: #52525b;
     }
 
     .time-display {
         font-family: 'Courier New', monospace;
         font-size: 0.9rem;
-        color: #00ff88;
-        flex: 1;
+        color: #a1a1aa;
+        flex: 0 0 auto;
+        white-space: nowrap;
+        min-width: fit-content;
     }
 
     .timeline-section {
@@ -479,7 +572,7 @@
 
     .timeline-help {
         font-size: 0.85rem;
-        color: #666;
+        color: #71717a;
         margin-bottom: 0.5rem;
     }
 
@@ -487,12 +580,16 @@
         position: relative;
         width: 100%;
         height: 80px;
-        background: #0a0a0a;
-        border: 2px solid #333;
+        background: rgba(9, 9, 11, 0.6);
+        border: 1px solid #27272a;
         border-radius: 4px;
         cursor: pointer;
         overflow: hidden;
         user-select: none;
+    }
+
+    .timeline-container.dragging {
+        cursor: grabbing;
     }
 
     .timeline-canvas {
@@ -510,7 +607,7 @@
         top: 0;
         width: 2px;
         height: 100%;
-        background: #00ff88;
+        background: #fafafa;
         pointer-events: none;
         z-index: 10;
     }
@@ -519,13 +616,14 @@
         position: absolute;
         top: 0;
         height: 100%;
-        background: rgba(0, 255, 136, 0.3);
-        border: 2px solid #00ff88;
+        background: rgba(250, 250, 250, 0.1);
+        border: 1px solid #3f3f46;
         transition: background 0.2s;
     }
 
     .timeline-segment:hover {
-        background: rgba(0, 255, 136, 0.4);
+        background: rgba(250, 250, 250, 0.15);
+        border-color: #52525b;
     }
 
     .segment-label {
@@ -534,7 +632,7 @@
         left: 50%;
         transform: translate(-50%, -50%);
         font-size: 0.75rem;
-        color: white;
+        color: #fafafa;
         font-weight: 600;
         pointer-events: none;
         white-space: nowrap;
@@ -545,12 +643,12 @@
         position: absolute;
         top: 4px;
         right: 4px;
-        background: rgba(255, 0, 0, 0.8);
+        background: rgba(220, 38, 38, 0.8);
         border: none;
-        color: white;
+        color: #fafafa;
         width: 20px;
         height: 20px;
-        border-radius: 50%;
+        border-radius: 2px;
         cursor: pointer;
         display: flex;
         align-items: center;
@@ -564,7 +662,7 @@
     }
 
     .segment-delete:hover {
-        background: rgba(255, 0, 0, 1);
+        background: rgba(185, 28, 28, 0.95);
     }
 
     .timeline-markers {
@@ -577,21 +675,23 @@
     .time-marker {
         position: absolute;
         font-size: 0.7rem;
-        color: #666;
+        color: #52525b;
         transform: translateX(-50%);
     }
 
     .segments-list {
-        background: #0a0a0a;
+        background: rgba(9, 9, 11, 0.6);
+        border: 1px solid #27272a;
         border-radius: 4px;
         padding: 1rem;
     }
 
     .segments-title {
         font-size: 0.9rem;
-        color: #00ff88;
+        color: #fafafa;
         margin: 0 0 0.75rem 0;
         font-weight: 600;
+        text-transform: lowercase;
     }
 
     .segments-items {
@@ -605,39 +705,41 @@
         align-items: center;
         gap: 0.75rem;
         padding: 0.5rem;
-        background: rgba(255, 255, 255, 0.05);
-        border-radius: 4px;
+        background: rgba(24, 24, 27, 0.4);
+        border: 1px solid rgba(39, 39, 42, 0.4);
+        border-radius: 2px;
         font-size: 0.85rem;
     }
 
     .segment-number {
-        background: #00ff88;
-        color: #000;
+        background: rgba(250, 250, 250, 0.1);
+        color: #fafafa;
         width: 24px;
         height: 24px;
-        border-radius: 50%;
+        border-radius: 2px;
         display: flex;
         align-items: center;
         justify-content: center;
         font-weight: 600;
         flex-shrink: 0;
+        border: 1px solid #3f3f46;
     }
 
     .segment-time {
-        color: white;
+        color: #fafafa;
         font-family: 'Courier New', monospace;
         flex: 1;
     }
 
     .segment-duration {
-        color: #888;
+        color: #71717a;
         font-family: 'Courier New', monospace;
     }
 
     .segment-item-delete {
         background: none;
         border: none;
-        color: #ff4444;
+        color: #dc2626;
         cursor: pointer;
         padding: 0.25rem;
         display: flex;
