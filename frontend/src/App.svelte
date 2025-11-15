@@ -569,18 +569,31 @@
     function calculateOutputMetadata(result: any) {
         if (!originalSizeMb || !sourceDuration) return;
         
+        // Use edited duration if segments exist
+        const effectiveDuration = getEffectiveDuration() || sourceDuration;
+        const effectiveMaxSize = getEffectiveMaxSize();
+        
         // Estimate output size based on available data
         let estimatedOutputBytes = 0;
-        if (result.targetBitrateKbps && result.targetBitrateKbps > 0 && sourceDuration) {
-            estimatedOutputBytes = Math.round((result.targetBitrateKbps * 1000 * sourceDuration) / 8);
+        let outputSizeMb = 0;
+        
+        if (result.targetBitrateKbps && result.targetBitrateKbps > 0) {
+            estimatedOutputBytes = Math.round((result.targetBitrateKbps * 1000 * effectiveDuration) / 8);
+            outputSizeMb = estimatedOutputBytes / (1024 * 1024);
         } else if (result.videoBitrateKbps && result.videoBitrateKbps > 0) {
             // Account for audio bitrate (128 kbps default)
             const totalBitrateKbps = result.videoBitrateKbps + 128;
-            estimatedOutputBytes = Math.round((totalBitrateKbps * 1000 * sourceDuration) / 8);
+            estimatedOutputBytes = Math.round((totalBitrateKbps * 1000 * effectiveDuration) / 8);
+            outputSizeMb = estimatedOutputBytes / (1024 * 1024);
+        } else {
+            // No bitrate info (compression was skipped) - use effective max size as estimate
+            // The actual size will be updated when the video preview loads
+            outputSizeMb = effectiveMaxSize;
+            estimatedOutputBytes = Math.round(effectiveMaxSize * 1024 * 1024);
         }
         
-        const outputSizeMb = estimatedOutputBytes / (1024 * 1024);
-        const compressionRatio = (1 - outputSizeMb / originalSizeMb) * 100;
+        // Calculate compression ratio based on the effective max size (edited video size)
+        const compressionRatio = (1 - outputSizeMb / effectiveMaxSize) * 100;
         const startTime = new Date(result.createdAt || Date.now());
         const completionTime = new Date(result.completedAt || Date.now());
         const encodingSeconds = Math.max(0, (completionTime.getTime() - startTime.getTime()) / 1000);
@@ -657,6 +670,13 @@
                     URL.revokeObjectURL(videoPreviewUrl);
                 }
                 videoPreviewUrl = URL.createObjectURL(blob);
+                
+                // Update metadata with actual file size
+                const actualSizeMb = blob.size / (1024 * 1024);
+                const effectiveMaxSize = getEffectiveMaxSize();
+                outputMetadata.outputSizeBytes = blob.size;
+                outputMetadata.outputSizeMb = actualSizeMb;
+                outputMetadata.compressionRatio = (1 - actualSizeMb / effectiveMaxSize) * 100;
             } else {
                 console.warn('Failed to load video preview');
             }

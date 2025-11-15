@@ -62,6 +62,7 @@ public class VideoCompressionService : IVideoCompressionService
 
         // Calculate original file size in MB for comparison
         var originalSizeMb = videoFile.Length / (1024.0 * 1024.0);
+        var originalDuration = normalizedRequest.SourceDuration;
 
         // Process video segments if provided
         string actualInputPath = inputPath;
@@ -105,13 +106,23 @@ public class VideoCompressionService : IVideoCompressionService
             _logger.LogInformation("No segments provided - using full video for job {JobId}", jobId);
         }
 
-        // Check if target size is 100% or more of original (no compression needed)
+        // Calculate effective max size (adjusted for edited duration if segments were cut)
+        var effectiveMaxSizeMb = originalSizeMb;
+        if (hasSegments && originalDuration.HasValue && originalDuration.Value > 0 && normalizedRequest.SourceDuration.HasValue)
+        {
+            var durationRatio = normalizedRequest.SourceDuration.Value / originalDuration.Value;
+            effectiveMaxSizeMb = originalSizeMb * durationRatio;
+            _logger.LogInformation("Effective max size adjusted for edited duration: {EffectiveMaxMb}MB (original: {OriginalMb}MB, ratio: {Ratio:F2})", 
+                effectiveMaxSizeMb, originalSizeMb, durationRatio);
+        }
+
+        // Check if target size is 100% or more of effective max (no compression needed)
         bool skipCompression = false;
-        if (normalizedRequest.TargetSizeMb.HasValue && normalizedRequest.TargetSizeMb.Value >= originalSizeMb)
+        if (normalizedRequest.TargetSizeMb.HasValue && normalizedRequest.TargetSizeMb.Value >= effectiveMaxSizeMb)
         {
             skipCompression = true;
-            _logger.LogInformation("Target size ({TargetMb}MB) is >= original size ({OriginalMb}MB) - skipping compression for job {JobId}", 
-                normalizedRequest.TargetSizeMb.Value, originalSizeMb, jobId);
+            _logger.LogInformation("Target size ({TargetMb}MB) is >= effective max size ({EffectiveMaxMb}MB) - skipping compression for job {JobId}", 
+                normalizedRequest.TargetSizeMb.Value, effectiveMaxSizeMb, jobId);
         }
 
         // Calculate bitrates for compression (only if we're actually compressing)
