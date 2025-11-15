@@ -175,17 +175,35 @@
     function handleSegmentsChange(segments: Array<{start: number, end: number}>) {
         videoSegments = segments;
         
-        // Update sourceDuration to reflect edited duration
-        if (segments.length > 0) {
-            const totalEditedDuration = segments.reduce((sum, seg) => sum + (seg.end - seg.start), 0);
-            // Store original duration if not already stored
-            if (!sourceDuration) {
-                // sourceDuration will be set by video metadata load
-            } else {
-                // Update the output size estimate based on edited duration
-                updateOutputSizeDisplay();
-            }
+        // Always recalculate output size display when segments change
+        // This ensures bitrate estimates match the edited duration
+        updateOutputSizeDisplay();
+    }
+    
+    function getEffectiveDuration(): number | null {
+        // If we have segments, calculate the total edited duration
+        if (videoSegments && videoSegments.length > 0) {
+            return videoSegments.reduce((sum, seg) => sum + (seg.end - seg.start), 0);
         }
+        // Otherwise use the original duration
+        return sourceDuration;
+    }
+    
+    function getEffectiveMaxSize(): number {
+        // Calculate the max target size based on the edited duration
+        if (!originalSizeMb || !sourceDuration || sourceDuration <= 0) {
+            return originalSizeMb || 0;
+        }
+        
+        const effectiveDuration = getEffectiveDuration();
+        if (!effectiveDuration || effectiveDuration === sourceDuration) {
+            return originalSizeMb;
+        }
+        
+        // Scale the original size by the duration ratio
+        // (edited duration / original duration) * original size
+        const durationRatio = effectiveDuration / sourceDuration;
+        return originalSizeMb * durationRatio;
     }
     
     function calculateOptimalResolution(targetSizeMb: number, durationSec: number, width: number, height: number): number {
@@ -229,21 +247,38 @@
         }
         
         const percent = parseFloat(outputSizeSliderValue.toString());
-        const targetSizeMb = (originalSizeMb * percent) / 100;
+        const effectiveMaxSize = getEffectiveMaxSize();
+        const targetSizeMb = (effectiveMaxSize * percent) / 100;
         
         const displayValue = targetSizeMb >= 10 ? targetSizeMb.toFixed(0) : targetSizeMb.toFixed(1);
         outputSizeValue = `${displayValue} MB`;
+        
+        // Show max size if it's different from original
+        if (videoSegments && videoSegments.length > 0 && effectiveMaxSize !== originalSizeMb) {
+            outputSizeValue += ` (max: ${effectiveMaxSize.toFixed(1)} MB)`;
+        }
         
         if (!sourceDuration || !sourceVideoWidth || !sourceVideoHeight) {
             outputSizeDetails = 'Waiting for video metadata...';
             return;
         }
         
+        // Use effective duration (edited duration if segments exist, otherwise original)
+        const effectiveDuration = getEffectiveDuration() || sourceDuration;
+        
+        // If target is 100% or more, indicate no compression will occur
+        if (percent >= 100) {
+            outputSizeDetails = videoSegments && videoSegments.length > 0 
+                ? 'Will cut video segments only (no compression)'
+                : 'No compression (original quality preserved)';
+            return;
+        }
+        
         const targetBitsTotal = (targetSizeMb * 1024 * 1024 * 8 * 0.9);
-        const targetBitrateKbps = targetBitsTotal / sourceDuration / 1000;
+        const targetBitrateKbps = targetBitsTotal / effectiveDuration / 1000;
         const videoBitrateKbps = Math.max(100, targetBitrateKbps - 128);
         
-        const recommendedScale = calculateOptimalResolution(targetSizeMb, sourceDuration, sourceVideoWidth, sourceVideoHeight);
+        const recommendedScale = calculateOptimalResolution(targetSizeMb, effectiveDuration, sourceVideoWidth, sourceVideoHeight);
         
         const targetW = Math.floor((sourceVideoWidth * recommendedScale / 100) / 2) * 2;
         const targetH = Math.floor((sourceVideoHeight * recommendedScale / 100) / 2) * 2;
@@ -254,6 +289,11 @@
             details += ` · Resolution: ${targetW}×${targetH} (${recommendedScale}%)`;
         } else {
             details += ` · Resolution: ${sourceVideoWidth}×${sourceVideoHeight} (original)`;
+        }
+        
+        // Show edited duration if segments are active
+        if (videoSegments && videoSegments.length > 0 && effectiveDuration !== sourceDuration) {
+            details += ` · Duration: ${effectiveDuration.toFixed(1)}s (edited)`;
         }
         
         outputSizeDetails = details;
@@ -279,19 +319,29 @@
         formData.append('codec', codecSelectValue);
         
         const percent = parseFloat(outputSizeSliderValue.toString());
-        const targetSizeMb = (originalSizeMb! * percent) / 100;
+        const effectiveMaxSize = getEffectiveMaxSize();
+        const targetSizeMb = (effectiveMaxSize * percent) / 100;
         formData.append('targetSizeMb', targetSizeMb.toFixed(2));
         
-        const calculatedScalePercent = calculateOptimalResolution(
-            targetSizeMb,
-            sourceDuration!,
-            sourceVideoWidth!,
-            sourceVideoHeight!
-        );
+        // Use effective duration for calculations
+        const effectiveDuration = getEffectiveDuration() || sourceDuration!;
         
-        // Only append scalePercent if it's a valid number
-        if (Number.isFinite(calculatedScalePercent)) {
-            formData.append('scalePercent', calculatedScalePercent.toString());
+        // Only calculate scale if we're actually compressing (< 100%)
+        if (percent < 100) {
+            const calculatedScalePercent = calculateOptimalResolution(
+                targetSizeMb,
+                effectiveDuration,
+                sourceVideoWidth!,
+                sourceVideoHeight!
+            );
+            
+            // Only append scalePercent if it's a valid number
+            if (Number.isFinite(calculatedScalePercent)) {
+                formData.append('scalePercent', calculatedScalePercent.toString());
+            }
+        } else {
+            // At 100%, don't scale (preserve original resolution)
+            formData.append('scalePercent', '100');
         }
         
         if (sourceDuration && isFinite(sourceDuration)) {

@@ -45,10 +45,81 @@ public class VideoCompressionService : IVideoCompressionService
         var normalizedRequest = NormalizeRequest(request);
         var codecConfig = GetCodecConfig(normalizedRequest.Codec);
 
-        // Calculate bitrates for simple mode with target size
+        var jobId = Guid.NewGuid().ToString();
+        var originalFilename = videoFile.FileName;
+        var safeStem = Path.GetFileNameWithoutExtension(string.IsNullOrWhiteSpace(originalFilename) ? jobId : originalFilename);
+        var inputPath = Path.Combine(_tempUploadPath, $"{jobId}_{originalFilename}");
+        var targetSizePrefix = normalizedRequest.TargetSizeMb.HasValue
+            ? $"{Math.Round(normalizedRequest.TargetSizeMb.Value, MidpointRounding.AwayFromZero)}MB"
+            : "auto";
+        var outputFilename = $"{targetSizePrefix}_compressed_{safeStem}{codecConfig.FileExtension}";
+        var outputPath = Path.Combine(_tempOutputPath, outputFilename);
+
+        await using (var stream = new FileStream(inputPath, FileMode.Create))
+        {
+            await videoFile.CopyToAsync(stream);
+        }
+
+        // Calculate original file size in MB for comparison
+        var originalSizeMb = videoFile.Length / (1024.0 * 1024.0);
+
+        // Process video segments if provided
+        string actualInputPath = inputPath;
+        bool hasSegments = false;
+        if (normalizedRequest.Segments != null && normalizedRequest.Segments.Count > 0)
+        {
+            // Check if segments represent the full unedited video (single segment from start to end)
+            var isFullVideo = normalizedRequest.Segments.Count == 1 && 
+                             normalizedRequest.Segments[0].Start == 0 &&
+                             normalizedRequest.SourceDuration.HasValue &&
+                             Math.Abs(normalizedRequest.Segments[0].End - normalizedRequest.SourceDuration.Value) < 0.1;
+            
+            if (!isFullVideo)
+            {
+                _logger.LogInformation("Processing {Count} video segments for job {JobId}", normalizedRequest.Segments.Count, jobId);
+                
+                // Log each segment for debugging
+                for (int i = 0; i < normalizedRequest.Segments.Count; i++)
+                {
+                    var seg = normalizedRequest.Segments[i];
+                    _logger.LogInformation("Segment {Index}: {Start}s - {End}s (duration: {Duration}s)", 
+                        i + 1, seg.Start, seg.End, seg.End - seg.Start);
+                }
+                
+                actualInputPath = await MergeVideoSegmentsAsync(jobId, inputPath, normalizedRequest.Segments);
+                
+                // Update source duration to reflect edited duration
+                var totalEditedDuration = normalizedRequest.Segments.Sum(s => s.End - s.Start);
+                _logger.LogInformation("Updated source duration from segments: {Duration}s (original was {OriginalDuration}s)", 
+                    totalEditedDuration, normalizedRequest.SourceDuration);
+                normalizedRequest.SourceDuration = totalEditedDuration;
+                hasSegments = true;
+            }
+            else
+            {
+                _logger.LogInformation("Segments represent full video - not processing segments for job {JobId}", jobId);
+            }
+        }
+        else
+        {
+            _logger.LogInformation("No segments provided - using full video for job {JobId}", jobId);
+        }
+
+        // Check if target size is 100% or more of original (no compression needed)
+        bool skipCompression = false;
+        if (normalizedRequest.TargetSizeMb.HasValue && normalizedRequest.TargetSizeMb.Value >= originalSizeMb)
+        {
+            skipCompression = true;
+            _logger.LogInformation("Target size ({TargetMb}MB) is >= original size ({OriginalMb}MB) - skipping compression for job {JobId}", 
+                normalizedRequest.TargetSizeMb.Value, originalSizeMb, jobId);
+        }
+
+        // Calculate bitrates for compression (only if we're actually compressing)
         double? computedTargetKbps = null;
         double? computedVideoKbps = null;
-        if (normalizedRequest.TargetSizeMb.HasValue && 
+        
+        if (!skipCompression && 
+            normalizedRequest.TargetSizeMb.HasValue && 
             normalizedRequest.SourceDuration.HasValue && 
             normalizedRequest.SourceDuration.Value > 0)
         {
@@ -99,92 +170,49 @@ public class VideoCompressionService : IVideoCompressionService
             computedVideoKbps = Math.Round(videoKbps, 2);
         }
 
-        var jobId = Guid.NewGuid().ToString();
-        var originalFilename = videoFile.FileName;
-        var safeStem = Path.GetFileNameWithoutExtension(string.IsNullOrWhiteSpace(originalFilename) ? jobId : originalFilename);
-        var inputPath = Path.Combine(_tempUploadPath, $"{jobId}_{originalFilename}");
-        var targetSizePrefix = normalizedRequest.TargetSizeMb.HasValue
-            ? $"{Math.Round(normalizedRequest.TargetSizeMb.Value, MidpointRounding.AwayFromZero)}MB"
-            : "auto";
-        var outputFilename = $"{targetSizePrefix}_compressed_{safeStem}{codecConfig.FileExtension}";
-        var outputPath = Path.Combine(_tempOutputPath, outputFilename);
-
-        await using (var stream = new FileStream(inputPath, FileMode.Create))
+        // If we're skipping compression (100% target), just copy/use the merged file
+        if (skipCompression)
         {
-            await videoFile.CopyToAsync(stream);
-        }
-
-        // Process video segments if provided
-        string actualInputPath = inputPath;
-        if (normalizedRequest.Segments != null && normalizedRequest.Segments.Count > 0)
-        {
-            // Check if segments represent the full unedited video (single segment from start to end)
-            var isFullVideo = normalizedRequest.Segments.Count == 1 && 
-                             normalizedRequest.Segments[0].Start == 0 &&
-                             normalizedRequest.SourceDuration.HasValue &&
-                             Math.Abs(normalizedRequest.Segments[0].End - normalizedRequest.SourceDuration.Value) < 0.1;
+            _logger.LogInformation("Skipping compression for job {JobId} - copying file directly", jobId);
             
-            if (!isFullVideo)
+            // If segments were cut, we already have the merged file
+            // If no segments, just copy the original file
+            if (hasSegments)
             {
-                _logger.LogInformation("Processing {Count} video segments for job {JobId}", normalizedRequest.Segments.Count, jobId);
-                
-                // Log each segment for debugging
-                for (int i = 0; i < normalizedRequest.Segments.Count; i++)
-                {
-                    var seg = normalizedRequest.Segments[i];
-                    _logger.LogInformation("Segment {Index}: {Start}s - {End}s (duration: {Duration}s)", 
-                        i + 1, seg.Start, seg.End, seg.End - seg.Start);
-                }
-                
-                actualInputPath = await MergeVideoSegmentsAsync(jobId, inputPath, normalizedRequest.Segments);
-                
-                // Update source duration to reflect edited duration
-                var totalEditedDuration = normalizedRequest.Segments.Sum(s => s.End - s.Start);
-                _logger.LogInformation("Updated source duration from segments: {Duration}s (original was {OriginalDuration}s)", 
-                    totalEditedDuration, normalizedRequest.SourceDuration);
-                normalizedRequest.SourceDuration = totalEditedDuration;
-            
-            // Recalculate bitrates with new duration
-            if (normalizedRequest.TargetSizeMb.HasValue && totalEditedDuration > 0)
-            {
-                var targetSize = normalizedRequest.TargetSizeMb.Value;
-                var targetBitsTotal = (targetSize * 1024 * 1024 * 8);
-                var totalKbps = targetBitsTotal / totalEditedDuration / 1000;
-                
-                double containerOverheadFactor;
-                if (codecConfig.FileExtension.Equals(".webm", StringComparison.OrdinalIgnoreCase))
-                {
-                    containerOverheadFactor = 0.98;
-                }
-                else
-                {
-                    if (targetSize < 3.0)
-                        containerOverheadFactor = 0.85;
-                    else if (targetSize < 8.0)
-                        containerOverheadFactor = 0.88;
-                    else if (targetSize < 20.0)
-                        containerOverheadFactor = 0.92;
-                    else
-                        containerOverheadFactor = 0.95;
-                }
-                var effectiveTargetKbps = totalKbps * containerOverheadFactor;
-                var videoKbps = Math.Max(100, effectiveTargetKbps - codecConfig.AudioBitrateKbps);
-                
-                computedTargetKbps = Math.Round(effectiveTargetKbps, 2);
-                computedVideoKbps = Math.Round(videoKbps, 2);
-                
-                _logger.LogInformation("Recalculated bitrate for edited video: Duration={Duration}s, VideoKbps={VideoKbps}", 
-                    totalEditedDuration, computedVideoKbps);
-                }
+                File.Copy(actualInputPath, outputPath, overwrite: true);
             }
             else
             {
-                _logger.LogInformation("Segments represent full video - not processing segments for job {JobId}", jobId);
+                File.Copy(inputPath, outputPath, overwrite: true);
             }
-        }
-        else
-        {
-            _logger.LogInformation("No segments provided - using full video for job {JobId}", jobId);
+            
+            // Create a completed job immediately
+            var job = new JobMetadata
+            {
+                JobId = jobId,
+                OriginalFilename = originalFilename,
+                InputPath = actualInputPath,
+                OutputPath = outputPath,
+                OutputFilename = outputFilename,
+                OutputMimeType = codecConfig.MimeType,
+                Status = "completed",
+                Codec = codecConfig.Key,
+                ScalePercent = 100, // No scaling when not compressing
+                TargetSizeMb = normalizedRequest.TargetSizeMb,
+                TargetBitrateKbps = null,
+                VideoBitrateKbps = null,
+                SourceDuration = normalizedRequest.SourceDuration,
+                TwoPass = false,
+                CreatedAt = DateTime.UtcNow,
+                StartedAt = DateTime.UtcNow,
+                CompletedAt = DateTime.UtcNow,
+                Progress = 100
+            };
+            
+            _jobs[jobId] = job;
+            _logger.LogInformation("Job {JobId} completed immediately (no compression)", jobId);
+            
+            return jobId;
         }
 
         // Check queue size before accepting new job
@@ -196,7 +224,7 @@ public class VideoCompressionService : IVideoCompressionService
         // Enable two-pass by default when using target size for better accuracy
         var enableTwoPass = normalizedRequest.TargetSizeMb.HasValue;
         
-        var job = new JobMetadata
+        var compressionJob = new JobMetadata
         {
             JobId = jobId,
             OriginalFilename = originalFilename,
@@ -215,7 +243,7 @@ public class VideoCompressionService : IVideoCompressionService
             CreatedAt = DateTime.UtcNow
         };
 
-        _jobs[jobId] = job;
+        _jobs[jobId] = compressionJob;
         _jobQueue.Enqueue(jobId);
 
         _ = Task.Run(async () => await ProcessQueueAsync(jobId, normalizedRequest, codecConfig));
