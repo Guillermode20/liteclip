@@ -146,7 +146,7 @@
     function handleDragLeave() {
         isDragover = false;
     }
-    
+
     function handleDrop(event: DragEvent) {
         event.preventDefault();
         isDragover = false;
@@ -155,12 +155,16 @@
             handleFileSelect(files[0]);
         }
     }
-    
+
     function handleFileInputChange(event: Event) {
         const target = event.target as HTMLInputElement;
         if (target.files && target.files.length > 0) {
             handleFileSelect(target.files[0]);
         }
+    }
+
+    function triggerFileInput() {
+        document.getElementById('fileInput')?.click();
     }
     
     function updateCodecHelper() {
@@ -786,39 +790,26 @@
                         />
                         
                         {#if selectedFile && objectUrl && controlsVisible}
-                            <!-- Video Preview -->
-                            <div class="video-preview-wrapper">
-                                <video
-                                    src={objectUrl}
-                                    controls
-                                    preload="metadata"
-                                    aria-label="Source video preview"
-                                    tabindex="0"
-                                    class="preview-video"
-                                >
-                                    <track kind="captions" srclang="en" label="English" default>
-                                    Your browser does not support the video tag.
-                                </video>
-                                <button 
-                                    type="button"
-                                    class="remove-video-btn"
-                                    on:click={(e) => { e.stopPropagation(); resetInterface(); }}
-                                    aria-label="Remove video"
-                                >
-                                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                        <circle cx="12" cy="12" r="10"></circle>
-                                        <line x1="15" y1="9" x2="9" y2="15"></line>
-                                        <line x1="9" y1="9" x2="15" y2="15"></line>
-                                    </svg>
-                                    remove video
-                                </button>
+                            <div 
+                                class="upload-state"
+                                on:click={triggerFileInput}
+                                on:keydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); triggerFileInput(); } }}
+                                role="button"
+                                tabindex="0"
+                            >
+                                <div class="upload-state-text">
+                                    <p class="upload-state-title">Video ready for editing</p>
+                                    <p class="upload-state-helper">Drop another file to replace it</p>
+                                </div>
+                                {#if fileInfo}
+                                    <div class="file-info">{fileInfo}</div>
+                                {/if}
                             </div>
                         {:else}
-                            <!-- Upload Prompt -->
                             <div 
                                 class="upload-prompt"
-                                on:click={() => document.getElementById('fileInput')?.click()}
-                                on:keydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); document.getElementById('fileInput')?.click(); } }}
+                                on:click={triggerFileInput}
+                                on:keydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); triggerFileInput(); } }}
                                 role="button"
                                 tabindex="0"
                             >
@@ -840,6 +831,7 @@
                     <VideoEditor 
                         videoFile={selectedFile} 
                         onSegmentsChange={handleSegmentsChange}
+                        onRemoveVideo={resetInterface}
                     />
                 </div>
             {/if}
