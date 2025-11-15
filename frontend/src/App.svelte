@@ -6,6 +6,7 @@
     let statusCheckInterval: number | null = null;
     let downloadFileName: string | null = null;
     let downloadMimeType: string | null = null;
+    let compressedVideoElement: HTMLVideoElement | null = null;
     
     let objectUrl: string | null = null;
     let sourceVideoWidth: number | null = null;
@@ -54,6 +55,9 @@
         encoderName: null,
         encoderIsHardware: false,
         encodingTime: 0,
+        finalDuration: 0,
+        finalWidth: 0,
+        finalHeight: 0,
     };
     
     const codecDetails = {
@@ -83,6 +87,13 @@
         const sizes = ['Bytes', 'KB', 'MB', 'GB'];
         const i = Math.floor(Math.log(bytes) / Math.log(k));
         return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+    }
+
+    function formatDurationLabel(seconds: number | null): string {
+        if (!seconds || !isFinite(seconds)) {
+            return '--';
+        }
+        return `${seconds.toFixed(1)}s`;
     }
     
     function handleFileSelect(file: File) {
@@ -597,7 +608,8 @@
         }
         
         // Calculate compression ratio based on the effective max size (edited video size)
-        const compressionRatio = (1 - outputSizeMb / effectiveMaxSize) * 100;
+        const safeEffectiveMaxSize = effectiveMaxSize > 0 ? effectiveMaxSize : outputSizeMb || 1;
+        const compressionRatio = (1 - outputSizeMb / safeEffectiveMaxSize) * 100;
         const startTime = new Date(result.createdAt || Date.now());
         const completionTime = new Date(result.completedAt || Date.now());
         const encodingSeconds = Math.max(0, (completionTime.getTime() - startTime.getTime()) / 1000);
@@ -614,6 +626,9 @@
             encoderName: result.encoderName || null,
             encoderIsHardware: result.encoderIsHardware ?? false,
             encodingTime: Math.round(encodingSeconds),
+            finalDuration: 0,
+            finalWidth: 0,
+            finalHeight: 0,
         };
     }
     
@@ -650,6 +665,9 @@
             encoderName: null,
             encoderIsHardware: false,
             encodingTime: 0,
+            finalDuration: 0,
+            finalWidth: 0,
+            finalHeight: 0,
         };
         
         // Re-enable upload button to try again with different settings
@@ -678,15 +696,44 @@
                 // Update metadata with actual file size
                 const actualSizeMb = blob.size / (1024 * 1024);
                 const effectiveMaxSize = getEffectiveMaxSize();
-                outputMetadata.outputSizeBytes = blob.size;
-                outputMetadata.outputSizeMb = actualSizeMb;
-                outputMetadata.compressionRatio = (1 - actualSizeMb / effectiveMaxSize) * 100;
+                const compressionRatio = effectiveMaxSize > 0
+                    ? (1 - actualSizeMb / effectiveMaxSize) * 100
+                    : 0;
+                outputMetadata = {
+                    ...outputMetadata,
+                    outputSizeBytes: blob.size,
+                    outputSizeMb: actualSizeMb,
+                    compressionRatio: compressionRatio,
+                    finalDuration: 0,
+                    finalWidth: 0,
+                    finalHeight: 0,
+                };
             } else {
                 console.warn('Failed to load video preview');
             }
         } catch (error) {
             console.warn('Failed to load video preview:', error);
         }
+    }
+
+    function handleCompressedMetadata() {
+        if (!compressedVideoElement) return;
+        const duration = isFinite(compressedVideoElement.duration) ? compressedVideoElement.duration : null;
+        const width = compressedVideoElement.videoWidth || 0;
+        const height = compressedVideoElement.videoHeight || 0;
+        const sizeBytes = outputMetadata.outputSizeBytes;
+        const bitrateKbps = duration && sizeBytes
+            ? Math.round((sizeBytes * 8) / duration / 1000)
+            : outputMetadata.videoBitrateKbps;
+
+        outputMetadata = {
+            ...outputMetadata,
+            videoBitrateKbps: bitrateKbps,
+            estimatedVideoBitrateKbps: bitrateKbps,
+            finalDuration: duration || outputMetadata.finalDuration,
+            finalWidth: width,
+            finalHeight: height,
+        };
     }
 
     function handleDownload() {
@@ -751,9 +798,43 @@
             URL.revokeObjectURL(objectUrl);
         }
         objectUrl = null;
+        compressedVideoElement = null;
+        outputMetadata = {
+            outputSizeBytes: 0,
+            outputSizeMb: 0,
+            compressionRatio: 0,
+            targetBitrateKbps: 0,
+            videoBitrateKbps: 0,
+            estimatedVideoBitrateKbps: 0,
+            scalePercent: 100,
+            codec: 'h264',
+            encoderName: null,
+            encoderIsHardware: false,
+            encodingTime: 0,
+            finalDuration: 0,
+            finalWidth: 0,
+            finalHeight: 0,
+        };
         showVideoEditor = false;
         videoSegments = [];
     }
+
+    $: finalBitrateLabel = outputMetadata.videoBitrateKbps > 0
+        ? `${Math.round(outputMetadata.videoBitrateKbps)} kbps`
+        : '--';
+
+    $: finalDurationLabel = formatDurationLabel(outputMetadata.finalDuration);
+
+    $: resolutionPercent = (() => {
+        if (!sourceVideoWidth || !sourceVideoHeight || outputMetadata.finalWidth <= 0) {
+            return null;
+        }
+        return Math.round((outputMetadata.finalWidth / sourceVideoWidth) * 100);
+    })();
+
+    $: finalResolutionLabel = (outputMetadata.finalWidth > 0 && outputMetadata.finalHeight > 0)
+        ? `${outputMetadata.finalWidth}×${outputMetadata.finalHeight}${resolutionPercent ? ` (${resolutionPercent}%)` : ''}`
+        : '--';
 </script>
 
 <div class="app-layout">
@@ -877,10 +958,12 @@
                     <h2 class="section-title">// compressed_output</h2>
                     <div class="video-container">
                         <video
+                            bind:this={compressedVideoElement}
                             controls
                             preload="none"
                             aria-label="Compressed video preview"
                             tabindex="0"
+                            on:loadedmetadata={handleCompressedMetadata}
                         >
                             {#if videoPreviewUrl}
                                 <source src={videoPreviewUrl} type={downloadMimeType || 'video/mp4'}>
@@ -915,11 +998,15 @@
                             </div>
                             <div class="metadata-item">
                                 <span class="metadata-label">bitrate</span>
-                                <span class="metadata-value">{Math.round(outputMetadata.videoBitrateKbps)} kbps</span>
+                                <span class="metadata-value">{finalBitrateLabel}</span>
                             </div>
                             <div class="metadata-item">
                                 <span class="metadata-label">resolution</span>
-                                <span class="metadata-value">{outputMetadata.scalePercent}%</span>
+                                <span class="metadata-value">{finalResolutionLabel}</span>
+                            </div>
+                            <div class="metadata-item">
+                                <span class="metadata-label">duration</span>
+                                <span class="metadata-value">{finalDurationLabel}</span>
                             </div>
                             <div class="metadata-item">
                                 <span class="metadata-label">original_size</span>

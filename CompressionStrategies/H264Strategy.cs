@@ -161,6 +161,8 @@ public class H264Strategy : ICompressionStrategy
                     "-g", "60",
                     "-bf", "3"
                 });
+                // AMF h264 encoder only supports 8-bit input on Windows. Force NV12.
+                args.AddRange(new[] { "-pix_fmt", "nv12" });
             }
         }
         else
