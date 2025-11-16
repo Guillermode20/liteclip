@@ -32,7 +32,7 @@ body {
 }
 
 .app-header {
-    padding: 16px 24px;
+    padding: 8px 16px;
     border-bottom: 1px solid #27272a;
     background: rgba(9, 9, 11, 0.8);
     backdrop-filter: blur(12px);
@@ -43,7 +43,7 @@ body {
 
 .app-header h1 {
     margin: 0;
-    font-size: 24px;
+    font-size: 18px;
     font-weight: 600;
     color: #fafafa;
     letter-spacing: -0.02em;
@@ -52,11 +52,7 @@ body {
 }
 
 .subtitle {
-    margin: 4px 0 0 0;
-    font-size: 13px;
-    color: #71717a;
-    word-break: break-word;
-    overflow-wrap: break-word;
+    display: none !important;
 }
 
 .main-layout {

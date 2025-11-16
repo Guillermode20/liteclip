@@ -37,6 +37,7 @@
     let codecSelectValue = 'h265';
     let showCancelButton = false;
     let etaText = '';
+    let fileInputRef: HTMLInputElement | null = null;
     
     // Video editor state
     let showVideoEditor = false;
@@ -817,6 +818,9 @@
         };
         showVideoEditor = false;
         videoSegments = [];
+        if (fileInputRef) {
+            fileInputRef.value = '';
+        }
     }
 
     $: finalBitrateLabel = outputMetadata.videoBitrateKbps > 0
@@ -841,7 +845,6 @@
     <!-- Header -->
     <header class="app-header">
         <h1>// liteclip</h1>
-        <p class="subtitle">fast video compression with intelligent optimization</p>
     </header>
 
     <!-- Main Layout -->
@@ -849,7 +852,7 @@
         <!-- Main Content -->
         <main class="main-content">
             <!-- Upload Section (always visible) -->
-            {#if !videoPreviewVisible && !progressVisible}
+            {#if !selectedFile && !videoPreviewVisible && !progressVisible}
                 <div class="content-card">
                     <h2 class="section-title">// upload_video</h2>
                     <div 
@@ -867,6 +870,7 @@
                             id="fileInput" 
                             accept="video/*" 
                             style="display: none;"
+                            bind:this={fileInputRef}
                             on:change={handleFileInputChange}
                         />
                         

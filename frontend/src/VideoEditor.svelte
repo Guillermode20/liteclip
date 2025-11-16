@@ -15,6 +15,7 @@
     let isReady: boolean = false;
     let isDragging: boolean = false;
     let wasPlayingBeforeDrag: boolean = false;
+    let videoAspectRatio = 16 / 9;
     
     // Trim segments (kept segments)
     let segments: Array<{start: number, end: number, id: string}> = [];
@@ -45,6 +46,9 @@
     function handleLoadedMetadata() {
         duration = videoElement.duration;
         isReady = true;
+        if (videoElement.videoWidth && videoElement.videoHeight) {
+            videoAspectRatio = videoElement.videoWidth / videoElement.videoHeight;
+        }
         
         // Initialize with full video as single segment
         segments = [{
@@ -275,15 +279,17 @@
 
     <!-- Video Preview -->
     <div class="video-preview">
-        <!-- svelte-ignore a11y-media-has-caption -->
-        <video
-            bind:this={videoElement}
-            on:loadedmetadata={handleLoadedMetadata}
-            on:timeupdate={handleTimeUpdate}
-            on:play={() => isPlaying = true}
-            on:pause={() => isPlaying = false}
-            class="editor-video"
-        ></video>
+        <div class="video-frame" style={`--video-aspect: ${videoAspectRatio}`}>
+            <!-- svelte-ignore a11y-media-has-caption -->
+            <video
+                bind:this={videoElement}
+                on:loadedmetadata={handleLoadedMetadata}
+                on:timeupdate={handleTimeUpdate}
+                on:play={() => isPlaying = true}
+                on:pause={() => isPlaying = false}
+                class="editor-video"
+            ></video>
+        </div>
         
         <div class="video-controls">
             <button 
@@ -503,14 +509,25 @@
         border-radius: 4px;
         margin-bottom: 1.5rem;
         overflow: hidden;
+        display: flex;
+        flex-direction: column;
+    }
+
+    .video-frame {
+        position: relative;
+        width: 100%;
+        aspect-ratio: var(--video-aspect, 16 / 9);
+        overflow: hidden;
+        background: #09090b;
+        border-bottom: 1px solid #27272a;
     }
 
     .editor-video {
         width: 100%;
-        height: auto;
+        height: 100%;
         display: block;
-        max-height: 400px;
-        object-fit: cover;
+        object-fit: contain;
+        background: #09090b;
     }
 
     .video-controls {
