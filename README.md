@@ -43,10 +43,20 @@ A fast, lightweight desktop application for compressing videos. Built with ASP.N
 .\build.bat
 ```
 
-Or manually:
-```bash
-cd frontend && npm install && npm run build && cd ..
-dotnet publish -c Release -r win-x64 -o publish-win /p:PublishSingleFile=true
+Or manually (frontend builds automatically during .NET build/publish):
+```powershell
+# Publish a Release single-file to the project's publish-win directory
+dotnet publish -c Release
+```
+
+Notes:
+- `dotnet build -c Release` will compile the code, but to generate a single-file, use `dotnet publish -c Release`.
+
+Optional: rebuild UI only
+```powershell
+cd frontend
+npm install   # first time only
+npm run build
 ```
 
 Output: `publish-win/liteclip.exe`

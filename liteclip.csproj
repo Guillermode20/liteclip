@@ -57,17 +57,17 @@
   -->
 
   <!-- 
-    DEBUGGING: The auto-build target is commented out to remove
-    it as a variable. Remember to run 'npm run build' manually
-    in your 'frontend' folder before running 'dotnet run'.
+    Frontend auto-build: Build Svelte/Vite UI before .NET build/publish.
+    Skips during design-time builds and if frontend folder is missing.
   -->
-  <!--
-  <Target Name="BuildFrontend" BeforeTargets="BeforeBuild">
-    <Message Importance="high" Text="Building frontend..." />
+  <Target Name="BuildFrontend" BeforeTargets="Build;Publish"
+          Condition="Exists('frontend/package.json') and '$(DesignTimeBuild)' != 'true'">
+    <Message Importance="high" Text="Building frontend (Vite) -> wwwroot ..." />
+    <!-- Install dependencies only if node_modules missing -->
     <Exec Command="npm install" WorkingDirectory="frontend" Condition="!Exists('frontend/node_modules')" />
+    <!-- Build always to ensure wwwroot is up-to-date -->
     <Exec Command="npm run build" WorkingDirectory="frontend" />
   </Target>
-  -->
 
   <!-- Speed-focused Debug settings -->
   <PropertyGroup Condition="'$(Configuration)'=='Debug'">
@@ -83,16 +83,15 @@
   <PropertyGroup Condition="'$(Configuration)'=='Release'">
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>
-    <EnableCompressionInSingleFile>false</EnableCompressionInSingleFile>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
     <IncludeAllContentForSelfExtract>false</IncludeAllContentForSelfExtract>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <PublishReadyToRun>true</PublishReadyToRun>
     <GenerateEmbeddedFilesManifest>true</GenerateEmbeddedFilesManifest>
     <!-- Native AOT disabled - incompatible with ASP.NET Core and Photino -->
     <PublishAot>false</PublishAot>
-    <!-- Trimming enabled with partial mode for better compatibility -->
-    <PublishTrimmed>true</PublishTrimmed>
-    <TrimMode>partial</TrimMode>
+    <!-- Trimming disabled to ensure full ASP.NET Core server is bundled -->
+    <PublishTrimmed>false</PublishTrimmed>
     <!-- Suppress trimming warnings -->
     <SuppressTrimAnalysisWarnings>false</SuppressTrimAnalysisWarnings>
     <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
@@ -100,6 +99,11 @@
     <EventSourceSupport>false</EventSourceSupport>
     <HttpActivityPropagationSupport>false</HttpActivityPropagationSupport>
     <MetricsSupport>false</MetricsSupport>
+    <!-- Ensure Release publish outputs a single-file to publish-win by default -->
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <!-- PublishDir set to publish-win at project root -->
+    <PublishDir>$(MSBuildProjectDirectory)\publish-win\</PublishDir>
   </PropertyGroup>
   
   <!-- Preserve assemblies that use reflection (prevent trim issues) -->

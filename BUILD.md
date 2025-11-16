@@ -106,6 +106,7 @@ Or directly:
 .\publish-win.ps1
 ```
 
+- By default, `dotnet publish -c Release` will produce a single-file executable in the `publish-win/` folder.
 This creates:
 - `publish-win/liteclip.exe` - Working directory build
 - `dist/liteclip-1.0.0-portable-win-x64.exe` - Versioned portable copy
@@ -198,6 +199,16 @@ chmod +x build-linux.sh build-appimage.sh build-rpm.sh
 - Linux packages must be built on Linux
 - Windows packages must be built on Windows
 - The .NET project itself is cross-platform compatible
+
+### Frontend Build Integration
+- The Svelte/Vite frontend is automatically built as part of `dotnet build` and `dotnet publish`.
+- Output goes to `wwwroot/` (configured in `frontend/vite.config.ts`).
+- Manual UI build (optional):
+  ```powershell
+  cd frontend
+  npm install   # first time only
+  npm run build
+  ```
 
 ## Troubleshooting
 
