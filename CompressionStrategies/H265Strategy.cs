@@ -119,6 +119,7 @@ public class H265Strategy : ICompressionStrategy
         
         if (isHardware)
         {
+            args.AddRange(new[] { "-pix_fmt", "yuv420p" });
             args.AddRange(new[] { "-minrate", $"{minRate}k" });
             
             if (encoder == "hevc_nvenc")

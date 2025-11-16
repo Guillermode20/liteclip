@@ -38,6 +38,7 @@
     let showCancelButton = false;
     let etaText = '';
     let fileInputRef: HTMLInputElement | null = null;
+    let compressionSkipped = false;
     
     // Video editor state
     let showVideoEditor = false;
@@ -609,8 +610,14 @@
         }
         
         // Calculate compression ratio based on the effective max size (edited video size)
+        const noTargetBitrate = !result.targetBitrateKbps || result.targetBitrateKbps <= 0;
+        const noVideoBitrate = !result.videoBitrateKbps || result.videoBitrateKbps <= 0;
+        compressionSkipped = noTargetBitrate && noVideoBitrate;
+
         const safeEffectiveMaxSize = effectiveMaxSize > 0 ? effectiveMaxSize : outputSizeMb || 1;
-        const compressionRatio = (1 - outputSizeMb / safeEffectiveMaxSize) * 100;
+        const compressionRatio = compressionSkipped
+            ? 0
+            : (1 - outputSizeMb / safeEffectiveMaxSize) * 100;
         const startTime = new Date(result.createdAt || Date.now());
         const completionTime = new Date(result.completedAt || Date.now());
         const encodingSeconds = Math.max(0, (completionTime.getTime() - startTime.getTime()) / 1000);
@@ -670,6 +677,7 @@
             finalWidth: 0,
             finalHeight: 0,
         };
+        compressionSkipped = false;
         
         // Re-enable upload button to try again with different settings
         uploadBtnDisabled = false;
@@ -697,9 +705,11 @@
                 // Update metadata with actual file size
                 const actualSizeMb = blob.size / (1024 * 1024);
                 const effectiveMaxSize = getEffectiveMaxSize();
-                const compressionRatio = effectiveMaxSize > 0
-                    ? (1 - actualSizeMb / effectiveMaxSize) * 100
-                    : 0;
+                const compressionRatio = compressionSkipped
+                    ? 0
+                    : effectiveMaxSize > 0
+                        ? (1 - actualSizeMb / effectiveMaxSize) * 100
+                        : 0;
                 outputMetadata = {
                     ...outputMetadata,
                     outputSizeBytes: blob.size,
@@ -781,6 +791,7 @@
         downloadMimeType = null;
         showCancelButton = false;
         etaText = '';
+        compressionSkipped = false;
         if (videoPreviewUrl) {
             URL.revokeObjectURL(videoPreviewUrl);
             videoPreviewUrl = null;
