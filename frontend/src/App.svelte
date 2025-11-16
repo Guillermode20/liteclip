@@ -339,6 +339,8 @@
         const effectiveMaxSize = getEffectiveMaxSize();
         const targetSizeMb = (effectiveMaxSize * percent) / 100;
         formData.append('targetSizeMb', targetSizeMb.toFixed(2));
+        const shouldSkipCompression = percent >= 100;
+        formData.append('skipCompression', shouldSkipCompression ? 'true' : 'false');
         
         // Use effective duration for calculations
         const effectiveDuration = getEffectiveDuration() || sourceDuration!;
@@ -590,11 +592,18 @@
         const effectiveDuration = getEffectiveDuration() || sourceDuration;
         const effectiveMaxSize = getEffectiveMaxSize();
         
-        // Estimate output size based on available data
+        // Estimate output size based on available data (prefer actual size from server)
+        const actualOutputBytes = typeof result.outputSizeBytes === 'number' && Number.isFinite(result.outputSizeBytes) && result.outputSizeBytes > 0
+            ? result.outputSizeBytes
+            : null;
+
         let estimatedOutputBytes = 0;
         let outputSizeMb = 0;
-        
-        if (result.targetBitrateKbps && result.targetBitrateKbps > 0) {
+
+        if (actualOutputBytes) {
+            estimatedOutputBytes = actualOutputBytes;
+            outputSizeMb = actualOutputBytes / (1024 * 1024);
+        } else if (result.targetBitrateKbps && result.targetBitrateKbps > 0) {
             estimatedOutputBytes = Math.round((result.targetBitrateKbps * 1000 * effectiveDuration) / 8);
             outputSizeMb = estimatedOutputBytes / (1024 * 1024);
         } else if (result.videoBitrateKbps && result.videoBitrateKbps > 0) {
@@ -610,14 +619,14 @@
         }
         
         // Calculate compression ratio based on the effective max size (edited video size)
-        const noTargetBitrate = !result.targetBitrateKbps || result.targetBitrateKbps <= 0;
-        const noVideoBitrate = !result.videoBitrateKbps || result.videoBitrateKbps <= 0;
-        compressionSkipped = noTargetBitrate && noVideoBitrate;
+        // Check if backend explicitly marked compression as skipped
+        compressionSkipped = result.compressionSkipped === true;
 
-        const safeEffectiveMaxSize = effectiveMaxSize > 0 ? effectiveMaxSize : outputSizeMb || 1;
+        const ratioSizeMb = actualOutputBytes ? actualOutputBytes / (1024 * 1024) : outputSizeMb;
+        const safeEffectiveMaxSize = effectiveMaxSize > 0 ? effectiveMaxSize : ratioSizeMb || 1;
         const compressionRatio = compressionSkipped
             ? 0
-            : (1 - outputSizeMb / safeEffectiveMaxSize) * 100;
+            : (1 - ratioSizeMb / safeEffectiveMaxSize) * 100;
         const startTime = new Date(result.createdAt || Date.now());
         const completionTime = new Date(result.completedAt || Date.now());
         const encodingSeconds = Math.max(0, (completionTime.getTime() - startTime.getTime()) / 1000);

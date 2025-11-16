@@ -116,10 +116,16 @@ public class VideoCompressionService : IVideoCompressionService
                 effectiveMaxSizeMb, originalSizeMb, durationRatio);
         }
 
-        // Check if target size is 100% or more of effective max (no compression needed)
-        bool skipCompression = false;
-        if (normalizedRequest.TargetSizeMb.HasValue && normalizedRequest.TargetSizeMb.Value >= effectiveMaxSizeMb)
+        // Check if compression should be skipped
+        bool skipCompression = normalizedRequest.SkipCompression;
+        
+        if (skipCompression)
         {
+            _logger.LogInformation("Skip compression flag is set for job {JobId} - user requested no compression", jobId);
+        }
+        else if (normalizedRequest.TargetSizeMb.HasValue && normalizedRequest.TargetSizeMb.Value >= (effectiveMaxSizeMb - 0.01))
+        {
+            // Also skip if target size is >= effective max (with small tolerance for floating-point)
             skipCompression = true;
             _logger.LogInformation("Target size ({TargetMb}MB) is >= effective max size ({EffectiveMaxMb}MB) - skipping compression for job {JobId}", 
                 normalizedRequest.TargetSizeMb.Value, effectiveMaxSizeMb, jobId);
@@ -196,7 +202,6 @@ public class VideoCompressionService : IVideoCompressionService
             {
                 File.Copy(inputPath, outputPath, overwrite: true);
             }
-            
             // Create a completed job immediately
             var job = new JobMetadata
             {
@@ -214,11 +219,17 @@ public class VideoCompressionService : IVideoCompressionService
                 VideoBitrateKbps = null,
                 SourceDuration = normalizedRequest.SourceDuration,
                 TwoPass = false,
+                CompressionSkipped = true,
                 CreatedAt = DateTime.UtcNow,
                 StartedAt = DateTime.UtcNow,
                 CompletedAt = DateTime.UtcNow,
                 Progress = 100
             };
+            
+            if (File.Exists(outputPath))
+            {
+                job.OutputSizeBytes = new FileInfo(outputPath).Length;
+            }
             
             _jobs[jobId] = job;
             _logger.LogInformation("Job {JobId} completed immediately (no compression)", jobId);
@@ -638,6 +649,7 @@ public class VideoCompressionService : IVideoCompressionService
             if (File.Exists(job.OutputPath))
             {
                 var outputSize = new FileInfo(job.OutputPath).Length;
+                    job.OutputSizeBytes = outputSize;
                 var outputSizeMb = outputSize / (1024.0 * 1024.0);
                 _logger.LogInformation("Video compression completed for job {JobId} using {Codec}. Output size: {OutputSizeMb:F2} MB (Target: {TargetSizeMb} MB)", 
                     jobId, job.Codec, outputSizeMb, job.TargetSizeMb?.ToString("F2") ?? "N/A");
@@ -832,6 +844,7 @@ public class VideoCompressionService : IVideoCompressionService
             if (File.Exists(job.OutputPath))
             {
                 var outputSize = new FileInfo(job.OutputPath).Length;
+                    job.OutputSizeBytes = outputSize;
                 var outputSizeMb = outputSize / (1024.0 * 1024.0);
                 _logger.LogInformation("Two-pass compression completed for job {JobId}. Output size: {OutputSizeMb:F2} MB (Target: {TargetSizeMb} MB)", 
                     jobId, outputSizeMb, job.TargetSizeMb?.ToString("F2") ?? "N/A");
@@ -1354,6 +1367,8 @@ public class JobMetadata
     public string OutputPath { get; set; } = string.Empty;
     public string OutputFilename { get; set; } = string.Empty;
     public string OutputMimeType { get; set; } = "video/mp4";
+    public long? OutputSizeBytes { get; set; }
+    public bool CompressionSkipped { get; set; } = false;
     public string Status { get; set; } = string.Empty;
     public string Codec { get; set; } = "h264";
     public int? ScalePercent { get; set; }

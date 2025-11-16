@@ -12,6 +12,8 @@ public class CompressionResult
     public double? TargetBitrateKbps { get; set; }
     public string? OutputFilename { get; set; }
     public string? OutputMimeType { get; set; }
+    public long? OutputSizeBytes { get; set; }
+    public bool CompressionSkipped { get; set; } = false;
     // Encoder metadata
     public string? EncoderName { get; set; }
     public bool? EncoderIsHardware { get; set; }

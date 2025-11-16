@@ -96,6 +96,7 @@ namespace liteclip
                 [FromForm] double? targetSizeMb,
                 [FromForm] double? sourceDuration,
                 [FromForm] string? segments,
+                [FromForm] bool? skipCompression,
                 
                 VideoCompressionService compressionService,
                 IConfiguration configuration) =>
@@ -139,6 +140,7 @@ namespace liteclip
                         Codec = codec ?? "h264",
                         ScalePercent = scalePercent,
                         TargetSizeMb = targetSizeMb,
+                        SkipCompression = skipCompression ?? false,
                         SourceDuration = sourceDuration,
                         Segments = videoSegments
                     };
@@ -156,6 +158,8 @@ namespace liteclip
                         ScalePercent = job?.ScalePercent,
                         TargetSizeMb = job?.TargetSizeMb,
                         TargetBitrateKbps = job?.TargetBitrateKbps,
+                        OutputSizeBytes = job?.OutputSizeBytes,
+                        CompressionSkipped = job?.CompressionSkipped ?? false,
                         OutputFilename = job?.OutputFilename,
                         OutputMimeType = job?.OutputMimeType,
                         Progress = job?.Progress ?? 0,
@@ -217,6 +221,8 @@ namespace liteclip
                     ScalePercent = job.ScalePercent,
                     TargetSizeMb = job.TargetSizeMb,
                     TargetBitrateKbps = job.TargetBitrateKbps,
+                    OutputSizeBytes = job.OutputSizeBytes,
+                    CompressionSkipped = job.CompressionSkipped,
                     OutputFilename = job.OutputFilename,
                     OutputMimeType = job.OutputMimeType,
                     Progress = job.Progress,
@@ -293,6 +299,8 @@ namespace liteclip
                         ScalePercent = job.ScalePercent,
                         TargetSizeMb = job.TargetSizeMb,
                         TargetBitrateKbps = job.TargetBitrateKbps,
+                        OutputSizeBytes = job.OutputSizeBytes,
+                        CompressionSkipped = job.CompressionSkipped,
                         OutputFilename = job.OutputFilename,
                         OutputMimeType = job.OutputMimeType
                     ,
