@@ -49,6 +49,8 @@
         if (videoElement.videoWidth && videoElement.videoHeight) {
             videoAspectRatio = videoElement.videoWidth / videoElement.videoHeight;
         }
+        currentTime = 0;
+        videoElement.currentTime = 0;
         
         // Initialize with full video as single segment
         segments = [{
@@ -223,12 +225,21 @@
         }
     }
 
-    function formatTime(seconds: number): string {
-        const mins = Math.floor(seconds / 60);
-        const secs = Math.floor(seconds % 60);
-        const ms = Math.floor((seconds % 1) * 10);
-        return `${mins}:${secs.toString().padStart(2, '0')}.${ms}`;
-    }
+        function formatTime(seconds: number): string {
+            const mins = Math.floor(seconds / 60);
+            const secs = Math.floor(seconds % 60);
+            const ms = Math.floor((seconds % 1) * 10);
+            return `${mins}:${secs.toString().padStart(2, '0')}.${ms}`;
+        }
+
+        function formatMarkerTime(seconds: number): string {
+            if (!Number.isFinite(seconds) || seconds < 0) {
+                return '0:00';
+            }
+            const mins = Math.floor(seconds / 60);
+            const secs = Math.floor(seconds % 60);
+            return `${mins}:${secs.toString().padStart(2, '0')}`;
+        }
 
     function updateThumbnails() {
         // Generate thumbnails for timeline (simplified version)
@@ -404,8 +415,13 @@
         <!-- Time markers -->
         <div class="timeline-markers">
             {#each Array(11) as _, i}
-                <div class="time-marker" style="left: {i * 10}%">
-                    {formatTime((duration * i) / 10)}
+                <div 
+                    class="time-marker" 
+                    class:start-marker={i === 0}
+                    class:end-marker={i === 10}
+                    style={i === 10 ? 'right: 0;' : `left: ${i * 10}%;`}
+                >
+                    {formatMarkerTime((duration * i) / 10)}
                 </div>
             {/each}
         </div>
@@ -693,7 +709,21 @@
         position: absolute;
         font-size: 0.7rem;
         color: #52525b;
+        white-space: nowrap;
         transform: translateX(-50%);
+    }
+
+    .time-marker.start-marker {
+        left: 0;
+        transform: none;
+        text-align: left;
+    }
+
+    .time-marker.end-marker {
+        left: auto;
+        right: 0;
+        transform: none;
+        text-align: right;
     }
 
     .segments-list {

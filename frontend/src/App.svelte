@@ -29,7 +29,7 @@
     let videoPreviewVisible = false;
     let videoPreviewUrl: string | null = null;
     let uploadBtnDisabled = true;
-    let uploadBtnText = 'Upload & Compress Video';
+    let uploadBtnText = 'Process Video';
     let outputSizeSliderDisabled = true;
     let outputSizeValue = '--';
     let outputSizeDetails = '';
@@ -108,7 +108,7 @@
         originalSizeMb = selectedFile.size / (1024 * 1024);
         fileInfo = `Selected: ${file.name} (${formatFileSize(file.size)})`;
         uploadBtnDisabled = false;
-        uploadBtnText = 'Upload & Compress Video';
+        uploadBtnText = 'Process Video';
         controlsVisible = true;
         metadataVisible = false;
         showVideoEditor = true;
@@ -409,7 +409,7 @@
             
             progressPercent = 100;
             isCompressing = true;
-            showStatus('Video uploaded successfully. Compressing...', 'processing');
+            showStatus('Video uploaded successfully. Processing...', 'processing');
             
             statusCheckInterval = window.setInterval(checkStatus, 2000);
             
@@ -425,7 +425,7 @@
             
             showStatus('Upload failed: ' + errorMessage, 'error');
             uploadBtnDisabled = false;
-            uploadBtnText = 'Upload & Compress Video';
+            uploadBtnText = 'Process Video';
             progressVisible = false;
         }
     }
@@ -438,8 +438,8 @@
                 if (result.status === 'queued') {
                     showCancelButton = true;
                     const queueMsg = result.queuePosition > 0 
-                        ? `Queued for compression (position ${result.queuePosition})...`
-                        : 'Queued for compression...';
+                        ? `Queued for processing (position ${result.queuePosition})...`
+                        : 'Queued for processing...';
                     showStatus(queueMsg, 'processing');
                 } else if (result.status === 'processing') {
                     showCancelButton = true;
@@ -449,10 +449,10 @@
                     // Update ETA
                     if (result.estimatedSecondsRemaining && result.estimatedSecondsRemaining > 0) {
                         etaText = formatTimeRemaining(result.estimatedSecondsRemaining);
-                        showStatus(`Compressing video... ${progressPercentValue.toFixed(1)}% (ETA: ${etaText})`, 'processing');
+                        showStatus(`Processing video... ${progressPercentValue.toFixed(1)}% (ETA: ${etaText})`, 'processing');
                     } else {
                         etaText = '';
-                        showStatus(`Compressing video... ${progressPercentValue.toFixed(1)}%`, 'processing');
+                        showStatus(`Processing video... ${progressPercentValue.toFixed(1)}%`, 'processing');
                     }
                     // If encoder/codec info is available while processing, surface it in the UI
                     try {
@@ -480,7 +480,7 @@
                     // Load video for preview
                     loadVideoPreview();
 
-                    showStatus('Compression complete! Preview and download your video.', 'success');
+                    showStatus('Processing complete! Preview and download your video.', 'success');
                     videoPreviewVisible = true;
                     downloadVisible = true;
                     progressVisible = false;
@@ -492,9 +492,9 @@
                     isCompressing = false;
                     showCancelButton = false;
                     etaText = '';
-                    showStatus('Compression was cancelled.', 'error');
+                    showStatus('Processing was cancelled.', 'error');
                     uploadBtnDisabled = false;
-                    uploadBtnText = 'Upload & Compress Video';
+                    uploadBtnText = 'Process Video';
                     progressVisible = false;
                 } else if (result.status === 'failed') {
                     if (statusCheckInterval) {
@@ -504,9 +504,9 @@
                     isCompressing = false;
                     showCancelButton = false;
                     etaText = '';
-                    showStatus('Compression failed: ' + (result.message || 'Unknown error'), 'error');
+                    showStatus('Processing failed: ' + (result.message || 'Unknown error'), 'error');
                     uploadBtnDisabled = false;
-                    uploadBtnText = 'Upload & Compress Video';
+                    uploadBtnText = 'Process Video';
                     progressVisible = false;
                 }
             } else {
@@ -527,9 +527,9 @@
                 } catch {
                     // If we can't read the body, use default message
                 }
-                showStatus('Compression failed: ' + errorMessage, 'error');
+            showStatus('Processing failed: ' + errorMessage, 'error');
                 uploadBtnDisabled = false;
-                uploadBtnText = 'Upload & Compress Video';
+                uploadBtnText = 'Process Video';
                 progressVisible = false;
             }
         } catch (error) {
@@ -541,7 +541,7 @@
             isCompressing = false;
             showStatus('Failed to check status: ' + (error as Error).message, 'error');
             uploadBtnDisabled = false;
-            uploadBtnText = 'Upload & Compress Video';
+            uploadBtnText = 'Process Video';
             progressVisible = false;
         }
     }
@@ -567,7 +567,7 @@
             }
         } catch (error) {
             console.error('Cancel failed:', error);
-            showStatus('Failed to cancel compression', 'error');
+            showStatus('Failed to cancel processing', 'error');
         }
     }
 
@@ -690,7 +690,7 @@
         
         // Re-enable upload button to try again with different settings
         uploadBtnDisabled = false;
-        uploadBtnText = 'Upload & Compress Video';
+        uploadBtnText = 'Process Video';
         
         // Show success message
         showStatus('Result cleared. You can adjust settings and compress again.', 'success');
@@ -793,7 +793,7 @@
         progressPercent = 0;
         isCompressing = false;
         uploadBtnDisabled = true;
-        uploadBtnText = 'Upload & Compress Video';
+        uploadBtnText = 'Process Video';
         controlsVisible = false;
         metadataVisible = false;
         downloadFileName = null;
@@ -1138,7 +1138,7 @@
                                     on:click={handleCancelJob}
                                     class="action-btn danger"
                                 >
-                                    $ cancel compression
+                                    $ cancel processing
                                 </button>
                             {/if}
                         </section>
