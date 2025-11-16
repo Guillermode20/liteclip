@@ -42,7 +42,7 @@ try {
     $dotnetVersion = dotnet --version
     Write-Host "Found .NET SDK version: $dotnetVersion" -ForegroundColor Green
 } catch {
-    Write-Host "ERROR: .NET SDK not found. Please install .NET 9.0 SDK or later." -ForegroundColor Red
+    Write-Host "ERROR: .NET SDK not found. Please install .NET 10.0 SDK or later." -ForegroundColor Red
     Write-Host ""
     Write-Host "Press any key to exit..." -ForegroundColor Gray
     $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")

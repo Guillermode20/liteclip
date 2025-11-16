@@ -11,7 +11,7 @@ Current version: **1.0.0**
 ### For Linux Builds
 
 - **Bash shell**
-- **.NET 9.0 SDK** or later: https://dotnet.microsoft.com/download/dotnet/9.0
+- **.NET 10.0 SDK** or later: https://dotnet.microsoft.com/download/dotnet/10.0
 - **Node.js 18+**: https://nodejs.org/
 - **rpm-build** (for RPM packages): `sudo dnf install rpm-build rpmdevtools`
 - **wget** (for AppImage): `sudo dnf install wget`
@@ -19,7 +19,7 @@ Current version: **1.0.0**
 ### For Windows Builds
 
 - **PowerShell** (pre-installed on Windows)
-- **.NET 9.0 SDK** or later: https://dotnet.microsoft.com/download/dotnet/9.0
+- **.NET 10.0 SDK** or later: https://dotnet.microsoft.com/download/dotnet/10.0
 - **Node.js 18+**: https://nodejs.org/
 - **Inno Setup 6** (for installer): https://jrsoftware.org/isdl.php
 
@@ -215,7 +215,7 @@ chmod +x build-linux.sh build-appimage.sh build-rpm.sh
 ### Linux
 
 **Issue:** `dotnet: command not found`
-- **Solution:** Install .NET 9.0 SDK: https://dotnet.microsoft.com/download/dotnet/9.0
+- **Solution:** Install .NET 10.0 SDK: https://dotnet.microsoft.com/download/dotnet/10.0
 
 **Issue:** `rpmbuild: command not found`
 - **Solution:** `sudo dnf install rpm-build rpmdevtools`
@@ -229,7 +229,7 @@ chmod +x build-linux.sh build-appimage.sh build-rpm.sh
 - **Solution:** Install Inno Setup 6 from https://jrsoftware.org/isdl.php
 
 **Issue:** `dotnet: command not found`
-- **Solution:** Install .NET 9.0 SDK: https://dotnet.microsoft.com/download/dotnet/9.0
+- **Solution:** Install .NET 10.0 SDK: https://dotnet.microsoft.com/download/dotnet/10.0
 
 **Issue:** `node: command not found`
 - **Solution:** Install Node.js from https://nodejs.org/

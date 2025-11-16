@@ -32,7 +32,7 @@ A fast, lightweight desktop application for compressing videos. Built with ASP.N
 
 ### Prerequisites
 
-- [.NET 9.0 SDK](https://dotnet.microsoft.com/download/dotnet/9.0) or later
+- [.NET 10.0 SDK](https://dotnet.microsoft.com/download/dotnet/10.0) or later
 - [Node.js](https://nodejs.org/) 18+
 - [FFmpeg](https://ffmpeg.org/) executable at `ffmpeg/ffmpeg.exe`
 
@@ -127,7 +127,7 @@ Edit `appsettings.json`:
 
 ## Tech Stack
 
-- **Backend**: ASP.NET Core 9.0
+- **Backend**: ASP.NET Core 10.0
 - **Frontend**: Svelte 5 + TypeScript
 - **Build**: Vite
 - **Video Processing**: FFmpeg
