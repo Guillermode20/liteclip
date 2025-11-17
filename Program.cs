@@ -178,7 +178,9 @@ namespace liteclip
                         OutputMimeType = job?.OutputMimeType,
                         Progress = job?.Progress ?? 0,
                         EncoderName = job?.EncoderName,
-                        EncoderIsHardware = job?.EncoderIsHardware
+                        EncoderIsHardware = job?.EncoderIsHardware,
+                        CreatedAt = job?.CreatedAt,
+                        CompletedAt = job?.CompletedAt
                     });
                 }
                 catch (Exception ex)
@@ -243,7 +245,9 @@ namespace liteclip
                     EstimatedSecondsRemaining = job.EstimatedSecondsRemaining,
                     QueuePosition = queuePosition,
                     EncoderName = job.EncoderName,
-                    EncoderIsHardware = job.EncoderIsHardware
+                    EncoderIsHardware = job.EncoderIsHardware,
+                    CreatedAt = job.CreatedAt,
+                    CompletedAt = job.CompletedAt
                 });
             })
             .WithName("GetJobStatus");
@@ -316,11 +320,12 @@ namespace liteclip
                         OutputSizeBytes = job.OutputSizeBytes,
                         CompressionSkipped = job.CompressionSkipped,
                         OutputFilename = job.OutputFilename,
-                        OutputMimeType = job.OutputMimeType
-                    ,
+                        OutputMimeType = job.OutputMimeType,
                         Progress = job.Progress,
                         EncoderName = job.EncoderName,
-                        EncoderIsHardware = job.EncoderIsHardware
+                        EncoderIsHardware = job.EncoderIsHardware,
+                        CreatedAt = job.CreatedAt,
+                        CompletedAt = job.CompletedAt
                     });
                 }
 

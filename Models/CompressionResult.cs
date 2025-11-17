@@ -20,6 +20,9 @@ public class CompressionResult
     public double Progress { get; set; } = 0;
     public int? EstimatedSecondsRemaining { get; set; }
     public int? QueuePosition { get; set; }
+    // Timestamp metadata for encoding time calculation
+    public DateTime? CreatedAt { get; set; }
+    public DateTime? CompletedAt { get; set; }
 }
 
 
