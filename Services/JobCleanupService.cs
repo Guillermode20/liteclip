@@ -122,13 +122,3 @@ public class JobCleanupService : BackgroundService
     }
 }
 
-public static class VideoCompressionServiceExtensions
-{
-    public static IEnumerable<JobMetadata> GetAllJobs(this VideoCompressionService service)
-    {
-        // This is a helper method to access all jobs for cleanup
-        // We'll need to add a public method in VideoCompressionService to support this
-        return service.GetAllJobsInternal();
-    }
-}
-

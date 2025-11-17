@@ -51,108 +51,29 @@ public class VideoCompressionService : IVideoCompressionService
 
     public async Task<string> CompressVideoAsync(IFormFile videoFile, CompressionRequest request)
     {
-        _logger.LogInformation("Compression request received - Mode: {Mode}, TargetSizeMb: {TargetSizeMb}, SourceDuration: {SourceDuration}", 
+        _logger.LogInformation("Compression request received - Mode: {Mode}, TargetSizeMb: {TargetSizeMb}, SourceDuration: {SourceDuration}",
             $"{(request.UseUltraMode ? "Ultra" : request.UseQualityMode ? "Quality" : "Fast")}", request.TargetSizeMb, request.SourceDuration);
-        
+
         var normalizedRequest = NormalizeRequest(request);
-        _logger.LogInformation("Normalized codec from mode: {Mode} → {Codec}", 
+        _logger.LogInformation("Normalized codec from mode: {Mode} → {Codec}",
             normalizedRequest.Mode, normalizedRequest.Codec);
         var codecConfig = GetCodecConfig(normalizedRequest.Codec);
 
         var jobId = Guid.NewGuid().ToString();
-        var originalFilename = videoFile.FileName;
-        var safeStem = Path.GetFileNameWithoutExtension(string.IsNullOrWhiteSpace(originalFilename) ? jobId : originalFilename);
-        var inputPath = Path.Combine(_tempUploadPath, $"{jobId}_{originalFilename}");
-        var targetSizePrefix = normalizedRequest.TargetSizeMb.HasValue
-            ? $"{Math.Round(normalizedRequest.TargetSizeMb.Value, MidpointRounding.AwayFromZero)}MB"
-            : "auto";
-        var outputFilename = $"{targetSizePrefix}_compressed_{safeStem}{codecConfig.FileExtension}";
-        var outputPath = Path.Combine(_tempOutputPath, outputFilename);
+        var artifacts = await PrepareJobArtifactsAsync(jobId, videoFile, normalizedRequest, codecConfig);
 
-        await using (var stream = new FileStream(inputPath, FileMode.Create))
-        {
-            await videoFile.CopyToAsync(stream);
-        }
+        normalizedRequest.SourceDuration = artifacts.EffectiveDuration ?? normalizedRequest.SourceDuration;
 
-        // Calculate original file size in MB for comparison
-        var originalSizeMb = videoFile.Length / (1024.0 * 1024.0);
-        var originalDuration = normalizedRequest.SourceDuration;
-
-        // Process video segments if provided
-        string actualInputPath = inputPath;
-        bool hasSegments = false;
-        if (normalizedRequest.Segments != null && normalizedRequest.Segments.Count > 0)
-        {
-            // Check if segments represent the full unedited video (single segment from start to end)
-            var isFullVideo = normalizedRequest.Segments.Count == 1 && 
-                             normalizedRequest.Segments[0].Start == 0 &&
-                             normalizedRequest.SourceDuration.HasValue &&
-                             Math.Abs(normalizedRequest.Segments[0].End - normalizedRequest.SourceDuration.Value) < 0.1;
-            
-            if (!isFullVideo)
-            {
-                _logger.LogInformation("Processing {Count} video segments for job {JobId}", normalizedRequest.Segments.Count, jobId);
-                
-                // Log each segment for debugging
-                for (int i = 0; i < normalizedRequest.Segments.Count; i++)
-                {
-                    var seg = normalizedRequest.Segments[i];
-                    _logger.LogInformation("Segment {Index}: {Start}s - {End}s (duration: {Duration}s)", 
-                        i + 1, seg.Start, seg.End, seg.End - seg.Start);
-                }
-                
-                actualInputPath = await MergeVideoSegmentsAsync(jobId, inputPath, normalizedRequest.Segments);
-                
-                // Update source duration to reflect edited duration
-                var totalEditedDuration = normalizedRequest.Segments.Sum(s => s.End - s.Start);
-                _logger.LogInformation("Updated source duration from segments: {Duration}s (original was {OriginalDuration}s)", 
-                    totalEditedDuration, normalizedRequest.SourceDuration);
-                normalizedRequest.SourceDuration = totalEditedDuration;
-                hasSegments = true;
-            }
-            else
-            {
-                _logger.LogInformation("Segments represent full video - not processing segments for job {JobId}", jobId);
-            }
-        }
-        else
-        {
-            _logger.LogInformation("No segments provided - using full video for job {JobId}", jobId);
-        }
-
-        // Calculate effective max size (adjusted for edited duration if segments were cut)
-        var effectiveMaxSizeMb = originalSizeMb;
-        if (hasSegments && originalDuration.HasValue && originalDuration.Value > 0 && normalizedRequest.SourceDuration.HasValue)
-        {
-            var durationRatio = normalizedRequest.SourceDuration.Value / originalDuration.Value;
-            effectiveMaxSizeMb = originalSizeMb * durationRatio;
-            _logger.LogInformation("Effective max size adjusted for edited duration: {EffectiveMaxMb}MB (original: {OriginalMb}MB, ratio: {Ratio:F2})", 
-                effectiveMaxSizeMb, originalSizeMb, durationRatio);
-        }
-
-        // Check if compression should be skipped
-        bool skipCompression = normalizedRequest.SkipCompression;
-        
-        if (skipCompression)
-        {
-            _logger.LogInformation("Skip compression flag is set for job {JobId} - user requested no compression", jobId);
-        }
-        else if (normalizedRequest.TargetSizeMb.HasValue && normalizedRequest.TargetSizeMb.Value >= (effectiveMaxSizeMb - 0.01))
-        {
-            // Also skip if target size is >= effective max (with small tolerance for floating-point)
-            skipCompression = true;
-            _logger.LogInformation("Target size ({TargetMb}MB) is >= effective max size ({EffectiveMaxMb}MB) - skipping compression for job {JobId}", 
-                normalizedRequest.TargetSizeMb.Value, effectiveMaxSizeMb, jobId);
-        }
+        var skipCompression = ShouldSkipCompression(normalizedRequest, artifacts.EffectiveMaxSizeMb, artifacts.JobId);
 
         // Calculate bitrates for compression (only if we're actually compressing)
         double? computedTargetKbps = null;
         double? computedVideoKbps = null;
         BitratePlan? bitratePlan = null;
-        
-        if (!skipCompression && 
-            normalizedRequest.TargetSizeMb.HasValue && 
-            normalizedRequest.SourceDuration.HasValue && 
+
+        if (!skipCompression &&
+            normalizedRequest.TargetSizeMb.HasValue &&
+            normalizedRequest.SourceDuration.HasValue &&
             normalizedRequest.SourceDuration.Value > 0)
         {
             bitratePlan = CalculateBitratePlan(normalizedRequest, codecConfig);
@@ -164,7 +85,7 @@ public class VideoCompressionService : IVideoCompressionService
 
                 _logger.LogInformation(
                     "Bitrate plan for job {JobId}: TargetSize={TargetMb}MB, Duration={Duration}s, PayloadBudget={PayloadMb}MB, ContainerReserve={ContainerMb}MB, SafetyMargin={SafetyMb}MB, TotalKbps={TotalKbps}, VideoKbps={VideoKbps}, AudioKbps={AudioKbps}",
-                    jobId,
+                    artifacts.JobId,
                     normalizedRequest.TargetSizeMb.Value,
                     normalizedRequest.SourceDuration.Value,
                     bitratePlan.PayloadBudgetMb,
@@ -176,83 +97,17 @@ public class VideoCompressionService : IVideoCompressionService
             }
         }
 
-        // If we're skipping compression (100% target), just copy/use the merged file
         if (skipCompression)
         {
-            _logger.LogInformation("Skipping compression for job {JobId} - copying file directly", jobId);
-            
-            // If segments were cut, we already have the merged file
-            // If no segments, just copy the original file
-            if (hasSegments)
-            {
-                File.Copy(actualInputPath, outputPath, overwrite: true);
-            }
-            else
-            {
-                File.Copy(inputPath, outputPath, overwrite: true);
-            }
-            // Create a completed job immediately
-            var job = new JobMetadata
-            {
-                JobId = jobId,
-                OriginalFilename = originalFilename,
-                InputPath = actualInputPath,
-                OutputPath = outputPath,
-                OutputFilename = outputFilename,
-                OutputMimeType = codecConfig.MimeType,
-                Status = "completed",
-                Codec = codecConfig.Key,
-                ScalePercent = 100, // No scaling when not compressing
-                TargetSizeMb = normalizedRequest.TargetSizeMb,
-                TargetBitrateKbps = null,
-                VideoBitrateKbps = null,
-                SourceDuration = normalizedRequest.SourceDuration,
-                TwoPass = false,
-                CompressionSkipped = true,
-                CreatedAt = DateTime.UtcNow,
-                StartedAt = DateTime.UtcNow,
-                CompletedAt = DateTime.UtcNow,
-                Progress = 100
-            };
-            
-            if (File.Exists(outputPath))
-            {
-                job.OutputSizeBytes = new FileInfo(outputPath).Length;
-            }
-            
-            _jobs[jobId] = job;
-            _logger.LogInformation("Job {JobId} completed immediately (no compression)", jobId);
-            
-            return jobId;
+            return CompleteSkippedJob(artifacts, codecConfig, normalizedRequest);
         }
 
-        // Check queue size before accepting new job
-        if (_jobQueue.Count >= _maxQueueSize)
-        {
-            throw new InvalidOperationException($"Queue is full. Maximum queue size is {_maxQueueSize}. Please try again later.");
-        }
+        EnsureQueueCapacity();
 
         // ALWAYS enable two-pass encoding for best quality and bitrate accuracy.
         var enableTwoPass = true;
-        
-        var compressionJob = new JobMetadata
-        {
-            JobId = jobId,
-            OriginalFilename = originalFilename,
-            InputPath = actualInputPath,
-            OutputPath = outputPath,
-            OutputFilename = outputFilename,
-            OutputMimeType = codecConfig.MimeType,
-            Status = "queued",
-            Codec = codecConfig.Key,
-            ScalePercent = normalizedRequest.ScalePercent,
-            TargetSizeMb = normalizedRequest.TargetSizeMb,
-            TargetBitrateKbps = computedTargetKbps,
-            VideoBitrateKbps = computedVideoKbps,
-            SourceDuration = normalizedRequest.SourceDuration,
-            TwoPass = enableTwoPass,
-            CreatedAt = DateTime.UtcNow
-        };
+
+        var compressionJob = BuildQueuedJob(artifacts, normalizedRequest, codecConfig, computedTargetKbps, computedVideoKbps, enableTwoPass);
 
         _jobs[jobId] = compressionJob;
         _jobQueue.Enqueue(jobId);
@@ -260,6 +115,182 @@ public class VideoCompressionService : IVideoCompressionService
         _ = Task.Run(async () => await ProcessQueueAsync(jobId, normalizedRequest, codecConfig));
 
         return jobId;
+    }
+
+    private async Task<JobPreparationArtifacts> PrepareJobArtifactsAsync(string jobId, IFormFile videoFile, CompressionRequest request, CodecConfig codecConfig)
+    {
+        var originalFilename = videoFile.FileName;
+        var sanitizedFilename = string.IsNullOrWhiteSpace(originalFilename)
+            ? $"{jobId}.bin"
+            : Path.GetFileName(originalFilename);
+
+        var safeStem = Path.GetFileNameWithoutExtension(string.IsNullOrWhiteSpace(sanitizedFilename) ? jobId : sanitizedFilename);
+        if (string.IsNullOrWhiteSpace(safeStem))
+        {
+            safeStem = jobId;
+        }
+
+        var uploadPath = Path.Combine(_tempUploadPath, $"{jobId}_{sanitizedFilename}");
+        await using (var stream = new FileStream(uploadPath, FileMode.Create))
+        {
+            await videoFile.CopyToAsync(stream);
+        }
+
+        var targetSizePrefix = request.TargetSizeMb.HasValue
+            ? $"{Math.Round(request.TargetSizeMb.Value, MidpointRounding.AwayFromZero)}MB"
+            : "auto";
+        var outputFilename = $"{targetSizePrefix}_compressed_{safeStem}{codecConfig.FileExtension}";
+        var outputPath = Path.Combine(_tempOutputPath, outputFilename);
+
+        var originalSizeMb = videoFile.Length / (1024.0 * 1024.0);
+        var originalDuration = request.SourceDuration;
+
+        var segmentResult = await ProcessSegmentsAsync(jobId, uploadPath, request.Segments, originalDuration);
+        var effectiveMaxSizeMb = originalSizeMb;
+
+        if (segmentResult.SegmentsApplied &&
+            originalDuration.HasValue && originalDuration.Value > 0 &&
+            segmentResult.EffectiveDuration.HasValue)
+        {
+            var durationRatio = segmentResult.EffectiveDuration.Value / originalDuration.Value;
+            effectiveMaxSizeMb = originalSizeMb * durationRatio;
+            _logger.LogInformation("Effective max size adjusted for edited duration: {EffectiveMaxMb}MB (original: {OriginalMb}MB, ratio: {Ratio:F2})",
+                effectiveMaxSizeMb, originalSizeMb, durationRatio);
+        }
+
+        return new JobPreparationArtifacts(
+            jobId,
+            originalFilename,
+            segmentResult.PreparedInputPath,
+            outputFilename,
+            outputPath,
+            segmentResult.EffectiveDuration ?? originalDuration,
+            effectiveMaxSizeMb,
+            segmentResult.SegmentsApplied);
+    }
+
+    private async Task<SegmentProcessingResult> ProcessSegmentsAsync(string jobId, string inputPath, List<VideoSegment>? segments, double? originalDuration)
+    {
+        if (segments == null || segments.Count == 0)
+        {
+            _logger.LogInformation("No segments provided - using full video for job {JobId}", jobId);
+            return new SegmentProcessingResult(false, inputPath, originalDuration);
+        }
+
+        var isFullVideo = segments.Count == 1 &&
+                          segments[0].Start == 0 &&
+                          originalDuration.HasValue &&
+                          Math.Abs(segments[0].End - originalDuration.Value) < 0.1;
+
+        if (isFullVideo)
+        {
+            _logger.LogInformation("Segments represent full video - not processing segments for job {JobId}", jobId);
+            return new SegmentProcessingResult(false, inputPath, originalDuration);
+        }
+
+        _logger.LogInformation("Processing {Count} video segments for job {JobId}", segments.Count, jobId);
+
+        for (int i = 0; i < segments.Count; i++)
+        {
+            var seg = segments[i];
+            _logger.LogInformation("Segment {Index}: {Start}s - {End}s (duration: {Duration}s)",
+                i + 1, seg.Start, seg.End, seg.End - seg.Start);
+        }
+
+        var mergedPath = await MergeVideoSegmentsAsync(jobId, inputPath, segments);
+        var totalEditedDuration = segments.Sum(s => s.End - s.Start);
+        _logger.LogInformation("Updated source duration from segments: {Duration}s (original was {OriginalDuration}s)",
+            totalEditedDuration, originalDuration);
+
+        return new SegmentProcessingResult(true, mergedPath, totalEditedDuration);
+    }
+
+    private bool ShouldSkipCompression(CompressionRequest request, double effectiveMaxSizeMb, string jobId)
+    {
+        if (request.SkipCompression)
+        {
+            _logger.LogInformation("Skip compression flag is set for job {JobId} - user requested no compression", jobId);
+            return true;
+        }
+
+        if (request.TargetSizeMb.HasValue && request.TargetSizeMb.Value >= (effectiveMaxSizeMb - 0.01))
+        {
+            _logger.LogInformation("Target size ({TargetMb}MB) is >= effective max size ({EffectiveMaxMb}MB) - skipping compression for job {JobId}",
+                request.TargetSizeMb.Value, effectiveMaxSizeMb, jobId);
+            return true;
+        }
+
+        return false;
+    }
+
+    private string CompleteSkippedJob(JobPreparationArtifacts artifacts, CodecConfig codecConfig, CompressionRequest request)
+    {
+        _logger.LogInformation("Skipping compression for job {JobId} - copying file directly", artifacts.JobId);
+
+        File.Copy(artifacts.PreparedInputPath, artifacts.OutputPath, overwrite: true);
+
+        var job = new JobMetadata
+        {
+            JobId = artifacts.JobId,
+            OriginalFilename = artifacts.OriginalFilename,
+            InputPath = artifacts.PreparedInputPath,
+            OutputPath = artifacts.OutputPath,
+            OutputFilename = artifacts.OutputFilename,
+            OutputMimeType = codecConfig.MimeType,
+            Status = "completed",
+            Codec = codecConfig.Key,
+            ScalePercent = 100,
+            TargetSizeMb = request.TargetSizeMb,
+            TargetBitrateKbps = null,
+            VideoBitrateKbps = null,
+            SourceDuration = request.SourceDuration,
+            TwoPass = false,
+            CompressionSkipped = true,
+            CreatedAt = DateTime.UtcNow,
+            StartedAt = DateTime.UtcNow,
+            CompletedAt = DateTime.UtcNow,
+            Progress = 100
+        };
+
+        if (File.Exists(artifacts.OutputPath))
+        {
+            job.OutputSizeBytes = new FileInfo(artifacts.OutputPath).Length;
+        }
+
+        _jobs[artifacts.JobId] = job;
+        _logger.LogInformation("Job {JobId} completed immediately (no compression)", artifacts.JobId);
+
+        return artifacts.JobId;
+    }
+
+    private static JobMetadata BuildQueuedJob(JobPreparationArtifacts artifacts, CompressionRequest request, CodecConfig codecConfig, double? computedTargetKbps, double? computedVideoKbps, bool enableTwoPass)
+    {
+        return new JobMetadata
+        {
+            JobId = artifacts.JobId,
+            OriginalFilename = artifacts.OriginalFilename,
+            InputPath = artifacts.PreparedInputPath,
+            OutputPath = artifacts.OutputPath,
+            OutputFilename = artifacts.OutputFilename,
+            OutputMimeType = codecConfig.MimeType,
+            Status = "queued",
+            Codec = codecConfig.Key,
+            ScalePercent = request.ScalePercent,
+            TargetSizeMb = request.TargetSizeMb,
+            TargetBitrateKbps = computedTargetKbps,
+            VideoBitrateKbps = computedVideoKbps,
+            SourceDuration = request.SourceDuration,
+            TwoPass = enableTwoPass,
+            CreatedAt = DateTime.UtcNow
+        };
+    }
+
+    private void EnsureQueueCapacity()
+    {
+        if (_jobQueue.Count >= _maxQueueSize)
+        {
+            throw new InvalidOperationException($"Queue is full. Maximum queue size is {_maxQueueSize}. Please try again later.");
+        }
     }
 
     private async Task ProcessQueueAsync(string jobId, CompressionRequest request, CodecConfig codecConfig)
@@ -1576,6 +1607,18 @@ public class VideoCompressionService : IVideoCompressionService
         public string MimeType { get; init; } = "video/mp4";
         public int AudioBitrateKbps { get; init; } = 128;
     }
+
+    private sealed record JobPreparationArtifacts(
+        string JobId,
+        string OriginalFilename,
+        string PreparedInputPath,
+        string OutputFilename,
+        string OutputPath,
+        double? EffectiveDuration,
+        double EffectiveMaxSizeMb,
+        bool SegmentsApplied);
+
+    private sealed record SegmentProcessingResult(bool SegmentsApplied, string PreparedInputPath, double? EffectiveDuration);
 }
 
 public class JobMetadata
