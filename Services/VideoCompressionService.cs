@@ -505,9 +505,8 @@ public class VideoCompressionService : IVideoCompressionService
             if (useTwoPass)
             {
                 _logger.LogInformation("Using two-pass encoding for job {JobId}", jobId);
-                var firstAttemptArgs = BuildArguments(videoBitrateKbps);
-                firstAttemptArgs.Add(job.OutputPath);
-                await RunTwoPassEncodingAsync(jobId, job, firstAttemptArgs, codec, job.SourceDuration, strategy);
+                var baseArgs = BuildArguments(videoBitrateKbps); // without output
+                await RunTwoPassEncodingAsync(jobId, job, baseArgs, codec, job.SourceDuration, strategy);
             }
             else
             {
