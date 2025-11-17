@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=LiteClip
+Exec=AppRun
+Icon=com.liteclip.app
+Comment=A fast, lightweight desktop application for compressing videos
+Categories=AudioVideo;
+Terminal=false
+StartupWMClass=com.liteclip.app

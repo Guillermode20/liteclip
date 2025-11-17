@@ -105,6 +105,10 @@
     <PublishDir>$(MSBuildProjectDirectory)\publish\</PublishDir>
   </PropertyGroup>
   
+  <PropertyGroup Condition="'$(Configuration)'=='Release'">
+    <EmbedStaticFiles Condition="$(EmbedStaticFiles) == ''">true</EmbedStaticFiles>
+  </PropertyGroup>
+
   <!-- Preserve assemblies that use reflection (prevent trim issues) -->
   <ItemGroup Condition="'$(Configuration)'=='Release'">
     <TrimmerRootAssembly Include="liteclip" />
@@ -141,7 +145,7 @@
   </ItemGroup>
   
   <!-- Custom target to clean up unnecessary published files in Release -->
-  <Target Name="CleanupPublishedFiles" AfterTargets="Publish" Condition="'$(Configuration)'=='Release'">
+  <Target Name="CleanupPublishedFiles" AfterTargets="Publish" Condition="'$(Configuration)'=='Release' and '$(EmbedStaticFiles)'=='true'">
     <!-- Remove wwwroot folder (it's embedded) -->
     <RemoveDir Directories="$(PublishDir)wwwroot" />
     
@@ -164,5 +168,9 @@
     <!-- Remove web.config (must be deleted separately after other operations) -->
     <Delete Files="$(PublishDir)web.config" Condition="Exists('$(PublishDir)web.config')" />
   </Target>
+
+  <ItemGroup Condition="'$(Configuration)'=='Release' and '$(EmbedStaticFiles)'=='false'">
+    <Content Include="wwwroot\**\*" CopyToPublishDirectory="Always" />
+  </ItemGroup>
 
 </Project>

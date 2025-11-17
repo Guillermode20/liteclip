@@ -27,7 +27,19 @@ public class VideoCompressionService : IVideoCompressionService
         _ffmpegResolver = ffmpegResolver;
         _strategyFactory = strategyFactory;
         _tempUploadPath = configuration["TempPaths:Uploads"] ?? Path.Combine(Path.GetTempPath(), "video-uploads");
+
+        if (!Path.IsPathRooted(_tempUploadPath))
+        {
+          _tempUploadPath = Path.Combine(Path.GetTempPath(), _tempUploadPath.TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        }
+
         _tempOutputPath = configuration["TempPaths:Outputs"] ?? Path.Combine(Path.GetTempPath(), "video-outputs");
+
+        if (!Path.IsPathRooted(_tempOutputPath))
+        {
+          _tempOutputPath = Path.Combine(Path.GetTempPath(), _tempOutputPath.TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        }
+
         _maxConcurrentJobs = configuration.GetValue<int>("Compression:MaxConcurrentJobs", 2);
         _maxQueueSize = configuration.GetValue<int>("Compression:MaxQueueSize", 10);
 

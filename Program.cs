@@ -82,10 +82,20 @@ namespace liteclip
             }
             else
             {
-                var embeddedProvider = new ManifestEmbeddedFileProvider(typeof(Program).Assembly, "wwwroot");
-                app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = embeddedProvider });
-                app.UseStaticFiles(new StaticFileOptions { FileProvider = embeddedProvider });
-                Console.WriteLine("✓ Using embedded static files (Non-Development)");
+                try
+                {
+                    var embeddedProvider = new ManifestEmbeddedFileProvider(typeof(Program).Assembly, "wwwroot");
+                    app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = embeddedProvider });
+                    app.UseStaticFiles(new StaticFileOptions { FileProvider = embeddedProvider });
+                    Console.WriteLine("✓ Using embedded static files (Non-Development)");
+                }
+                catch (InvalidOperationException ex) when (ex.Message.Contains("embedded file manifest"))
+                {
+                    var physicalProvider = new PhysicalFileProvider(Path.Combine(AppContext.BaseDirectory, "wwwroot"));
+                    app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = physicalProvider });
+                    app.UseStaticFiles(new StaticFileOptions { FileProvider = physicalProvider });
+                    Console.WriteLine("✓ Using physical static files (fallback)");
+                }
             }
 
             // POST endpoint to upload and compress video
