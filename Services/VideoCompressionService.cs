@@ -232,10 +232,8 @@ public class VideoCompressionService : IVideoCompressionService
             throw new InvalidOperationException($"Queue is full. Maximum queue size is {_maxQueueSize}. Please try again later.");
         }
 
-        // Enable two-pass by default when using target size for better accuracy.
-        // For small targets with H.264/H.265, prefer software encoders over hardware
-        // (handled by strategies via encoder selection) and rely on two-pass.
-        var enableTwoPass = normalizedRequest.TargetSizeMb.HasValue;
+        // ALWAYS enable two-pass encoding for best quality and bitrate accuracy.
+        var enableTwoPass = true;
         
         var compressionJob = new JobMetadata
         {
@@ -515,14 +513,12 @@ public class VideoCompressionService : IVideoCompressionService
                     var success = await RunSinglePassEncodingAsync(jobId, job, attemptArgs, job.SourceDuration);
                     if (!success)
                     {
-                        return;
-                    }
+                    return;
+                }
 
-                    // Use 95% of target size for feedback correction to match initial bitrate calculation
-                    var targetSizeMb = (request.TargetSizeMb ?? 0) * 0.95;
-                    var actualSizeMb = job.OutputSizeBytes.HasValue ? job.OutputSizeBytes.Value / (1024.0 * 1024.0) : 0;
-
-                    if (attempts == maxAttempts || !ShouldRetryFeedback(targetSizeMb, actualSizeMb))
+                // Use 92% of target size for feedback correction to match initial bitrate calculation
+                var targetSizeMb = (request.TargetSizeMb ?? 0) * 0.92;
+                var actualSizeMb = job.OutputSizeBytes.HasValue ? job.OutputSizeBytes.Value / (1024.0 * 1024.0) : 0;                    if (attempts == maxAttempts || !ShouldRetryFeedback(targetSizeMb, actualSizeMb))
                     {
                         FinalizeSinglePassJob(job, codec);
                         break;
@@ -1176,8 +1172,8 @@ public class VideoCompressionService : IVideoCompressionService
             return null;
         }
 
-        // Target 5% lower than requested to ensure we stay under the target output size
-        var targetSizeMb = request.TargetSizeMb.Value * 0.95;
+        // Target 8% lower to account for container overhead and ensure we stay under target with two-pass
+        var targetSizeMb = request.TargetSizeMb.Value * 0.92;
         var durationSeconds = request.SourceDuration.Value;
 
         var reserveBudgetMb = CalculateReserveBudget(targetSizeMb, durationSeconds, codecConfig);
@@ -1218,29 +1214,29 @@ public class VideoCompressionService : IVideoCompressionService
 
     private static double CalculateReserveBudget(double targetSizeMb, double durationSeconds, CodecConfig codecConfig)
     {
-        // Codec/container level reserve only; encoder-specific behavior is handled in strategies
-        var baseReserve = 0.18;
-        var linearComponent = targetSizeMb * (codecConfig.FileExtension.Equals(".mp4", StringComparison.OrdinalIgnoreCase) ? 0.0035 : 0.0028);
+        // Conservative reserves to ensure we stay under target with two-pass encoding
+        var baseReserve = 0.20;
+        var linearComponent = targetSizeMb * (codecConfig.FileExtension.Equals(".mp4", StringComparison.OrdinalIgnoreCase) ? 0.004 : 0.0032);
         var reserve = baseReserve + linearComponent;
 
         if (durationSeconds >= 1800)
         {
-            reserve += 0.12;
+            reserve += 0.14;
         }
         else if (durationSeconds >= 900)
         {
-            reserve += 0.06;
+            reserve += 0.07;
         }
         else if (durationSeconds >= 300)
         {
-            reserve += 0.03;
+            reserve += 0.035;
         }
 
-        var maxReserve = codecConfig.FileExtension.Equals(".mp4", StringComparison.OrdinalIgnoreCase) ? 1.0 : 0.75;
-        var minReserve = 0.25;
+        var maxReserve = codecConfig.FileExtension.Equals(".mp4", StringComparison.OrdinalIgnoreCase) ? 1.1 : 0.85;
+        var minReserve = 0.28;
         reserve = Math.Clamp(reserve, minReserve, maxReserve);
 
-        var maxAllowed = targetSizeMb * 0.85;
+        var maxAllowed = targetSizeMb * 0.82;
         if (reserve > maxAllowed)
         {
             reserve = maxAllowed;
