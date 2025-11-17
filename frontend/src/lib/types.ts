@@ -1,6 +1,6 @@
 export type StatusMessageType = 'processing' | 'success' | 'error';
 
-export type CodecKey = 'h264' | 'h265' | 'vp9' | 'av1';
+export type CodecKey = 'fast' | 'quality';
 
 export interface VideoSegment {
     start: number;

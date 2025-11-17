@@ -47,8 +47,8 @@
     let outputSizeValue = '--';
     let outputSizeDetails = '';
     let outputSizeSliderValue = 100;
-    let codecSelectValue: CodecKey = 'h265';
-    let codecHelperText = codecDetails.h264.helper;
+    let codecSelectValue: CodecKey = 'quality';
+    let codecHelperText = codecDetails.quality.helper;
     let showCancelButton = false;
     let compressionSkipped = false;
     let showVideoEditor = false;
@@ -639,7 +639,7 @@
         outputSizeSliderValue = 100;
         outputSizeValue = '--';
         outputSizeDetails = '';
-        codecSelectValue = 'h265';
+        codecSelectValue = 'quality';
         updateCodecHelper();
         sourceVideoWidth = null;
         sourceVideoHeight = null;

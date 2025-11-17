@@ -1,21 +1,13 @@
 import type { CodecDetailsMap, OutputMetadata } from './types';
 
 export const codecDetails: CodecDetailsMap = {
-    h264: {
-        helper: 'Best compatibility across browsers and devices.',
+    fast: {
+        helper: 'H.264 optimized for speed. Best for quick processing and wide device compatibility.',
         container: 'mp4'
     },
-    h265: {
-        helper: 'Higher efficiency than H.264 but slower to encode. Limited support on older devices.',
+    quality: {
+        helper: 'H.265 optimized for quality and file size. Better compression with good encoding speed.',
         container: 'mp4'
-    },
-    vp9: {
-        helper: 'Great for modern browsers. Outputs WebM files optimized for streaming.',
-        container: 'webm'
-    },
-    av1: {
-        helper: 'Smallest files but slowest encode. Requires very recent hardware/software.',
-        container: 'webm'
     }
 };
 
@@ -28,7 +20,7 @@ export function createDefaultOutputMetadata(): OutputMetadata {
         videoBitrateKbps: 0,
         estimatedVideoBitrateKbps: 0,
         scalePercent: 100,
-        codec: 'h264',
+        codec: 'quality',
         encoderName: null,
         encoderIsHardware: false,
         encodingTime: 0,

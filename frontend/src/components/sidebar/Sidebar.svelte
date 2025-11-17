@@ -6,7 +6,7 @@
     export let outputSizeDetails = '';
     export let outputSizeSliderValue = 100;
     export let outputSizeSliderDisabled = true;
-    export let codecSelectValue = 'h265';
+    export let codecSelectValue = 'quality';
     export let codecHelperText = '';
     export let uploadBtnDisabled = true;
     export let uploadBtnText = 'Process Video';
@@ -75,8 +75,8 @@
                         <strong>codec</strong>
                     </label>
                     <select id="codecSelect" value={codecSelectValue} on:change={handleCodecSelect}>
-                        <option value="h264">h264 (mp4)</option>
-                        <option value="h265">h265 / hevc (mp4)</option>
+                        <option value="fast">fast (h.264)</option>
+                        <option value="quality">quality (h.265)</option>
                     </select>
                     {#if codecHelperText}
                         <div class="helper-text">// {codecHelperText}</div>

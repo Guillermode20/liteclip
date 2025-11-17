@@ -1506,11 +1506,16 @@ public class VideoCompressionService : IVideoCompressionService
     {
         return codec?.ToLowerInvariant() switch
         {
+            // New user-friendly codec names
+            "fast" => "h264",           // Fast mode uses H.264
+            "quality" => "h265",        // Quality mode uses H.265
+            // Legacy codec names still supported
             "hevc" => "h265",
             "h265" => "h265",
+            "h264" => "h264",
             "vp9" => "vp9",
             "av1" => "av1",
-            _ => "h264"
+            _ => "h265"                 // Default to quality (H.265)
         };
     }
 

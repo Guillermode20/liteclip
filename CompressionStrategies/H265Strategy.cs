@@ -208,19 +208,20 @@ public class H265Strategy : ICompressionStrategy
         }
         else
         {
-            // Software: Use slower preset for highest quality
+            // Software: Use medium preset for good quality/speed balance
+            // Quality-focused codec deserves more processing time than H.264
             args.AddRange(new[]
             {
-                "-preset", "slower",
+                "-preset", "medium",
                 "-pix_fmt", "yuv420p",
                 "-tag:v", "hvc1",
                 "-g", "60",
                 "-sc_threshold", "0",
-                "-bf", "4",
-                "-refs", "5",
+                "-bf", "3",
+                "-refs", "4",
                 "-minrate", $"{minRate}k",
-                // Maximum lookahead and psychovisual tuning for best quality
-                "-x265-params", $"vbv-bufsize={buffer}:vbv-maxrate={maxRate}:aq-mode=3:aq-strength=1.0:psy-rd=2.0:psy-rdoq=1.0:rc-lookahead=60:me=star:subme=7:rd=6"
+                // Balanced quality settings: good psychovisual optimization with reasonable lookahead
+                "-x265-params", $"vbv-bufsize={buffer}:vbv-maxrate={maxRate}:aq-mode=3:aq-strength=0.9:psy-rd=1.5:psy-rdoq=0.8:rc-lookahead=40:me=star:subme=5:rd=4"
             });
         }
 

@@ -187,18 +187,18 @@ public class H264Strategy : ICompressionStrategy
         }
         else
         {
-            // Software encoder: Use slower preset for highest quality
+            // Software encoder: Use fast preset for speed while maintaining decent quality
             args.AddRange(new[]
             {
-                "-preset", "slower",
+                "-preset", "fast",
                 "-pix_fmt", "yuv420p",
                 "-g", "60",
                 "-sc_threshold", "0",
-                "-bf", "4",
-                "-refs", "5",
+                "-bf", "2",
+                "-refs", "2",
                 "-minrate", $"{minRate}k",
-                // Maximum lookahead for best quality
-                "-x264-params", "aq-mode=3:aq-strength=1.0:rc_lookahead=60:psy=1:psy_rd=1.0:deblock=-1,-1:me=umh:subme=10"
+                // Balanced settings: speed-focused with some quality preservation
+                "-x264-params", "aq-mode=2:aq-strength=0.8:rc_lookahead=30:psy=0:me=hex:subme=6"
             });
         }
 
