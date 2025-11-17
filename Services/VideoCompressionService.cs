@@ -51,10 +51,12 @@ public class VideoCompressionService : IVideoCompressionService
 
     public async Task<string> CompressVideoAsync(IFormFile videoFile, CompressionRequest request)
     {
-        _logger.LogInformation("Compression request received - Codec: {Codec}, TargetSizeMb: {TargetSizeMb}, SourceDuration: {SourceDuration}", 
-            request.Codec, request.TargetSizeMb, request.SourceDuration);
+        _logger.LogInformation("Compression request received - Mode: {Mode}, TargetSizeMb: {TargetSizeMb}, SourceDuration: {SourceDuration}", 
+            $"{(request.UseUltraMode ? "Ultra" : request.UseQualityMode ? "Quality" : "Fast")}", request.TargetSizeMb, request.SourceDuration);
         
         var normalizedRequest = NormalizeRequest(request);
+        _logger.LogInformation("Normalized codec from mode: {Mode} → {Codec}", 
+            normalizedRequest.Mode, normalizedRequest.Codec);
         var codecConfig = GetCodecConfig(normalizedRequest.Codec);
 
         var jobId = Guid.NewGuid().ToString();
@@ -429,20 +431,16 @@ public class VideoCompressionService : IVideoCompressionService
                 filters.Add($"fps={fpsToUse}");
             }
 
-            // Prefer a registered compression strategy if available; fall back to legacy builders.
-            var preferSoftwareEncoder = job.TargetSizeMb.HasValue && string.Equals(request.Codec, "h264", StringComparison.OrdinalIgnoreCase);
+            // Get a registered compression strategy if available; fall back to legacy builders.
             ICompressionStrategy? strategy = null;
-            if (!preferSoftwareEncoder)
+            try
             {
-                try
-                {
-                    strategy = _strategyFactory?.GetStrategy(codec.Key);
-                }
-                catch
-                {
-                    // Ignore factory errors and fall back
-                    strategy = null;
-                }
+                strategy = _strategyFactory?.GetStrategy(codec.Key);
+            }
+            catch
+            {
+                // Ignore factory errors and fall back
+                strategy = null;
             }
 
             if (strategy != null)
@@ -484,11 +482,11 @@ public class VideoCompressionService : IVideoCompressionService
 
                 if (strategy != null)
                 {
-                    args.AddRange(strategy.BuildVideoArgs(videoBitrate, request.UseQualityMode, request.UseUltraMode));
+                    args.AddRange(strategy.BuildVideoArgs(videoBitrate, request.Mode));
                 }
                 else
                 {
-                    args.AddRange(BuildSimpleVideoArgs(codec, videoBitrate, fpsToUse, request.UseQualityMode));
+                    args.AddRange(BuildSimpleVideoArgs(codec, videoBitrate, fpsToUse, request.Mode));
                 }
 
                 args.AddRange(audioArgs);
@@ -976,14 +974,29 @@ public class VideoCompressionService : IVideoCompressionService
 
         private static CompressionRequest NormalizeRequest(CompressionRequest request)
     {
+        // Derive unified encoding mode from flags first
+        var mode = DeriveEncodingMode(request.UseQualityMode, request.UseUltraMode);
+        
+        // Determine codec based on the derived encoding mode
+        // Fast → H.264, Quality → H.265
+        var codec = mode switch
+        {
+            EncodingMode.Quality => "h265",
+            _ => "h264"  // Default to Fast (H.264)
+        };
+
         var normalized = new CompressionRequest
         {
-            Codec = NormalizeCodec(request.Codec),
+            Codec = codec,
             ScalePercent = request.ScalePercent,
             TargetFps = request.TargetFps,
             TargetSizeMb = request.TargetSizeMb,
             SourceDuration = request.SourceDuration,
-            Segments = NormalizeSegments(request.Segments, request.SourceDuration)
+            Segments = NormalizeSegments(request.Segments, request.SourceDuration),
+            SkipCompression = request.SkipCompression,
+            UseQualityMode = request.UseQualityMode,
+            UseUltraMode = request.UseUltraMode,
+            Mode = mode
         };
 
         if (normalized.ScalePercent.HasValue)
@@ -1059,9 +1072,9 @@ public class VideoCompressionService : IVideoCompressionService
 
 
 
-    private static List<string> BuildSimpleVideoArgs(CodecConfig codec, double videoBitrateKbps, int fps, bool useQualityMode)
+    private static List<string> BuildSimpleVideoArgs(CodecConfig codec, double videoBitrateKbps, int fps, EncodingMode mode)
     {
-        _ = useQualityMode;
+        _ = mode;
         var targetBitrate = Math.Max(100, Math.Round(videoBitrateKbps));
         // Tighter bitrate control for more accurate file sizes
         // maxrate: 3% variance (reduced from 5%)
@@ -1515,22 +1528,17 @@ public class VideoCompressionService : IVideoCompressionService
         return merged;
     }
 
-    private static string NormalizeCodec(string? codec)
+
+
+    private static EncodingMode DeriveEncodingMode(bool useQualityMode, bool useUltraMode)
     {
-        return codec?.ToLowerInvariant() switch
+        // useUltraMode is ignored; we only support Fast and Quality modes
+        if (useQualityMode)
         {
-            // New user-friendly codec names
-            "fast" => "h264",           // Fast mode uses H.264
-            "quality" => "h265",        // Quality mode uses H.265
-            "ultra" => "h265",          // Ultra mode uses H.265 with extreme settings
-            // Legacy codec names still supported
-            "hevc" => "h265",
-            "h265" => "h265",
-            "h264" => "h264",
-            "vp9" => "vp9",
-            "av1" => "av1",
-            _ => "h265"                 // Default to quality (H.265)
-        };
+            return EncodingMode.Quality;
+        }
+
+        return EncodingMode.Fast;
     }
 
     private sealed record BitratePlan(double TotalKbps, double VideoKbps, double PayloadBudgetMb, double ContainerReserveMb, double SafetyMarginMb);

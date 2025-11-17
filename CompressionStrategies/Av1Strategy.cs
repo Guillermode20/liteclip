@@ -12,9 +12,9 @@ public class Av1Strategy : ICompressionStrategy
     public string AudioCodec => "libopus";
     public int AudioBitrateKbps => 128;
 
-    public IEnumerable<string> BuildVideoArgs(double videoBitrateKbps, bool useQualityMode, bool useUltraMode = false)
+    public IEnumerable<string> BuildVideoArgs(double videoBitrateKbps, EncodingMode mode)
     {
-        _ = useQualityMode;
+        _ = mode;
         var targetBitrate = Math.Max(100, Math.Round(videoBitrateKbps));
         var maxRate = Math.Round(targetBitrate * 1.03);
         var minRate = Math.Round(targetBitrate * 0.97);

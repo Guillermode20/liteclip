@@ -5,13 +5,10 @@ namespace liteclip.CompressionStrategies;
 /// <summary>
 /// Strategy interface for codec-specific compression argument generation and metadata.
 /// 
-/// Quality mode defaults by codec:
-/// - H.264: Prioritizes speed; default is lean/fast AMF settings.
-/// - H.265: Prioritizes quality+speed mix; default is quality-focused with higher lookahead/AQ.
-/// 
-/// When useQualityMode=true, each codec respects its philosophy while adapting:
-/// - H.264 can optionally enhance AQ further but remains speed-oriented.
-/// - H.265 uses the quality settings by default; mode=false would scale back for speed.
+/// The <see cref="EncodingMode"/> value is the single source of truth for
+/// how \"fast\", \"quality\", and \"ultra\" are interpreted per codec.
+/// Concrete strategies should use the central <see cref="EncodingModeConfigs"/>
+/// table so all mode-specific behavior can be inspected in one place.
 /// </summary>
 public interface ICompressionStrategy
 {
@@ -24,12 +21,12 @@ public interface ICompressionStrategy
     int AudioBitrateKbps { get; }
 
     // Argument builders
-    IEnumerable<string> BuildVideoArgs(double videoBitrateKbps, bool useQualityMode, bool useUltraMode = false);
+    IEnumerable<string> BuildVideoArgs(double videoBitrateKbps, EncodingMode mode);
     IEnumerable<string> BuildAudioArgs();
     IEnumerable<string> BuildContainerArgs();
     /// <summary>
     /// Returns extra ffmpeg arguments required for the given pass number when performing two-pass encoding.
-    /// For example: "-pass 1 -passlogfile <log> -f mp4" or similar. Return empty collection when no extras are required.
+    /// For example: "-pass 1 -passlogfile &lt;log&gt; -f mp4" or similar. Return empty collection when no extras are required.
     /// </summary>
     IEnumerable<string> GetPassExtras(int passNumber, string passLogFile);
 }
