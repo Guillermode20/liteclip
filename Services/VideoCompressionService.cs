@@ -456,15 +456,7 @@ public class VideoCompressionService : IVideoCompressionService
                 filters.Add("unsharp=3:3:0.3");
             }
             
-            // 5. Grain synthesis - apply only for heavy compression
-            // Adds subtle film grain to mask compression artifacts
-            // Only needed when bitrate is very low
-            if (isHeavyCompression)
-            {
-                filters.Add("noise=alls=6:allf=t");
-            }
-            
-            // 6. FPS limiting (if specified)
+            // 5. FPS limiting (if specified)
             if (targetFps > 0)
             {
                 filters.Add($"fps={targetFps}");
@@ -490,11 +482,9 @@ public class VideoCompressionService : IVideoCompressionService
 			int scalePercent = Math.Clamp(request.ScalePercent ?? 100, 10, 100);
             job.ScalePercent = scalePercent;
 
-            var targetBitrateKbps = job.TargetBitrateKbps ?? 0;
             var videoBitrateKbps = job.VideoBitrateKbps.Value;
 
             job.TargetSizeMb = Math.Round(job.TargetSizeMb.Value, 2);
-            job.TargetBitrateKbps = targetBitrateKbps;
             job.VideoBitrateKbps = videoBitrateKbps;
 
             // Build adaptive filter chain - always applied for best quality
@@ -542,10 +532,9 @@ public class VideoCompressionService : IVideoCompressionService
                 }
             }
 
-            var audioArgs = (strategy?.BuildAudioArgs() ?? BuildAudioArgs(codec)).ToList();
             var containerArgs = (strategy?.BuildContainerArgs() ?? BuildContainerArgs(codec)).ToList();
 
-            List<string> BuildArguments(double videoBitrate)
+            List<string> BuildArguments(double videoBitrate, AudioPlan audioPlan)
             {
                 var args = new List<string> { "-y", "-i", job.InputPath };
                 if (filters.Count > 0)
@@ -562,51 +551,83 @@ public class VideoCompressionService : IVideoCompressionService
                     args.AddRange(BuildSimpleVideoArgs(codec, videoBitrate, fpsToUse, request.Mode));
                 }
 
-                args.AddRange(audioArgs);
+                args.AddRange(BuildAudioArgsWithPlan(strategy, codec, audioPlan));
                 args.AddRange(containerArgs);
                 return args;
             }
 
             var useTwoPass = job.TwoPass;
+            var enableFeedback = ShouldEnableFeedbackRetry(request.TargetSizeMb);
+            var maxAttempts = enableFeedback ? 2 : 1;
+            var targetSizeForFeedback = (request.TargetSizeMb ?? 0) * 0.92;
+            var currentVideoKbps = videoBitrateKbps;
+
             if (useTwoPass)
             {
                 _logger.LogInformation("Using two-pass encoding for job {JobId} with encoder {Encoder}", jobId, job.EncoderName);
-                var baseArgs = BuildArguments(videoBitrateKbps); // without output
-                await RunTwoPassEncodingAsync(jobId, job, baseArgs, codec, job.SourceDuration, strategy);
+                var attempts = 0;
+                while (attempts < maxAttempts)
+                {
+                    attempts++;
+                    job.VideoBitrateKbps = currentVideoKbps;
+                    var audioPlan = CalculateAudioPlan(job, codec);
+                    job.TargetBitrateKbps = Math.Round(currentVideoKbps + audioPlan.BitrateKbps, 2);
+
+                    var baseArgs = BuildArguments(currentVideoKbps, audioPlan);
+                    bool success;
+                    try
+                    {
+                        success = await RunTwoPassEncodingAsync(jobId, job, baseArgs, codec, job.SourceDuration, strategy);
+                    }
+                    finally
+                    {
+                        CleanupPassLogs(jobId);
+                    }
+                    if (!success)
+                    {
+                        return;
+                    }
+
+                    var actualSizeMb = job.OutputSizeBytes.HasValue ? job.OutputSizeBytes.Value / (1024.0 * 1024.0) : 0;
+                    if (attempts < maxAttempts && ShouldRetryFeedback(targetSizeForFeedback, actualSizeMb))
+                    {
+                        PrepareRetry(job);
+                        currentVideoKbps = ComputeFeedbackBitrate(currentVideoKbps, targetSizeForFeedback, actualSizeMb);
+                        continue;
+                    }
+
+                    FinalizeSuccessfulJob(job, codec);
+                    break;
+                }
             }
             else
             {
                 var attempts = 0;
-                var maxAttempts = ShouldEnableFeedbackRetry(strategy, request.TargetSizeMb) ? 2 : 1;
-                var currentVideoKbps = videoBitrateKbps;
-
                 while (attempts < maxAttempts)
                 {
                     attempts++;
-                    var attemptArgs = BuildArguments(currentVideoKbps);
+                    job.VideoBitrateKbps = currentVideoKbps;
+                    var audioPlan = CalculateAudioPlan(job, codec);
+                    job.TargetBitrateKbps = Math.Round(currentVideoKbps + audioPlan.BitrateKbps, 2);
+
+                    var attemptArgs = BuildArguments(currentVideoKbps, audioPlan);
                     attemptArgs.Add(job.OutputPath);
                     var success = await RunSinglePassEncodingAsync(jobId, job, attemptArgs, job.SourceDuration);
                     if (!success)
                     {
-                    return;
-                }
-
-                // Use 92% of target size for feedback correction to match initial bitrate calculation
-                var targetSizeMb = (request.TargetSizeMb ?? 0) * 0.92;
-                var actualSizeMb = job.OutputSizeBytes.HasValue ? job.OutputSizeBytes.Value / (1024.0 * 1024.0) : 0;                    if (attempts == maxAttempts || !ShouldRetryFeedback(targetSizeMb, actualSizeMb))
-                    {
-                        FinalizeSinglePassJob(job, codec);
-                        break;
+                        return;
                     }
 
-                    currentVideoKbps = ComputeFeedbackBitrate(currentVideoKbps, targetSizeMb, actualSizeMb);
-                    job.VideoBitrateKbps = currentVideoKbps;
-                    job.TargetBitrateKbps = Math.Round(currentVideoKbps + codec.AudioBitrateKbps, 2);
-                    job.Progress = 0;
-                    job.EstimatedSecondsRemaining = null;
-                    job.Status = "processing";
-                    job.CompletedAt = null;
-                    job.StartedAt = DateTime.UtcNow;
+                    var actualSizeMb = job.OutputSizeBytes.HasValue ? job.OutputSizeBytes.Value / (1024.0 * 1024.0) : 0;
+                    if (attempts < maxAttempts && ShouldRetryFeedback(targetSizeForFeedback, actualSizeMb))
+                    {
+                        PrepareRetry(job);
+                        currentVideoKbps = ComputeFeedbackBitrate(currentVideoKbps, targetSizeForFeedback, actualSizeMb);
+                        continue;
+                    }
+
+                    FinalizeSuccessfulJob(job, codec);
+                    break;
                 }
             }
         }
@@ -756,7 +777,7 @@ public class VideoCompressionService : IVideoCompressionService
         }
     }
 
-    private void FinalizeSinglePassJob(JobMetadata job, CodecConfig codec)
+    private void FinalizeSuccessfulJob(JobMetadata job, CodecConfig codec)
     {
         job.Status = "completed";
         job.Progress = 100;
@@ -775,7 +796,30 @@ public class VideoCompressionService : IVideoCompressionService
         }
     }
 
-    private async Task RunTwoPassEncodingAsync(string jobId, JobMetadata job, List<string> baseArguments, CodecConfig codec, double? totalDuration, ICompressionStrategy? strategy)
+    private void PrepareRetry(JobMetadata job)
+    {
+        job.Status = "processing";
+        job.Progress = 0;
+        job.EstimatedSecondsRemaining = null;
+        job.CompletedAt = null;
+        job.OutputSizeBytes = null;
+        job.ErrorMessage = null;
+        job.StartedAt = DateTime.UtcNow;
+
+        try
+        {
+            if (File.Exists(job.OutputPath))
+            {
+                File.Delete(job.OutputPath);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to delete oversized output for job {JobId} before retry", job.JobId);
+        }
+    }
+
+    private async Task<bool> RunTwoPassEncodingAsync(string jobId, JobMetadata job, List<string> baseArguments, CodecConfig codec, double? totalDuration, ICompressionStrategy? strategy)
     {
         var passLogFile = Path.Combine(_tempOutputPath, $"{jobId}_ffmpeg2pass");
 
@@ -816,7 +860,7 @@ public class VideoCompressionService : IVideoCompressionService
         }
 
         var success = await RunPassAsync(jobId, job, pass1Args, totalDuration, 1, 2);
-        if (!success) return;
+        if (!success) return false;
 
         // Second pass
         _logger.LogInformation("Starting second pass for job {JobId}", jobId);
@@ -841,9 +885,23 @@ public class VideoCompressionService : IVideoCompressionService
 
         pass2Args.Add(job.OutputPath);
 
-        await RunPassAsync(jobId, job, pass2Args, totalDuration, 2, 2);
+        success = await RunPassAsync(jobId, job, pass2Args, totalDuration, 2, 2);
+        if (!success) return false;
 
-        // Cleanup pass log files
+        if (File.Exists(job.OutputPath))
+        {
+            var outputSize = new FileInfo(job.OutputPath).Length;
+            job.OutputSizeBytes = outputSize;
+            var outputSizeMb = outputSize / (1024.0 * 1024.0);
+            _logger.LogInformation("Two-pass encoding produced {OutputSizeMb:F2} MB for job {JobId} (Target {TargetSizeMb} MB)",
+                outputSizeMb, jobId, job.TargetSizeMb?.ToString("F2") ?? "N/A");
+        }
+
+        return true;
+    }
+
+    private void CleanupPassLogs(string jobId)
+    {
         try
         {
             foreach (var file in Directory.GetFiles(_tempOutputPath, $"{jobId}_ffmpeg2pass*"))
@@ -940,22 +998,6 @@ public class VideoCompressionService : IVideoCompressionService
             job.ErrorMessage = $"Pass {passNumber} failed: {errorBuilder}";
             _logger.LogError("Pass {Pass} failed for job {JobId}. Exit code {ExitCode}", passNumber, jobId, process.ExitCode);
             return false;
-        }
-
-        if (passNumber == totalPasses)
-        {
-            job.Status = "completed";
-            job.Progress = 100;
-            job.EstimatedSecondsRemaining = 0;
-            
-            if (File.Exists(job.OutputPath))
-            {
-                var outputSize = new FileInfo(job.OutputPath).Length;
-                    job.OutputSizeBytes = outputSize;
-                var outputSizeMb = outputSize / (1024.0 * 1024.0);
-                _logger.LogInformation("Two-pass compression completed for job {JobId}. Output size: {OutputSizeMb:F2} MB (Target: {TargetSizeMb} MB)", 
-                    jobId, outputSizeMb, job.TargetSizeMb?.ToString("F2") ?? "N/A");
-            }
         }
 
         return true;
@@ -1142,13 +1184,10 @@ public class VideoCompressionService : IVideoCompressionService
     {
         _ = mode;
         var targetBitrate = Math.Max(100, Math.Round(videoBitrateKbps));
-        // Tighter bitrate control for more accurate file sizes
-        // maxrate: 3% variance (reduced from 5%)
-        // minrate: 97% of target (increased from 95%)
-        // bufsize: 1.0x for very tight control (reduced from 1.5x)
-        var maxRate = Math.Round(targetBitrate * 1.03);
-        var minRate = Math.Round(targetBitrate * 0.97);
-        var buffer = Math.Round(targetBitrate * 1.0);
+        // Allow the encoder to breathe so average bitrate can fall below the ceiling when scenes are easy.
+        // maxrate: 10% burst headroom, bufsize: 2x target for smoother rate control.
+        var maxRate = Math.Round(targetBitrate * 1.10);
+        var buffer = Math.Round(targetBitrate * 2.0);
 
         var args = new List<string>();
 
@@ -1172,8 +1211,7 @@ public class VideoCompressionService : IVideoCompressionService
         {
             "-b:v", $"{targetBitrate}k",
             "-maxrate", $"{maxRate}k",
-            "-bufsize", $"{buffer}k",
-            "-minrate", $"{minRate}k"
+            "-bufsize", $"{buffer}k"
         });
 
         return args;
@@ -1191,6 +1229,53 @@ public class VideoCompressionService : IVideoCompressionService
         return args;
     }
 
+    private AudioPlan CalculateAudioPlan(JobMetadata job, CodecConfig codec)
+    {
+        var defaultBitrate = codec.AudioBitrateKbps;
+        var defaultPlan = new AudioPlan(defaultBitrate, 2);
+
+        if (!job.TargetSizeMb.HasValue ||
+            !job.SourceDuration.HasValue || job.SourceDuration.Value <= 0 ||
+            !job.VideoBitrateKbps.HasValue)
+        {
+            return defaultPlan;
+        }
+
+        var totalKbps = (job.TargetSizeMb.Value * 8 * 1024) / job.SourceDuration.Value;
+        var residualKbps = Math.Max(32, totalKbps - job.VideoBitrateKbps.Value);
+        var planned = Math.Clamp(residualKbps * 0.85, 48, defaultBitrate);
+        var channels = planned <= 80 ? 1 : 2;
+        if (channels == 1)
+        {
+            planned = Math.Min(planned, 72);
+        }
+
+        return new AudioPlan((int)Math.Round(planned, MidpointRounding.AwayFromZero), channels);
+    }
+
+    private static List<string> BuildAudioArgsWithPlan(ICompressionStrategy? strategy, CodecConfig codec, AudioPlan plan)
+    {
+        var args = (strategy?.BuildAudioArgs() ?? BuildAudioArgs(codec)).ToList();
+
+        ApplyOrAppend(args, "-b:a", $"{plan.BitrateKbps}k");
+        ApplyOrAppend(args, "-ac", plan.Channels.ToString(CultureInfo.InvariantCulture));
+
+        return args;
+    }
+
+    private static void ApplyOrAppend(List<string> args, string flag, string value)
+    {
+        var index = args.IndexOf(flag);
+        if (index >= 0 && index + 1 < args.Count)
+        {
+            args[index + 1] = value;
+            return;
+        }
+
+        args.Add(flag);
+        args.Add(value);
+    }
+
     private static IEnumerable<string> BuildContainerArgs(CodecConfig codec)
     {
         if (codec.FileExtension.Equals(".mp4", StringComparison.OrdinalIgnoreCase))
@@ -1201,20 +1286,9 @@ public class VideoCompressionService : IVideoCompressionService
         return Array.Empty<string>();
     }
 
-    private static bool ShouldEnableFeedbackRetry(ICompressionStrategy? strategy, double? targetSizeMb)
+    private static bool ShouldEnableFeedbackRetry(double? targetSizeMb)
     {
-        if (!targetSizeMb.HasValue || targetSizeMb.Value <= 0)
-        {
-            return false;
-        }
-
-        if (strategy == null)
-        {
-            return false;
-        }
-
-        var encoderName = strategy.VideoCodec ?? string.Empty;
-        return encoderName.Contains("amf", StringComparison.OrdinalIgnoreCase);
+        return targetSizeMb.HasValue && targetSizeMb.Value > 0;
     }
 
     private static bool ShouldRetryFeedback(double targetSizeMb, double actualSizeMb)
@@ -1597,6 +1671,7 @@ public class VideoCompressionService : IVideoCompressionService
     }
 
     private sealed record BitratePlan(double TotalKbps, double VideoKbps, double PayloadBudgetMb, double ContainerReserveMb, double SafetyMarginMb);
+    private sealed record AudioPlan(int BitrateKbps, int Channels);
 
     private sealed class CodecConfig
     {

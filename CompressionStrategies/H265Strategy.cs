@@ -107,9 +107,13 @@ public class H265Strategy : ICompressionStrategy
         var encoder = GetBestEncoder();
         var config = EncodingModeConfigs.Get(CodecKey, encoder, mode);
 
-        var maxRate = Math.Round(targetBitrate * config.MaxRateMultiplier);
-        var minRate = Math.Round(targetBitrate * config.MinRateMultiplier);
-        var buffer = Math.Round(targetBitrate * config.BufferMultiplier);
+        var maxRateMultiplier = Math.Max(config.MaxRateMultiplier, 1.10);
+        var bufferMultiplier = Math.Max(config.BufferMultiplier, 2.0);
+        var minRateMultiplier = Math.Min(config.MinRateMultiplier, 0.5);
+
+        var maxRate = Math.Round(targetBitrate * maxRateMultiplier);
+        var minRate = Math.Round(targetBitrate * minRateMultiplier);
+        var buffer = Math.Round(targetBitrate * bufferMultiplier);
         
         var args = new List<string>
         {
@@ -159,10 +163,6 @@ public class H265Strategy : ICompressionStrategy
         if (!args.Contains("-bufsize"))
         {
             args.AddRange(new[] { "-bufsize", $"{buffer}k" });
-        }
-        if (!args.Contains("-minrate"))
-        {
-            args.AddRange(new[] { "-minrate", $"{minRate}k" });
         }
 
         return args;

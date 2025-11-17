@@ -16,9 +16,8 @@ public class Vp9Strategy : ICompressionStrategy
     {
         _ = mode;
         var targetBitrate = Math.Max(100, Math.Round(videoBitrateKbps));
-        var maxRate = Math.Round(targetBitrate * 1.03);
-        var minRate = Math.Round(targetBitrate * 0.97);
-        var buffer = Math.Round(targetBitrate * 1.0);
+        var maxRate = Math.Round(targetBitrate * 1.15);
+        var buffer = Math.Round(targetBitrate * 2.0);
 
         var args = new List<string>
         {
@@ -38,8 +37,7 @@ public class Vp9Strategy : ICompressionStrategy
             "-sc_threshold", "0",
             "-b:v", $"{targetBitrate}k",
             "-maxrate", $"{maxRate}k",
-            "-bufsize", $"{buffer}k",
-            "-minrate", $"{minRate}k"
+            "-bufsize", $"{buffer}k"
         };
 
         return args;
