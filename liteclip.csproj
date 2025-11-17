@@ -14,14 +14,13 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>liteclip</RootNamespace>
-    <OutputType>WinExe</OutputType>
+    <OutputType>Exe</OutputType>
     
         <!-- Build optimization -->
     <UseAppHost>true</UseAppHost>
     <ProduceReferenceAssembly>false</ProduceReferenceAssembly>
     
-    <!-- Windows portable exe only -->
-    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <!-- Cross-platform support - runtime identifier determined at build/publish time -->
     <TieredCompilation>true</TieredCompilation>
     <TieredCompilationQuickJit>true</TieredCompilationQuickJit>
     
@@ -99,11 +98,11 @@
     <EventSourceSupport>false</EventSourceSupport>
     <HttpActivityPropagationSupport>false</HttpActivityPropagationSupport>
     <MetricsSupport>false</MetricsSupport>
-    <!-- Ensure Release publish outputs a single-file to publish-win by default -->
+    <!-- Ensure Release publish outputs a single-file to publish directory by default -->
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>
-    <!-- PublishDir set to publish-win at project root -->
-    <PublishDir>$(MSBuildProjectDirectory)\publish-win\</PublishDir>
+    <!-- PublishDir set to publish at project root (platform-specific subdirs can be added via CLI) -->
+    <PublishDir>$(MSBuildProjectDirectory)\publish\</PublishDir>
   </PropertyGroup>
   
   <!-- Preserve assemblies that use reflection (prevent trim issues) -->
