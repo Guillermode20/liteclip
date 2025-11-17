@@ -364,6 +364,84 @@ public class VideoCompressionService : IVideoCompressionService
         return 0;
     }
 
+        /// <summary>
+        /// Builds adaptive video filters that are always applied to improve perceived quality.
+        /// These filters are especially beneficial at lower bitrates.
+        /// Filters are automatically tuned based on the compression level and target size.
+        /// </summary>
+        private static List<string> BuildAdaptiveFilters(int scalePercent, int targetFps, double? targetSizeMb, double? sourceDuration)
+        {
+            var filters = new List<string>();
+            
+            // Calculate compression intensity (higher = more aggressive compression)
+            var isHeavyCompression = false;
+            if (targetSizeMb.HasValue && sourceDuration.HasValue && sourceDuration.Value > 0)
+            {
+                var bitrateKbps = (targetSizeMb.Value * 8 * 1024) / sourceDuration.Value;
+                isHeavyCompression = bitrateKbps < 1000; // < 1 Mbps is heavy compression
+            }
+            
+            // 1. Temporal denoising - ALWAYS apply before scaling
+            // Removes noise/grain that's difficult to compress efficiently
+            // More aggressive denoising for heavy compression to maximize efficiency
+            if (isHeavyCompression)
+            {
+                // Stronger denoising for heavy compression
+                filters.Add("hqdn3d=2.5:2.0:4.0:4.0");
+            }
+            else
+            {
+                // Moderate denoising for lighter compression
+                filters.Add("hqdn3d=1.5:1.0:3.0:3.0");
+            }
+            
+            // 2. Scaling (if needed)
+            if (scalePercent < 100)
+            {
+                var factor = scalePercent / 100.0;
+                var factorStr = factor.ToString(CultureInfo.InvariantCulture);
+                filters.Add($"scale=trunc(iw*{factorStr}/2)*2:trunc(ih*{factorStr}/2)*2:flags=lanczos");
+            }
+            
+            // 3. Debanding - ALWAYS apply after scaling
+            // Prevents banding in gradients (skies, sunsets, dark scenes)
+            // This is critical for compressed video quality
+            // Parameters: range=16 pixels, threshold1/2/3/4 for each plane
+            filters.Add("deband=1thr=0.02:2thr=0.02:3thr=0.02:range=16:blur=0");
+            
+            // 4. Contrast-adaptive sharpening - ALWAYS apply
+            // Compensates for softness from denoising and enhances perceived sharpness
+            if (scalePercent < 100)
+            {
+                // Adaptive sharpening based on downscaling amount
+                var downscaleFactor = 1.0 - (scalePercent / 100.0);
+                var unsharpStrength = Math.Round(0.5 + (downscaleFactor * 1.5), 2);
+                var unsharpStrengthStr = unsharpStrength.ToString(CultureInfo.InvariantCulture);
+                filters.Add($"unsharp=3:3:{unsharpStrengthStr}");
+            }
+            else
+            {
+                // Light sharpening even without downscaling
+                filters.Add("unsharp=3:3:0.3");
+            }
+            
+            // 5. Grain synthesis - apply only for heavy compression
+            // Adds subtle film grain to mask compression artifacts
+            // Only needed when bitrate is very low
+            if (isHeavyCompression)
+            {
+                filters.Add("noise=alls=6:allf=t");
+            }
+            
+            // 6. FPS limiting (if specified)
+            if (targetFps > 0)
+            {
+                filters.Add($"fps={targetFps}");
+            }
+            
+            return filters;
+        }
+
         private async Task RunFfmpegCompressionAsync(string jobId, JobMetadata job, CompressionRequest request, CodecConfig codec)
     {
         try
@@ -381,26 +459,6 @@ public class VideoCompressionService : IVideoCompressionService
 			int scalePercent = Math.Clamp(request.ScalePercent ?? 100, 10, 100);
             job.ScalePercent = scalePercent;
 
-            string? scaleFilter = null;
-            string? unsharpFilter = null;
-            if (scalePercent < 100)
-            {
-                var factor = scalePercent / 100.0;
-                var factorStr = factor.ToString(CultureInfo.InvariantCulture);
-                scaleFilter = $"scale=trunc(iw*{factorStr}/2)*2:trunc(ih*{factorStr}/2)*2:flags=lanczos";
-                
-                // Calculate adaptive unsharp strength based on downscaling level
-                // Base: unsharp=3:3:0.5 for 50% downscale
-                // Adjust strength proportionally: less aggressive for mild downscaling, more for heavy downscaling
-                var downscaleFactor = 1.0 - factor; // 0.0 (no downscale) to 0.9 (10% of original)
-                var unsharpStrength = Math.Round(0.5 + (downscaleFactor * 1.5), 2); // Range: 0.5 to 1.85
-                var unsharpStrengthStr = unsharpStrength.ToString(CultureInfo.InvariantCulture);
-                unsharpFilter = $"unsharp=3:3:{unsharpStrengthStr}";
-                
-                _logger.LogInformation("Applying Lanczos scaling for job {JobId}: {ScalePercent}% with unsharp strength {UnsharpStrength}", 
-                    jobId, scalePercent, unsharpStrength);
-            }
-
             var targetBitrateKbps = job.TargetBitrateKbps ?? 0;
             var videoBitrateKbps = job.VideoBitrateKbps.Value;
 
@@ -408,26 +466,12 @@ public class VideoCompressionService : IVideoCompressionService
             job.TargetBitrateKbps = targetBitrateKbps;
             job.VideoBitrateKbps = videoBitrateKbps;
 
-            // Smart filter chain: only apply filters that are actually needed
+            // Build adaptive filter chain - always applied for best quality
             var fpsToUse = request.TargetFps ?? 30;
-            var filters = new List<string>();
+            var filters = BuildAdaptiveFilters(scalePercent, fpsToUse, job.TargetSizeMb, job.SourceDuration);
             
-            if (!string.IsNullOrWhiteSpace(scaleFilter))
-            {
-                filters.Add(scaleFilter);
-            }
-            
-            // Apply unsharp filter after scaling (only if we downscaled)
-            if (!string.IsNullOrWhiteSpace(unsharpFilter))
-            {
-                filters.Add(unsharpFilter);
-            }
-            
-            // Only force FPS if target is specified (don't waste time on unnecessary reencoding)
-            if (request.TargetFps.HasValue)
-            {
-                filters.Add($"fps={fpsToUse}");
-            }
+            _logger.LogInformation("Applying {Count} adaptive quality filters for job {JobId} (scale={Scale}%, targetSize={TargetMb}MB)", 
+                filters.Count, jobId, scalePercent, job.TargetSizeMb);
 
             // Get a registered compression strategy if available; fall back to legacy builders.
             ICompressionStrategy? strategy = null;
