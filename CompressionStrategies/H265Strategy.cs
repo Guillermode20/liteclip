@@ -23,9 +23,11 @@ public class H265Strategy : ICompressionStrategy
             
         _encoderDetected = true;
         
-        // Try hardware encoders: NVENC > QuickSync > AMF > Software
+        // For small or tightly-targeted outputs we prefer libx265 (two-pass) for accuracy.
+        // The selection of hardware vs software is made at a higher level based on target size.
+        // Here we only detect hardware for general use.
+
         var encodersToTry = new[] { "hevc_nvenc", "hevc_qsv", "hevc_amf" };
-        
         foreach (var encoder in encodersToTry)
         {
             if (IsEncoderAvailable(encoder))
@@ -34,7 +36,7 @@ public class H265Strategy : ICompressionStrategy
                 return encoder;
             }
         }
-        
+
         _detectedEncoder = "libx265";
         return "libx265";
     }
@@ -98,10 +100,10 @@ public class H265Strategy : ICompressionStrategy
         }
     }
 
-    public IEnumerable<string> BuildVideoArgs(double videoBitrateKbps)
+    public IEnumerable<string> BuildVideoArgs(double videoBitrateKbps, bool useQualityMode)
     {
         var targetBitrate = Math.Max(100, Math.Round(videoBitrateKbps));
-        // Tighter bitrate control to prevent file size overshoot
+        // Base CBR-ish defaults; strategies can override per encoder
         var maxRate = Math.Round(targetBitrate * 1.01);
         var minRate = Math.Round(targetBitrate * 0.99);
         var buffer = Math.Round(targetBitrate * 0.8);
@@ -151,16 +153,56 @@ public class H265Strategy : ICompressionStrategy
             }
             else if (encoder == "hevc_amf")
             {
+                // H.265 defaults to quality-focused tuning (good mix of speed + quality)
+                // This is the primary codec recommendation and can afford slower encoding
+                maxRate = targetBitrate;
+                minRate = targetBitrate;
+                buffer = targetBitrate;
+
                 args.AddRange(new[]
                 {
                     "-quality", "quality",
-                    "-rc", "vbr_peak",
-                    "-qmin", "18",
+                    "-rc", "cbr",
+                    "-qmin", "0",
                     "-qmax", "51",
-                    "-preanalysis", "1",
-                    "-g", "60",
-                    "-bf", "3",
                     "-tag:v", "hvc1"
+                });
+
+                // Default: quality-focused (larger GOP, high lookahead, adaptive AQ)
+                args.AddRange(new[]
+                {
+                    "-g", "120",
+                    "-bf", "2",
+                    "-rc-lookahead", "64",
+                    "-temporal-aq", "2",
+                    "-spatial-aq", "2",
+                    "-profile:v", "main",
+                    "-no-scenecut", "1"
+                });
+
+                // Quality mode OFF (unlikely): scale back to faster, lighter settings
+                if (!useQualityMode)
+                {
+                    // Remove the quality-focused args and add speed-optimized ones
+                    args.RemoveRange(args.Count - 8, 8);
+                    args.AddRange(new[]
+                    {
+                        "-g", "60",
+                        "-bf", "1",
+                        "-rc-lookahead", "32",
+                        "-temporal-aq", "1",
+                        "-spatial-aq", "0",
+                        "-profile:v", "main",
+                        "-no-scenecut", "0"
+                    });
+                }
+
+                args.AddRange(new[]
+                {
+                    "-b:v", $"{targetBitrate}k",
+                    "-maxrate", $"{maxRate}k",
+                    "-minrate", $"{minRate}k",
+                    "-bufsize", $"{buffer}k"
                 });
             }
         }

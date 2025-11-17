@@ -134,57 +134,32 @@ public class VideoCompressionService : IVideoCompressionService
         // Calculate bitrates for compression (only if we're actually compressing)
         double? computedTargetKbps = null;
         double? computedVideoKbps = null;
+        BitratePlan? bitratePlan = null;
         
         if (!skipCompression && 
             normalizedRequest.TargetSizeMb.HasValue && 
             normalizedRequest.SourceDuration.HasValue && 
             normalizedRequest.SourceDuration.Value > 0)
         {
-            var targetSize = normalizedRequest.TargetSizeMb.Value;
-            var duration = normalizedRequest.SourceDuration.Value;
+            bitratePlan = CalculateBitratePlan(normalizedRequest, codecConfig);
 
-            // Calculate target bitrate in bits per second, then convert to kbps
-            var targetBitsTotal = (targetSize * 1024 * 1024 * 8);
-            var durationSec = duration;
-            var totalKbps = targetBitsTotal / durationSec / 1000;
-
-            // Reserve audio bitrate, use remaining for video
-            // Container overhead varies by format and file size:
-            // - WebM is more efficient (2% overhead)
-            // - MP4 has significant overhead (moov atom, faststart, etc.) especially for small files
-            //   Empirical testing shows we need aggressive compensation to hit target sizes
-            double containerOverheadFactor;
-            if (codecConfig.FileExtension.Equals(".webm", StringComparison.OrdinalIgnoreCase))
+            if (bitratePlan != null)
             {
-                containerOverheadFactor = 0.98;
-            }
-            else
-            {
-                // MP4: very aggressive overhead compensation based on target size
-                // The maxrate variance (3%) combined with container overhead requires
-                // substantial bitrate reduction to hit target file sizes accurately
-                // Small files (< 3MB): 15% overhead (0.85)
-                // Small-medium (3-8MB): 12% overhead (0.88)
-                // Medium (8-20MB): 8% overhead (0.92)
-                // Large (> 20MB): 5% overhead (0.95)
-                if (targetSize < 3.0)
-                    containerOverheadFactor = 0.85;
-                else if (targetSize < 8.0)
-                    containerOverheadFactor = 0.88;
-                else if (targetSize < 20.0)
-                    containerOverheadFactor = 0.92;
-                else
-                    containerOverheadFactor = 0.95;
-            }
-            var effectiveTargetKbps = totalKbps * containerOverheadFactor;
-            var videoKbps = Math.Max(100, effectiveTargetKbps - codecConfig.AudioBitrateKbps);
+                computedTargetKbps = bitratePlan.TotalKbps;
+                computedVideoKbps = bitratePlan.VideoKbps;
 
-            _logger.LogInformation("Bitrate calculation: TargetSize={TargetMb}MB, Duration={Duration}s, TotalKbps={TotalKbps}, ContainerOverhead={ContainerOverheadPct}%, EffectiveKbps={EffectiveKbps}, VideoKbps={VideoKbps}, AudioKbps={AudioKbps}",
-                targetSize, durationSec, Math.Round(totalKbps, 2), Math.Round((1 - containerOverheadFactor) * 100, 1), effectiveTargetKbps, videoKbps, codecConfig.AudioBitrateKbps);
-
-            // Store for job creation below
-            computedTargetKbps = Math.Round(effectiveTargetKbps, 2);
-            computedVideoKbps = Math.Round(videoKbps, 2);
+                _logger.LogInformation(
+                    "Bitrate plan for job {JobId}: TargetSize={TargetMb}MB, Duration={Duration}s, PayloadBudget={PayloadMb}MB, ContainerReserve={ContainerMb}MB, SafetyMargin={SafetyMb}MB, TotalKbps={TotalKbps}, VideoKbps={VideoKbps}, AudioKbps={AudioKbps}",
+                    jobId,
+                    normalizedRequest.TargetSizeMb.Value,
+                    normalizedRequest.SourceDuration.Value,
+                    bitratePlan.PayloadBudgetMb,
+                    bitratePlan.ContainerReserveMb,
+                    bitratePlan.SafetyMarginMb,
+                    bitratePlan.TotalKbps,
+                    bitratePlan.VideoKbps,
+                    codecConfig.AudioBitrateKbps);
+            }
         }
 
         // If we're skipping compression (100% target), just copy/use the merged file
@@ -243,7 +218,9 @@ public class VideoCompressionService : IVideoCompressionService
             throw new InvalidOperationException($"Queue is full. Maximum queue size is {_maxQueueSize}. Please try again later.");
         }
 
-        // Enable two-pass by default when using target size for better accuracy
+        // Enable two-pass by default when using target size for better accuracy.
+        // For small targets with H.264/H.265, prefer software encoders over hardware
+        // (handled by strategies via encoder selection) and rely on two-pass.
         var enableTwoPass = normalizedRequest.TargetSizeMb.HasValue;
         
         var compressionJob = new JobMetadata
@@ -419,8 +396,6 @@ public class VideoCompressionService : IVideoCompressionService
             job.TargetBitrateKbps = targetBitrateKbps;
             job.VideoBitrateKbps = videoBitrateKbps;
 
-            var arguments = new List<string> { "-y", "-i", job.InputPath };
-
             // Smart filter chain: only apply filters that are actually needed
             var fpsToUse = request.TargetFps ?? 30;
             var filters = new List<string>();
@@ -441,32 +416,25 @@ public class VideoCompressionService : IVideoCompressionService
             {
                 filters.Add($"fps={fpsToUse}");
             }
-            
-            // Apply filter chain only if we have filters
-            if (filters.Count > 0)
-            {
-                arguments.AddRange(new[] { "-vf", string.Join(",", filters) });
-            }
 
             // Prefer a registered compression strategy if available; fall back to legacy builders.
+            var preferSoftwareEncoder = job.TargetSizeMb.HasValue && string.Equals(request.Codec, "h264", StringComparison.OrdinalIgnoreCase);
             ICompressionStrategy? strategy = null;
-            try
+            if (!preferSoftwareEncoder)
             {
-                strategy = _strategyFactory?.GetStrategy(codec.Key);
-            }
-            catch
-            {
-                // Ignore factory errors and fall back
-                strategy = null;
+                try
+                {
+                    strategy = _strategyFactory?.GetStrategy(codec.Key);
+                }
+                catch
+                {
+                    // Ignore factory errors and fall back
+                    strategy = null;
+                }
             }
 
             if (strategy != null)
             {
-                arguments.AddRange(strategy.BuildVideoArgs(videoBitrateKbps));
-                arguments.AddRange(strategy.BuildAudioArgs());
-                arguments.AddRange(strategy.BuildContainerArgs());
-
-                // Populate encoder metadata on the job if available
                 try
                 {
                     var encoderName = strategy.VideoCodec;
@@ -480,12 +448,6 @@ public class VideoCompressionService : IVideoCompressionService
             }
             else
             {
-                var videoArgs = BuildSimpleVideoArgs(codec, videoBitrateKbps, fpsToUse);
-                arguments.AddRange(videoArgs);
-                arguments.AddRange(BuildAudioArgs(codec));
-                arguments.AddRange(BuildContainerArgs(codec));
-
-                // Populate encoder metadata from codec fallback
                 try
                 {
                     job.EncoderName = codec.VideoCodec;
@@ -496,18 +458,80 @@ public class VideoCompressionService : IVideoCompressionService
                     // ignore
                 }
             }
-            // Two-pass encoding for accurate target size
-            var useTwoPass = job.TwoPass;
-            
+
+            var audioArgs = (strategy?.BuildAudioArgs() ?? BuildAudioArgs(codec)).ToList();
+            var containerArgs = (strategy?.BuildContainerArgs() ?? BuildContainerArgs(codec)).ToList();
+
+            List<string> BuildArguments(double videoBitrate)
+            {
+                var args = new List<string> { "-y", "-i", job.InputPath };
+                if (filters.Count > 0)
+                {
+                    args.AddRange(new[] { "-vf", string.Join(",", filters) });
+                }
+
+                if (strategy != null)
+                {
+                    args.AddRange(strategy.BuildVideoArgs(videoBitrate, request.UseQualityMode));
+                }
+                else
+                {
+                    args.AddRange(BuildSimpleVideoArgs(codec, videoBitrate, fpsToUse, request.UseQualityMode));
+                }
+
+                args.AddRange(audioArgs);
+                args.AddRange(containerArgs);
+                return args;
+            }
+
+            var hardwareEncoder = IsHardwareEncoder(job.EncoderName);
+            var useTwoPass = job.TwoPass && !hardwareEncoder;
+            if (job.TwoPass && hardwareEncoder)
+            {
+                _logger.LogInformation("Hardware encoder {Encoder} detected; skipping two-pass to avoid incompatible parameters", job.EncoderName);
+            }
             if (useTwoPass)
             {
                 _logger.LogInformation("Using two-pass encoding for job {JobId}", jobId);
-                await RunTwoPassEncodingAsync(jobId, job, arguments, codec, job.SourceDuration);
+                var firstAttemptArgs = BuildArguments(videoBitrateKbps);
+                firstAttemptArgs.Add(job.OutputPath);
+                await RunTwoPassEncodingAsync(jobId, job, firstAttemptArgs, codec, job.SourceDuration, strategy);
             }
             else
             {
-                arguments.Add(job.OutputPath);
-                await RunSinglePassEncodingAsync(jobId, job, arguments, job.SourceDuration);
+                var attempts = 0;
+                var maxAttempts = ShouldEnableFeedbackRetry(strategy, request.TargetSizeMb) ? 2 : 1;
+                var currentVideoKbps = videoBitrateKbps;
+
+                while (attempts < maxAttempts)
+                {
+                    attempts++;
+                    var attemptArgs = BuildArguments(currentVideoKbps);
+                    attemptArgs.Add(job.OutputPath);
+                    var success = await RunSinglePassEncodingAsync(jobId, job, attemptArgs, job.SourceDuration);
+                    if (!success)
+                    {
+                        return;
+                    }
+
+                    var targetSizeMb = request.TargetSizeMb ?? 0;
+                    var actualSizeMb = job.OutputSizeBytes.HasValue ? job.OutputSizeBytes.Value / (1024.0 * 1024.0) : 0;
+
+                    if (attempts == maxAttempts || !ShouldRetryFeedback(targetSizeMb, actualSizeMb))
+                    {
+                        FinalizeSinglePassJob(job, codec);
+                        break;
+                    }
+
+                    currentVideoKbps = ComputeFeedbackBitrate(currentVideoKbps, targetSizeMb, actualSizeMb);
+                    job.VideoBitrateKbps = currentVideoKbps;
+                    job.TargetBitrateKbps = Math.Round(currentVideoKbps + codec.AudioBitrateKbps, 2);
+                    job.Progress = 0;
+                    job.EstimatedSecondsRemaining = null;
+                    job.Status = "processing";
+                    job.CompletedAt = null;
+                    job.StartedAt = DateTime.UtcNow;
+                }
             }
         }
         catch (Exception ex)
@@ -552,7 +576,7 @@ public class VideoCompressionService : IVideoCompressionService
         }
     }
 
-    private async Task RunSinglePassEncodingAsync(string jobId, JobMetadata job, List<string> arguments, double? totalDuration)
+    private async Task<bool> RunSinglePassEncodingAsync(string jobId, JobMetadata job, List<string> arguments, double? totalDuration)
     {
         var commandLine = $"ffmpeg {string.Join(" ", arguments.Select(a => a.Contains(" ") ? $"\"{a}\"" : a))}";
         _logger.LogInformation("Executing FFmpeg command for job {JobId}: {Command}", jobId, commandLine);
@@ -632,42 +656,50 @@ public class VideoCompressionService : IVideoCompressionService
 
         await process.WaitForExitAsync();
 
-        // Check for cancellation
         if (job.Status == "cancelled")
         {
             _logger.LogInformation("Job {JobId} was cancelled", jobId);
-            return;
+            return false;
         }
 
         if (process.ExitCode == 0)
         {
-            job.Status = "completed";
-            job.Progress = 100;
-            job.EstimatedSecondsRemaining = 0;
-            
-            // Log output file size for verification
             if (File.Exists(job.OutputPath))
             {
                 var outputSize = new FileInfo(job.OutputPath).Length;
-                    job.OutputSizeBytes = outputSize;
-                var outputSizeMb = outputSize / (1024.0 * 1024.0);
-                _logger.LogInformation("Video compression completed for job {JobId} using {Codec}. Output size: {OutputSizeMb:F2} MB (Target: {TargetSizeMb} MB)", 
-                    jobId, job.Codec, outputSizeMb, job.TargetSizeMb?.ToString("F2") ?? "N/A");
+                job.OutputSizeBytes = outputSize;
             }
-            else
-            {
-                _logger.LogInformation("Video compression completed for job {JobId} using {Codec}.", jobId, job.Codec);
-            }
+            return true;
         }
         else
         {
             job.Status = "failed";
             job.ErrorMessage = errorBuilder.ToString();
             _logger.LogError("Video compression failed for job {JobId}. Exit code {ExitCode}. Error: {Error}", jobId, process.ExitCode, errorBuilder.ToString());
+            return false;
         }
     }
 
-    private async Task RunTwoPassEncodingAsync(string jobId, JobMetadata job, List<string> baseArguments, CodecConfig codec, double? totalDuration)
+    private void FinalizeSinglePassJob(JobMetadata job, CodecConfig codec)
+    {
+        job.Status = "completed";
+        job.Progress = 100;
+        job.EstimatedSecondsRemaining = 0;
+        job.CompletedAt = DateTime.UtcNow;
+
+        if (job.OutputSizeBytes.HasValue)
+        {
+            var outputSizeMb = job.OutputSizeBytes.Value / (1024.0 * 1024.0);
+            _logger.LogInformation("Video compression completed for job {JobId} using {Codec}. Output size: {OutputSizeMb:F2} MB (Target: {TargetSizeMb} MB)",
+                job.JobId, job.Codec, outputSizeMb, job.TargetSizeMb?.ToString("F2") ?? "N/A");
+        }
+        else
+        {
+            _logger.LogInformation("Video compression completed for job {JobId} using {Codec}.", job.JobId, job.Codec);
+        }
+    }
+
+    private async Task RunTwoPassEncodingAsync(string jobId, JobMetadata job, List<string> baseArguments, CodecConfig codec, double? totalDuration, ICompressionStrategy? strategy)
     {
         var passLogFile = Path.Combine(_tempOutputPath, $"{jobId}_ffmpeg2pass");
 
@@ -676,7 +708,6 @@ public class VideoCompressionService : IVideoCompressionService
         var pass1Args = new List<string>(baseArguments);
 
         // Ask strategy for pass-specific extras when available
-        var strategy = _strategyFactory?.GetStrategy(codec.Key);
         if (strategy != null)
         {
             pass1Args.AddRange(strategy.GetPassExtras(1, passLogFile));
@@ -1016,8 +1047,9 @@ public class VideoCompressionService : IVideoCompressionService
 
 
 
-    private static List<string> BuildSimpleVideoArgs(CodecConfig codec, double videoBitrateKbps, int fps)
+    private static List<string> BuildSimpleVideoArgs(CodecConfig codec, double videoBitrateKbps, int fps, bool useQualityMode)
     {
+        _ = useQualityMode;
         var targetBitrate = Math.Max(100, Math.Round(videoBitrateKbps));
         // Tighter bitrate control for more accurate file sizes
         // maxrate: 3% variance (reduced from 5%)
@@ -1076,6 +1108,140 @@ public class VideoCompressionService : IVideoCompressionService
         }
 
         return Array.Empty<string>();
+    }
+
+    private static bool ShouldEnableFeedbackRetry(ICompressionStrategy? strategy, double? targetSizeMb)
+    {
+        if (!targetSizeMb.HasValue || targetSizeMb.Value <= 0)
+        {
+            return false;
+        }
+
+        if (strategy == null)
+        {
+            return false;
+        }
+
+        var encoderName = strategy.VideoCodec ?? string.Empty;
+        return encoderName.Contains("amf", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool ShouldRetryFeedback(double targetSizeMb, double actualSizeMb)
+    {
+        if (targetSizeMb <= 0 || actualSizeMb <= 0)
+        {
+            return false;
+        }
+
+        var overshoot = actualSizeMb / targetSizeMb;
+        return overshoot > 1.05;
+    }
+
+    private static double ComputeFeedbackBitrate(double currentVideoKbps, double targetSizeMb, double actualSizeMb)
+    {
+        if (actualSizeMb <= 0)
+        {
+            return Math.Max(60, currentVideoKbps * 0.9);
+        }
+
+        var correction = targetSizeMb / actualSizeMb;
+        return Math.Max(60, currentVideoKbps * correction * 0.98);
+    }
+
+    private static bool IsHardwareEncoder(string? encoderName)
+    {
+        if (string.IsNullOrWhiteSpace(encoderName))
+        {
+            return false;
+        }
+
+        var lower = encoderName.ToLowerInvariant();
+        return lower.Contains("amf") || lower.Contains("nvenc") || lower.Contains("qsv");
+    }
+
+    private BitratePlan? CalculateBitratePlan(CompressionRequest request, CodecConfig codecConfig)
+    {
+        if (!request.TargetSizeMb.HasValue || request.TargetSizeMb.Value <= 0 ||
+            !request.SourceDuration.HasValue || request.SourceDuration.Value <= 0)
+        {
+            return null;
+        }
+
+        var targetSizeMb = request.TargetSizeMb.Value;
+        var durationSeconds = request.SourceDuration.Value;
+
+        var reserveBudgetMb = CalculateReserveBudget(targetSizeMb, durationSeconds, codecConfig);
+        var containerShare = GetContainerShare(codecConfig);
+
+        var containerReserveMb = reserveBudgetMb * containerShare;
+        var safetyMarginMb = reserveBudgetMb - containerReserveMb;
+
+        // Ensure we always have a positive payload budget to hand to the encoder
+        var payloadBudgetMb = targetSizeMb - reserveBudgetMb;
+        if (payloadBudgetMb <= 0)
+        {
+            payloadBudgetMb = Math.Max(targetSizeMb * 0.1, 0.05);
+            var adjustedReserve = Math.Max(targetSizeMb - payloadBudgetMb, 0);
+            if (reserveBudgetMb > 0)
+            {
+                var scale = adjustedReserve / reserveBudgetMb;
+                containerReserveMb *= scale;
+                safetyMarginMb *= scale;
+                reserveBudgetMb = adjustedReserve;
+            }
+        }
+
+        var payloadBits = payloadBudgetMb * 1024 * 1024 * 8;
+        var totalKbps = payloadBits / durationSeconds / 1000d;
+
+        // Add a slight buffer to the reserved audio bitrate so container muxing remains under target
+        var audioBudgetKbps = codecConfig.AudioBitrateKbps * 1.04;
+        var videoKbps = Math.Max(80, totalKbps - audioBudgetKbps);
+
+        return new BitratePlan(
+            Math.Round(totalKbps, 2),
+            Math.Round(videoKbps, 2),
+            Math.Round(payloadBudgetMb, 3),
+            Math.Round(containerReserveMb, 3),
+            Math.Round(safetyMarginMb, 3));
+    }
+
+    private static double CalculateReserveBudget(double targetSizeMb, double durationSeconds, CodecConfig codecConfig)
+    {
+        // Codec/container level reserve only; encoder-specific behavior is handled in strategies
+        var baseReserve = 0.18;
+        var linearComponent = targetSizeMb * (codecConfig.FileExtension.Equals(".mp4", StringComparison.OrdinalIgnoreCase) ? 0.0035 : 0.0028);
+        var reserve = baseReserve + linearComponent;
+
+        if (durationSeconds >= 1800)
+        {
+            reserve += 0.12;
+        }
+        else if (durationSeconds >= 900)
+        {
+            reserve += 0.06;
+        }
+        else if (durationSeconds >= 300)
+        {
+            reserve += 0.03;
+        }
+
+        var maxReserve = codecConfig.FileExtension.Equals(".mp4", StringComparison.OrdinalIgnoreCase) ? 1.0 : 0.75;
+        var minReserve = 0.25;
+        reserve = Math.Clamp(reserve, minReserve, maxReserve);
+
+        var maxAllowed = targetSizeMb * 0.85;
+        if (reserve > maxAllowed)
+        {
+            reserve = maxAllowed;
+        }
+
+        return Math.Max(reserve, 0);
+    }
+
+    private static double GetContainerShare(CodecConfig codecConfig)
+    {
+        return codecConfig.FileExtension.Equals(".mp4", StringComparison.OrdinalIgnoreCase) ? 0.68 : 0.48;
     }
 
 
@@ -1347,6 +1513,8 @@ public class VideoCompressionService : IVideoCompressionService
             _ => "h264"
         };
     }
+
+    private sealed record BitratePlan(double TotalKbps, double VideoKbps, double PayloadBudgetMb, double ContainerReserveMb, double SafetyMarginMb);
 
     private sealed class CodecConfig
     {

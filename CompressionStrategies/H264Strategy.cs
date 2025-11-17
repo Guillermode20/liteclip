@@ -98,10 +98,10 @@ public class H264Strategy : ICompressionStrategy
         }
     }
 
-    public IEnumerable<string> BuildVideoArgs(double videoBitrateKbps)
+    public IEnumerable<string> BuildVideoArgs(double videoBitrateKbps, bool useQualityMode)
     {
         var targetBitrate = Math.Max(100, Math.Round(videoBitrateKbps));
-        // Tighter bitrate control to prevent file size overshoot
+        // Base CBR-ish defaults; strategies can override per encoder
         var maxRate = Math.Round(targetBitrate * 1.01);
         var minRate = Math.Round(targetBitrate * 0.99);
         var buffer = Math.Round(targetBitrate * 0.8);
@@ -150,19 +150,39 @@ public class H264Strategy : ICompressionStrategy
             }
             else if (encoder == "h264_amf")
             {
-                // AMD AMF: highest quality preset
+                // AMD AMF: use CBR-style mode for accurate sizing
+                // H.264 prioritizes speed by default (lighter AQ settings)
+                maxRate = targetBitrate;
+                minRate = targetBitrate;
+                buffer = targetBitrate;
+
                 args.AddRange(new[]
                 {
                     "-quality", "quality",
-                    "-rc", "vbr_peak",
-                    "-qmin", "18",
+                    "-rc", "cbr",
+                    "-qmin", "0",
                     "-qmax", "51",
-                    "-preanalysis", "1",
-                    "-g", "60",
-                    "-bf", "3"
+                    "-pix_fmt", "nv12"
                 });
-                // AMF h264 encoder only supports 8-bit input on Windows. Force NV12.
-                args.AddRange(new[] { "-pix_fmt", "nv12" });
+
+                // Default: speed-optimized (smaller GOP, less lookahead, less AQ)
+                // Quality mode: can add more AQ if needed, but H.264 stays lean by design
+                args.AddRange(new[]
+                {
+                    "-g", "60",
+                    "-bf", "1",
+                    "-rc-lookahead", "32",
+                    "-temporal-aq", "1",
+                    "-spatial-aq", "0"
+                });
+
+                args.AddRange(new[]
+                {
+                    "-b:v", $"{targetBitrate}k",
+                    "-maxrate", $"{maxRate}k",
+                    "-minrate", $"{minRate}k",
+                    "-bufsize", $"{buffer}k"
+                });
             }
         }
         else

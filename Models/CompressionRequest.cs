@@ -15,5 +15,6 @@ public class CompressionRequest
     public bool SkipCompression { get; set; }
     public double? SourceDuration { get; set; }
     public List<VideoSegment>? Segments { get; set; }
+        public bool UseQualityMode { get; set; }
 }
 

@@ -97,6 +97,7 @@ namespace liteclip
                 [FromForm] double? sourceDuration,
                 [FromForm] string? segments,
                 [FromForm] bool? skipCompression,
+                [FromForm] bool? qualityMode,
                 
                 VideoCompressionService compressionService,
                 IConfiguration configuration) =>
@@ -142,7 +143,8 @@ namespace liteclip
                         TargetSizeMb = targetSizeMb,
                         SkipCompression = skipCompression ?? false,
                         SourceDuration = sourceDuration,
-                        Segments = videoSegments
+                        Segments = videoSegments,
+                        UseQualityMode = qualityMode ?? false
                     };
 
                     var jobId = await compressionService.CompressVideoAsync(file, compressionRequest);
