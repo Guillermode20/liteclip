@@ -494,15 +494,10 @@ public class VideoCompressionService : IVideoCompressionService
                 return args;
             }
 
-            var hardwareEncoder = IsHardwareEncoder(job.EncoderName);
-            var useTwoPass = job.TwoPass && !hardwareEncoder;
-            if (job.TwoPass && hardwareEncoder)
-            {
-                _logger.LogInformation("Hardware encoder {Encoder} detected; skipping two-pass to avoid incompatible parameters", job.EncoderName);
-            }
+            var useTwoPass = job.TwoPass;
             if (useTwoPass)
             {
-                _logger.LogInformation("Using two-pass encoding for job {JobId}", jobId);
+                _logger.LogInformation("Using two-pass encoding for job {JobId} with encoder {Encoder}", jobId, job.EncoderName);
                 var baseArgs = BuildArguments(videoBitrateKbps); // without output
                 await RunTwoPassEncodingAsync(jobId, job, baseArgs, codec, job.SourceDuration, strategy);
             }
@@ -1171,17 +1166,6 @@ public class VideoCompressionService : IVideoCompressionService
 
         var correction = targetSizeMb / actualSizeMb;
         return Math.Max(60, currentVideoKbps * correction * 0.98);
-    }
-
-    private static bool IsHardwareEncoder(string? encoderName)
-    {
-        if (string.IsNullOrWhiteSpace(encoderName))
-        {
-            return false;
-        }
-
-        var lower = encoderName.ToLowerInvariant();
-        return lower.Contains("amf") || lower.Contains("nvenc") || lower.Contains("qsv");
     }
 
     private BitratePlan? CalculateBitratePlan(CompressionRequest request, CodecConfig codecConfig)
