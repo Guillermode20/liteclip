@@ -234,6 +234,8 @@
         formData.append('targetSizeMb', targetSizeMb.toFixed(2));
         const shouldSkipCompression = percent >= 100;
         formData.append('skipCompression', shouldSkipCompression ? 'true' : 'false');
+        formData.append('qualityMode', (codecSelectValue === 'quality' || codecSelectValue === 'ultra') ? 'true' : 'false');
+        formData.append('ultraMode', codecSelectValue === 'ultra' ? 'true' : 'false');
 
         const effectiveDuration = getEffectiveDuration(videoSegments, sourceDuration) ?? sourceDuration;
 

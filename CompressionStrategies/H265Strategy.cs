@@ -100,7 +100,7 @@ public class H265Strategy : ICompressionStrategy
         }
     }
 
-    public IEnumerable<string> BuildVideoArgs(double videoBitrateKbps, bool useQualityMode)
+    public IEnumerable<string> BuildVideoArgs(double videoBitrateKbps, bool useQualityMode, bool useUltraMode = false)
     {
         var targetBitrate = Math.Max(100, Math.Round(videoBitrateKbps));
         // Base CBR-ish defaults; strategies can override per encoder
@@ -126,16 +126,18 @@ public class H265Strategy : ICompressionStrategy
             
             if (encoder == "hevc_nvenc")
             {
-                // NVENC HEVC: P4 preset for balance
+                // NVENC HEVC: Higher preset for ultra mode, maximum quality settings
                 args.AddRange(new[]
                 {
-                    "-preset", "p4",
+                    "-preset", useUltraMode ? "p7" : "p6",
                     "-rc", "vbr",
                     "-spatial-aq", "1",
                     "-temporal-aq", "1",
-                    "-rc-lookahead", "32",
+                    "-rc-lookahead", useUltraMode ? "64" : "48",
                     "-g", "60",
-                    "-bf", "3",
+                    "-bf", useUltraMode ? "5" : "4",
+                    "-b_ref_mode", useUltraMode ? "each" : "middle",
+                    "-multipass", useUltraMode ? "fullres" : "disabled",
                     "-tag:v", "hvc1"
                 });
             }
@@ -143,11 +145,11 @@ public class H265Strategy : ICompressionStrategy
             {
                 args.AddRange(new[]
                 {
-                    "-preset", "medium",
+                    "-preset", useUltraMode ? "veryslow" : "slower",
                     "-look_ahead", "1",
-                    "-look_ahead_depth", "40",
+                    "-look_ahead_depth", useUltraMode ? "80" : "60",
                     "-g", "60",
-                    "-bf", "3",
+                    "-bf", useUltraMode ? "5" : "4",
                     "-tag:v", "hvc1"
                 });
             }
@@ -155,33 +157,52 @@ public class H265Strategy : ICompressionStrategy
             {
                 // H.265 defaults to quality-focused tuning (good mix of speed + quality)
                 // This is the primary codec recommendation and can afford slower encoding
-                maxRate = targetBitrate;
-                minRate = targetBitrate;
-                buffer = targetBitrate;
+                maxRate = Math.Round(targetBitrate * 1.05);
+                minRate = Math.Round(targetBitrate * 0.95);
+                buffer = Math.Round(targetBitrate * 1.5);
 
                 args.AddRange(new[]
                 {
                     "-quality", "quality",
-                    "-rc", "cbr",
-                    "-qmin", "0",
-                    "-qmax", "51",
+                    "-rc", "vbr_peak",
+                    "-qmin", "15",
+                    "-qmax", "45",
                     "-tag:v", "hvc1"
                 });
 
-                // Default: quality-focused (larger GOP, high lookahead, adaptive AQ)
-                args.AddRange(new[]
+                // Ultra mode: Maximum quality settings with extended lookahead and more B-frames
+                // Quality mode: Enhanced quality settings
+                // Default: quality-focused (larger GOP, high lookahead, more B-frames, adaptive AQ)
+                if (useUltraMode)
                 {
-                    "-g", "120",
-                    "-bf", "2",
-                    "-rc-lookahead", "64",
-                    "-temporal-aq", "2",
-                    "-spatial-aq", "2",
-                    "-profile:v", "main",
-                    "-no-scenecut", "1"
-                });
+                    args.AddRange(new[]
+                    {
+                        "-g", "120",
+                        "-bf", "6",
+                        "-rc-lookahead", "120",
+                        "-temporal-aq", "2",
+                        "-spatial-aq", "2",
+                        "-profile:v", "main",
+                        "-no-scenecut", "1",
+                        "-preanalysis", "1"
+                    });
+                }
+                else
+                {
+                    args.AddRange(new[]
+                    {
+                        "-g", "120",
+                        "-bf", "4",
+                        "-rc-lookahead", "80",
+                        "-temporal-aq", "2",
+                        "-spatial-aq", "2",
+                        "-profile:v", "main",
+                        "-no-scenecut", "1"
+                    });
+                }
 
                 // Quality mode OFF (unlikely): scale back to faster, lighter settings
-                if (!useQualityMode)
+                if (!useQualityMode && !useUltraMode)
                 {
                     // Remove the quality-focused args and add speed-optimized ones
                     args.RemoveRange(args.Count - 8, 8);
@@ -208,21 +229,42 @@ public class H265Strategy : ICompressionStrategy
         }
         else
         {
-            // Software: Use medium preset for good quality/speed balance
-            // Quality-focused codec deserves more processing time than H.264
-            args.AddRange(new[]
+            // Software encoder (libx265)
+            if (useUltraMode)
             {
-                "-preset", "medium",
-                "-pix_fmt", "yuv420p",
-                "-tag:v", "hvc1",
-                "-g", "60",
-                "-sc_threshold", "0",
-                "-bf", "3",
-                "-refs", "4",
-                "-minrate", $"{minRate}k",
-                // Balanced quality settings: good psychovisual optimization with reasonable lookahead
-                "-x265-params", $"vbv-bufsize={buffer}:vbv-maxrate={maxRate}:aq-mode=3:aq-strength=0.9:psy-rd=1.5:psy-rdoq=0.8:rc-lookahead=40:me=star:subme=5:rd=4"
-            });
+                // Ultra quality mode: veryslow preset with maximum quality settings
+                // This will take significantly longer but produce the best possible quality
+                args.AddRange(new[]
+                {
+                    "-preset", "veryslow",
+                    "-pix_fmt", "yuv420p",
+                    "-tag:v", "hvc1",
+                    "-g", "120",
+                    "-sc_threshold", "0",
+                    "-bf", "8",
+                    "-refs", "6",
+                    "-minrate", $"{minRate}k",
+                    // Maximum quality settings: extreme psychovisual optimization, maximum lookahead, best motion estimation
+                    "-x265-params", $"vbv-bufsize={buffer}:vbv-maxrate={maxRate}:aq-mode=3:aq-strength=1.8:psy-rd=3.0:psy-rdoq=2.5:rc-lookahead=120:me=star:subme=11:rd=6:ref=6:bframes=8:b-adapt=2:ctu=64:max-tu-size=32:rdoq-level=2:tu-intra-depth=4:tu-inter-depth=4:limit-modes=0:limit-refs=0:limit-tu=0:early-skip=0:rskip=0:rskip-edge-threshold=0:tskip=1:tskip-fast=0:strong-intra-smoothing=1:constrained-intra=0:fast-intra=0:b-intra=1:cu-lossless=0:signhide=1:weightp=1:weightb=1:analyze-src-pics=1:deblock=-2,-2:no-sao=0:selective-sao=4:pmode=1:pmode=1"
+                });
+            }
+            else
+            {
+                // Quality mode: slower preset with enhanced quality settings for better visual fidelity
+                args.AddRange(new[]
+                {
+                    "-preset", "slower",
+                    "-pix_fmt", "yuv420p",
+                    "-tag:v", "hvc1",
+                    "-g", "60",
+                    "-sc_threshold", "0",
+                    "-bf", "4",
+                    "-refs", "5",
+                    "-minrate", $"{minRate}k",
+                    // Enhanced quality settings: stronger psychovisual optimization, better motion estimation, improved adaptive quantization
+                    "-x265-params", $"vbv-bufsize={buffer}:vbv-maxrate={maxRate}:aq-mode=3:aq-strength=1.4:psy-rd=2.5:psy-rdoq=1.5:rc-lookahead=80:me=star:subme=10:rd=6:ref=6:sao=1:deblock=-1,-1:rdoq-level=2:ctu=32:tu-intra-depth=3:tu-inter-depth=3"
+                });
+            }
         }
 
         return args;

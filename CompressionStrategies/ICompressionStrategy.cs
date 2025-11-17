@@ -24,7 +24,7 @@ public interface ICompressionStrategy
     int AudioBitrateKbps { get; }
 
     // Argument builders
-    IEnumerable<string> BuildVideoArgs(double videoBitrateKbps, bool useQualityMode);
+    IEnumerable<string> BuildVideoArgs(double videoBitrateKbps, bool useQualityMode, bool useUltraMode = false);
     IEnumerable<string> BuildAudioArgs();
     IEnumerable<string> BuildContainerArgs();
     /// <summary>

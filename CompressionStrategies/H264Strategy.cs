@@ -98,7 +98,7 @@ public class H264Strategy : ICompressionStrategy
         }
     }
 
-    public IEnumerable<string> BuildVideoArgs(double videoBitrateKbps, bool useQualityMode)
+    public IEnumerable<string> BuildVideoArgs(double videoBitrateKbps, bool useQualityMode, bool useUltraMode = false)
     {
         var targetBitrate = Math.Max(100, Math.Round(videoBitrateKbps));
         // Base CBR-ish defaults; strategies can override per encoder
@@ -124,57 +124,84 @@ public class H264Strategy : ICompressionStrategy
             
             if (encoder == "h264_nvenc")
             {
-                // NVENC: P4 preset balances speed and quality well, spatial AQ for quality
+                // NVENC: Higher preset for better quality when quality mode is enabled
                 args.AddRange(new[]
                 {
-                    "-preset", "p4", // medium preset
+                    "-preset", (useQualityMode || useUltraMode) ? "p6" : "p4",
                     "-rc", "vbr",
                     "-spatial-aq", "1",
                     "-temporal-aq", "1",
-                    "-rc-lookahead", "32", // lookahead helps with bitrate accuracy
+                    "-rc-lookahead", (useQualityMode || useUltraMode) ? "48" : "32",
                     "-g", "60",
-                    "-bf", "3"
+                    "-bf", (useQualityMode || useUltraMode) ? "4" : "3"
                 });
+                
+                if (useQualityMode || useUltraMode)
+                {
+                    args.AddRange(new[] { "-b_ref_mode", "middle" });
+                }
             }
             else if (encoder == "h264_qsv")
             {
-                // QuickSync: balanced preset, lookahead for better quality
+                // QuickSync: slower preset for quality mode
                 args.AddRange(new[]
                 {
-                    "-preset", "medium",
+                    "-preset", (useQualityMode || useUltraMode) ? "slower" : "medium",
                     "-look_ahead", "1",
-                    "-look_ahead_depth", "40",
+                    "-look_ahead_depth", (useQualityMode || useUltraMode) ? "60" : "40",
                     "-g", "60",
-                    "-bf", "3"
+                    "-bf", (useQualityMode || useUltraMode) ? "4" : "3"
                 });
             }
             else if (encoder == "h264_amf")
             {
-                // AMD AMF: use CBR-style mode for accurate sizing
-                // H.264 prioritizes speed by default (lighter AQ settings)
-                maxRate = targetBitrate;
-                minRate = targetBitrate;
-                buffer = targetBitrate;
+                // AMD AMF: Better bitrate control for quality mode
+                if (useQualityMode || useUltraMode)
+                {
+                    maxRate = Math.Round(targetBitrate * 1.05);
+                    minRate = Math.Round(targetBitrate * 0.95);
+                    buffer = Math.Round(targetBitrate * 1.5);
+                }
+                else
+                {
+                    maxRate = targetBitrate;
+                    minRate = targetBitrate;
+                    buffer = targetBitrate;
+                }
 
                 args.AddRange(new[]
                 {
                     "-quality", "quality",
-                    "-rc", "cbr",
-                    "-qmin", "0",
-                    "-qmax", "51",
+                    "-rc", (useQualityMode || useUltraMode) ? "vbr_peak" : "cbr",
+                    "-qmin", (useQualityMode || useUltraMode) ? "18" : "0",
+                    "-qmax", (useQualityMode || useUltraMode) ? "45" : "51",
                     "-pix_fmt", "nv12"
                 });
 
-                // Default: speed-optimized (smaller GOP, less lookahead, less AQ)
-                // Quality mode: can add more AQ if needed, but H.264 stays lean by design
-                args.AddRange(new[]
+                // Quality mode: Enhanced AQ and lookahead for better visual quality
+                // Speed mode: Lighter settings for faster encoding
+                if (useQualityMode || useUltraMode)
                 {
-                    "-g", "60",
-                    "-bf", "1",
-                    "-rc-lookahead", "32",
-                    "-temporal-aq", "1",
-                    "-spatial-aq", "0"
-                });
+                    args.AddRange(new[]
+                    {
+                        "-g", "60",
+                        "-bf", "3",
+                        "-rc-lookahead", "64",
+                        "-temporal-aq", "2",
+                        "-spatial-aq", "2"
+                    });
+                }
+                else
+                {
+                    args.AddRange(new[]
+                    {
+                        "-g", "60",
+                        "-bf", "1",
+                        "-rc-lookahead", "32",
+                        "-temporal-aq", "1",
+                        "-spatial-aq", "0"
+                    });
+                }
 
                 args.AddRange(new[]
                 {
@@ -187,19 +214,42 @@ public class H264Strategy : ICompressionStrategy
         }
         else
         {
-            // Software encoder: Use fast preset for speed while maintaining decent quality
-            args.AddRange(new[]
+            // Software encoder: Adjust preset based on quality mode
+            if (useQualityMode || useUltraMode)
             {
-                "-preset", "fast",
-                "-pix_fmt", "yuv420p",
-                "-g", "60",
-                "-sc_threshold", "0",
-                "-bf", "2",
-                "-refs", "2",
-                "-minrate", $"{minRate}k",
-                // Balanced settings: speed-focused with some quality preservation
-                "-x264-params", "aq-mode=2:aq-strength=0.8:rc_lookahead=30:psy=0:me=hex:subme=6"
-            });
+                // Quality/Ultra mode: Use much slower preset for ultra mode
+                args.AddRange(new[]
+                {
+                    "-preset", useUltraMode ? "veryslow" : "medium",
+                    "-pix_fmt", "yuv420p",
+                    "-g", "60",
+                    "-sc_threshold", "0",
+                    "-bf", useUltraMode ? "5" : "3",
+                    "-refs", useUltraMode ? "6" : "4",
+                    "-minrate", $"{minRate}k",
+                    // Ultra mode: Maximum quality settings with extreme psychovisual optimization
+                    // Quality mode: Enhanced quality settings
+                    "-x264-params", useUltraMode 
+                        ? "aq-mode=3:aq-strength=1.5:rc_lookahead=120:psy=1:psy-rd=1.5:me=umh:subme=11:ref=6:deblock=-2,-2:mbtree=1:trellis=2:fast-pskip=0:no-fast-pskip=1:no-dct-decimate=1:no-mbtree=0:direct=auto:weightb=1:weightp=2:aq-strength=1.5:aq-sensitivity=10:aq-bias-strength=1.0:aq-bias=0:mixed-refs=1:8x8dct=1:fast-pskip=0:no-fast-pskip=1:no-dct-decimate=1"
+                        : "aq-mode=3:aq-strength=1.0:rc_lookahead=50:psy=1:psy-rd=1.0:me=umh:subme=8:ref=4:mbtree=1"
+                });
+            }
+            else
+            {
+                // Fast mode: Use fast preset for speed while maintaining decent quality
+                args.AddRange(new[]
+                {
+                    "-preset", "fast",
+                    "-pix_fmt", "yuv420p",
+                    "-g", "60",
+                    "-sc_threshold", "0",
+                    "-bf", "2",
+                    "-refs", "2",
+                    "-minrate", $"{minRate}k",
+                    // Balanced settings: speed-focused with some quality preservation
+                    "-x264-params", "aq-mode=2:aq-strength=0.8:rc_lookahead=30:psy=0:me=hex:subme=6"
+                });
+            }
         }
 
         return args;

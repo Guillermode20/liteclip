@@ -8,6 +8,10 @@ export const codecDetails: CodecDetailsMap = {
     quality: {
         helper: 'H.265 optimized for quality and file size. Better compression with good encoding speed.',
         container: 'mp4'
+    },
+    ultra: {
+        helper: 'H.265 ultra quality mode. Extremely slow encoding but maximum quality and compression.',
+        container: 'mp4'
     }
 };
 

@@ -77,6 +77,7 @@
                     <select id="codecSelect" value={codecSelectValue} on:change={handleCodecSelect}>
                         <option value="fast">fast (h.264)</option>
                         <option value="quality">quality (h.265)</option>
+                        <option value="ultra">ultra (h.265)</option>
                     </select>
                     {#if codecHelperText}
                         <div class="helper-text">// {codecHelperText}</div>

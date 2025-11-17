@@ -484,7 +484,7 @@ public class VideoCompressionService : IVideoCompressionService
 
                 if (strategy != null)
                 {
-                    args.AddRange(strategy.BuildVideoArgs(videoBitrate, request.UseQualityMode));
+                    args.AddRange(strategy.BuildVideoArgs(videoBitrate, request.UseQualityMode, request.UseUltraMode));
                 }
                 else
                 {
@@ -525,7 +525,8 @@ public class VideoCompressionService : IVideoCompressionService
                         return;
                     }
 
-                    var targetSizeMb = request.TargetSizeMb ?? 0;
+                    // Use 95% of target size for feedback correction to match initial bitrate calculation
+                    var targetSizeMb = (request.TargetSizeMb ?? 0) * 0.95;
                     var actualSizeMb = job.OutputSizeBytes.HasValue ? job.OutputSizeBytes.Value / (1024.0 * 1024.0) : 0;
 
                     if (attempts == maxAttempts || !ShouldRetryFeedback(targetSizeMb, actualSizeMb))
@@ -1178,7 +1179,8 @@ public class VideoCompressionService : IVideoCompressionService
             return null;
         }
 
-        var targetSizeMb = request.TargetSizeMb.Value;
+        // Target 5% lower than requested to ensure we stay under the target output size
+        var targetSizeMb = request.TargetSizeMb.Value * 0.95;
         var durationSeconds = request.SourceDuration.Value;
 
         var reserveBudgetMb = CalculateReserveBudget(targetSizeMb, durationSeconds, codecConfig);
@@ -1520,6 +1522,7 @@ public class VideoCompressionService : IVideoCompressionService
             // New user-friendly codec names
             "fast" => "h264",           // Fast mode uses H.264
             "quality" => "h265",        // Quality mode uses H.265
+            "ultra" => "h265",          // Ultra mode uses H.265 with extreme settings
             // Legacy codec names still supported
             "hevc" => "h265",
             "h265" => "h265",
