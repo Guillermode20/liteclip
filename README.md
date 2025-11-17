@@ -1,32 +1,47 @@
-# LiteClip
+# Smart Compressor
 
-A fast, lightweight desktop application for compressing videos. Built with ASP.NET Core, Svelte, and WebView2—no browser needed.
+An all-in-one desktop video editor and compressor designed for platforms with limited upload sizes. Built with ASP.NET Core, Svelte, and Photino—native window, cross-platform, no browser needed.
+
+Perfect for cutting, editing, and compressing videos to fit strict file size limits on social media platforms, messaging apps, and file sharing services.
 
 ## Quick Start
 
-1. Download `liteclip.exe` from releases
-2. Ensure FFmpeg is installed and available in PATH (or place `ffmpeg.exe` in the `ffmpeg/` directory)
+1. Download the executable from releases
+2. Ensure FFmpeg is installed and available in PATH
 3. Run the executable—a native window opens automatically
 4. Upload a video (drag & drop or file picker)
-5. Adjust the target size slider and pick a codec
-6. Compress and download
+5. Edit: trim, split into segments, and merge parts as needed
+6. Set target upload size or choose codec manually
+7. Compress and download
 
 ## Features
 
-- **Codec Selection**: H.264, H.265, VP9, AV1
-- **Target Size Slider**: Drag to set compression target (1-100% of original)
-- **Automatic Optimization**: Resolution scales automatically to hit target size
+- **Video Editing**: Trim videos, split into segments, and merge multiple parts back together
+- **Smart Codec Selection**: Automatic quality-optimized or manual choice (H.264, H.265, VP9, AV1)
+- **Hardware Encoder Detection**: Auto-detects and uses NVENC, QSV, AMF when available
+- **Target Size Compression**: Set exact output size to meet platform upload limits
+- **Automatic Optimization**: Resolution and bitrate scales automatically to hit target size
+- **Two-Pass Encoding**: Accurate bitrate targeting for precise file sizes
 - **Video Preview**: Play compressed result before downloading
 - **Drag & Drop Upload**: Easy file selection
-- **Real-Time Progress**: Live status with ETA during compression
-- **Native Desktop Window**: WebView2-based UI, no browser required
-- **Single Executable**: Self-contained app
+- **Real-Time Progress**: Live status with queue position and ETA during compression
+- **Job Queue**: Configurable concurrent compression limit with queue management
+- **Cross-Platform**: Runs on Windows, Linux, and macOS
+- **Native Desktop Window**: Photino-based UI, no browser required
+- **Single Executable**: Self-contained app (Release builds embed UI assets)
 
 ## System Requirements
 
-- **Windows 10/11** (64-bit)
-- **WebView2 Runtime** (usually pre-installed; if missing, download [here](https://developer.microsoft.com/en-us/microsoft-edge/webview2/#download-section))
+- **Windows 10/11, Linux (GTK3+), or macOS 10.14+** (64-bit)
 - **FFmpeg**: Install via your package manager or download from [ffmpeg.org](https://ffmpeg.org/download.html)
+
+## Use Cases
+
+- Compress videos to fit Discord's 8MB limit
+- Create TikTok/Instagram Reels under file size restrictions
+- Prepare videos for email with attachment limits
+- Cut and compress large recordings for cloud storage
+- Reduce video file sizes for messaging apps (WhatsApp, Telegram, etc.)
 
 ## Developer Setup
 
@@ -34,32 +49,29 @@ A fast, lightweight desktop application for compressing videos. Built with ASP.N
 
 - [.NET 10.0 SDK](https://dotnet.microsoft.com/download/dotnet/10.0) or later
 - [Node.js](https://nodejs.org/) 18+
-- [FFmpeg](https://ffmpeg.org/) executable at `ffmpeg/ffmpeg.exe`
+- [FFmpeg](https://ffmpeg.org/) (ensure `ffmpeg` is in PATH)
 
 ### Build
 
-**Windows (PowerShell or Command Prompt):**
-```powershell
-.\build.bat
+**Cross-Platform (Linux, macOS, Windows):**
+```bash
+# Release build (self-contained single file)
+dotnet publish -c Release -r linux-x64  # or win-x64, osx-x64
 ```
 
-Or manually (frontend builds automatically during .NET build/publish):
-```powershell
-# Publish a Release single-file to the project's publish-win directory
-dotnet publish -c Release
-```
+The frontend builds automatically during .NET build/publish via the `BuildFrontend` MSBuild target.
 
-Notes:
-- `dotnet build -c Release` will compile the code, but to generate a single-file, use `dotnet publish -c Release`.
+Output locations:
+- Windows: `publish/smart-compressor.exe`
+- Linux: `publish/smart-compressor`
+- macOS: `publish/smart-compressor`
 
 Optional: rebuild UI only
-```powershell
+```bash
 cd frontend
 npm install   # first time only
 npm run build
 ```
-
-Output: `publish-win/liteclip.exe`
 
 ### Development
 
@@ -68,44 +80,45 @@ Run the app with the native window:
 dotnet run
 ```
 
-For live frontend editing (requires commenting out WebView code in `Program.cs`):
-```bash
-# Terminal 1
-dotnet run
-
-# Terminal 2
-cd frontend && npm run dev
-```
-
-Backend runs on a dynamic port (shown in console); frontend dev server typically at `http://localhost:5173`.
+The backend runs on a dynamic port (shown in console).
 
 ### Project Layout
 
 ```
-liteclip/
-├── Program.cs                 # ASP.NET Core app & WebView2 setup
+smart-compressor/
+├── Program.cs                           # ASP.NET Core minimal API + Photino window
 ├── Services/
-│   ├── VideoCompressionService.cs    # Core compression logic
-│   ├── FfmpegPathResolver.cs         # FFmpeg binary locator
-│   └── JobCleanupService.cs          # Background cleanup
-├── Models/                    # CompressionRequest, CompressionResult
-├── frontend/                  # Svelte UI (Vite-built)
-│   └── src/App.svelte        # Main component
-├── ffmpeg/                    # FFmpeg binaries (embedded in release)
-├── wwwroot/                   # Built UI assets (embedded)
-├── appsettings.json           # Configuration
-└── liteclip.csproj
+│   ├── VideoCompressionService.cs       # Core compression logic & job queue
+│   ├── FfmpegPathResolver.cs            # FFmpeg binary discovery
+│   └── JobCleanupService.cs             # Background cleanup of expired jobs
+├── CompressionStrategies/               # Strategy pattern for codec-specific logic
+│   ├── H264Strategy.cs
+│   ├── H265Strategy.cs
+│   ├── Vp9Strategy.cs
+│   ├── Av1Strategy.cs
+│   └── CompressionStrategyFactory.cs
+├── Models/                              # CompressionRequest, CompressionResult, CompressionJob
+├── frontend/                            # Svelte 5 UI (Vite-built)
+│   ├── src/
+│   │   ├── App.svelte                   # Main app with editor, upload, progress
+│   │   ├── VideoEditor.svelte           # Video segment trimming/merging
+│   │   └── components/                  # UI components
+│   └── vite.config.ts
+├── wwwroot/                             # Built UI assets (embedded in Release)
+├── appsettings.json                     # Configuration (concurrency, retention, temp paths)
+├── liteclip.csproj                      # Project file with auto-build targets
+└── liteclip.sln
 ```
 
 ### Configuration
 
-Edit `appsettings.json`:
+Edit `appsettings.json` to customize behavior:
 
 ```json
 {
   "Compression": {
-    "MaxConcurrentJobs": 2,
-    "MaxQueueSize": 10,
+    "MaxConcurrentJobs": 1,
+    "MaxQueueSize": 50,
     "JobRetentionMinutes": 30
   },
   "FileUpload": {
@@ -114,9 +127,19 @@ Edit `appsettings.json`:
   "TempPaths": {
     "Uploads": "temp/uploads",
     "Outputs": "temp/outputs"
+  },
+  "FFmpeg": {
+    "Path": null
   }
 }
 ```
+
+**Settings:**
+- `MaxConcurrentJobs`: Number of videos to compress simultaneously (default: 1 to avoid system overload)
+- `MaxQueueSize`: Maximum jobs in queue before rejecting new uploads
+- `JobRetentionMinutes`: How long to keep completed jobs before auto-cleanup
+- `MaxFileSizeBytes`: Maximum upload size (default: 2 GB)
+- `FFmpeg.Path`: Force a specific FFmpeg executable path (leave null for auto-detection)
 
 ### API Endpoints
 
@@ -127,13 +150,22 @@ Edit `appsettings.json`:
 
 ## Tech Stack
 
-- **Backend**: ASP.NET Core 10.0
-- **Frontend**: Svelte 5 + TypeScript
-- **Build**: Vite
-- **Video Processing**: FFmpeg
-- **Desktop UI**: WebView2 (native Windows control)
+- **Backend**: ASP.NET Core 10.0, Kestrel server
+- **Frontend**: Svelte 5 (runes mode) + TypeScript
+- **Build**: Vite (Rolldown)
+- **UI Framework**: Photino.NET (cross-platform native window)
+- **Video Processing**: FFmpeg with codec-specific strategies
+- **Platform Support**: Windows 10+, Linux (GTK3+), macOS 10.14+
+
+## Architecture Highlights
+
+- **Strategy Pattern**: Each codec (H.264, H.265, VP9, AV1) has its own compression strategy with hardware encoder detection
+- **Job Queue**: Semaphore-based concurrency control prevents system overload
+- **Two-Pass Encoding**: Automatic bitrate calculation with configurable container overhead for precise sizing
+- **Cross-Platform**: Single codebase builds to Windows, Linux, and macOS executables
+- **Embedded Assets**: Release builds embed UI assets into the executable for true single-file distribution
+- **Segment Editing**: Built-in trimming and merging capabilities without requiring external tools
 
 ## License
 
 Provided as-is for personal and educational use.
-
