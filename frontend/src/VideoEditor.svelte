@@ -1,9 +1,11 @@
 <script lang="ts">
     import { onMount } from 'svelte';
+    import type { VideoSegment } from './lib/types';
 
     export let videoFile: File;
     export let onSegmentsChange: (segments: Array<{start: number, end: number}>) => void;
     export let onRemoveVideo: (() => void) | null = null;
+    export let savedSegments: VideoSegment[] = [];
 
     let videoElement: HTMLVideoElement;
     let canvasElement: HTMLCanvasElement;
@@ -20,6 +22,45 @@
     // Trim segments (kept segments)
     let segments: Array<{start: number, end: number, id: string}> = [];
     let nextSegmentId = 1;
+    
+    function clampTime(value: number) {
+        if (!Number.isFinite(value)) return 0;
+        if (value < 0) return 0;
+        if (value > duration) return duration;
+        return value;
+    }
+
+    function createSegmentRange(start: number, end: number) {
+        return {
+            start,
+            end,
+            id: `seg-${nextSegmentId++}`
+        };
+    }
+
+    function sanitizeSavedSegments(): Array<{ start: number; end: number }> {
+        if (!savedSegments || savedSegments.length === 0 || !Number.isFinite(duration) || duration <= 0) {
+            return [];
+        }
+
+        return savedSegments
+            .map(seg => ({
+                start: clampTime(seg.start),
+                end: clampTime(seg.end)
+            }))
+            .filter(seg => seg.end > seg.start)
+            .sort((a, b) => a.start - b.start);
+    }
+
+    function initializeSegmentsFromSavedState() {
+        const restored = sanitizeSavedSegments();
+        if (restored.length > 0) {
+            segments = restored.map(seg => createSegmentRange(seg.start, seg.end));
+            return;
+        }
+
+        segments = [createSegmentRange(0, duration)];
+    }
     
     // No selection or dragging - we just cut and delete
 
@@ -44,20 +85,17 @@
     }
 
     function handleLoadedMetadata() {
-        duration = videoElement.duration;
-        isReady = true;
+        const loadedDuration = videoElement.duration;
+        duration = Number.isFinite(loadedDuration) ? loadedDuration : 0;
+        isReady = duration > 0;
         if (videoElement.videoWidth && videoElement.videoHeight) {
             videoAspectRatio = videoElement.videoWidth / videoElement.videoHeight;
         }
         currentTime = 0;
         videoElement.currentTime = 0;
+        nextSegmentId = 1;
         
-        // Initialize with full video as single segment
-        segments = [{
-            start: 0,
-            end: duration,
-            id: `seg-${nextSegmentId++}`
-        }];
+        initializeSegmentsFromSavedState();
         
         notifySegmentsChange();
         updateThumbnails();
@@ -151,17 +189,9 @@
         const segment = segments[segmentIndex];
         
         // Split the segment at current time
-        const leftSegment = {
-            start: segment.start,
-            end: currentTime,
-            id: `seg-${nextSegmentId++}`
-        };
+        const leftSegment = createSegmentRange(segment.start, currentTime);
         
-        const rightSegment = {
-            start: currentTime,
-            end: segment.end,
-            id: `seg-${nextSegmentId++}`
-        };
+        const rightSegment = createSegmentRange(currentTime, segment.end);
         
         // Replace the original segment with the two new segments
         segments = [
@@ -180,11 +210,8 @@
     }
 
     function resetSegments() {
-        segments = [{
-            start: 0,
-            end: duration,
-            id: `seg-${nextSegmentId++}`
-        }];
+        nextSegmentId = 1;
+        segments = [createSegmentRange(0, duration)];
         notifySegmentsChange();
     }
 

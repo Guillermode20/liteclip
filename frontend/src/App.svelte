@@ -74,6 +74,7 @@
             return;
         }
 
+        videoSegments = [];
         selectedFile = file;
         originalSizeMb = file.size / (1024 * 1024);
         fileInfo = `Selected: ${file.name} (${formatFileSize(file.size)})`;
@@ -698,6 +699,7 @@
                         videoFile={selectedFile} 
                         onSegmentsChange={handleSegmentsChange}
                         onRemoveVideo={resetInterface}
+                        savedSegments={videoSegments}
                     />
                 </div>
             {/if}
