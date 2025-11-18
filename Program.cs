@@ -56,6 +56,7 @@ namespace liteclip
 
             // Add services to the container.
             builder.Services.AddSingleton<FfmpegPathResolver>();
+            builder.Services.AddSingleton<FfmpegCapabilityProbe>();
             builder.Services.AddSingleton<IFfmpegPathResolver>(sp => sp.GetRequiredService<FfmpegPathResolver>());
 
             builder.Services.AddSingleton<VideoCompressionService>();
@@ -71,6 +72,10 @@ namespace liteclip
             builder.Services.AddHostedService<JobCleanupService>();
 
             var app = builder.Build();
+
+            // NOTE: Delay FFmpeg capability probing to background after the UI is loaded.
+            // Running the probe synchronously on startup makes the UI wait on long ffmpeg checks.
+            // We will start the probe later (non-blocking) once the native window has been loaded.
 
             // Configure the HTTP request pipeline.
             // Serve static files: physical in Development, embedded in non-Development
@@ -410,6 +415,49 @@ namespace liteclip
                 }
             });
 
+            // NOTE: we delay starting the HTTP server until after we show the native UI so the app feels faster
+
+            // Create the native UI early so it appears instantly for the user.
+            var window = new PhotinoWindow()
+                .SetTitle("LiteClip - Fast Video Compression")
+                .SetUseOsDefaultSize(false)
+                .SetUseOsDefaultLocation(false)
+                .SetResizable(true)
+                .SetDevToolsEnabled(true)
+                .SetContextMenuEnabled(true)
+                .SetLogVerbosity(4);
+
+            window.RegisterWebMessageReceivedHandler((sender, message) =>
+                {
+                    Console.WriteLine($"Message received from frontend: {message}");
+                    if (message == "close-app")
+                    {
+                        window.Close();
+                    }
+                });
+
+            // Load a local copy of the frontend early (fast) so UI shows while server starts
+            var indexPath = Path.Combine(AppContext.BaseDirectory, "wwwroot", "index.html");
+            if (File.Exists(indexPath))
+            {
+                window.Load(new Uri(indexPath).AbsoluteUri);
+            }
+            else
+            {
+                window.Load("about:blank");
+            }
+
+            // Server will be started after the UI is shown; we'll navigate the window to the server URL
+            // once the HTTP server reports it's ready (below).
+
+
+            // Skipping duplicate web handler registration — already set above.
+
+            // The UI already loaded a local index earlier - avoid duplicate load.
+
+            // Probe already started earlier; no need to start a second probe.
+
+            // Now start the server in background and wait for it to bind
             var serverTask = app.RunAsync(cts.Token);
 
             string serverUrl;
@@ -424,27 +472,42 @@ namespace liteclip
                 return; 
             }
 
-            // --- Photino Window Setup (Main Thread) ---
-            var window = new PhotinoWindow()
-                .SetTitle("LiteClip - Fast Video Compression")
-                .SetUseOsDefaultSize(false)
-                .SetUseOsDefaultLocation(false)
-                .SetResizable(true)
-                .SetDevToolsEnabled(true)
-                .SetContextMenuEnabled(true)
-                .SetLogVerbosity(4);
+            // When server is ready, navigate the UI to the running server
+            try
+            {
+                window.Load(serverUrl);
+            }
+            catch (Exception ex)
+            {
+                var logger = app.Services.GetRequiredService<ILogger<Program>>();
+                logger.LogWarning(ex, "Failed to navigate to server URL - continuing with existing UI");
+            }
 
+            // Start the FFmpeg capability probe in the background so the UI can appear quickly.
+            try
+            {
+                using var scope = app.Services.CreateScope();
+                var probe = scope.ServiceProvider.GetRequiredService<FfmpegCapabilityProbe>();
+                var logger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
 
-            window.RegisterWebMessageReceivedHandler((sender, message) =>
+                // Fire-and-forget the probe; it will populate the probe object for strategies later.
+                _ = Task.Run(async () =>
                 {
-                    Console.WriteLine($"Message received from frontend: {message}");
-                    
-                    if (message == "close-app")
+                    try
                     {
-                        window.Close(); 
+                        await probe.ProbeAsync();
                     }
-                })
-                .Load(serverUrl); 
+                    catch (Exception ex)
+                    {
+                        logger.LogWarning(ex, "FFmpeg capability probe failed in background. Continuing without probe results.");
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                var logger = app.Services.GetRequiredService<ILogger<Program>>();
+                logger.LogWarning(ex, "Failed to start background FFmpeg capability probe");
+            }
 
             window.SetSize(1200, 800);
             window.Center();

@@ -1,11 +1,13 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using liteclip.Services;
 
 namespace liteclip.CompressionStrategies;
 
 public class H265Strategy : ICompressionStrategy
 {
+    private readonly FfmpegCapabilityProbe? _probe;
     private string? _detectedEncoder;
     private bool _encoderDetected = false;
     
@@ -15,6 +17,11 @@ public class H265Strategy : ICompressionStrategy
     public string VideoCodec => GetBestEncoder();
     public string AudioCodec => "aac";
     public int AudioBitrateKbps => 128;
+
+    public H265Strategy(FfmpegCapabilityProbe? probe = null)
+    {
+        _probe = probe;
+    }
 
     private string GetBestEncoder()
     {
@@ -28,8 +35,15 @@ public class H265Strategy : ICompressionStrategy
         // Here we only detect hardware for general use.
 
         var encodersToTry = new[] { "hevc_nvenc", "hevc_qsv", "hevc_amf" };
+        // Prefer probe results where available (quiet, fast), fallback to runtime check otherwise
         foreach (var encoder in encodersToTry)
         {
+            if (_probe != null && _probe.SupportedEncoders.Contains(encoder))
+            {
+                _detectedEncoder = encoder;
+                return encoder;
+            }
+
             if (IsEncoderAvailable(encoder))
             {
                 _detectedEncoder = encoder;
@@ -147,11 +161,45 @@ public class H265Strategy : ICompressionStrategy
                 var replaced = token
                     .Replace("{maxrate}", maxRate.ToString(), StringComparison.Ordinal)
                     .Replace("{buffer}", buffer.ToString(), StringComparison.Ordinal);
-                args.Add(replaced);
+                // If the probe knows a safe subme limit, clamp it here too
+                var processed = replaced;
+                if (_probe?.MaxX265Subme.HasValue == true && processed.Contains("subme="))
+                {
+                    processed = System.Text.RegularExpressions.Regex.Replace(processed, @"subme=(\d+)", m =>
+                    {
+                        if (int.TryParse(m.Groups[1].Value, out var requested))
+                        {
+                            var cap = _probe.MaxX265Subme.Value;
+                            var use = Math.Min(requested, cap);
+                            return $"subme={use}";
+                        }
+                        return m.Value;
+                    });
+                }
+
+                args.Add(processed);
             }
             else
             {
-                args.Add(token);
+                // If the token contains x265 params and the probe knows a maximum subme,
+                // adjust it here so we don't pass an unsupported value to libx265.
+                var processed = token;
+                if (_probe?.MaxX265Subme.HasValue == true && processed.Contains("subme="))
+                {
+                    // Replace subme=<n> with the max supported value if it's too large
+                    processed = System.Text.RegularExpressions.Regex.Replace(processed, @"subme=(\d+)", m =>
+                    {
+                        if (int.TryParse(m.Groups[1].Value, out var requested))
+                        {
+                            var cap = _probe.MaxX265Subme.Value;
+                            var use = Math.Min(requested, cap);
+                            return $"subme={use}";
+                        }
+                        return m.Value;
+                    });
+                }
+                
+                args.Add(processed);
             }
         }
 

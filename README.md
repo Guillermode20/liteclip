@@ -90,6 +90,7 @@ smart-compressor/
 ├── Services/
 │   ├── VideoCompressionService.cs       # Core compression logic & job queue
 │   ├── FfmpegPathResolver.cs            # FFmpeg binary discovery
+│   ├── FfmpegCapabilityProbe.cs         # Detects available ffmpeg encoders and capability limits
 │   └── JobCleanupService.cs             # Background cleanup of expired jobs
 ├── CompressionStrategies/               # Strategy pattern for codec-specific logic
 │   ├── H264Strategy.cs

@@ -5,6 +5,7 @@ using System.Linq;
 using System.Text;
 using liteclip.Models;
 using liteclip.CompressionStrategies;
+using System.Text.RegularExpressions;
 
 namespace liteclip.Services;
 
@@ -18,14 +19,16 @@ public class VideoCompressionService : IVideoCompressionService
     private readonly ILogger<VideoCompressionService> _logger;
     private readonly FfmpegPathResolver _ffmpegResolver;
     private readonly ICompressionStrategyFactory _strategyFactory;
+    private readonly FfmpegCapabilityProbe _capabilities;
     private readonly int _maxConcurrentJobs;
     private readonly int _maxQueueSize;
 
-    public VideoCompressionService(IConfiguration configuration, ILogger<VideoCompressionService> logger, FfmpegPathResolver ffmpegResolver, ICompressionStrategyFactory strategyFactory)
+    public VideoCompressionService(IConfiguration configuration, ILogger<VideoCompressionService> logger, FfmpegPathResolver ffmpegResolver, ICompressionStrategyFactory strategyFactory, FfmpegCapabilityProbe capabilities)
     {
         _logger = logger;
         _ffmpegResolver = ffmpegResolver;
         _strategyFactory = strategyFactory;
+        _capabilities = capabilities;
         _tempUploadPath = configuration["TempPaths:Uploads"] ?? Path.Combine(Path.GetTempPath(), "video-uploads");
 
         if (!Path.IsPathRooted(_tempUploadPath))
@@ -512,7 +515,13 @@ public class VideoCompressionService : IVideoCompressionService
                 {
                     var encoderName = strategy.VideoCodec;
                     job.EncoderName = encoderName;
-                    job.EncoderIsHardware = !(encoderName == "libx264" || encoderName == "libx265" || encoderName == "libvpx-vp9" || encoderName == "libaom-av1");
+                    // determine whether the encoder is hardware-backed - prefer probe info when available
+                    var lower = encoderName?.ToLowerInvariant() ?? string.Empty;
+                    var hardwareEncoders = new[] { "nvenc", "qsv", "amf", "vaapi", "v4l2m2m" };
+
+                    var isHardwareName = hardwareEncoders.Any(h => lower.Contains(h));
+                    // ensure probe says it's supported
+                    job.EncoderIsHardware = isHardwareName && !string.IsNullOrWhiteSpace(encoderName) && _capabilities.SupportedEncoders.Contains(encoderName);
                 }
                 catch
                 {
@@ -860,7 +869,89 @@ public class VideoCompressionService : IVideoCompressionService
         }
 
         var success = await RunPassAsync(jobId, job, pass1Args, totalDuration, 1, 2);
-        if (!success) return false;
+        if (!success)
+        {
+            // Attempt to degrade gracefully: sanitize x265 params or remove suspect switches
+            var err = job.ErrorMessage ?? string.Empty;
+
+            // If x265-specific params might be the root cause, try safer x265 params (cap 'subme' and similar)
+            var sanitizedBase = new List<string>(baseArguments);
+            var sanitized = SanitizeX265Params(sanitizedBase);
+            if (sanitized)
+            {
+                _logger.LogWarning("Pass 1 failed for job {JobId} — trying sanitized x265 parameters", jobId);
+                pass1Args = new List<string>(sanitizedBase);
+                if (strategy != null)
+                {
+                    pass1Args.AddRange(strategy.GetPassExtras(1, passLogFile));
+                }
+                else
+                {
+                    // Legacy fallback for mp4/webm
+                    if (codec.Key == "h264" || codec.Key == "h265")
+                    {
+                        pass1Args.AddRange(new[] { "-pass", "1", "-passlogfile", passLogFile, "-f", codec.Key == "h264" ? "mp4" : "mp4" });
+                    }
+                    else if (codec.Key == "vp9" || codec.Key == "av1")
+                    {
+                        pass1Args.AddRange(new[] { "-pass", "1", "-passlogfile", passLogFile, "-f", "webm" });
+                    }
+                }
+                if (OperatingSystem.IsWindows())
+                {
+                    pass1Args.Add("NUL");
+                }
+                else
+                {
+                    pass1Args.Add("/dev/null");
+                }
+
+                // Retry with sanitized params
+                success = await RunPassAsync(jobId, job, pass1Args, totalDuration, 1, 2);
+            }
+
+            // If the sanitized attempt still didn't work, try removing complex x265 params entirely
+            if (!success)
+            {
+                var simplified = TryRemoveX265Params(sanitizedBase = new List<string>(baseArguments));
+                if (simplified)
+                {
+                    _logger.LogWarning("Pass 1 failed for job {JobId} — retrying after removing x265 params", jobId);
+                    pass1Args = new List<string>(sanitizedBase);
+                    if (strategy != null)
+                    {
+                        pass1Args.AddRange(strategy.GetPassExtras(1, passLogFile));
+                    }
+                    else
+                    {
+                        if (codec.Key == "h264" || codec.Key == "h265")
+                        {
+                            pass1Args.AddRange(new[] { "-pass", "1", "-passlogfile", passLogFile, "-f", codec.Key == "h264" ? "mp4" : "mp4" });
+                        }
+                        else if (codec.Key == "vp9" || codec.Key == "av1")
+                        {
+                            pass1Args.AddRange(new[] { "-pass", "1", "-passlogfile", passLogFile, "-f", "webm" });
+                        }
+                    }
+                    if (OperatingSystem.IsWindows())
+                    {
+                        pass1Args.Add("NUL");
+                    }
+                    else
+                    {
+                        pass1Args.Add("/dev/null");
+                    }
+
+                    success = await RunPassAsync(jobId, job, pass1Args, totalDuration, 1, 2);
+                }
+            }
+
+            if (!success)
+            {
+                _logger.LogError("Pass 1 failed for job {JobId} after sanitization attempts. Error: {Error}", jobId, err);
+                return false;
+            }
+        }
 
         // Second pass
         _logger.LogInformation("Starting second pass for job {JobId}", jobId);
@@ -886,6 +977,43 @@ public class VideoCompressionService : IVideoCompressionService
         pass2Args.Add(job.OutputPath);
 
         success = await RunPassAsync(jobId, job, pass2Args, totalDuration, 2, 2);
+        if (!success)
+        {
+            // If we've reached pass2 failure after a sanitation attempt, attempt a second sanitize/remove only for pass2
+            var attemptAgain = false;
+            var sanitizedBase2 = new List<string>(baseArguments);
+            if (SanitizeX265Params(sanitizedBase2))
+            {
+                attemptAgain = true;
+                _logger.LogWarning("Pass 2 failed for job {JobId} — retrying with sanitized params", jobId);
+                pass2Args = new List<string>(sanitizedBase2);
+                if (strategy != null) pass2Args.AddRange(strategy.GetPassExtras(2, passLogFile));
+                else pass2Args.AddRange(new[] { "-pass", "2", "-passlogfile", passLogFile });
+                pass2Args.Add(job.OutputPath);
+                success = await RunPassAsync(jobId, job, pass2Args, totalDuration, 2, 2);
+            }
+
+            if (!success && !attemptAgain)
+            {
+                var sanitizedBase3 = new List<string>(baseArguments);
+                if (TryRemoveX265Params(sanitizedBase3))
+                {
+                    attemptAgain = true;
+                    _logger.LogWarning("Pass 2 failed for job {JobId} — retrying after removing x265 params", jobId);
+                    pass2Args = new List<string>(sanitizedBase3);
+                    if (strategy != null) pass2Args.AddRange(strategy.GetPassExtras(2, passLogFile));
+                    else pass2Args.AddRange(new[] { "-pass", "2", "-passlogfile", passLogFile });
+                    pass2Args.Add(job.OutputPath);
+                    success = await RunPassAsync(jobId, job, pass2Args, totalDuration, 2, 2);
+                }
+            }
+
+            if (!success)
+            {
+                _logger.LogError("Pass 2 failed for job {JobId} after sanitization attempts.", jobId);
+                return false;
+            }
+        }
         if (!success) return false;
 
         if (File.Exists(job.OutputPath))
@@ -1397,6 +1525,93 @@ public class VideoCompressionService : IVideoCompressionService
     private static double GetContainerShare(CodecConfig codecConfig)
     {
         return codecConfig.FileExtension.Equals(".mp4", StringComparison.OrdinalIgnoreCase) ? 0.68 : 0.48;
+    }
+
+    // Attempts to sanitize libx265 parameters to avoid unsupported options on some builds.
+    // Returns true if we actually changed anything.
+    private static bool SanitizeX265Params(List<string> args)
+    {
+        if (args == null) return false;
+
+        var changed = false;
+
+        for (int i = 0; i < args.Count; i++)
+        {
+            if (string.Equals(args[i], "-x265-params", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Count)
+            {
+                var original = args[i + 1];
+                // cap subme to 7 (some libx265 builds report max supported level <= 7)
+                var sanitized = Regex.Replace(original, @"subme=(\d+)", match =>
+                {
+                    try
+                    {
+                        var v = int.Parse(match.Groups[1].Value);
+                        var capped = Math.Min(v, 7);
+                        if (capped != v)
+                        {
+                            changed = true;
+                        }
+                        return $"subme={capped}";
+                    }
+                    catch
+                    {
+                        return match.Value;
+                    }
+                });
+
+                // Also cap 'rd' to a safe value in case it's too high for some encoders
+                sanitized = Regex.Replace(sanitized, @"\brd=(\d+)\b", match =>
+                {
+                    try
+                    {
+                        var v = int.Parse(match.Groups[1].Value);
+                        var capped = Math.Min(v, 6);
+                        if (capped != v)
+                        {
+                            changed = true;
+                        }
+                        return $"rd={capped}";
+                    }
+                    catch
+                    {
+                        return match.Value;
+                    }
+                });
+
+                if (sanitized != original)
+                {
+                    args[i + 1] = sanitized;
+                }
+            }
+        }
+
+        return changed;
+    }
+
+    private static bool TryRemoveX265Params(List<string> args)
+    {
+        if (args == null) return false;
+
+        var changed = false;
+        for (int i = args.Count - 1; i >= 0; i--)
+        {
+            if (string.Equals(args[i], "-x265-params", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Count)
+            {
+                args.RemoveAt(i + 1);
+                args.RemoveAt(i);
+                changed = true;
+                continue;
+            }
+
+            if (string.Equals(args[i], "-x264-params", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Count)
+            {
+                args.RemoveAt(i + 1);
+                args.RemoveAt(i);
+                changed = true;
+            }
+        }
+
+        return changed;
     }
 
 
