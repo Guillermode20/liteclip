@@ -65,8 +65,6 @@ namespace liteclip
             // Compression strategies and factory
             builder.Services.AddSingleton<ICompressionStrategy, H264Strategy>();
             builder.Services.AddSingleton<ICompressionStrategy, H265Strategy>();
-            builder.Services.AddSingleton<ICompressionStrategy, Vp9Strategy>();
-            builder.Services.AddSingleton<ICompressionStrategy, Av1Strategy>();
             builder.Services.AddSingleton<ICompressionStrategyFactory, CompressionStrategyFactory>();
 
             builder.Services.AddHostedService<JobCleanupService>();

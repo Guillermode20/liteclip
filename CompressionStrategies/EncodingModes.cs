@@ -314,7 +314,7 @@ public static class EncodingModeConfigs
             VideoArgs: new[]
             {
                 "-pix_fmt", "yuv420p",
-                "-preset", "p6",
+                "-preset", "p7",
                 "-rc", "vbr",
                 "-spatial-aq", "1",
                 "-temporal-aq", "1",
@@ -415,6 +415,75 @@ public static class EncodingModeConfigs
                 "-spatial-aq", "2",
                 "-profile:v", "main",
                 "-no-scenecut", "1"
+            }
+        ),
+
+        // --- H.265 / VideoToolbox (MacOS) ---
+        new EncodingModeConfig(
+            CodecKey: "h265",
+            EncoderKey: "hevc_videotoolbox",
+            Mode: EncodingMode.Fast,
+            DisplayName: "H.265 VideoToolbox Fast",
+            Description: "Apple Silicon H.265 tuned for speed.",
+            MaxRateMultiplier: 1.0,
+            MinRateMultiplier: 1.0,
+            BufferMultiplier: 1.0,
+            VideoArgs: new[]
+            {
+                "-pix_fmt", "yuv420p",
+                "-tag:v", "hvc1",
+                "-g", "60"
+            }
+        ),
+        new EncodingModeConfig(
+            CodecKey: "h265",
+            EncoderKey: "hevc_videotoolbox",
+            Mode: EncodingMode.Quality,
+            DisplayName: "H.265 VideoToolbox Quality",
+            Description: "Apple Silicon H.265 tuned for quality.",
+            MaxRateMultiplier: 1.0,
+            MinRateMultiplier: 1.0,
+            BufferMultiplier: 1.0,
+            VideoArgs: new[]
+            {
+                "-pix_fmt", "yuv420p",
+                "-tag:v", "hvc1",
+                "-g", "60",
+                "-preset", "quality"
+            }
+        ),
+
+        // --- H.265 / Wildcard ---
+        new EncodingModeConfig(
+            CodecKey: "h265",
+            EncoderKey: "*",
+            Mode: EncodingMode.Fast,
+            DisplayName: "H.265 Generic Fast",
+            Description: "Generic H.265 settings for unknown encoders.",
+            MaxRateMultiplier: 1.0,
+            MinRateMultiplier: 1.0,
+            BufferMultiplier: 1.0,
+            VideoArgs: new[]
+            {
+                "-pix_fmt", "yuv420p",
+                "-tag:v", "hvc1",
+                "-g", "60"
+            }
+        ),
+        new EncodingModeConfig(
+            CodecKey: "h265",
+            EncoderKey: "*",
+            Mode: EncodingMode.Quality,
+            DisplayName: "H.265 Generic Quality",
+            Description: "Generic H.265 settings for unknown encoders.",
+            MaxRateMultiplier: 1.0,
+            MinRateMultiplier: 1.0,
+            BufferMultiplier: 1.0,
+            VideoArgs: new[]
+            {
+                "-pix_fmt", "yuv420p",
+                "-tag:v", "hvc1",
+                "-g", "60"
             }
         )
     };
