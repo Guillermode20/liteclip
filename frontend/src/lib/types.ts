@@ -70,9 +70,5 @@ export interface UserSettingsPayload {
     checkForUpdatesOnLaunch: boolean;
 }
 
-export interface EncoderDetectionPayload {
-    supportedEncoders: string[];
-    maxX265Subme: number | null;
-    ffmpegPath: string;
-}
+// Encoder detection removed: frontend no longer receives probe data
 

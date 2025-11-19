@@ -19,16 +19,14 @@ public class VideoCompressionService : IVideoCompressionService
     private readonly ILogger<VideoCompressionService> _logger;
     private readonly FfmpegPathResolver _ffmpegResolver;
     private readonly ICompressionStrategyFactory _strategyFactory;
-    private readonly FfmpegCapabilityProbe _capabilities;
     private readonly int _maxConcurrentJobs;
     private readonly int _maxQueueSize;
 
-    public VideoCompressionService(IConfiguration configuration, ILogger<VideoCompressionService> logger, FfmpegPathResolver ffmpegResolver, ICompressionStrategyFactory strategyFactory, FfmpegCapabilityProbe capabilities)
+    public VideoCompressionService(IConfiguration configuration, ILogger<VideoCompressionService> logger, FfmpegPathResolver ffmpegResolver, ICompressionStrategyFactory strategyFactory)
     {
         _logger = logger;
         _ffmpegResolver = ffmpegResolver;
         _strategyFactory = strategyFactory;
-        _capabilities = capabilities;
         _tempUploadPath = configuration["TempPaths:Uploads"] ?? Path.Combine(Path.GetTempPath(), "video-uploads");
 
         if (!Path.IsPathRooted(_tempUploadPath))
@@ -618,7 +616,7 @@ public class VideoCompressionService : IVideoCompressionService
 
                     var isHardwareName = hardwareEncoders.Any(h => lower.Contains(h));
                     // ensure probe says it's supported
-                    job.EncoderIsHardware = isHardwareName && !string.IsNullOrWhiteSpace(encoderName) && _capabilities.SupportedEncoders.Contains(encoderName);
+                    job.EncoderIsHardware = isHardwareName && !string.IsNullOrWhiteSpace(encoderName);
                 }
                 catch
                 {

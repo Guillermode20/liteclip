@@ -12,7 +12,7 @@ public class H265Strategy : BaseCompressionStrategy
     public override string AudioCodec => "aac";
     public override int AudioBitrateKbps => 128;
 
-    public H265Strategy(FfmpegCapabilityProbe? probe = null) : base(probe)
+    public H265Strategy() : base()
     {
     }
 

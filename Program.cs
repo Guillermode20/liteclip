@@ -57,7 +57,6 @@ namespace liteclip
             // Add services to the container.
             builder.Services.AddHttpClient();
             builder.Services.AddSingleton<FfmpegPathResolver>();
-            builder.Services.AddSingleton<FfmpegCapabilityProbe>();
             builder.Services.AddSingleton<IFfmpegPathResolver>(sp => sp.GetRequiredService<FfmpegPathResolver>());
 
             builder.Services.AddSingleton<VideoCompressionService>();
@@ -429,17 +428,7 @@ namespace liteclip
             })
             .WithName("UpdateUserSettings");
 
-            app.MapGet("/api/encoder-detection", async (FfmpegCapabilityProbe probe, FfmpegPathResolver pathResolver) =>
-            {
-                var result = new
-                {
-                    SupportedEncoders = probe.SupportedEncoders.ToList(),
-                    MaxX265Subme = probe.MaxX265Subme,
-                    FfmpegPath = pathResolver.GetFfmpegPath()
-                };
-                return Results.Ok(result);
-            })
-            .WithName("GetEncoderDetection");
+            // Encoder detection endpoint removed: frontend no longer queries encoder capabilities
 
             // --- Robust Server Startup and Shutdown Logic ---
 
@@ -546,31 +535,7 @@ namespace liteclip
                 logger.LogWarning(ex, "Failed to navigate to server URL - continuing with existing UI");
             }
 
-            // Start the FFmpeg capability probe in the background so the UI can appear quickly.
-            try
-            {
-                using var scope = app.Services.CreateScope();
-                var probe = scope.ServiceProvider.GetRequiredService<FfmpegCapabilityProbe>();
-                var logger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
-
-                // Fire-and-forget the probe; it will populate the probe object for strategies later.
-                _ = Task.Run(async () =>
-                {
-                    try
-                    {
-                        await probe.ProbeAsync();
-                    }
-                    catch (Exception ex)
-                    {
-                        logger.LogWarning(ex, "FFmpeg capability probe failed in background. Continuing without probe results.");
-                    }
-                });
-            }
-            catch (Exception ex)
-            {
-                var logger = app.Services.GetRequiredService<ILogger<Program>>();
-                logger.LogWarning(ex, "Failed to start background FFmpeg capability probe");
-            }
+            // FFmpeg capability probe removed: no background probing will be performed
 
             window.SetSize(1200, 800);
             window.Center();

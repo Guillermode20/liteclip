@@ -1,6 +1,6 @@
 <script lang="ts">
     import { createEventDispatcher } from 'svelte';
-    import type { CodecKey, ResolutionPreset, UserSettingsPayload, EncoderDetectionPayload } from '../lib/types';
+    import type { CodecKey, ResolutionPreset, UserSettingsPayload } from '../lib/types';
 
     const dispatch = createEventDispatcher();
 
@@ -16,41 +16,14 @@
     };
 
     let localSettings: UserSettingsPayload = { ...defaultState };
-    let encoderDetection: EncoderDetectionPayload | null = null;
-    let encoderDetectionLoading = false;
-    let encoderDetectionError = '';
-
-    // Filter out VP9 and AV1 encoders that are no longer used
-    $: filteredEncoders = encoderDetection?.supportedEncoders.filter(encoder =>
-        !encoder.includes('libvpx-vp9') &&  // VP9 specifically
-        !encoder.includes('libaom-av1') &&  // AOM AV1
-        !encoder.includes('libsvtav1')      // SVT-AV1
-    ) || [];
 
     $: if (open) {
         localSettings = { ...defaultState, ...settings };
         if (open) {
-            loadEncoderDetection();
+            // no encoder detection is performed client-side
         }
     }
 
-    async function loadEncoderDetection() {
-        encoderDetectionLoading = true;
-        encoderDetectionError = '';
-
-        try {
-            const response = await fetch('/api/encoder-detection');
-            if (!response.ok) {
-                throw new Error(`Failed to load encoder detection: ${response.statusText}`);
-            }
-            encoderDetection = await response.json();
-        } catch (error) {
-            console.error('Error loading encoder detection:', error);
-            encoderDetectionError = error instanceof Error ? error.message : 'Unknown error occurred';
-        } finally {
-            encoderDetectionLoading = false;
-        }
-    }
 
     function handleClose() {
         dispatch('close');
@@ -158,38 +131,7 @@
                         </label>
                     </div>
 
-                    <!-- Encoder Detection Section -->
-                    <div class="encoder-detection-section">
-                        <h3>diagnostic information</h3>
-                        {#if encoderDetectionLoading}
-                            <p class="loading">detecting encoders...</p>
-                        {:else if encoderDetectionError}
-                            <p class="error">Error: {encoderDetectionError}</p>
-                        {:else if encoderDetection}
-                            <div class="encoder-info">
-                                <div class="info-row">
-                                    <span class="label">ffmpeg path:</span>
-                                    <span class="value">{encoderDetection.ffmpegPath}</span>
-                                </div>
-                                <div class="info-row">
-                                    <span class="label">max x265 subme:</span>
-                                    <span class="value">{encoderDetection.maxX265Subme !== null ? encoderDetection.maxX265Subme : 'not detected'}</span>
-                                </div>
-                                <div class="encoders-list">
-                                    <span class="label">supported encoders:</span>
-                                    <div class="encoder-tags">
-                                        {#if filteredEncoders.length > 0}
-                                            {#each filteredEncoders as encoder}
-                                                <span class="encoder-tag">{encoder}</span>
-                                            {/each}
-                                        {:else}
-                                            <span class="no-encoders">no encoders detected</span>
-                                        {/if}
-                                    </div>
-                                </div>
-                            </div>
-                        {/if}
-                    </div>
+                    <!-- Encoder detection removed from settings -->
                 </div>
 
                 <footer class="modal-footer">
@@ -340,86 +282,7 @@
         }
     }
 
-    /* Encoder Detection Styles */
-    .encoder-detection-section {
-        border-top: 1px solid #27272a;
-        padding-top: 16px;
-        margin-top: 8px;
-    }
+    /* Encoder detection UI removed */
 
-    .encoder-detection-section h3 {
-        margin: 0 0 12px 0;
-        font-size: 0.9rem;
-        color: #fafafa;
-        text-transform: lowercase;
-    }
-
-    .encoder-info {
-        display: flex;
-        flex-direction: column;
-        gap: 8px;
-    }
-
-    .info-row {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        font-size: 0.8rem;
-    }
-
-    .info-row .label {
-        color: #a1a1aa;
-        text-transform: lowercase;
-        flex: 0 0 120px; /* Fixed width for labels */
-    }
-
-    .info-row .value {
-        color: #fafafa;
-        flex: 1;
-        text-align: right;
-        word-break: break-all;
-    }
-
-    .encoders-list {
-        display: flex;
-        flex-direction: column;
-        gap: 4px;
-    }
-
-    .encoders-list .label {
-        color: #a1a1aa;
-        text-transform: lowercase;
-        margin-bottom: 4px;
-    }
-
-    .encoder-tags {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 4px;
-    }
-
-    .encoder-tag {
-        background: rgba(34, 211, 238, 0.15);
-        color: #22d3ee;
-        padding: 2px 6px;
-        border-radius: 4px;
-        font-size: 0.7rem;
-        border: 1px solid rgba(34, 211, 238, 0.3);
-    }
-
-    .no-encoders {
-        color: #71717a;
-        font-size: 0.8rem;
-    }
-
-    .loading,
-    .error {
-        color: #a1a1aa;
-        font-size: 0.8rem;
-        margin: 8px 0;
-    }
-
-    .error {
-        color: #f87171;
-    }
+    /* Removed encoder-specific loading/error UI */
 </style>

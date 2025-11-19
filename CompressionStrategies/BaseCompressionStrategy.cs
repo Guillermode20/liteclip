@@ -12,7 +12,7 @@ namespace liteclip.CompressionStrategies;
 /// </summary>
 public abstract class BaseCompressionStrategy : ICompressionStrategy
 {
-    protected readonly FfmpegCapabilityProbe? _probe;
+    // Probe removed - encoder detection is now runtime-only
     protected string? _detectedEncoder;
     protected bool _encoderDetected = false;
 
@@ -23,9 +23,9 @@ public abstract class BaseCompressionStrategy : ICompressionStrategy
     public abstract string AudioCodec { get; }
     public abstract int AudioBitrateKbps { get; }
 
-    protected BaseCompressionStrategy(FfmpegCapabilityProbe? probe)
+    protected BaseCompressionStrategy()
     {
-        _probe = probe;
+        // noop
     }
 
     /// <summary>
@@ -47,17 +47,10 @@ public abstract class BaseCompressionStrategy : ICompressionStrategy
 
         var encodersToTry = GetEncodersToTry();
 
-        foreach (var encoder in encodersToTry)
+            foreach (var encoder in encodersToTry)
         {
-            // Check probe cache first
-            if (_probe != null && _probe.SupportedEncoders.Contains(encoder))
-            {
-                _detectedEncoder = encoder;
-                return encoder;
-            }
-
-            // Runtime check fallback
-            if (IsEncoderAvailable(encoder))
+                // Runtime check
+                if (IsEncoderAvailable(encoder))
             {
                 _detectedEncoder = encoder;
                 return encoder;

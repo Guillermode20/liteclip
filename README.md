@@ -18,7 +18,7 @@ Perfect for cutting, editing, and compressing videos to fit strict file size lim
 
 - **Video Editing**: Trim videos, split into segments, and merge multiple parts back together
 - **Smart Codec Selection**: Automatic quality-optimized or manual choice (H.264, H.265, VP9, AV1)
-- **Hardware Encoder Detection**: Auto-detects and uses NVENC, QSV, AMF when available
+-- **Hardware Encoder Selection**: Uses encoder name heuristics and runtime checks to choose hardware encoders when appropriate
 - **Target Size Compression**: Set exact output size to meet platform upload limits
 - **Automatic Optimization**: Resolution and bitrate scales automatically to hit target size
 - **Resolution Presets**: Force 1080p/720p/480p/360p output when you need strict dimensions
@@ -94,7 +94,7 @@ smart-compressor/
 ├── Services/
 │   ├── VideoCompressionService.cs       # Core compression logic & job queue
 │   ├── FfmpegPathResolver.cs            # FFmpeg binary discovery
-│   ├── FfmpegCapabilityProbe.cs         # Detects available ffmpeg encoders and capability limits
+│   ├── (removed) FfmpegCapabilityProbe.cs         # Encoder probing removed
 │   └── JobCleanupService.cs             # Background cleanup of expired jobs
 ├── CompressionStrategies/               # Strategy pattern for codec-specific logic
 │   ├── H264Strategy.cs
@@ -164,7 +164,7 @@ Edit `appsettings.json` to customize behavior:
 
 ## Architecture Highlights
 
-- **Strategy Pattern**: Each codec (H.264, H.265, VP9, AV1) has its own compression strategy with hardware encoder detection
+-- **Strategy Pattern**: Each codec (H.264, H.265, VP9, AV1) has its own compression strategy; strategies choose encoders at runtime
 - **Job Queue**: Semaphore-based concurrency control prevents system overload
 - **Two-Pass Encoding**: Automatic bitrate calculation with configurable container overhead for precise sizing
 - **Cross-Platform**: Single codebase builds to Windows, Linux, and macOS executables
