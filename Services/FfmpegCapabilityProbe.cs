@@ -27,7 +27,16 @@ public class FfmpegCapabilityProbe
 
             // Check common encoders of interest
             var encodersToCheck = new[] {
-                "libx265", "libx264", "libvpx-vp9", "libaom-av1", "hevc_nvenc", "h264_nvenc", "hevc_qsv", "h264_qsv", "hevc_amf", "h264_amf"
+                // Software encoders
+                "libx265", "libx264",
+                // NVIDIA encoders
+                "h264_nvenc", "hevc_nvenc",
+                // Intel Quick Sync
+                "h264_qsv", "hevc_qsv",
+                // AMD AMF
+                "h264_amf", "hevc_amf",
+                // Apple VideoToolbox
+                "h264_videotoolbox", "hevc_videotoolbox"
             };
 
             foreach (var enc in encodersToCheck)
@@ -74,8 +83,35 @@ public class FfmpegCapabilityProbe
     {
         try
         {
-            // We use a minimal test like other strategies - a tiny lavfi input
-            var args = $"-hide_banner -loglevel error -f lavfi -i color=black:s=64x64:d=0.15 -c:v {encoderKey} -f null -";
+            // Different encoders may need different test parameters
+            string args;
+
+            // For hardware encoders, we might need specific parameters
+            if (encoderKey.Contains("amf"))
+            {
+                // AMD AMF encoders may need specific parameters
+                args = $"-hide_banner -loglevel error -f lavfi -i color=black:s=64x64:d=0.15 -c:v {encoderKey} -b:v 2M -f null -";
+            }
+            else if (encoderKey.Contains("nvenc"))
+            {
+                // NVIDIA encoders
+                args = $"-hide_banner -loglevel error -f lavfi -i color=black:s=64x64:d=0.15 -c:v {encoderKey} -b:v 2M -f null -";
+            }
+            else if (encoderKey.Contains("qsv"))
+            {
+                // Intel QSV encoders
+                args = $"-hide_banner -loglevel error -f lavfi -i color=black:s=64x64:d=0.15 -c:v {encoderKey} -b:v 2M -f null -";
+            }
+            else if (encoderKey.Contains("videotoolbox"))
+            {
+                // Apple VideoToolbox encoders
+                args = $"-hide_banner -loglevel error -f lavfi -i color=black:s=64x64:d=0.15 -c:v {encoderKey} -b:v 2M -f null -";
+            }
+            else
+            {
+                // Default for software encoders
+                args = $"-hide_banner -loglevel error -f lavfi -i color=black:s=64x64:d=0.15 -c:v {encoderKey} -f null -";
+            }
 
             var psi = new ProcessStartInfo
             {
@@ -97,7 +133,8 @@ public class FfmpegCapabilityProbe
             if (p.ExitCode == 0) return true;
 
             var low = (err ?? string.Empty).ToLowerInvariant();
-            if (low.Contains("not available") || low.Contains("cannot load") || low.Contains("no nvenc") )
+            if (low.Contains("not available") || low.Contains("cannot load") || low.Contains("no nvenc") ||
+                low.Contains("failed to get") || low.Contains("couldn't initialize") || low.Contains("not found"))
             {
                 return false;
             }

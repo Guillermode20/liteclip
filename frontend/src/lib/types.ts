@@ -70,3 +70,9 @@ export interface UserSettingsPayload {
     checkForUpdatesOnLaunch: boolean;
 }
 
+export interface EncoderDetectionPayload {
+    supportedEncoders: string[];
+    maxX265Subme: number | null;
+    ffmpegPath: string;
+}
+

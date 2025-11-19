@@ -429,6 +429,18 @@ namespace liteclip
             })
             .WithName("UpdateUserSettings");
 
+            app.MapGet("/api/encoder-detection", async (FfmpegCapabilityProbe probe, FfmpegPathResolver pathResolver) =>
+            {
+                var result = new
+                {
+                    SupportedEncoders = probe.SupportedEncoders.ToList(),
+                    MaxX265Subme = probe.MaxX265Subme,
+                    FfmpegPath = pathResolver.GetFfmpegPath()
+                };
+                return Results.Ok(result);
+            })
+            .WithName("GetEncoderDetection");
+
             // --- Robust Server Startup and Shutdown Logic ---
 
             var serverReadyTcs = new TaskCompletionSource<string>();
