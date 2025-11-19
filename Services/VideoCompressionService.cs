@@ -99,17 +99,21 @@ public class VideoCompressionService : IVideoCompressionService
                     codecConfig.AudioBitrateKbps);
 
                 // Auto-resolution adjustment: Downscale if bitrate is too low for the resolution
-                var dims = await ProbeVideoDimensionsAsync(artifacts.PreparedInputPath);
-                if (dims != null)
+                // But only if the user hasn't explicitly requested "original" resolution (100% scale)
+                if (normalizedRequest.ScalePercent != 100)
                 {
-                    var optimalScale = CalculateOptimalScale(dims.Width, dims.Height, bitratePlan.VideoKbps, normalizedRequest.TargetFps ?? 30, normalizedRequest.Codec);
-                    var currentScale = normalizedRequest.ScalePercent ?? 100;
-                    
-                    if (optimalScale < currentScale)
+                    var dims = await ProbeVideoDimensionsAsync(artifacts.PreparedInputPath);
+                    if (dims != null)
                     {
-                        _logger.LogInformation("Auto-scaling triggered for job {JobId}: Reducing resolution to {Scale}% to maintain quality (Bitrate: {Bitrate}kbps, Input: {W}x{H})", 
-                            artifacts.JobId, optimalScale, bitratePlan.VideoKbps, dims.Width, dims.Height);
-                        normalizedRequest.ScalePercent = optimalScale;
+                        var optimalScale = CalculateOptimalScale(dims.Width, dims.Height, bitratePlan.VideoKbps, normalizedRequest.TargetFps ?? 30, normalizedRequest.Codec);
+                        var currentScale = normalizedRequest.ScalePercent ?? 100;
+                        
+                        if (optimalScale < currentScale)
+                        {
+                            _logger.LogInformation("Auto-scaling triggered for job {JobId}: Reducing resolution to {Scale}% to maintain quality (Bitrate: {Bitrate}kbps, Input: {W}x{H})", 
+                                artifacts.JobId, optimalScale, bitratePlan.VideoKbps, dims.Width, dims.Height);
+                            normalizedRequest.ScalePercent = optimalScale;
+                        }
                     }
                 }
             }
