@@ -97,6 +97,21 @@ public class VideoCompressionService : IVideoCompressionService
                     bitratePlan.TotalKbps,
                     bitratePlan.VideoKbps,
                     codecConfig.AudioBitrateKbps);
+
+                // Auto-resolution adjustment: Downscale if bitrate is too low for the resolution
+                var dims = await ProbeVideoDimensionsAsync(artifacts.PreparedInputPath);
+                if (dims != null)
+                {
+                    var optimalScale = CalculateOptimalScale(dims.Width, dims.Height, bitratePlan.VideoKbps, normalizedRequest.TargetFps ?? 30, normalizedRequest.Codec);
+                    var currentScale = normalizedRequest.ScalePercent ?? 100;
+                    
+                    if (optimalScale < currentScale)
+                    {
+                        _logger.LogInformation("Auto-scaling triggered for job {JobId}: Reducing resolution to {Scale}% to maintain quality (Bitrate: {Bitrate}kbps, Input: {W}x{H})", 
+                            artifacts.JobId, optimalScale, bitratePlan.VideoKbps, dims.Width, dims.Height);
+                        normalizedRequest.ScalePercent = optimalScale;
+                    }
+                }
             }
         }
 
@@ -1319,19 +1334,21 @@ public class VideoCompressionService : IVideoCompressionService
 
     private static List<string> BuildSimpleVideoArgs(CodecConfig codec, double videoBitrateKbps, int fps, EncodingMode mode)
     {
-        _ = mode;
         var targetBitrate = Math.Max(100, Math.Round(videoBitrateKbps));
-        // Allow the encoder to breathe so average bitrate can fall below the ceiling when scenes are easy.
-        // maxrate: 10% burst headroom, bufsize: 2x target for smoother rate control.
-        var maxRate = Math.Round(targetBitrate * 1.10);
-        var buffer = Math.Round(targetBitrate * 2.0);
+        
+        // Strict adherence to target size
+        var maxRate = Math.Round(targetBitrate * 1.0);
+        var buffer = Math.Round(targetBitrate * 1.0);
+
+        // Adjust preset based on mode
+        var preset = mode == EncodingMode.Fast ? "fast" : "slow";
 
         var args = new List<string>();
 
         switch (codec.Key)
         {
             case "h265":
-                args.AddRange(new[] { "-c:v", codec.VideoCodec, "-preset", "slower", "-pix_fmt", "yuv420p", "-tag:v", "hvc1", "-g", (fps * 2).ToString(), "-sc_threshold", "0", "-bf", "4", "-refs", "5", "-x265-params", "vbv-bufsize=" + buffer + ":vbv-maxrate=" + maxRate + ":aq-mode=3:aq-strength=1.0:psy-rd=2.0:rc-lookahead=60" });
+                args.AddRange(new[] { "-c:v", codec.VideoCodec, "-preset", preset, "-pix_fmt", "yuv420p", "-tag:v", "hvc1", "-g", (fps * 2).ToString(), "-sc_threshold", "0", "-bf", "4", "-refs", "5", "-x265-params", "vbv-bufsize=" + buffer + ":vbv-maxrate=" + maxRate + ":aq-mode=3:aq-strength=1.0:psy-rd=2.0:rc-lookahead=60" });
                 break;
             case "vp9":
                 args.AddRange(new[] { "-c:v", codec.VideoCodec, "-deadline", "good", "-cpu-used", "1", "-row-mt", "1", "-tile-columns", "1", "-g", (fps * 2).ToString(), "-sc_threshold", "0" });
@@ -1340,7 +1357,7 @@ public class VideoCompressionService : IVideoCompressionService
                 args.AddRange(new[] { "-c:v", codec.VideoCodec, "-cpu-used", "0", "-row-mt", "1", "-g", (fps * 2).ToString(), "-sc_threshold", "0" });
                 break;
             default:
-                args.AddRange(new[] { "-c:v", codec.VideoCodec, "-preset", "slower", "-pix_fmt", "yuv420p", "-g", (fps * 2).ToString(), "-sc_threshold", "0", "-bf", "4", "-refs", "5" });
+                args.AddRange(new[] { "-c:v", codec.VideoCodec, "-preset", preset, "-pix_fmt", "yuv420p", "-g", (fps * 2).ToString(), "-sc_threshold", "0", "-bf", "4", "-refs", "5" });
                 break;
         }
 
@@ -1928,6 +1945,99 @@ public class VideoCompressionService : IVideoCompressionService
         bool SegmentsApplied);
 
     private sealed record SegmentProcessingResult(bool SegmentsApplied, string PreparedInputPath, double? EffectiveDuration);
+
+    private string GetFfprobePath()
+    {
+        var ffmpegPath = _ffmpegResolver.GetFfmpegPath();
+        var directory = Path.GetDirectoryName(ffmpegPath);
+        var extension = Path.GetExtension(ffmpegPath);
+        var ffprobeName = "ffprobe" + extension;
+        
+        if (string.IsNullOrEmpty(directory)) return ffprobeName;
+        
+        var probePath = Path.Combine(directory, ffprobeName);
+        if (File.Exists(probePath)) return probePath;
+
+        // Fallback: try to find in PATH if not next to ffmpeg
+        return "ffprobe";
+    }
+
+    private async Task<VideoDimensions?> ProbeVideoDimensionsAsync(string filePath)
+    {
+        try
+        {
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = GetFfprobePath(),
+                Arguments = $"-v error -select_streams v:0 -show_entries stream=width,height -of csv=s=x:p=0 \"{filePath}\"",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            using var process = new Process { StartInfo = startInfo };
+            process.Start();
+            
+            var output = await process.StandardOutput.ReadToEndAsync();
+            await process.WaitForExitAsync();
+
+            if (process.ExitCode == 0 && !string.IsNullOrWhiteSpace(output))
+            {
+                var parts = output.Trim().Split('x');
+                if (parts.Length == 2 && int.TryParse(parts[0], out var w) && int.TryParse(parts[1], out var h))
+                {
+                    return new VideoDimensions(w, h);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to probe video dimensions for {Path}", filePath);
+        }
+        return null;
+    }
+
+    private int CalculateOptimalScale(int width, int height, double videoKbps, int fps, string codec)
+    {
+        // Target bits per pixel (BPP) for "good" quality
+        // These are heuristic values:
+        // H.264 needs ~0.1 bpp for complex scenes, 0.05 for simple
+        // H.265/VP9 are ~30-40% more efficient
+        // AV1 is ~50% more efficient
+        
+        double targetBpp = codec.ToLowerInvariant() switch
+        {
+            "h265" or "hevc" => 0.065,
+            "vp9" => 0.07,
+            "av1" => 0.055,
+            _ => 0.095 // H.264 and others
+        };
+
+        var pixels = width * height;
+        if (pixels <= 0) return 100;
+
+        // Calculate max pixels we can support at this bitrate with acceptable quality
+        // videoKbps * 1000 = bits per second
+        // bits per frame = bits per second / fps
+        // max pixels = bits per frame / targetBpp
+        var maxPixels = (videoKbps * 1000) / (fps * targetBpp);
+
+        if (maxPixels >= pixels) return 100;
+
+        // Calculate scale factor
+        // new_pixels = scale^2 * old_pixels
+        // scale = sqrt(new_pixels / old_pixels)
+        var scale = Math.Sqrt(maxPixels / pixels);
+        
+        // Convert to percentage and round down to nearest 5%
+        var percent = (int)(scale * 100);
+        
+        // Don't go below 25% or above 100%
+        return Math.Clamp((percent / 5) * 5, 25, 100);
+    }
+
+    private sealed record VideoDimensions(int Width, int Height);
 }
 
 public class JobMetadata

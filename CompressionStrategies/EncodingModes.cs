@@ -85,13 +85,13 @@ public static class EncodingModeConfigs
             EncoderKey: "libx264",
             Mode: EncodingMode.Quality,
             DisplayName: "H.264 Quality",
-            Description: "Balanced H.264 quality using medium preset and stronger AQ.",
+            Description: "Balanced H.264 quality using slow preset and stronger AQ.",
             MaxRateMultiplier: 1.0,
             MinRateMultiplier: 1.0,
             BufferMultiplier: 1.0,
             VideoArgs: new[]
             {
-                "-preset", "medium",
+                "-preset", "slow",
                 "-pix_fmt", "yuv420p",
                 "-g", "60",
                 "-sc_threshold", "0",
@@ -108,19 +108,19 @@ public static class EncodingModeConfigs
             EncoderKey: "h264_nvenc",
             Mode: EncodingMode.Fast,
             DisplayName: "H.264 NVENC Fast",
-            Description: "NVENC H.264 tuned for speed with moderate quality.",
+            Description: "NVENC H.264 tuned for speed.",
             MaxRateMultiplier: 1.0,
             MinRateMultiplier: 1.0,
             BufferMultiplier: 1.0,
             VideoArgs: new[]
             {
-                "-preset", "p4",
+                "-preset", "p3",
                 "-rc", "vbr",
-                "-spatial-aq", "1",
-                "-temporal-aq", "1",
-                "-rc-lookahead", "32",
+                "-spatial-aq", "0",
+                "-temporal-aq", "0",
+                "-rc-lookahead", "20",
                 "-g", "60",
-                "-bf", "3"
+                "-bf", "2"
             }
         ),
         new EncodingModeConfig(
@@ -158,11 +158,10 @@ public static class EncodingModeConfigs
             BufferMultiplier: 1.0,
             VideoArgs: new[]
             {
-                "-preset", "medium",
-                "-look_ahead", "1",
-                "-look_ahead_depth", "40",
+                "-preset", "fast",
+                "-look_ahead", "0",
                 "-g", "60",
-                "-bf", "3"
+                "-bf", "2"
             }
         ),
         new EncodingModeConfig(
@@ -192,22 +191,20 @@ public static class EncodingModeConfigs
             EncoderKey: "h264_amf",
             Mode: EncodingMode.Fast,
             DisplayName: "H.264 AMF Fast",
-            Description: "AMD AMF H.264 tuned for speed with simpler rate control.",
+            Description: "AMD AMF H.264 tuned for speed.",
             MaxRateMultiplier: 1.0,
             MinRateMultiplier: 1.0,
             BufferMultiplier: 1.0,
             VideoArgs: new[]
             {
-                "-quality", "quality",
+                "-quality", "speed",
                 "-rc", "cbr",
                 "-qmin", "0",
                 "-qmax", "51",
                 "-pix_fmt", "nv12",
                 "-g", "60",
-                "-bf", "1",
-                "-rc-lookahead", "32",
-                "-temporal-aq", "1",
-                "-spatial-aq", "0"
+                "-bf", "0",
+                "-rc-lookahead", "0"
             }
         ),
         new EncodingModeConfig(
@@ -308,21 +305,21 @@ public static class EncodingModeConfigs
             EncoderKey: "libx265",
             Mode: EncodingMode.Fast,
             DisplayName: "H.265 Fast",
-            Description: "Software H.265 with slower preset but smaller lookahead for speed.",
+            Description: "Software H.265 with fast preset for speed.",
             MaxRateMultiplier: 1.0,
             MinRateMultiplier: 1.0,
             BufferMultiplier: 1.0,
             VideoArgs: new[]
             {
-                "-preset", "slower",
+                "-preset", "fast",
                 "-pix_fmt", "yuv420p",
                 "-tag:v", "hvc1",
                 "-g", "60",
                 "-sc_threshold", "0",
-                "-bf", "4",
-                "-refs", "5",
+                "-bf", "3",
+                "-refs", "3",
                 "-x265-params",
-                "vbv-bufsize={buffer}:vbv-maxrate={maxrate}:aq-mode=3:aq-strength=1.0:psy-rd=2.0:rc-lookahead=60"
+                "vbv-bufsize={buffer}:vbv-maxrate={maxrate}:aq-mode=1:aq-strength=1.0:rc-lookahead=20"
             }
         ),
         new EncodingModeConfig(
@@ -354,20 +351,20 @@ public static class EncodingModeConfigs
             EncoderKey: "hevc_nvenc",
             Mode: EncodingMode.Fast,
             DisplayName: "H.265 NVENC Fast",
-            Description: "NVENC HEVC tuned for reasonable speed and quality.",
+            Description: "NVENC HEVC tuned for speed.",
             MaxRateMultiplier: 1.0,
             MinRateMultiplier: 1.0,
             BufferMultiplier: 1.0,
             VideoArgs: new[]
             {
                 "-pix_fmt", "yuv420p",
-                "-preset", "p6",
+                "-preset", "p3",
                 "-rc", "vbr",
-                "-spatial-aq", "1",
-                "-temporal-aq", "1",
-                "-rc-lookahead", "48",
+                "-spatial-aq", "0",
+                "-temporal-aq", "0",
+                "-rc-lookahead", "20",
                 "-g", "60",
-                "-bf", "4",
+                "-bf", "3",
                 "-b_ref_mode", "middle",
                 "-multipass", "disabled",
                 "-tag:v", "hvc1"
@@ -411,11 +408,10 @@ public static class EncodingModeConfigs
             BufferMultiplier: 1.0,
             VideoArgs: new[]
             {
-                "-preset", "slower",
-                "-look_ahead", "1",
-                "-look_ahead_depth", "60",
+                "-preset", "fast",
+                "-look_ahead", "0",
                 "-g", "60",
-                "-bf", "4",
+                "-bf", "3",
                 "-tag:v", "hvc1"
             }
         ),
@@ -453,15 +449,15 @@ public static class EncodingModeConfigs
             BufferMultiplier: 1.0,
             VideoArgs: new[]
             {
-                "-quality", "quality",
+                "-quality", "speed",
                 "-rc", "vbr_peak",
                 "-qmin", "15",
                 "-qmax", "45",
                 "-tag:v", "hvc1",
                 "-g", "60",
                 "-bf", "1",
-                "-rc-lookahead", "32",
-                "-temporal-aq", "1",
+                "-rc-lookahead", "0",
+                "-temporal-aq", "0",
                 "-spatial-aq", "0",
                 "-profile:v", "main"
             }
