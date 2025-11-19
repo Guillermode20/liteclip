@@ -11,12 +11,16 @@
     export let uploadBtnDisabled = true;
     export let uploadBtnText = 'Process Video';
     export let showCancelButton = false;
+    export let muteAudio = false;
+    export let resolutionPreset = 'auto';
 
     export let onPresetClick: (value: string) => void = () => {};
     export let onSliderChange: (value: number) => void = () => {};
     export let onCodecChange: (value: string) => void = () => {};
     export let onUploadClick: (event: MouseEvent) => void = () => {};
     export let onCancelClick: () => void = () => {};
+    export let onMuteToggle: (value: boolean) => void = () => {};
+    export let onResolutionChange: (value: string) => void = () => {};
 
     function handleSliderInput(event: Event) {
         const value = parseFloat((event.target as HTMLInputElement).value);
@@ -26,6 +30,16 @@
     function handleCodecSelect(event: Event) {
         const value = (event.target as HTMLSelectElement).value;
         onCodecChange(value);
+    }
+
+    function handleResolutionSelect(event: Event) {
+        const value = (event.target as HTMLSelectElement).value;
+        onResolutionChange(value);
+    }
+
+    function handleMuteChange(event: Event) {
+        const checked = (event.target as HTMLInputElement).checked;
+        onMuteToggle(checked);
     }
 </script>
 
@@ -81,6 +95,29 @@
                     {#if codecHelperText}
                         <div class="helper-text">// {codecHelperText}</div>
                     {/if}
+                </div>
+
+                <div class="settings-group">
+                    <label for="resolutionSelect" class="setting-label">
+                        <strong>resolution</strong>
+                    </label>
+                    <select id="resolutionSelect" value={resolutionPreset} on:change={handleResolutionSelect}>
+                        <option value="auto">auto (smart)</option>
+                        <option value="source">original</option>
+                        <option value="1080p">1080p</option>
+                        <option value="720p">720p</option>
+                        <option value="480p">480p</option>
+                        <option value="360p">360p</option>
+                    </select>
+                    <div class="helper-text">// force target resolution if needed</div>
+                </div>
+
+                <div class="settings-group toggle-group">
+                    <label class="toggle">
+                        <input type="checkbox" checked={muteAudio} on:change={handleMuteChange} />
+                        <span>mute audio</span>
+                    </label>
+                    <div class="helper-text">// turn sound off to save space</div>
                 </div>
             </section>
 

@@ -1,6 +1,7 @@
 export type StatusMessageType = 'processing' | 'success' | 'error';
 
 export type CodecKey = 'fast' | 'quality';
+export type ResolutionPreset = 'auto' | 'source' | '1080p' | '720p' | '480p' | '360p';
 
 export interface VideoSegment {
     start: number;
@@ -50,5 +51,22 @@ export interface CompressionStatusResponse {
     completedAt?: string;
     compressionSkipped?: boolean;
     message?: string;
+}
+
+export interface UpdateInfoPayload {
+    currentVersion: string;
+    latestVersion: string;
+    updateAvailable: boolean;
+    downloadUrl?: string | null;
+    checkedAt?: string;
+    releaseNotes?: string | null;
+}
+
+export interface UserSettingsPayload {
+    defaultCodec: CodecKey;
+    defaultResolution: ResolutionPreset;
+    defaultMuteAudio: boolean;
+    defaultTargetSizePercent: number;
+    checkForUpdatesOnLaunch: boolean;
 }
 

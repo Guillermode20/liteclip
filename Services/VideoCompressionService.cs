@@ -125,7 +125,8 @@ public class VideoCompressionService : IVideoCompressionService
         // ALWAYS enable two-pass encoding for best quality and bitrate accuracy.
         var enableTwoPass = true;
 
-        var compressionJob = BuildQueuedJob(artifacts, normalizedRequest, codecConfig, computedTargetKbps, computedVideoKbps, enableTwoPass);
+        var requestSnapshot = CloneRequest(normalizedRequest);
+        var compressionJob = BuildQueuedJob(artifacts, requestSnapshot, codecConfig, computedTargetKbps, computedVideoKbps, enableTwoPass);
 
         _jobs[jobId] = compressionJob;
         _jobQueue.Enqueue(jobId);
@@ -225,6 +226,11 @@ public class VideoCompressionService : IVideoCompressionService
 
     private bool ShouldSkipCompression(CompressionRequest request, double effectiveMaxSizeMb, string jobId)
     {
+        if (request.MuteAudio)
+        {
+            return false;
+        }
+
         if (request.SkipCompression)
         {
             _logger.LogInformation("Skip compression flag is set for job {JobId} - user requested no compression", jobId);
@@ -264,10 +270,12 @@ public class VideoCompressionService : IVideoCompressionService
             SourceDuration = request.SourceDuration,
             TwoPass = false,
             CompressionSkipped = true,
+            MuteAudio = request.MuteAudio,
             CreatedAt = DateTime.UtcNow,
             StartedAt = DateTime.UtcNow,
             CompletedAt = DateTime.UtcNow,
-            Progress = 100
+            Progress = 100,
+            RequestSnapshot = CloneRequest(request)
         };
 
         if (File.Exists(artifacts.OutputPath))
@@ -281,7 +289,7 @@ public class VideoCompressionService : IVideoCompressionService
         return artifacts.JobId;
     }
 
-    private static JobMetadata BuildQueuedJob(JobPreparationArtifacts artifacts, CompressionRequest request, CodecConfig codecConfig, double? computedTargetKbps, double? computedVideoKbps, bool enableTwoPass)
+    private static JobMetadata BuildQueuedJob(JobPreparationArtifacts artifacts, CompressionRequest requestSnapshot, CodecConfig codecConfig, double? computedTargetKbps, double? computedVideoKbps, bool enableTwoPass)
     {
         return new JobMetadata
         {
@@ -293,13 +301,15 @@ public class VideoCompressionService : IVideoCompressionService
             OutputMimeType = codecConfig.MimeType,
             Status = "queued",
             Codec = codecConfig.Key,
-            ScalePercent = request.ScalePercent,
-            TargetSizeMb = request.TargetSizeMb,
+            ScalePercent = requestSnapshot.ScalePercent,
+            TargetSizeMb = requestSnapshot.TargetSizeMb,
             TargetBitrateKbps = computedTargetKbps,
             VideoBitrateKbps = computedVideoKbps,
-            SourceDuration = request.SourceDuration,
+            SourceDuration = requestSnapshot.SourceDuration,
             TwoPass = enableTwoPass,
-            CreatedAt = DateTime.UtcNow
+            CreatedAt = DateTime.UtcNow,
+            MuteAudio = requestSnapshot.MuteAudio,
+            RequestSnapshot = CloneRequest(requestSnapshot)
         };
     }
 
@@ -388,6 +398,74 @@ public class VideoCompressionService : IVideoCompressionService
         
         _logger.LogInformation("Job {JobId} cancelled", jobId);
         return true;
+    }
+
+    public (bool Success, string? Error) RetryJob(string jobId)
+    {
+        if (!_jobs.TryGetValue(jobId, out var job))
+        {
+            return (false, "Job not found");
+        }
+
+        if (job.Status != "failed" && job.Status != "cancelled")
+        {
+            return (false, "Only failed or cancelled jobs can be retried");
+        }
+
+        if (job.CompressionSkipped)
+        {
+            return (false, "Jobs that skipped compression cannot be retried");
+        }
+
+        if (string.IsNullOrWhiteSpace(job.InputPath) || !File.Exists(job.InputPath))
+        {
+            return (false, "Original upload has been cleaned up");
+        }
+
+        var sourceRequest = job.RequestSnapshot ?? new CompressionRequest
+        {
+            Codec = job.Codec,
+            ScalePercent = job.ScalePercent,
+            TargetFps = job.RequestSnapshot?.TargetFps ?? 30,
+            TargetSizeMb = job.TargetSizeMb,
+            SourceDuration = job.SourceDuration,
+            SkipCompression = false,
+            MuteAudio = job.MuteAudio,
+            UseQualityMode = string.Equals(job.Codec, "h265", StringComparison.OrdinalIgnoreCase),
+            UseUltraMode = false,
+            Mode = job.RequestSnapshot?.Mode ?? EncodingMode.Fast
+        };
+
+        var replayRequest = CloneRequest(sourceRequest);
+        job.RequestSnapshot = CloneRequest(replayRequest);
+
+        job.Status = "queued";
+        job.Progress = 0;
+        job.ErrorMessage = null;
+        job.CompletedAt = null;
+        job.StartedAt = null;
+        job.EstimatedSecondsRemaining = null;
+        job.OutputSizeBytes = null;
+        job.CreatedAt = DateTime.UtcNow;
+        job.CompressionSkipped = false;
+
+        try
+        {
+            if (File.Exists(job.OutputPath))
+            {
+                File.Delete(job.OutputPath);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to delete previous output for job {JobId}", jobId);
+        }
+
+        _jobQueue.Enqueue(jobId);
+        var codecConfig = GetCodecConfig(job.Codec);
+        _ = Task.Run(async () => await ProcessQueueAsync(jobId, replayRequest, codecConfig));
+
+        return (true, null);
     }
 
     public int GetQueuePosition(string jobId)
@@ -1254,6 +1332,7 @@ public class VideoCompressionService : IVideoCompressionService
             SourceDuration = request.SourceDuration,
             Segments = NormalizeSegments(request.Segments, request.SourceDuration),
             SkipCompression = request.SkipCompression,
+            MuteAudio = request.MuteAudio,
             UseQualityMode = request.UseQualityMode,
             UseUltraMode = request.UseUltraMode,
             Mode = mode
@@ -1385,6 +1464,11 @@ public class VideoCompressionService : IVideoCompressionService
 
     private AudioPlan CalculateAudioPlan(JobMetadata job, CodecConfig codec)
     {
+        if (job.MuteAudio)
+        {
+            return new AudioPlan(0, 0, true);
+        }
+
         var defaultBitrate = codec.AudioBitrateKbps;
         var defaultPlan = new AudioPlan(defaultBitrate, 2);
 
@@ -1409,6 +1493,11 @@ public class VideoCompressionService : IVideoCompressionService
 
     private static List<string> BuildAudioArgsWithPlan(ICompressionStrategy? strategy, CodecConfig codec, AudioPlan plan)
     {
+        if (plan.Muted)
+        {
+            return new List<string> { "-an" };
+        }
+
         var args = (strategy?.BuildAudioArgs() ?? BuildAudioArgs(codec)).ToList();
 
         ApplyOrAppend(args, "-b:a", $"{plan.BitrateKbps}k");
@@ -1514,7 +1603,7 @@ public class VideoCompressionService : IVideoCompressionService
         // Add a slight buffer to the reserved audio bitrate so container muxing remains under target
         // Keep audio lean so more bits land on video. Modern
         // platforms are very forgiving to slightly lower audio.
-        var audioBudgetKbps = codecConfig.AudioBitrateKbps * 0.9;
+        var audioBudgetKbps = request.MuteAudio ? 0 : codecConfig.AudioBitrateKbps * 0.9;
         var videoKbps = Math.Max(80, totalKbps - audioBudgetKbps);
 
         return new BitratePlan(
@@ -1908,6 +1997,28 @@ public class VideoCompressionService : IVideoCompressionService
         return merged;
     }
 
+    private static CompressionRequest CloneRequest(CompressionRequest source)
+    {
+        return new CompressionRequest
+        {
+            Codec = source.Codec,
+            ScalePercent = source.ScalePercent,
+            TargetFps = source.TargetFps,
+            TargetSizeMb = source.TargetSizeMb,
+            SkipCompression = source.SkipCompression,
+            MuteAudio = source.MuteAudio,
+            SourceDuration = source.SourceDuration,
+            Segments = source.Segments?.Select(segment => new VideoSegment
+            {
+                Start = segment.Start,
+                End = segment.End
+            }).ToList(),
+            UseQualityMode = source.UseQualityMode,
+            UseUltraMode = source.UseUltraMode,
+            Mode = source.Mode
+        };
+    }
+
 
 
     private static EncodingMode DeriveEncodingMode(bool useQualityMode, bool useUltraMode)
@@ -1922,7 +2033,7 @@ public class VideoCompressionService : IVideoCompressionService
     }
 
     private sealed record BitratePlan(double TotalKbps, double VideoKbps, double PayloadBudgetMb, double ContainerReserveMb, double SafetyMarginMb);
-    private sealed record AudioPlan(int BitrateKbps, int Channels);
+    private sealed record AudioPlan(int BitrateKbps, int Channels, bool Muted = false);
 
     private sealed class CodecConfig
     {
@@ -2060,6 +2171,7 @@ public class JobMetadata
     public double Progress { get; set; } = 0;
     public string? ErrorMessage { get; set; }
     public bool TwoPass { get; set; } = false;
+    public bool MuteAudio { get; set; }
     public DateTime CreatedAt { get; set; }
     public DateTime? StartedAt { get; set; }
     public DateTime? CompletedAt { get; set; }
@@ -2068,5 +2180,6 @@ public class JobMetadata
         // Encoder metadata
         public string? EncoderName { get; set; }
         public bool? EncoderIsHardware { get; set; }
+        public CompressionRequest? RequestSnapshot { get; set; }
 }
 

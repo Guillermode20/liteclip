@@ -21,11 +21,15 @@ Perfect for cutting, editing, and compressing videos to fit strict file size lim
 - **Hardware Encoder Detection**: Auto-detects and uses NVENC, QSV, AMF when available
 - **Target Size Compression**: Set exact output size to meet platform upload limits
 - **Automatic Optimization**: Resolution and bitrate scales automatically to hit target size
+- **Resolution Presets**: Force 1080p/720p/480p/360p output when you need strict dimensions
 - **Two-Pass Encoding**: Accurate bitrate targeting for precise file sizes
+- **Audio Control**: One-click mute option to drop audio and save precious megabytes
 - **Video Preview**: Play compressed result before downloading
 - **Drag & Drop Upload**: Easy file selection
 - **Real-Time Progress**: Live status with queue position and ETA during compression
 - **Job Queue**: Configurable concurrent compression limit with queue management
+- **Retry Safety Net**: Failed jobs can be re-queued instantly without re-uploading files
+- **Update Notifications**: Built-in release checker so you always know when a new build ships
 - **Cross-Platform**: Runs on Windows, Linux, and macOS
 - **Native Desktop Window**: Photino-based UI, no browser required
 - **Single Executable**: Self-contained app (Release builds embed UI assets)

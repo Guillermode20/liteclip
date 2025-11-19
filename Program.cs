@@ -55,6 +55,7 @@ namespace liteclip
             });
 
             // Add services to the container.
+            builder.Services.AddHttpClient();
             builder.Services.AddSingleton<FfmpegPathResolver>();
             builder.Services.AddSingleton<FfmpegCapabilityProbe>();
             builder.Services.AddSingleton<IFfmpegPathResolver>(sp => sp.GetRequiredService<FfmpegPathResolver>());
@@ -68,6 +69,8 @@ namespace liteclip
             builder.Services.AddSingleton<ICompressionStrategyFactory, CompressionStrategyFactory>();
 
             builder.Services.AddHostedService<JobCleanupService>();
+            builder.Services.AddSingleton<UpdateCheckerService>();
+            builder.Services.AddSingleton<UserSettingsStore>();
 
             var app = builder.Build();
 
@@ -112,6 +115,7 @@ namespace liteclip
                 [FromForm] bool? skipCompression,
                 [FromForm] bool? qualityMode,
                 [FromForm] bool? ultraMode,
+                [FromForm] bool? muteAudio,
                 
                 VideoCompressionService compressionService,
                 IConfiguration configuration) =>
@@ -156,6 +160,7 @@ namespace liteclip
                         ScalePercent = scalePercent,
                         TargetSizeMb = targetSizeMb,
                         SkipCompression = skipCompression ?? false,
+                        MuteAudio = muteAudio ?? false,
                         SourceDuration = sourceDuration,
                         Segments = videoSegments,
                         UseQualityMode = qualityMode ?? false,
@@ -287,6 +292,25 @@ namespace liteclip
             })
             .WithName("CancelJob");
 
+            app.MapPost("/api/retry/{jobId}", (string jobId, VideoCompressionService compressionService, ILogger<Program> logger) =>
+            {
+                logger.LogInformation("Retry request for jobId: {JobId}", jobId);
+
+                if (string.IsNullOrWhiteSpace(jobId))
+                {
+                    return Results.BadRequest(new { error = "Job ID is required" });
+                }
+
+                var (success, error) = compressionService.RetryJob(jobId);
+                if (!success)
+                {
+                    return Results.BadRequest(new { error = error ?? "Unable to retry job." });
+                }
+
+                return Results.Ok(new { message = "Job re-queued for processing", jobId });
+            })
+            .WithName("RetryJob");
+
             // GET endpoint to check status and download compressed video
             app.MapGet("/api/download/{jobId}", async (string jobId, VideoCompressionService compressionService, ILogger<Program> logger) =>
             {
@@ -375,6 +399,35 @@ namespace liteclip
                 return Results.NotFound(new { error = $"Compressed video not found. Job status: {job.Status}" });
             })
             .WithName("DownloadCompressedVideo");
+
+            app.MapGet("/api/update", async (UpdateCheckerService updateChecker, ILogger<Program> logger) =>
+            {
+                try
+                {
+                    var info = await updateChecker.GetUpdateInfoAsync();
+                    return Results.Ok(info);
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "Update check failed");
+                    return Results.Problem("Unable to check for updates", statusCode: 503);
+                }
+            })
+            .WithName("GetUpdateInfo");
+
+            app.MapGet("/api/settings", async (UserSettingsStore store) =>
+            {
+                var settings = await store.GetAsync();
+                return Results.Ok(settings);
+            })
+            .WithName("GetUserSettings");
+
+            app.MapPost("/api/settings", async ([FromBody] UserSettings settings, UserSettingsStore store) =>
+            {
+                var updated = await store.UpdateAsync(settings);
+                return Results.Ok(updated);
+            })
+            .WithName("UpdateUserSettings");
 
             // --- Robust Server Startup and Shutdown Logic ---
 

@@ -1,17 +1,21 @@
 <script lang="ts">
-    import { onDestroy } from 'svelte';
+    import { onDestroy, onMount } from 'svelte';
     import UploadArea from './components/UploadArea.svelte';
     import ProgressCard from './components/ProgressCard.svelte';
     import StatusCard from './components/StatusCard.svelte';
     import OutputPanel from './components/OutputPanel.svelte';
     import Sidebar from './components/sidebar/Sidebar.svelte';
+    import SettingsModal from './components/SettingsModal.svelte';
     import VideoEditor from './VideoEditor.svelte';
     import { codecDetails, createDefaultOutputMetadata } from './lib/constants';
     import type {
         CodecKey,
         CompressionStatusResponse,
         OutputMetadata,
+        ResolutionPreset,
         StatusMessageType,
+        UpdateInfoPayload,
+        UserSettingsPayload,
         VideoSegment
     } from './lib/types';
     import { formatFileSize, formatDurationLabel, formatTimeRemaining } from './lib/utils/format';
@@ -53,6 +57,25 @@
     let compressionSkipped = false;
     let showVideoEditor = false;
     let videoSegments: VideoSegment[] = [];
+    let muteAudio = false;
+    let resolutionPreset: ResolutionPreset = 'auto';
+    let canRetry = false;
+    let retrying = false;
+    let updateInfo: UpdateInfoPayload | null = null;
+    let showUpdateBanner = false;
+    let userSettings: UserSettingsPayload | null = null;
+    let defaultTargetPercent = 100;
+    let showSettingsModal = false;
+    let autoUpdateEnabled = true;
+    let hasCheckedUpdates = false;
+
+    const fallbackSettings: UserSettingsPayload = {
+        defaultCodec: 'quality',
+        defaultResolution: 'auto',
+        defaultMuteAudio: false,
+        defaultTargetSizePercent: 50,
+        checkForUpdatesOnLaunch: true
+    };
 
     let outputMetadata: OutputMetadata = createDefaultOutputMetadata();
 
@@ -66,6 +89,10 @@
         if (videoPreviewUrl) {
             URL.revokeObjectURL(videoPreviewUrl);
         }
+    });
+
+    onMount(() => {
+        loadUserSettings();
     });
 
     function handleFileSelect(file: File) {
@@ -120,7 +147,8 @@
                 `;
                 metadataVisible = true;
 
-                outputSizeSliderValue = 100;
+                const initialPercent = clampPercentValue(defaultTargetPercent);
+                outputSizeSliderValue = initialPercent;
                 outputSizeSliderDisabled = false;
                 updateOutputSizeDisplay();
             },
@@ -147,6 +175,128 @@
         codecSelectValue = value as CodecKey;
         updateCodecHelper();
         updateOutputSizeDisplay();
+    }
+
+    function handleResolutionChange(value: string) {
+        resolutionPreset = value as ResolutionPreset;
+        updateOutputSizeDisplay();
+    }
+
+    function handleMuteToggle(value: boolean) {
+        muteAudio = value;
+    }
+
+    function parseResolutionHeight(preset: ResolutionPreset): number | null {
+        switch (preset) {
+            case '1080p':
+                return 1080;
+            case '720p':
+                return 720;
+            case '480p':
+                return 480;
+            case '360p':
+                return 360;
+            default:
+                return null;
+        }
+    }
+
+    function getForcedScalePercent(): number | null {
+        if (!sourceVideoHeight || resolutionPreset === 'auto') {
+            return null;
+        }
+
+        if (resolutionPreset === 'source') {
+            return 100;
+        }
+
+        const targetHeight = parseResolutionHeight(resolutionPreset);
+        if (!targetHeight || targetHeight <= 0) {
+            return null;
+        }
+
+        if (sourceVideoHeight <= targetHeight) {
+            return 100;
+        }
+
+        const percent = Math.round((targetHeight / sourceVideoHeight) * 100);
+        return Math.max(10, Math.min(100, percent));
+    }
+
+    function clampPercentValue(value: number | null | undefined) {
+        if (typeof value !== 'number' || !Number.isFinite(value)) {
+            return 100;
+        }
+        return Math.min(100, Math.max(1, value));
+    }
+
+    async function loadUserSettings() {
+        let fetched: UserSettingsPayload | null = null;
+        try {
+            const response = await fetch('/api/settings');
+            if (response.ok) {
+                fetched = await response.json();
+            } else {
+                console.warn('Failed to load settings', response.status);
+            }
+        } catch (error) {
+            console.warn('Settings fetch failed', error);
+        } finally {
+            userSettings = fetched ?? { ...fallbackSettings };
+            applyUserSettings(userSettings);
+        }
+    }
+
+    function applyUserSettings(settings: UserSettingsPayload | null) {
+        const effective = settings ?? fallbackSettings;
+        codecSelectValue = effective.defaultCodec;
+        updateCodecHelper();
+        resolutionPreset = effective.defaultResolution;
+        muteAudio = effective.defaultMuteAudio;
+        defaultTargetPercent = clampPercentValue(effective.defaultTargetSizePercent);
+        autoUpdateEnabled = effective.checkForUpdatesOnLaunch;
+
+        if (!selectedFile) {
+            outputSizeSliderValue = defaultTargetPercent;
+        }
+
+        if (autoUpdateEnabled && !hasCheckedUpdates) {
+            checkForUpdates();
+        }
+
+        if (!autoUpdateEnabled) {
+            showUpdateBanner = false;
+        }
+    }
+
+    async function handleSettingsSave(event: CustomEvent<UserSettingsPayload>) {
+        const payload = event.detail;
+        try {
+            const response = await fetch('/api/settings', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(payload)
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                throw new Error(errorText || 'Failed to save settings');
+            }
+
+            const saved: UserSettingsPayload = await response.json();
+            userSettings = saved;
+            applyUserSettings(saved);
+            showSettingsModal = false;
+            showStatus('Settings saved', 'success');
+            setTimeout(() => {
+                statusVisible = false;
+            }, 2000);
+        } catch (error) {
+            console.error('Save settings failed:', error);
+            showStatus('Failed to save settings: ' + (error as Error).message, 'error');
+        }
     }
 
     function handlePresetClick(targetPercent: string) {
@@ -189,19 +339,21 @@
 
         const targetBitsTotal = targetSizeMb * 1024 * 1024 * 8 * 0.9;
         const targetBitrateKbps = targetBitsTotal / effectiveDuration / 1000;
-        const recommendedScale = calculateOptimalResolution(
+        const forcedScale = getForcedScalePercent();
+        const recommendedScale = forcedScale ?? calculateOptimalResolution(
             targetSizeMb,
             effectiveDuration,
             sourceVideoWidth,
             sourceVideoHeight
         );
-        const targetW = Math.floor(((sourceVideoWidth * recommendedScale) / 100) / 2) * 2;
-        const targetH = Math.floor(((sourceVideoHeight * recommendedScale) / 100) / 2) * 2;
+        const appliedScale = Math.max(10, Math.min(100, recommendedScale));
+        const targetW = Math.floor(((sourceVideoWidth * appliedScale) / 100) / 2) * 2;
+        const targetH = Math.floor(((sourceVideoHeight * appliedScale) / 100) / 2) * 2;
 
         let details = `Target bitrate: ~${Math.round(targetBitrateKbps)} kbps`;
 
-        if (recommendedScale < 100) {
-            details += ` · Resolution: ${targetW}×${targetH} (${recommendedScale}%)`;
+        if (appliedScale < 100) {
+            details += ` · Resolution: ${targetW}×${targetH} (${appliedScale}%)`;
         } else {
             details += ` · Resolution: ${sourceVideoWidth}×${sourceVideoHeight} (original)`;
         }
@@ -224,22 +376,28 @@
         uploadBtnText = 'Uploading...';
         progressVisible = true;
         progressPercent = 10;
+        canRetry = false;
 
         const formData = new FormData();
         formData.append('file', selectedFile);
         formData.append('codec', codecSelectValue);
 
         const percent = parseFloat(outputSizeSliderValue.toString());
+        const forcedScalePercent = getForcedScalePercent();
+        const shouldForceResolution = forcedScalePercent !== null;
         const effectiveMaxSize = getEffectiveMaxSize(originalSizeMb, sourceDuration, videoSegments);
         const targetSizeMb = (effectiveMaxSize * percent) / 100;
         formData.append('targetSizeMb', targetSizeMb.toFixed(2));
-        const shouldSkipCompression = percent >= 100;
+        const shouldSkipCompression = percent >= 100 && !shouldForceResolution && !muteAudio;
         formData.append('skipCompression', shouldSkipCompression ? 'true' : 'false');
         formData.append('qualityMode', codecSelectValue === 'quality' ? 'true' : 'false');
+        formData.append('muteAudio', muteAudio ? 'true' : 'false');
 
         const effectiveDuration = getEffectiveDuration(videoSegments, sourceDuration) ?? sourceDuration;
 
-        if (percent < 100) {
+        if (shouldForceResolution && forcedScalePercent !== null) {
+            formData.append('scalePercent', forcedScalePercent.toString());
+        } else if (percent < 100) {
             const calculatedScalePercent = calculateOptimalResolution(
                 targetSizeMb,
                 effectiveDuration,
@@ -319,6 +477,7 @@
                 const result: CompressionStatusResponse = await response.json();
                 if (result.status === 'queued') {
                     showCancelButton = true;
+                    canRetry = false;
                     const queueMsg =
                         result.queuePosition && result.queuePosition > 0
                             ? `Queued for processing (position ${result.queuePosition})...`
@@ -326,6 +485,7 @@
                     showStatus(queueMsg, 'processing');
                 } else if (result.status === 'processing') {
                     showCancelButton = true;
+                    canRetry = false;
                     const progressPercentValue = Math.max(10, Math.min(95, result.progress || 0));
                     progressPercent = progressPercentValue;
 
@@ -365,6 +525,7 @@
                     videoPreviewVisible = true;
                     downloadVisible = true;
                     progressVisible = false;
+                    canRetry = false;
                 } else if (result.status === 'cancelled') {
                     if (statusCheckInterval) {
                         clearInterval(statusCheckInterval);
@@ -376,6 +537,7 @@
                     uploadBtnDisabled = false;
                     uploadBtnText = 'Process Video';
                     progressVisible = false;
+                    canRetry = false;
                 } else if (result.status === 'failed') {
                     if (statusCheckInterval) {
                         clearInterval(statusCheckInterval);
@@ -387,6 +549,7 @@
                     uploadBtnDisabled = false;
                     uploadBtnText = 'Process Video';
                     progressVisible = false;
+                    canRetry = true;
                 }
             } else {
                 if (statusCheckInterval) {
@@ -446,6 +609,51 @@
         } catch (error) {
             console.error('Cancel failed:', error);
             showStatus('Failed to cancel processing', 'error');
+        }
+    }
+
+    async function handleRetryJob() {
+        if (!jobId || retrying) return;
+
+        retrying = true;
+        canRetry = false;
+        isCompressing = true;
+        progressVisible = true;
+        progressPercent = 5;
+        showCancelButton = true;
+        showStatus('Re-queueing job...', 'processing');
+
+        try {
+            const response = await fetch(`/api/retry/${jobId}`, {
+                method: 'POST'
+            });
+
+            if (!response.ok) {
+                let errorMessage = 'Unable to retry job';
+                try {
+                    const data = await response.json();
+                    errorMessage = data.error || errorMessage;
+                } catch {
+                    // text fallback
+                    const text = await response.text();
+                    errorMessage = text || errorMessage;
+                }
+                throw new Error(errorMessage);
+            }
+
+            if (statusCheckInterval) {
+                clearInterval(statusCheckInterval);
+            }
+            statusCheckInterval = window.setInterval(checkStatus, 2000);
+        } catch (error) {
+            console.error('Retry failed:', error);
+            canRetry = true;
+            isCompressing = false;
+            progressVisible = false;
+            showCancelButton = false;
+            showStatus('Retry failed: ' + (error as Error).message, 'error');
+        } finally {
+            retrying = false;
         }
     }
 
@@ -523,6 +731,7 @@
         progressPercent = 0;
         isCompressing = false;
         showCancelButton = false;
+        canRetry = false;
 
         outputMetadata = createDefaultOutputMetadata();
         compressionSkipped = false;
@@ -611,6 +820,29 @@
         statusVisible = true;
     }
 
+    async function checkForUpdates(force = false) {
+        if (!force && !autoUpdateEnabled) {
+            return;
+        }
+
+        hasCheckedUpdates = true;
+        try {
+            const response = await fetch('/api/update');
+            if (!response.ok) {
+                return;
+            }
+            const payload: UpdateInfoPayload = await response.json();
+            updateInfo = payload;
+            showUpdateBanner = payload.updateAvailable === true;
+        } catch (error) {
+            console.warn('Update check failed', error);
+        }
+    }
+
+    function dismissUpdateBanner() {
+        showUpdateBanner = false;
+    }
+
     function resetInterface() {
         if (statusCheckInterval) {
             clearInterval(statusCheckInterval);
@@ -638,15 +870,18 @@
             videoPreviewUrl = null;
         }
         outputSizeSliderDisabled = true;
-        outputSizeSliderValue = 100;
+        outputSizeSliderValue = defaultTargetPercent;
         outputSizeValue = '--';
         outputSizeDetails = '';
-        codecSelectValue = 'quality';
+        codecSelectValue = userSettings?.defaultCodec ?? 'quality';
         updateCodecHelper();
         sourceVideoWidth = null;
         sourceVideoHeight = null;
         sourceDuration = null;
         originalSizeMb = null;
+        muteAudio = userSettings?.defaultMuteAudio ?? false;
+        resolutionPreset = userSettings?.defaultResolution ?? 'auto';
+        canRetry = false;
         if (objectUrl) {
             URL.revokeObjectURL(objectUrl);
         }
@@ -679,8 +914,37 @@
 
 <div class="app-layout">
     <header class="app-header">
-        <h1>// liteclip</h1>
+        <div class="header-title">
+            <h1>// liteclip</h1>
+            {#if updateInfo}
+                <span class="version-chip">v{updateInfo.currentVersion}</span>
+            {/if}
+        </div>
+        <div class="header-actions">
+            <button class="icon-btn" type="button" on:click={() => (showSettingsModal = true)}>
+                ⚙ settings
+            </button>
+        </div>
     </header>
+
+    {#if showUpdateBanner && updateInfo?.updateAvailable}
+        <div class="update-banner">
+            <span>
+                New version <strong>{updateInfo.latestVersion}</strong> is available.
+            </span>
+            <a
+                class="update-link"
+                href={updateInfo.downloadUrl || 'https://github.com/Guillermode20/smart-compressor/releases'}
+                target="_blank"
+                rel="noreferrer"
+            >
+                download
+            </a>
+            <button type="button" class="dismiss-btn" on:click={dismissUpdateBanner}>
+                dismiss
+            </button>
+        </div>
+    {/if}
 
     <div class="main-layout">
         <main class="main-content">
@@ -710,6 +974,11 @@
 
             {#if statusVisible}
                 <StatusCard message={statusMessage} type={statusType} />
+                {#if statusType === 'error' && canRetry}
+                    <button class="retry-btn" on:click={handleRetryJob} disabled={retrying}>
+                        $ {retrying ? 'retrying...' : 'retry job'}
+                    </button>
+                {/if}
             {/if}
 
             {#if videoPreviewVisible}
@@ -744,13 +1013,24 @@
                 uploadBtnDisabled={uploadBtnDisabled}
                 uploadBtnText={uploadBtnText}
                 {showCancelButton}
+                {muteAudio}
+                resolutionPreset={resolutionPreset}
                 onPresetClick={handlePresetClick}
                 onSliderChange={handleSliderChange}
                 onCodecChange={handleCodecChange}
                 onUploadClick={handleUpload}
                 onCancelClick={handleCancelJob}
+                onMuteToggle={handleMuteToggle}
+                onResolutionChange={handleResolutionChange}
             />
         {/if}
     </div>
 </div>
+
+<SettingsModal
+    open={showSettingsModal}
+    settings={userSettings}
+    on:close={() => (showSettingsModal = false)}
+    on:save={handleSettingsSave}
+/>
 

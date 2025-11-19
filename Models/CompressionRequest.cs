@@ -15,6 +15,7 @@ public class CompressionRequest
     public int? TargetFps { get; set; }
     public double? TargetSizeMb { get; set; }
     public bool SkipCompression { get; set; }
+    public bool MuteAudio { get; set; }
     public double? SourceDuration { get; set; }
     public List<VideoSegment>? Segments { get; set; }
     public bool UseQualityMode { get; set; }

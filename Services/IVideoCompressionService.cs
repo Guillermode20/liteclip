@@ -45,6 +45,13 @@ public interface IVideoCompressionService
     int GetQueuePosition(string jobId);
 
     /// <summary>
+    /// Attempts to retry a failed or cancelled job using existing artifacts.
+    /// </summary>
+    /// <param name="jobId">Job identifier.</param>
+    /// <returns>Tuple containing success flag and optional error.</returns>
+    (bool Success, string? Error) RetryJob(string jobId);
+
+    /// <summary>
     /// Cleanup a specific job's files and remove it from in-memory tracking.
     /// </summary>
     void CleanupJob(string jobId);
