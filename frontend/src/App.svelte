@@ -64,7 +64,7 @@
     let updateInfo: UpdateInfoPayload | null = null;
     let showUpdateBanner = false;
     let userSettings: UserSettingsPayload | null = null;
-    let defaultTargetPercent = 100;
+    let defaultTargetMb = 25;
     let showSettingsModal = false;
     let autoUpdateEnabled = true;
     let hasCheckedUpdates = false;
@@ -73,7 +73,7 @@
         defaultCodec: 'quality',
         defaultResolution: 'auto',
         defaultMuteAudio: false,
-        defaultTargetSizePercent: 50,
+        defaultTargetSizeMb: 25,
         checkForUpdatesOnLaunch: true
     };
 
@@ -147,8 +147,9 @@
                 `;
                 metadataVisible = true;
 
-                const initialPercent = clampPercentValue(defaultTargetPercent);
-                outputSizeSliderValue = initialPercent;
+                const safeOriginalMb = originalSizeMb || 0;
+                const initialMb = Math.min(safeOriginalMb, defaultTargetMb);
+                outputSizeSliderValue = initialMb > 0 ? initialMb : defaultTargetMb;
                 outputSizeSliderDisabled = false;
                 updateOutputSizeDisplay();
             },
@@ -253,11 +254,11 @@
         updateCodecHelper();
         resolutionPreset = effective.defaultResolution;
         muteAudio = effective.defaultMuteAudio;
-        defaultTargetPercent = clampPercentValue(effective.defaultTargetSizePercent);
+        defaultTargetMb = effective.defaultTargetSizeMb;
         autoUpdateEnabled = effective.checkForUpdatesOnLaunch;
 
         if (!selectedFile) {
-            outputSizeSliderValue = defaultTargetPercent;
+            outputSizeSliderValue = defaultTargetMb;
         }
 
         if (autoUpdateEnabled && !hasCheckedUpdates) {
@@ -301,7 +302,8 @@
 
     function handlePresetClick(targetPercent: string) {
         if (outputSizeSliderDisabled || !originalSizeMb) return;
-        outputSizeSliderValue = parseFloat(targetPercent);
+        const percent = parseFloat(targetPercent);
+        outputSizeSliderValue = (originalSizeMb * percent) / 100;
         updateOutputSizeDisplay();
     }
 
@@ -312,9 +314,9 @@
             return;
         }
 
-        const percent = parseFloat(outputSizeSliderValue.toString());
+        const targetSizeMb = parseFloat(outputSizeSliderValue.toString());
         const effectiveMaxSize = getEffectiveMaxSize(originalSizeMb, sourceDuration, videoSegments);
-        const targetSizeMb = (effectiveMaxSize * percent) / 100;
+        
         const displayValue = targetSizeMb >= 10 ? targetSizeMb.toFixed(0) : targetSizeMb.toFixed(1);
         outputSizeValue = `${displayValue} MB`;
 
@@ -329,7 +331,7 @@
 
         const effectiveDuration = getEffectiveDuration(videoSegments, sourceDuration) ?? sourceDuration;
 
-        if (percent >= 100) {
+        if (targetSizeMb >= effectiveMaxSize) {
             outputSizeDetails =
                 videoSegments.length > 0 && effectiveDuration !== sourceDuration
                     ? 'Will cut video segments only (no compression)'
@@ -382,13 +384,13 @@
         formData.append('file', selectedFile);
         formData.append('codec', codecSelectValue);
 
-        const percent = parseFloat(outputSizeSliderValue.toString());
+        const targetSizeMb = parseFloat(outputSizeSliderValue.toString());
         const forcedScalePercent = getForcedScalePercent();
         const shouldForceResolution = forcedScalePercent !== null;
         const effectiveMaxSize = getEffectiveMaxSize(originalSizeMb, sourceDuration, videoSegments);
-        const targetSizeMb = (effectiveMaxSize * percent) / 100;
+        
         formData.append('targetSizeMb', targetSizeMb.toFixed(2));
-        const shouldSkipCompression = percent >= 100 && !shouldForceResolution && !muteAudio;
+        const shouldSkipCompression = targetSizeMb >= effectiveMaxSize && !shouldForceResolution && !muteAudio;
         formData.append('skipCompression', shouldSkipCompression ? 'true' : 'false');
         formData.append('qualityMode', codecSelectValue === 'quality' ? 'true' : 'false');
         formData.append('muteAudio', muteAudio ? 'true' : 'false');
@@ -397,7 +399,7 @@
 
         if (shouldForceResolution && forcedScalePercent !== null) {
             formData.append('scalePercent', forcedScalePercent.toString());
-        } else if (percent < 100) {
+        } else if (targetSizeMb < effectiveMaxSize) {
             const calculatedScalePercent = calculateOptimalResolution(
                 targetSizeMb,
                 effectiveDuration,
@@ -870,7 +872,7 @@
             videoPreviewUrl = null;
         }
         outputSizeSliderDisabled = true;
-        outputSizeSliderValue = defaultTargetPercent;
+        outputSizeSliderValue = defaultTargetMb;
         outputSizeValue = '--';
         outputSizeDetails = '';
         codecSelectValue = userSettings?.defaultCodec ?? 'quality';
@@ -1008,6 +1010,8 @@
                 {outputSizeDetails}
                 {outputSizeSliderValue}
                 {outputSizeSliderDisabled}
+                sliderMax={originalSizeMb || 100}
+                sliderStep={originalSizeMb && originalSizeMb < 10 ? 0.1 : 1}
                 codecSelectValue={codecSelectValue}
                 codecHelperText={codecHelperText}
                 uploadBtnDisabled={uploadBtnDisabled}

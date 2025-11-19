@@ -66,7 +66,7 @@ export interface UserSettingsPayload {
     defaultCodec: CodecKey;
     defaultResolution: ResolutionPreset;
     defaultMuteAudio: boolean;
-    defaultTargetSizePercent: number;
+    defaultTargetSizeMb: number;
     checkForUpdatesOnLaunch: boolean;
 }
 

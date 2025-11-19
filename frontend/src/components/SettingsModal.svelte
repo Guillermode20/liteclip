@@ -11,7 +11,7 @@
         defaultCodec: 'quality',
         defaultResolution: 'auto',
         defaultMuteAudio: false,
-        defaultTargetSizePercent: 50,
+        defaultTargetSizeMb: 25,
         checkForUpdatesOnLaunch: true
     };
 
@@ -41,10 +41,10 @@
         };
     }
 
-    function handlePercentChange(event: Event) {
+    function handleTargetMbChange(event: Event) {
         const value = parseFloat((event.target as HTMLInputElement).value);
         if (!Number.isNaN(value)) {
-            localSettings = { ...localSettings, defaultTargetSizePercent: Math.min(100, Math.max(1, value)) };
+            localSettings = { ...localSettings, defaultTargetSizeMb: Math.max(1, value) };
         }
     }
 
@@ -103,10 +103,10 @@
                             min="1"
                             max="100"
                             step="1"
-                            value={localSettings.defaultTargetSizePercent}
-                            on:input={handlePercentChange}
+                            value={localSettings.defaultTargetSizeMb}
+                            on:input={handleTargetMbChange}
                         />
-                        <div class="helper-text">{localSettings.defaultTargetSizePercent}% of original size</div>
+                        <div class="helper-text">{localSettings.defaultTargetSizeMb} MB</div>
                     </div>
 
                     <div class="form-group toggle">

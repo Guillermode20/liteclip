@@ -6,6 +6,8 @@
     export let outputSizeDetails = '';
     export let outputSizeSliderValue = 100;
     export let outputSizeSliderDisabled = true;
+    export let sliderMax = 100;
+    export let sliderStep = 1;
     export let codecSelectValue = 'quality';
     export let codecHelperText = '';
     export let uploadBtnDisabled = true;
@@ -71,8 +73,8 @@
                         type="range" 
                         id="outputSizeSlider" 
                         min="1" 
-                        max="100" 
-                        step="0.5"
+                        max={sliderMax} 
+                        step={sliderStep}
                         value={outputSizeSliderValue}
                         disabled={outputSizeSliderDisabled}
                         on:input={handleSliderInput}

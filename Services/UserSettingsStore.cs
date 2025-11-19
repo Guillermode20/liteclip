@@ -103,7 +103,7 @@ public class UserSettingsStore
             DefaultCodec = NormalizeCodec(settings.DefaultCodec),
             DefaultResolution = NormalizeResolution(settings.DefaultResolution),
             DefaultMuteAudio = settings.DefaultMuteAudio,
-            DefaultTargetSizePercent = ClampPercent(settings.DefaultTargetSizePercent),
+            DefaultTargetSizeMb = ClampMb(settings.DefaultTargetSizeMb),
             CheckForUpdatesOnLaunch = settings.CheckForUpdatesOnLaunch
         };
 
@@ -129,14 +129,14 @@ public class UserSettingsStore
         };
     }
 
-    private static double ClampPercent(double? value)
+    private static double ClampMb(double? value)
     {
         if (!value.HasValue || double.IsNaN(value.Value) || double.IsInfinity(value.Value))
         {
-            return 50;
+            return 25;
         }
 
-        return Math.Clamp(value.Value, 1, 100);
+        return Math.Max(1, value.Value);
     }
 
     private static UserSettings Clone(UserSettings source)
@@ -146,7 +146,7 @@ public class UserSettingsStore
             DefaultCodec = source.DefaultCodec,
             DefaultResolution = source.DefaultResolution,
             DefaultMuteAudio = source.DefaultMuteAudio,
-            DefaultTargetSizePercent = source.DefaultTargetSizePercent,
+            DefaultTargetSizeMb = source.DefaultTargetSizeMb,
             CheckForUpdatesOnLaunch = source.CheckForUpdatesOnLaunch
         };
     }
