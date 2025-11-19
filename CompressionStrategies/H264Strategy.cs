@@ -18,7 +18,14 @@ public class H264Strategy : BaseCompressionStrategy
 
     protected override string[] GetEncodersToTry()
     {
-        return new[] { "h264_nvenc", "h264_qsv", "h264_amf" };
+        return new[] 
+        { 
+            "h264_nvenc",       // NVIDIA
+            "h264_qsv",         // Intel QuickSync
+            "h264_videotoolbox",// MacOS Apple Silicon
+            "h264_amf",         // AMD
+            "h264_vaapi"        // Linux Generic
+        };
     }
 
     protected override string GetFallbackEncoder()

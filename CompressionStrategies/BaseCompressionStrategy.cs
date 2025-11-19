@@ -212,6 +212,17 @@ public abstract class BaseCompressionStrategy : ICompressionStrategy
 
     public virtual IEnumerable<string> GetPassExtras(int passNumber, string passLogFile)
     {
+        // Hardware encoders typically do not support standard ffmpeg 2-pass flags.
+        // They use internal rate control or specific flags (like -multipass qres for NVENC).
+        // If we are using a hardware encoder, we should not return standard pass flags.
+        var encoder = GetBestEncoder();
+        var isHardware = encoder.Contains("nvenc") || encoder.Contains("qsv") || encoder.Contains("amf") || encoder.Contains("videotoolbox") || encoder.Contains("vaapi");
+        
+        if (isHardware)
+        {
+            return Enumerable.Empty<string>();
+        }
+
         return new[] { "-pass", passNumber.ToString(), "-passlogfile", passLogFile, "-f", "mp4" };
     }
 }

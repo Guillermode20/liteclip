@@ -566,6 +566,15 @@ public class VideoCompressionService : IVideoCompressionService
             }
 
             var useTwoPass = job.TwoPass;
+
+            // Disable two-pass for hardware encoders as they typically use internal rate control
+            // and running them twice with ffmpeg -pass flags often fails or is redundant.
+            if (job.EncoderIsHardware == true)
+            {
+                _logger.LogInformation("Disabling two-pass encoding for hardware encoder {Encoder}", job.EncoderName);
+                useTwoPass = false;
+            }
+
             var enableFeedback = ShouldEnableFeedbackRetry(request.TargetSizeMb);
             var maxAttempts = enableFeedback ? 2 : 1;
             var targetSizeForFeedback = (request.TargetSizeMb ?? 0) * 0.92;
@@ -858,16 +867,30 @@ public class VideoCompressionService : IVideoCompressionService
             }
         }
 
-        // Use null output for first pass
-        if (OperatingSystem.IsWindows())
+        // Ensure pass1 writes to the null muxer - avoid writing mp4/webm to NUL because
+        // the mp4/webm muxers may require seekable outputs (fail on NUL). Use "-f null -".
+        void EnsurePass1NullOutput(List<string> passtArgs)
         {
-            pass1Args.Add("NUL");
-        }
-        else
-        {
-            pass1Args.Add("/dev/null");
+            if (passtArgs == null) return;
+            // Remove explicit -f <format> values
+            for (int i = passtArgs.Count - 1; i >= 0; i--)
+            {
+                if (string.Equals(passtArgs[i], "-f", StringComparison.OrdinalIgnoreCase) && i + 1 < passtArgs.Count)
+                {
+                    passtArgs.RemoveAt(i + 1);
+                    passtArgs.RemoveAt(i);
+                }
+            }
+            // Also remove any platform-specific discard outputs
+            passtArgs.RemoveAll(a => string.Equals(a, "NUL", StringComparison.OrdinalIgnoreCase) || string.Equals(a, "/dev/null", StringComparison.OrdinalIgnoreCase) || string.Equals(a, "-", StringComparison.Ordinal));
+
+            // Add -f null - to discard the output in a platform-agnostic way
+            passtArgs.Add("-f");
+            passtArgs.Add("null");
+            passtArgs.Add("-");
         }
 
+        EnsurePass1NullOutput(pass1Args);
         var success = await RunPassAsync(jobId, job, pass1Args, totalDuration, 1, 2);
         if (!success)
         {
@@ -877,7 +900,7 @@ public class VideoCompressionService : IVideoCompressionService
             // If x265-specific params might be the root cause, try safer x265 params (cap 'subme' and similar)
             var sanitizedBase = new List<string>(baseArguments);
             var sanitized = SanitizeX265Params(sanitizedBase);
-            if (sanitized)
+                if (sanitized)
             {
                 _logger.LogWarning("Pass 1 failed for job {JobId} — trying sanitized x265 parameters", jobId);
                 pass1Args = new List<string>(sanitizedBase);
@@ -897,14 +920,7 @@ public class VideoCompressionService : IVideoCompressionService
                         pass1Args.AddRange(new[] { "-pass", "1", "-passlogfile", passLogFile, "-f", "webm" });
                     }
                 }
-                if (OperatingSystem.IsWindows())
-                {
-                    pass1Args.Add("NUL");
-                }
-                else
-                {
-                    pass1Args.Add("/dev/null");
-                }
+                EnsurePass1NullOutput(pass1Args);
 
                 // Retry with sanitized params
                 success = await RunPassAsync(jobId, job, pass1Args, totalDuration, 1, 2);
@@ -914,7 +930,7 @@ public class VideoCompressionService : IVideoCompressionService
             if (!success)
             {
                 var simplified = TryRemoveX265Params(sanitizedBase = new List<string>(baseArguments));
-                if (simplified)
+                    if (simplified)
                 {
                     _logger.LogWarning("Pass 1 failed for job {JobId} — retrying after removing x265 params", jobId);
                     pass1Args = new List<string>(sanitizedBase);
@@ -933,14 +949,7 @@ public class VideoCompressionService : IVideoCompressionService
                             pass1Args.AddRange(new[] { "-pass", "1", "-passlogfile", passLogFile, "-f", "webm" });
                         }
                     }
-                    if (OperatingSystem.IsWindows())
-                    {
-                        pass1Args.Add("NUL");
-                    }
-                    else
-                    {
-                        pass1Args.Add("/dev/null");
-                    }
+                    EnsurePass1NullOutput(pass1Args);
 
                     success = await RunPassAsync(jobId, job, pass1Args, totalDuration, 1, 2);
                 }
@@ -1274,7 +1283,7 @@ public class VideoCompressionService : IVideoCompressionService
                 AudioCodec = "aac",
                 FileExtension = ".mp4",
                 MimeType = "video/mp4",
-                AudioBitrateKbps = 128
+                AudioBitrateKbps = 192
             },
             "vp9" => new CodecConfig
             {
@@ -1301,7 +1310,7 @@ public class VideoCompressionService : IVideoCompressionService
                 AudioCodec = "aac",
                 FileExtension = ".mp4",
                 MimeType = "video/mp4",
-                AudioBitrateKbps = 128
+                AudioBitrateKbps = 192
             }
         };
     }

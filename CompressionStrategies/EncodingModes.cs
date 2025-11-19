@@ -128,20 +128,21 @@ public static class EncodingModeConfigs
             EncoderKey: "h264_nvenc",
             Mode: EncodingMode.Quality,
             DisplayName: "H.264 NVENC Quality",
-            Description: "NVENC H.264 with higher quality preset and lookahead.",
+            Description: "NVENC H.264 with maximum quality preset and lookahead.",
             MaxRateMultiplier: 1.0,
             MinRateMultiplier: 1.0,
             BufferMultiplier: 1.0,
             VideoArgs: new[]
             {
-                "-preset", "p6",
+                "-preset", "p7",
                 "-rc", "vbr",
                 "-spatial-aq", "1",
                 "-temporal-aq", "1",
-                "-rc-lookahead", "48",
+                "-rc-lookahead", "32",
                 "-g", "60",
                 "-bf", "4",
-                "-b_ref_mode", "middle"
+                "-b_ref_mode", "middle",
+                "-multipass", "qres"
             }
         ),
 
@@ -169,15 +170,17 @@ public static class EncodingModeConfigs
             EncoderKey: "h264_qsv",
             Mode: EncodingMode.Quality,
             DisplayName: "H.264 QSV Quality",
-            Description: "QuickSync H.264 with deeper lookahead for better quality.",
+            Description: "QuickSync H.264 with deeper lookahead and adaptive quantization.",
             MaxRateMultiplier: 1.0,
             MinRateMultiplier: 1.0,
             BufferMultiplier: 1.0,
             VideoArgs: new[]
             {
-                "-preset", "slower",
+                "-preset", "veryslow",
                 "-look_ahead", "1",
-                "-look_ahead_depth", "60",
+                "-look_ahead_depth", "100",
+                "-adaptive_i", "1",
+                "-adaptive_b", "1",
                 "-g", "60",
                 "-bf", "4"
             }
@@ -227,7 +230,75 @@ public static class EncodingModeConfigs
                 "-bf", "3",
                 "-rc-lookahead", "64",
                 "-temporal-aq", "2",
-                "-spatial-aq", "2"
+                "-spatial-aq", "2",
+                "-high_motion_quality_boost_enable", "1"
+            }
+        ),
+
+        // --- H.264 / VideoToolbox (MacOS) ---
+        new EncodingModeConfig(
+            CodecKey: "h264",
+            EncoderKey: "h264_videotoolbox",
+            Mode: EncodingMode.Fast,
+            DisplayName: "H.264 VideoToolbox Fast",
+            Description: "Apple Silicon H.264 tuned for speed.",
+            MaxRateMultiplier: 1.0,
+            MinRateMultiplier: 1.0,
+            BufferMultiplier: 1.0,
+            VideoArgs: new[]
+            {
+                "-pix_fmt", "yuv420p",
+                "-g", "60",
+                "-bf", "2"
+            }
+        ),
+        new EncodingModeConfig(
+            CodecKey: "h264",
+            EncoderKey: "h264_videotoolbox",
+            Mode: EncodingMode.Quality,
+            DisplayName: "H.264 VideoToolbox Quality",
+            Description: "Apple Silicon H.264 tuned for quality.",
+            MaxRateMultiplier: 1.0,
+            MinRateMultiplier: 1.0,
+            BufferMultiplier: 1.0,
+            VideoArgs: new[]
+            {
+                "-pix_fmt", "yuv420p",
+                "-g", "60",
+                "-bf", "3",
+                "-profile:v", "high"
+            }
+        ),
+
+        // --- H.264 / Wildcard ---
+        new EncodingModeConfig(
+            CodecKey: "h264",
+            EncoderKey: "*",
+            Mode: EncodingMode.Fast,
+            DisplayName: "H.264 Generic Fast",
+            Description: "Generic H.264 settings for unknown encoders.",
+            MaxRateMultiplier: 1.0,
+            MinRateMultiplier: 1.0,
+            BufferMultiplier: 1.0,
+            VideoArgs: new[]
+            {
+                "-pix_fmt", "yuv420p",
+                "-g", "60"
+            }
+        ),
+        new EncodingModeConfig(
+            CodecKey: "h264",
+            EncoderKey: "*",
+            Mode: EncodingMode.Quality,
+            DisplayName: "H.264 Generic Quality",
+            Description: "Generic H.264 settings for unknown encoders.",
+            MaxRateMultiplier: 1.0,
+            MinRateMultiplier: 1.0,
+            BufferMultiplier: 1.0,
+            VideoArgs: new[]
+            {
+                "-pix_fmt", "yuv420p",
+                "-g", "60"
             }
         ),
 
@@ -323,6 +394,7 @@ public static class EncodingModeConfigs
                 "-bf", "4",
                 "-b_ref_mode", "middle",
                 "-multipass", "disabled",
+                "-tier", "high",
                 "-tag:v", "hvc1"
             }
         ),
@@ -358,9 +430,11 @@ public static class EncodingModeConfigs
             BufferMultiplier: 1.0,
             VideoArgs: new[]
             {
-                "-preset", "slower",
+                "-preset", "veryslow",
                 "-look_ahead", "1",
-                "-look_ahead_depth", "60",
+                "-look_ahead_depth", "100",
+                "-adaptive_i", "1",
+                "-adaptive_b", "1",
                 "-g", "60",
                 "-bf", "4",
                 "-tag:v", "hvc1"
