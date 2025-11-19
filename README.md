@@ -63,7 +63,7 @@ Perfect for cutting, editing, and compressing videos to fit strict file size lim
 dotnet publish -c Release -r linux-x64  # or win-x64, osx-x64
 ```
 
-The frontend builds automatically during .NET build/publish via the `BuildFrontend` MSBuild target.
+The frontend builds automatically during .NET build/publish and before `dotnet run` via the `BuildFrontend` MSBuild target. `dotnet run` will wait for the UI build to complete; if the build fails, the application will not start.
 
 Output locations:
 - Windows: `publish/smart-compressor.exe`

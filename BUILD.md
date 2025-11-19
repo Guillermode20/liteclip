@@ -201,7 +201,8 @@ chmod +x build-linux.sh build-appimage.sh build-rpm.sh
 - The .NET project itself is cross-platform compatible
 
 ### Frontend Build Integration
-- The Svelte/Vite frontend is automatically built as part of `dotnet build` and `dotnet publish`.
+- The Svelte/Vite frontend is automatically built as part of `dotnet build`, `dotnet publish`, and `dotnet run`.
+- `dotnet run` will wait for the frontend build to complete and will not start the application if the frontend build fails.
 - Output goes to `wwwroot/` (configured in `frontend/vite.config.ts`).
 - Manual UI build (optional):
   ```powershell
