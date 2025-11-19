@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using liteclip.Services;
 
 namespace liteclip.CompressionStrategies;
@@ -10,7 +11,7 @@ public class H265Strategy : ICompressionStrategy
     private readonly FfmpegCapabilityProbe? _probe;
     private string? _detectedEncoder;
     private bool _encoderDetected = false;
-    
+
     public string CodecKey => "h265";
     public string OutputExtension => ".mp4";
     public string MimeType => "video/mp4";
@@ -27,23 +28,30 @@ public class H265Strategy : ICompressionStrategy
     {
         if (_encoderDetected)
             return _detectedEncoder ?? "libx265";
-            
-        _encoderDetected = true;
-        
-        // For small or tightly-targeted outputs we prefer libx265 (two-pass) for accuracy.
-        // The selection of hardware vs software is made at a higher level based on target size.
-        // Here we only detect hardware for general use.
 
-        var encodersToTry = new[] { "hevc_nvenc", "hevc_qsv", "hevc_amf" };
-        // Prefer probe results where available (quiet, fast), fallback to runtime check otherwise
+        _encoderDetected = true;
+
+        // PRIORITY: Hardware Encoders
+        // We strictly prefer hardware for speed. 
+        var encodersToTry = new[] 
+        { 
+            "hevc_nvenc",       // NVIDIA (Best balance of speed/quality)
+            "hevc_qsv",         // Intel QuickSync (Excellent speed)
+            "hevc_videotoolbox",// MacOS Apple Silicon (Fast)
+            "hevc_amf",         // AMD (Fast, requires careful tuning)
+            "hevc_vaapi"        // Linux Generic
+        };
+
         foreach (var encoder in encodersToTry)
         {
+            // Check probe cache first
             if (_probe != null && _probe.SupportedEncoders.Contains(encoder))
             {
                 _detectedEncoder = encoder;
                 return encoder;
             }
 
+            // Runtime check fallback
             if (IsEncoderAvailable(encoder))
             {
                 _detectedEncoder = encoder;
@@ -51,62 +59,31 @@ public class H265Strategy : ICompressionStrategy
             }
         }
 
+        // Fallback to software (faster preset) only if NO hardware is found
         _detectedEncoder = "libx265";
         return "libx265";
     }
-    
+
     private static bool IsEncoderAvailable(string encoderName)
     {
         try
         {
-            // Try two more robust tests before falling back to a minimal one:
-            // 1) testsrc with NV12 pix_fmt, reasonable resolution/frame-rate and GOP (-g)
-            // 2) fallback to the older minimal color test if the first fails
-            var attempts = new[]
+            // Simple color test to verify encoder init
+            var args = $"-f lavfi -i color=black:s=64x64:d=0.1 -c:v {encoderName} -f null -";
+            var psi = new ProcessStartInfo
             {
-                // Use testsrc (video test signal) and set NV12 pixel format which AMF expects
-                $"-loglevel error -f lavfi -i testsrc=duration=0.5:size=1280x720:rate=30 -pix_fmt nv12 -c:v {encoderName} -g 60 -b:v 2000k -bf 0 -f null -",
-                // Fallback minimal test (keeps previous behavior)
-                $"-f lavfi -i color=black:s=64x64:d=0.1 -c:v {encoderName} -f null -"
+                FileName = "ffmpeg",
+                Arguments = args,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
             };
 
-            foreach (var args in attempts)
-            {
-                var psi = new ProcessStartInfo
-                {
-                    FileName = "ffmpeg",
-                    Arguments = args,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                };
-
-                using var process = Process.Start(psi);
-                if (process == null) continue;
-
-                // Read stderr (some encoders print diagnostics there)
-                var stdOut = process.StandardOutput.ReadToEnd();
-                var error = process.StandardError.ReadToEnd();
-                process.WaitForExit();
-
-                // If exit code is zero, the encoder initialized successfully
-                if (process.ExitCode == 0)
-                {
-                    return true;
-                }
-
-                // If the error clearly indicates the encoder is unavailable, break early
-                var errLower = error.ToLowerInvariant();
-                if (errLower.Contains("not available") || errLower.Contains("cannot load") || errLower.Contains("no nvenc") )
-                {
-                    return false;
-                }
-
-                // Otherwise try the next attempt (the fallback may succeed for some drivers)
-            }
-
-            return false;
+            using var process = Process.Start(psi);
+            if (process == null) return false;
+            process.WaitForExit();
+            return process.ExitCode == 0;
         }
         catch
         {
@@ -116,104 +93,115 @@ public class H265Strategy : ICompressionStrategy
 
     public IEnumerable<string> BuildVideoArgs(double videoBitrateKbps, EncodingMode mode)
     {
-        var targetBitrate = Math.Max(100, Math.Round(videoBitrateKbps));
-
         var encoder = GetBestEncoder();
-        var config = EncodingModeConfigs.Get(CodecKey, encoder, mode);
-
-        var maxRateMultiplier = Math.Max(config.MaxRateMultiplier, 1.10);
-        var bufferMultiplier = Math.Max(config.BufferMultiplier, 2.0);
-        var minRateMultiplier = Math.Min(config.MinRateMultiplier, 0.5);
-
-        var maxRate = Math.Round(targetBitrate * maxRateMultiplier);
-        var minRate = Math.Round(targetBitrate * minRateMultiplier);
-        var buffer = Math.Round(targetBitrate * bufferMultiplier);
+        var targetBitrate = Math.Max(100, Math.Round(videoBitrateKbps));
         
         var args = new List<string>
         {
             "-c:v", encoder,
-            "-b:v", $"{targetBitrate}k"
+            "-b:v", $"{targetBitrate}k",
+            "-pix_fmt", "yuv420p", // Maximum compatibility
+            "-movflags", "+faststart"
         };
 
-        // Apply encoder/mode-specific tuning first.
-        foreach (var token in config.VideoArgs)
-        {
-            if (token == "{maxrate}")
-            {
-                args.Add($"{maxRate}k");
-            }
-            else if (token == "{minrate}")
-            {
-                args.Add($"{minRate}k");
-            }
-            else if (token == "{buffer}")
-            {
-                args.Add($"{buffer}k");
-            }
-            else if (token == "{target}")
-            {
-                args.Add($"{targetBitrate}k");
-            }
-            else if (token.Contains("{maxrate}", StringComparison.Ordinal) ||
-                     token.Contains("{buffer}", StringComparison.Ordinal))
-            {
-                // Handle tokens used inside x265 param strings.
-                var replaced = token
-                    .Replace("{maxrate}", maxRate.ToString(), StringComparison.Ordinal)
-                    .Replace("{buffer}", buffer.ToString(), StringComparison.Ordinal);
-                // If the probe knows a safe subme limit, clamp it here too
-                var processed = replaced;
-                if (_probe?.MaxX265Subme.HasValue == true && processed.Contains("subme="))
-                {
-                    processed = System.Text.RegularExpressions.Regex.Replace(processed, @"subme=(\d+)", m =>
-                    {
-                        if (int.TryParse(m.Groups[1].Value, out var requested))
-                        {
-                            var cap = _probe.MaxX265Subme.Value;
-                            var use = Math.Min(requested, cap);
-                            return $"subme={use}";
-                        }
-                        return m.Value;
-                    });
-                }
+        // Strict Bitrate Control (Hardware encoders need strict limits to not overshoot size)
+        // We allow a tight 5-10% maxrate swing to handle motion, but rely on buffer to average it out.
+        var maxRate = Math.Round(targetBitrate * 1.10); 
+        var bufSize = Math.Round(targetBitrate * 2.0); 
 
-                args.Add(processed);
-            }
-            else
-            {
-                // If the token contains x265 params and the probe knows a maximum subme,
-                // adjust it here so we don't pass an unsupported value to libx265.
-                var processed = token;
-                if (_probe?.MaxX265Subme.HasValue == true && processed.Contains("subme="))
-                {
-                    // Replace subme=<n> with the max supported value if it's too large
-                    processed = System.Text.RegularExpressions.Regex.Replace(processed, @"subme=(\d+)", m =>
-                    {
-                        if (int.TryParse(m.Groups[1].Value, out var requested))
-                        {
-                            var cap = _probe.MaxX265Subme.Value;
-                            var use = Math.Min(requested, cap);
-                            return $"subme={use}";
-                        }
-                        return m.Value;
-                    });
-                }
-                
-                args.Add(processed);
-            }
-        }
+        args.Add("-maxrate");
+        args.Add($"{maxRate}k");
+        args.Add("-bufsize");
+        args.Add($"{bufSize}k");
 
-        // Attach standard bitrate constraints unless already provided.
-        if (!args.Contains("-maxrate"))
+        // Apply "Brutal" Quality Settings per Hardware Vendor
+        if (encoder.Contains("nvenc"))
         {
-            args.AddRange(new[] { "-maxrate", $"{maxRate}k" });
+            ApplyNvencSettings(args);
         }
-        if (!args.Contains("-bufsize"))
+        else if (encoder.Contains("qsv"))
         {
-            args.AddRange(new[] { "-bufsize", $"{buffer}k" });
+            ApplyQsvSettings(args);
+        }
+        else if (encoder.Contains("amf"))
+        {
+            ApplyAmfSettings(args);
+        }
+        else if (encoder.Contains("videotoolbox"))
+        {
+            args.Add("-preset");
+            args.Add("quality"); 
+        }
+        else
+        {
+            // Software Fallback: Use 'faster' because the user demanded speed
+            args.Add("-preset");
+            args.Add("faster");
+            args.Add("-x265-params");
+            args.Add($"vbv-maxrate={maxRate}:vbv-bufsize={bufSize}:aq-mode=3");
         }
 
         return args;
+    }
+
+    private void ApplyNvencSettings(List<string> args)
+    {
+        // NVENC "Brutal" Quality Settings
+        // P7 is the slowest NVENC preset, but it is still insanely fast compared to CPU.
+        args.Add("-preset");
+        args.Add("p7"); 
+
+        // High Quality Variable Bitrate
+        args.Add("-rc");
+        args.Add("vbr_hq"); 
+
+        // Spatial AQ: Allocates more bits to complex textures (grass, water)
+        args.Add("-spatial-aq");
+        args.Add("1");
+
+        // Temporal AQ: improves perceptual quality over time
+        args.Add("-temporal-aq");
+        args.Add("1");
+
+        // Lookahead: Allows encoder to see 32 frames ahead to plan bitrate allocation
+        args.Add("-rc-lookahead");
+        args.Add("32");
+
+        // Tier High allows for better peak bitrate handling if needed
+        args.Add("-tier");
+        args.Add("high");
+    }
+
+    private void ApplyQsvSettings(List<string> args)
+    {
+        // Intel QuickSync Quality Settings
+        args.Add("-load_plugin");
+        args.Add("hevc_hw");
+
+        args.Add("-preset");
+        args.Add("veryslow"); // QSV 'veryslow' is still very fast
+
+        // Enable Hardware Lookahead
+        args.Add("-look_ahead");
+        args.Add("1");
+        
+        args.Add("-look_ahead_depth");
+        args.Add("40");
+    }
+
+    private void ApplyAmfSettings(List<string> args)
+    {
+        // AMD AMF Quality Settings
+        args.Add("-quality");
+        args.Add("quality");
+
+        args.Add("-rc");
+        args.Add("vbr_peak"); // VBR with Peak Constraint
+
+        // Enable Variance Based Adaptive Quantization (if supported)
+        // Note: AMF flags can be driver specific, but this is standard for ffmpeg-amf
+        args.Add("-usage");
+        args.Add("transcoding"); 
     }
 
     public IEnumerable<string> BuildAudioArgs()
@@ -228,7 +216,6 @@ public class H265Strategy : ICompressionStrategy
 
     public IEnumerable<string> GetPassExtras(int passNumber, string passLogFile)
     {
-        // Use mp4 container for h265 passes
         return new[] { "-pass", passNumber.ToString(), "-passlogfile", passLogFile, "-f", "mp4" };
     }
 }

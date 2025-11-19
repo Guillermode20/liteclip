@@ -16,24 +16,23 @@ public class Vp9Strategy : ICompressionStrategy
     {
         _ = mode;
         var targetBitrate = Math.Max(100, Math.Round(videoBitrateKbps));
-        var maxRate = Math.Round(targetBitrate * 1.15);
-        var buffer = Math.Round(targetBitrate * 2.0);
+        var maxRate = Math.Round(targetBitrate * 1.08);
+        var buffer = Math.Round(targetBitrate * 1.6);
 
         var args = new List<string>
         {
             "-c:v", VideoCodec,
-            // deadline good and cpu-used 2 for balanced speed/quality
+            // deadline good and cpu-used 1 for higher quality
             "-deadline", "good",
-            "-cpu-used", "2",
-            // No row-mt for simpler/faster processing
-            // Disable lookahead for much faster encoding on short clips
-            "-lag-in-frames", "0",
-            // Use 1 tile column for faster tile processing
-            "-tile-columns", "1",
-            // Disable auto-alt-ref for faster encoding
-            "-auto-alt-ref", "0",
+            "-cpu-used", "1",
+            // Enable lookahead and alt-ref so VP9 can allocate bits better
+            "-lag-in-frames", "15",
+            "-auto-alt-ref", "1",
+            // Use 2 tile columns to keep decode fast while improving
+            // encoder parallelism.
+            "-tile-columns", "2",
             // GOP and scene detection
-            "-g", "120",
+            "-g", "160",
             "-sc_threshold", "0",
             "-b:v", $"{targetBitrate}k",
             "-maxrate", $"{maxRate}k",

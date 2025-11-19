@@ -105,10 +105,11 @@ public class H264Strategy : ICompressionStrategy
         var encoder = GetBestEncoder();
         var config = EncodingModeConfigs.Get(CodecKey, encoder, mode);
 
-        // Allow at least 10% burst headroom and a 2x buffer so VBR can settle under target.
-        var maxRateMultiplier = Math.Max(config.MaxRateMultiplier, 1.10);
-        var bufferMultiplier = Math.Max(config.BufferMultiplier, 2.0);
-        var minRateMultiplier = Math.Min(config.MinRateMultiplier, 0.5);
+        // Tighten VBV so the encoder cannot waste bits but keep enough
+        // burst for hard scenes – this is closer to how social apps tune.
+        var maxRateMultiplier = Math.Max(config.MaxRateMultiplier, 1.05);
+        var bufferMultiplier = Math.Max(config.BufferMultiplier, 1.6);
+        var minRateMultiplier = Math.Min(config.MinRateMultiplier, 0.35);
 
         var maxRate = Math.Round(targetBitrate * maxRateMultiplier);
         var minRate = Math.Round(targetBitrate * minRateMultiplier);

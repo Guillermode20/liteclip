@@ -16,25 +16,23 @@ public class Av1Strategy : ICompressionStrategy
     {
         _ = mode;
         var targetBitrate = Math.Max(100, Math.Round(videoBitrateKbps));
-        var maxRate = Math.Round(targetBitrate * 1.03);
-        var minRate = Math.Round(targetBitrate * 0.97);
-        var buffer = Math.Round(targetBitrate * 1.0);
+        var maxRate = Math.Round(targetBitrate * 1.06);
+        var minRate = Math.Round(targetBitrate * 0.85);
+        var buffer = Math.Round(targetBitrate * 1.5);
 
         var args = new List<string>
         {
             "-c:v", VideoCodec,
-            // cpu-used 5 for faster speed (still good quality)
-            "-cpu-used", "5",
-            // Disable lookahead for much faster encoding on short clips
-            "-lag-in-frames", "0",
-            // Use 1 tile column for faster processing
+            // Moderate speed; still interactive, but much higher quality
+            "-cpu-used", "3",
+            // Enable lookahead and restoration so AV1 can shape bitrate
+            "-lag-in-frames", "25",
             "-tile-columns", "1",
             "-tile-rows", "0",
-            // Disable restoration for speed
-            "-enable-cdef", "0",
-            "-enable-restoration", "0",
+            "-enable-cdef", "1",
+            "-enable-restoration", "1",
             // GOP settings
-            "-g", "120",
+            "-g", "160",
             "-sc_threshold", "0",
             "-b:v", $"{targetBitrate}k",
             "-maxrate", $"{maxRate}k",

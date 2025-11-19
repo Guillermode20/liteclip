@@ -1449,14 +1449,22 @@ public class VideoCompressionService : IVideoCompressionService
             return null;
         }
 
-        // Target 8% lower to account for container overhead and ensure we stay under target with two-pass
-        var targetSizeMb = request.TargetSizeMb.Value * 0.92;
+        // TikTok‑style tuning: be more aggressive on size safety, but
+        // free up as much payload as possible for texture/edges.
+        // We still err on the side of staying under target, but bias
+        // budgets to video instead of container overhead.
+
+        // Slightly stronger under‑target to give the rate control room
+        // to breathe while we push psychovisual quality.
+        var targetSizeMb = request.TargetSizeMb.Value * 0.90;
         var durationSeconds = request.SourceDuration.Value;
 
         var reserveBudgetMb = CalculateReserveBudget(targetSizeMb, durationSeconds, codecConfig);
         var containerShare = GetContainerShare(codecConfig);
 
-        var containerReserveMb = reserveBudgetMb * containerShare;
+        // Bias reserves towards safety rather than container – containers
+        // are cheap, bits are precious.
+        var containerReserveMb = reserveBudgetMb * (containerShare * 0.7);
         var safetyMarginMb = reserveBudgetMb - containerReserveMb;
 
         // Ensure we always have a positive payload budget to hand to the encoder
@@ -1478,7 +1486,9 @@ public class VideoCompressionService : IVideoCompressionService
         var totalKbps = payloadBits / durationSeconds / 1000d;
 
         // Add a slight buffer to the reserved audio bitrate so container muxing remains under target
-        var audioBudgetKbps = codecConfig.AudioBitrateKbps * 1.04;
+        // Keep audio lean so more bits land on video. Modern
+        // platforms are very forgiving to slightly lower audio.
+        var audioBudgetKbps = codecConfig.AudioBitrateKbps * 0.9;
         var videoKbps = Math.Max(80, totalKbps - audioBudgetKbps);
 
         return new BitratePlan(
