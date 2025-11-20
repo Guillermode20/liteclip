@@ -153,21 +153,8 @@ public class UserSettingsStore
 
     private static string ResolveSettingsPath()
     {
-        string baseDirectory;
-        try
-        {
-            baseDirectory = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-            if (string.IsNullOrWhiteSpace(baseDirectory))
-            {
-                baseDirectory = AppContext.BaseDirectory;
-            }
-        }
-        catch
-        {
-            baseDirectory = AppContext.BaseDirectory;
-        }
-
-        var settingsDirectory = Path.Combine(baseDirectory, "LiteClip");
+        var baseDirectory = AppContext.BaseDirectory;
+        var settingsDirectory = Path.Combine(baseDirectory, "config");
         return Path.Combine(settingsDirectory, "user-settings.json");
     }
 }

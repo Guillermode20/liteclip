@@ -6,11 +6,12 @@
 #define MyAppPublisher "LiteClip"
 #define MyAppURL "https://github.com/Guillermode20/smart-compressor"
 #define MyAppExeName "liteclip.exe"
+#define MyAppId "{A1B2C3D4-E5F6-7890-1234-567890ABCDEF}"
 
 [Setup]
 ; NOTE: The value of AppId uniquely identifies this application. Do not use the same AppId value in installers for other applications.
 ; (To generate a new GUID, click Tools | Generate GUID inside the IDE.)
-AppId={{A1B2C3D4-E5F6-7890-1234-567890ABCDEF}
+AppId={{#MyAppId}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 ;AppVerName={#MyAppName} {#MyAppVersion}
@@ -30,23 +31,31 @@ SolidCompression=yes
 WizardStyle=modern
 ArchitecturesAllowed=x64
 ArchitecturesInstallIn64BitMode=x64
+Uninstallable=yes
+CreateUninstallRegKey=yes
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
-Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked; Components: main
+Name: "uninstallicon"; Description: "Create an Uninstall icon"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked; Components: main
 
 [Files]
 ; Main executable
-Source: "..\publish-win\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\publish-win\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion; Components: main
 ; All other files (recursive)
-Source: "..\publish-win\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\publish-win\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Components: main
 ; NOTE: Don't use "Flags: ignoreversion" on any shared system files
 
 [Icons]
-Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Components: main
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon; Components: main
+Name: "{autoprograms}\{#MyAppName}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"; Tasks: uninstallicon
+Name: "{autodesktop}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"; Tasks: uninstallicon
+
+[Components]
+Name: "main"; Description: "Main program files"; Types: full compact custom
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent
@@ -81,6 +90,71 @@ begin
   end;
 
   Result := False;
+end;
+
+function GetUninstallString(): String;
+var
+  sUnInstPath: String;
+  sUnInstPathKey: String;
+begin
+  sUnInstPath := '';
+  sUnInstPathKey := 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#MyAppId}_is1';
+
+  if RegQueryStringValue(HKEY_LOCAL_MACHINE, sUnInstPathKey, 'UninstallString', sUnInstPath) then
+    Result := sUnInstPath
+  else if RegQueryStringValue(HKEY_CURRENT_USER, sUnInstPathKey, 'UninstallString', sUnInstPath) then
+    Result := sUnInstPath;
+end;
+
+function IsAppInstalled(): Boolean;
+begin
+  Result := (GetUninstallString() <> '');
+end;
+
+function InitializeSetup(): Boolean;
+var
+  V: Integer;
+  iResultCode: Integer;
+  sUnInstallString: String;
+begin
+  Result := True; // Default to proceeding
+
+  if IsAppInstalled() then
+  begin
+    V := MsgBox('{#MyAppName} is already installed.' + #13#10 + #13#10 +
+      'Click ''Yes'' to Repair/Update (reinstall).' + #13#10 +
+      'Click ''No'' to Uninstall.' + #13#10 +
+      'Click ''Cancel'' to exit setup.', mbInformation, MB_YESNOCANCEL);
+
+    if V = IDYES then
+    begin
+      Result := True;
+    end
+    else if V = IDNO then
+    begin
+      sUnInstallString := GetUninstallString();
+      if sUnInstallString <> '' then
+      begin
+        sUnInstallString := RemoveQuotes(sUnInstallString);
+        if Exec(sUnInstallString, '/SILENT /NORESTART /SUPPRESSMSGBOXES', '', SW_SHOW, ewWaitUntilTerminated, iResultCode) then
+        begin
+           if iResultCode = 0 then
+             MsgBox('Application successfully uninstalled.', mbInformation, MB_OK)
+           else
+             MsgBox('Uninstall failed with code: ' + IntToStr(iResultCode), mbError, MB_OK);
+        end
+        else
+        begin
+           MsgBox('Failed to run uninstaller.', mbError, MB_OK);
+        end;
+      end;
+      Result := False;
+    end
+    else
+    begin
+      Result := False;
+    end;
+  end;
 end;
 
 procedure InitializeWizard;

@@ -27,18 +27,20 @@ public class VideoCompressionService : IVideoCompressionService
         _logger = logger;
         _ffmpegResolver = ffmpegResolver;
         _strategyFactory = strategyFactory;
-        _tempUploadPath = configuration["TempPaths:Uploads"] ?? Path.Combine(Path.GetTempPath(), "video-uploads");
+        
+        var baseDir = AppContext.BaseDirectory;
+        _tempUploadPath = configuration["TempPaths:Uploads"] ?? Path.Combine(baseDir, "temp", "uploads");
 
         if (!Path.IsPathRooted(_tempUploadPath))
         {
-          _tempUploadPath = Path.Combine(Path.GetTempPath(), _tempUploadPath.TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+          _tempUploadPath = Path.Combine(baseDir, _tempUploadPath.TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
         }
 
-        _tempOutputPath = configuration["TempPaths:Outputs"] ?? Path.Combine(Path.GetTempPath(), "video-outputs");
+        _tempOutputPath = configuration["TempPaths:Outputs"] ?? Path.Combine(baseDir, "temp", "outputs");
 
         if (!Path.IsPathRooted(_tempOutputPath))
         {
-          _tempOutputPath = Path.Combine(Path.GetTempPath(), _tempOutputPath.TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+          _tempOutputPath = Path.Combine(baseDir, _tempOutputPath.TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
         }
 
         _maxConcurrentJobs = configuration.GetValue<int>("Compression:MaxConcurrentJobs", 2);
@@ -48,6 +50,34 @@ public class VideoCompressionService : IVideoCompressionService
 
         Directory.CreateDirectory(_tempUploadPath);
         Directory.CreateDirectory(_tempOutputPath);
+
+        CleanStartupTempFiles();
+    }
+
+    private void CleanStartupTempFiles()
+    {
+        try
+        {
+            _logger.LogInformation("Cleaning up temporary files from previous sessions...");
+            if (Directory.Exists(_tempUploadPath))
+            {
+                foreach (var file in Directory.GetFiles(_tempUploadPath))
+                {
+                    try { File.Delete(file); } catch { }
+                }
+            }
+            if (Directory.Exists(_tempOutputPath))
+            {
+                foreach (var file in Directory.GetFiles(_tempOutputPath))
+                {
+                    try { File.Delete(file); } catch { }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to clean temp files on startup");
+        }
     }
 
     public async Task<string> CompressVideoAsync(IFormFile videoFile, CompressionRequest request)
@@ -896,6 +926,21 @@ public class VideoCompressionService : IVideoCompressionService
         job.Progress = 100;
         job.EstimatedSecondsRemaining = 0;
         job.CompletedAt = DateTime.UtcNow;
+
+        // Cleanup input file immediately to save space
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(job.InputPath) && File.Exists(job.InputPath))
+            {
+                File.Delete(job.InputPath);
+                job.InputPath = null; // Clear path so we know it's gone
+                _logger.LogInformation("Cleaned up input file for job {JobId}", job.JobId);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to delete input file for job {JobId}", job.JobId);
+        }
 
         if (job.OutputSizeBytes.HasValue)
         {
