@@ -130,6 +130,18 @@ This creates `dist/LiteClip-Setup-1.0.0.exe` - an installer that:
 .\build-installer.ps1 -InnoSetupPath "C:\Path\To\ISCC.exe"
 ```
 
+### Include FFmpeg in the Installer
+
+If you'd like the installer to bundle FFmpeg so the installer doesn't need to download it at install-time, first make sure you have a local copy of `ffmpeg.exe` or a distribution folder. Then run publish and installer like this:
+
+```powershell
+# Publish and include a local ffmpeg.exe
+.\publish-win.ps1 -IncludeFFmpeg -FFmpegPath "C:\path\to\ffmpeg\bin\ffmpeg.exe"
+
+# Or build the installer and include ffmpeg in the published output automatically
+.\build-installer.ps1 -IncludeFFmpeg -FFmpegPath "C:\path\to\ffmpeg\bin\ffmpeg.exe"
+```
+
 ## Dependencies
 
 ### Runtime Dependencies

@@ -39,6 +39,16 @@ Perfect for cutting, editing, and compressing videos to fit strict file size lim
 - **Windows 10/11, Linux (GTK3+), or macOS 10.14+** (64-bit)
 - **FFmpeg**: Install via your package manager or download from [ffmpeg.org](https://ffmpeg.org/download.html)
 
+### Installer FFmpeg Extraction Error
+
+If the installer shows a dialog: "An error occurred while extracting or copying FFmpeg", try one of these options:
+
+- Ensure PowerShell is available and runnable (Windows default). If PowerShell is restricted, run installer as Administrator.
+- Download a Windows FFmpeg build (e.g. from https://www.gyan.dev/ffmpeg/builds/) and extract it. Copy `ffmpeg.exe` to the LiteClip install folder or place the parent `bin` on PATH.
+- Rebuild the installer including FFmpeg: run `.uild-installer.ps1 -IncludeFFmpeg -FFmpegPath "C:\path\to\ffmpeg\bin\ffmpeg.exe"`.
+
+This installer fallback downloads and extracts a zip using PowerShell's `Expand-Archive` and copies `ffmpeg.exe` into the app folder. If PowerShell cannot extract the archive on the host machine, manual installation of FFmpeg or bundling it in the installer avoids the issue.
+
 ## Use Cases
 
 - Compress videos to fit Discord's 8MB limit

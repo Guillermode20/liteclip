@@ -183,6 +183,62 @@ Write-Host "The app will look for FFmpeg in:" -ForegroundColor Yellow
 Write-Host "  1. FFmpeg:Path configuration setting" -ForegroundColor Gray
 Write-Host "  2. System PATH environment variable" -ForegroundColor Gray
 
+# If requested, copy the local FFmpeg binary or folder into the publish output so the
+# installer (build-installer) can include it without requiring download at install time.
+if ($IncludeFFmpeg) {
+    Write-Host "IncludeFFmpeg requested. Attempting to locate/copy FFmpeg..." -ForegroundColor Cyan
+
+    try {
+        $ffDestDir = Join-Path $OutputDir "ffmpeg"
+        New-Item -ItemType Directory -Path $ffDestDir -Force | Out-Null
+
+        if ([string]::IsNullOrWhiteSpace($FFmpegPath)) {
+            # Look up ffmpeg from PATH
+            $ffCmd = Get-Command ffmpeg -ErrorAction SilentlyContinue
+            if ($ffCmd) {
+                $ffExe = $ffCmd.Source
+                Write-Host "Found ffmpeg on PATH at: $ffExe" -ForegroundColor Green
+                Copy-Item -Path $ffExe -Destination (Join-Path $ffDestDir "ffmpeg.exe") -Force
+            } else {
+                Write-Host "FFmpeg not found in PATH and no FFmpegPath supplied." -ForegroundColor Yellow
+                Write-Host "Provide -FFmpegPath <path-to-ffmpeg.exe> or ensure ffmpeg is in PATH." -ForegroundColor Yellow
+            }
+        }
+        else {
+            $expanded = (Resolve-Path -LiteralPath $FFmpegPath -ErrorAction SilentlyContinue)
+            if ($expanded) {
+                $pathStr = $expanded.ToString()
+                if (Test-Path $pathStr -PathType Leaf) {
+                    # It's a file
+                    Write-Host "Copying ffmpeg.exe from: $pathStr" -ForegroundColor Green
+                    Copy-Item -Path $pathStr -Destination (Join-Path $ffDestDir "ffmpeg.exe") -Force
+                } elseif (Test-Path $pathStr -PathType Container) {
+                    # Provided a directory - try to find ffmpeg.exe inside
+                    $exe = Get-ChildItem -Path $pathStr -Filter "ffmpeg.exe" -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
+                    if ($exe) {
+                        Write-Host "Found ffmpeg.exe in provided directory: $($exe.FullName)" -ForegroundColor Green
+                        Copy-Item -Path $exe.FullName -Destination (Join-Path $ffDestDir "ffmpeg.exe") -Force
+                    } else {
+                        # Maybe the path points to the ffmpeg root (bin) inside the zip layout
+                        $exe2 = Get-ChildItem -Path $pathStr -Filter "ffmpeg.exe" -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
+                        if ($exe2) {
+                            Copy-Item -Path $exe2.FullName -Destination (Join-Path $ffDestDir "ffmpeg.exe") -Force
+                        } else {
+                            Write-Host "No ffmpeg.exe found in provided directory: $pathStr" -ForegroundColor Yellow
+                        }
+                    }
+                } else {
+                    Write-Host "FFmpeg path does not exist: $FFmpegPath" -ForegroundColor Yellow
+                }
+            } else {
+                Write-Host "Could not resolve FFmpegPath: $FFmpegPath" -ForegroundColor Yellow
+            }
+        }
+    } catch {
+        Write-Host "WARNING: Error copying FFmpeg: $_" -ForegroundColor Yellow
+    }
+}
+
 # Create a run script
 Write-Host ""
 Write-Host "Creating run script..." -ForegroundColor Yellow
