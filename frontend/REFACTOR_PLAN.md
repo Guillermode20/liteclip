@@ -17,13 +17,13 @@ This document outlines the plan to refactor the frontend codebase to improve mai
 ## Phase 2: State Management
 **Goal:** Remove prop drilling and complex state logic from `App.svelte` by introducing Svelte stores.
 
-- [ ] **Settings Store**
+- [x] **Settings Store**
     - Create `src/stores/settings.ts` to manage `userSettings`, `autoUpdateEnabled`, etc.
     - Implement `loadSettings` and `saveSettings` actions within the store.
-- [ ] **FFmpeg Store**
+- [x] **FFmpeg Store**
     - Create `src/stores/ffmpeg.ts` to manage `ffmpegReady`, `ffmpegStatusMessage`, `ffmpegProgressPercent`.
     - Move polling logic into this store.
-- [ ] **File/Video Store**
+- [x] **File/Video Store**
     - Create `src/stores/video.ts` to manage `selectedFile`, `videoSegments`, `objectUrl`, and metadata.
 
 ## Phase 3: Component Extraction
