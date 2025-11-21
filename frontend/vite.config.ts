@@ -11,7 +11,18 @@ export default defineConfig({
     terserOptions: {
       compress: {
         drop_console: true,
-        drop_debugger: true
+        drop_debugger: true,
+        ecma: 2020,
+        module: true,
+        toplevel: true
+      },
+      mangle: {
+        properties: {
+          regex: /^__/,
+        }
+      },
+      format: {
+        comments: false
       }
     },
     rollupOptions: {
@@ -19,12 +30,24 @@ export default defineConfig({
         entryFileNames: 'assets/[name].[hash].js',
         chunkFileNames: 'assets/[name].[hash].js',
         assetFileNames: 'assets/[name].[hash].[ext]',
-        manualChunks: undefined
+        manualChunks: (id) => {
+          if (id.includes('node_modules')) {
+            if (id.includes('svelte')) {
+              return 'vendor';
+            }
+            return 'vendor';
+          }
+        }
       }
     },
     cssMinify: true,
     reportCompressedSize: false,
-    chunkSizeWarningLimit: 1000
+    chunkSizeWarningLimit: 1000,
+    sourcemap: false, // Disable sourcemaps for production build
+    modulePreload: {
+      polyfill: false // Disable module preload polyfill as it's supported in modern browsers
+    },
+    target: 'es2020' // Target modern browsers for smaller bundle size
   },
   server: {
     proxy: {
@@ -34,5 +57,9 @@ export default defineConfig({
       }
     }
   },
-  base: '/'
+  base: '/',
+  // Optimize loading
+  optimizeDeps: {
+    include: ['svelte', 'svelte/animate', 'svelte/easing', 'svelte/motion', 'svelte/transition', 'svelte/internal']
+  }
 })

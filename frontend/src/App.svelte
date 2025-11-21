@@ -1059,8 +1059,8 @@
 
             {#if showVideoEditor && selectedFile && !videoPreviewVisible && !progressVisible}
                 <div class="content-card">
-                    <VideoEditor 
-                        videoFile={selectedFile} 
+                    <VideoEditor
+                        videoFile={selectedFile}
                         onSegmentsChange={handleSegmentsChange}
                         onRemoveVideo={resetInterface}
                         savedSegments={videoSegments}
