@@ -39,6 +39,7 @@
     <!-- OpenApi removed for faster startup -->
     <PackageReference Include="Microsoft.Extensions.FileProviders.Embedded" Version="10.0.0" />
     <PackageReference Include="Photino.NET" Version="4.0.16" />
+    <PackageReference Include="Xabe.FFmpeg.Downloader" Version="6.0.2" />
   </ItemGroup>
 
   <!-- Development: copy wwwroot to output directory -->
@@ -60,9 +61,8 @@
     Frontend auto-build: Build Svelte/Vite UI before .NET build/publish.
     Skips during design-time builds and if frontend folder is missing.
   -->
-  <Target Name="BuildFrontend" BeforeTargets="Build;Publish;Run"
-          Condition="Exists('frontend/package.json') and '$(DesignTimeBuild)' != 'true'">
-    <Message Importance="high" Text="Building frontend (Vite) -> wwwroot ..." />
+  <Target Name="BuildFrontend" BeforeTargets="Build;Publish;Run" Condition="Exists('frontend/package.json') and '$(DesignTimeBuild)' != 'true'">
+    <Message Importance="high" Text="Building frontend (Vite) -&gt; wwwroot ..." />
     <!-- Install dependencies only if node_modules missing -->
     <Exec Command="npm install" WorkingDirectory="frontend" Condition="!Exists('frontend/node_modules')" />
     <!-- Build always to ensure wwwroot is up-to-date -->

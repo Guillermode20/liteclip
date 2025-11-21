@@ -70,8 +70,18 @@ namespace liteclip
             builder.Services.AddHostedService<JobCleanupService>();
             builder.Services.AddSingleton<UpdateCheckerService>();
             builder.Services.AddSingleton<UserSettingsStore>();
+            builder.Services.AddSingleton<FfmpegBootstrapper>();
 
             var app = builder.Build();
+
+            var ffmpegBootstrapper = app.Services.GetRequiredService<FfmpegBootstrapper>();
+            var ffmpegStartupTask = ffmpegBootstrapper.EnsureReadyAsync();
+            _ = ffmpegStartupTask.ContinueWith(t =>
+            {
+                Console.WriteLine(t.IsCompletedSuccessfully
+                    ? "✓ FFmpeg ready"
+                    : $"⚠️ FFmpeg initialization failed: {t.Exception?.GetBaseException().Message}");
+            });
 
             // NOTE: Delay FFmpeg capability probing to background after the UI is loaded.
             // Running the probe synchronously on startup makes the UI wait on long ffmpeg checks.
@@ -117,11 +127,25 @@ namespace liteclip
                 [FromForm] bool? muteAudio,
                 
                 VideoCompressionService compressionService,
-                IConfiguration configuration) =>
+                IConfiguration configuration,
+                FfmpegBootstrapper ffmpegBootstrapper) =>
             {
                 if (file == null || file.Length == 0)
                 {
                     return Results.BadRequest(new { error = "No file uploaded" });
+                }
+
+                try
+                {
+                    await ffmpegBootstrapper.EnsureReadyAsync();
+                }
+                catch (Exception ex)
+                {
+                    return Results.Problem(
+                        title: "FFmpeg is still preparing",
+                        detail: ex.Message,
+                        statusCode: 503
+                    );
                 }
 
                 // Validate file size
@@ -427,6 +451,37 @@ namespace liteclip
                 return Results.Ok(updated);
             })
             .WithName("UpdateUserSettings");
+
+            app.MapGet("/api/ffmpeg/status", (FfmpegBootstrapper bootstrapper) =>
+            {
+                var status = bootstrapper.GetStatus();
+                return Results.Ok(new
+                {
+                    state = status.State.ToString().ToLowerInvariant(),
+                    status.ProgressPercent,
+                    status.DownloadedBytes,
+                    status.TotalBytes,
+                    status.Message,
+                    status.ExecutablePath,
+                    status.ErrorMessage,
+                    status.Ready
+                });
+            })
+            .WithName("GetFfmpegStatus");
+
+            app.MapPost("/api/ffmpeg/retry", async (FfmpegBootstrapper bootstrapper) =>
+            {
+                bootstrapper.ResetForRetry();
+                await bootstrapper.EnsureReadyAsync();
+                var status = bootstrapper.GetStatus();
+                return Results.Ok(new
+                {
+                    state = status.State.ToString().ToLowerInvariant(),
+                    status.Message,
+                    status.Ready
+                });
+            })
+            .WithName("RetryFfmpegDownload");
 
             // Encoder detection endpoint removed: frontend no longer queries encoder capabilities
 

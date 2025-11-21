@@ -41,6 +41,15 @@ public class FfmpegPathResolver : IFfmpegPathResolver
             return _cachedFfmpegPath;
         }
 
+        // 2a. Also check the common per-user folder used by the runtime downloader
+        var localAppDataPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LiteClip", "ffmpeg", GetFfmpegExecutableName());
+        if (File.Exists(localAppDataPath))
+        {
+            _logger.LogInformation("Using FFmpeg from LocalAppData: {Path}", localAppDataPath);
+            _cachedFfmpegPath = localAppDataPath;
+            return _cachedFfmpegPath;
+        }
+
         // 4. Check ffmpeg folder next to executable (for portable deployments)
         var portablePath = Path.Combine(executableDir, GetFfmpegExecutableName());
         if (File.Exists(portablePath))

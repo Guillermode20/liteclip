@@ -16,7 +16,8 @@
         StatusMessageType,
         UpdateInfoPayload,
         UserSettingsPayload,
-        VideoSegment
+        VideoSegment,
+        FfmpegStatusResponse
     } from './lib/types';
     import { formatFileSize, formatDurationLabel, formatTimeRemaining } from './lib/utils/format';
     import { calculateOptimalResolution, getEffectiveDuration, getEffectiveMaxSize } from './lib/utils/video';
@@ -69,6 +70,14 @@
     let autoUpdateEnabled = true;
     let hasCheckedUpdates = false;
 
+    let ffmpegReady = false;
+    let ffmpegStatusMessage = 'Preparing FFmpeg dependencies...';
+    let ffmpegProgressPercent = 0;
+    let ffmpegError: string | null = null;
+    let ffmpegStatusInterval: number | null = null;
+    let ffmpegState: FfmpegStatusResponse['state'] = 'idle';
+    let ffmpegRetrying = false;
+
     const fallbackSettings: UserSettingsPayload = {
         defaultCodec: 'quality',
         defaultResolution: 'auto',
@@ -83,6 +92,7 @@
         if (statusCheckInterval) {
             clearInterval(statusCheckInterval);
         }
+        stopFfmpegPolling();
         if (objectUrl) {
             URL.revokeObjectURL(objectUrl);
         }
@@ -93,6 +103,7 @@
 
     onMount(() => {
         loadUserSettings();
+        startFfmpegPolling();
     });
 
     function handleFileSelect(file: File) {
@@ -245,6 +256,65 @@
         } finally {
             userSettings = fetched ?? { ...fallbackSettings };
             applyUserSettings(userSettings);
+        }
+    }
+
+    function startFfmpegPolling() {
+        if (ffmpegStatusInterval !== null) {
+            return;
+        }
+        fetchFfmpegStatus();
+        ffmpegStatusInterval = window.setInterval(fetchFfmpegStatus, 1500);
+    }
+
+    function stopFfmpegPolling() {
+        if (ffmpegStatusInterval !== null) {
+            clearInterval(ffmpegStatusInterval);
+            ffmpegStatusInterval = null;
+        }
+    }
+
+    async function fetchFfmpegStatus() {
+        try {
+            const response = await fetch('/api/ffmpeg/status');
+            if (!response.ok) {
+                throw new Error(`FFmpeg status request failed (${response.status})`);
+            }
+            const payload: FfmpegStatusResponse = await response.json();
+            ffmpegState = payload.state;
+            ffmpegReady = payload.ready;
+            ffmpegProgressPercent = typeof payload.progressPercent === 'number' ? payload.progressPercent : 0;
+            ffmpegStatusMessage = payload.message ?? 'Preparing FFmpeg dependencies...';
+            ffmpegError = payload.errorMessage ?? null;
+
+            if (payload.ready) {
+                stopFfmpegPolling();
+            }
+        } catch (error) {
+            ffmpegError = (error as Error).message || 'Unable to check FFmpeg status';
+            ffmpegStatusMessage = 'Unable to check FFmpeg status';
+        }
+    }
+
+    async function handleFfmpegRetry() {
+        if (ffmpegRetrying) return;
+        ffmpegRetrying = true;
+        ffmpegStatusMessage = 'Retrying FFmpeg download...';
+        try {
+            const response = await fetch('/api/ffmpeg/retry', {
+                method: 'POST'
+            });
+            if (!response.ok) {
+                const errorText = await response.text();
+                throw new Error(errorText || `Retry failed (${response.status})`);
+            }
+            ffmpegError = null;
+            stopFfmpegPolling();
+            startFfmpegPolling();
+        } catch (error) {
+            ffmpegError = (error as Error).message;
+        } finally {
+            ffmpegRetrying = false;
         }
     }
 
@@ -1036,6 +1106,31 @@
         {/if}
     </div>
 </div>
+
+{#if !ffmpegReady}
+    <div class="ffmpeg-overlay">
+        <div class="ffmpeg-card">
+            <h2>Preparing FFmpeg…</h2>
+            <p class="ffmpeg-message">{ffmpegStatusMessage}</p>
+            <div class="ffmpeg-progress">
+                <div class="ffmpeg-progress-track">
+                    <div
+                        class="ffmpeg-progress-fill"
+                        style={`width: ${Math.min(100, Math.max(5, ffmpegProgressPercent || 0)).toFixed(1)}%;`}
+                    ></div>
+                </div>
+                <span>{Math.max(0, Math.min(100, ffmpegProgressPercent || 0)).toFixed(1)}%</span>
+            </div>
+            <span class="ffmpeg-state">{ffmpegState.toUpperCase()}</span>
+            {#if ffmpegError}
+                <p class="ffmpeg-error">{ffmpegError}</p>
+                <button class="retry-btn" on:click={handleFfmpegRetry} disabled={ffmpegRetrying}>
+                    {ffmpegRetrying ? 'retrying...' : 'retry download'}
+                </button>
+            {/if}
+        </div>
+    </div>
+{/if}
 
 <SettingsModal
     open={showSettingsModal}

@@ -72,3 +72,15 @@ export interface UserSettingsPayload {
 
 // Encoder detection removed: frontend no longer receives probe data
 
+export type FfmpegStatusState = 'idle' | 'checking' | 'downloading' | 'ready' | 'error';
+
+export interface FfmpegStatusResponse {
+    state: FfmpegStatusState;
+    progressPercent?: number;
+    downloadedBytes?: number;
+    totalBytes?: number;
+    message?: string | null;
+    errorMessage?: string | null;
+    ready: boolean;
+}
+
