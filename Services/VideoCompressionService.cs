@@ -609,8 +609,24 @@ public class VideoCompressionService : IVideoCompressionService
                 throw new InvalidOperationException("Target size, duration, and video bitrate are required for compression");
             }
 
-			// Apply scaling
-			int scalePercent = Math.Clamp(request.ScalePercent ?? 100, 10, 100);
+            // Apply scaling
+            int scalePercent = Math.Clamp(request.ScalePercent ?? 100, 10, 100);
+
+            // Ensure we never scale to an output height below 480px (unless source is smaller)
+            try
+            {
+                var srcDims = await ProbeVideoDimensionsAsync(job.InputPath);
+                if (srcDims != null && srcDims.Height >= 480)
+                {
+                    var minPercent = (int)Math.Ceiling(480.0 * 100 / srcDims.Height);
+                    if (minPercent > 100) minPercent = 100;
+                    scalePercent = Math.Max(scalePercent, minPercent);
+                }
+            }
+            catch
+            {
+                // If probing fails, fall back to previous scalePercent; don't crash
+            }
             job.ScalePercent = scalePercent;
 
             var videoBitrateKbps = job.VideoBitrateKbps.Value;
@@ -2261,9 +2277,24 @@ public class VideoCompressionService : IVideoCompressionService
         
         // Convert to percentage and round down to nearest 5%
         var percent = (int)(scale * 100);
-        
+
+        // If the source height is at least 480p, do not allow scaling
+        // that reduces the output height below 480 pixels. This prevents
+        // extremely small outputs that the UI or users don't expect.
+        var minOutputHeight = 480;
+        if (height >= minOutputHeight)
+        {
+            var minPercent = (int)Math.Ceiling(minOutputHeight * 100.0 / height);
+            if (minPercent > 100) minPercent = 100;
+            // Round up to nearest 5% to keep UI increments consistent and
+            // ensure we don't round down below the minimum height.
+            var minPercentRounded = ((minPercent + 4) / 5) * 5;
+            percent = Math.Max(percent, minPercentRounded);
+        }
+
         // Don't go below 25% or above 100%
-        return Math.Clamp((percent / 5) * 5, 25, 100);
+        var finalPercent = Math.Clamp(((percent + 4) / 5) * 5, 25, 100);
+        return finalPercent;
     }
 
     private sealed record VideoDimensions(int Width, int Height);

@@ -62,9 +62,14 @@ export function calculateOptimalResolution(
     let scalePercent = Math.min(100, Math.round(scaleFactor * 100));
 
     const minHeight = 480;
-    const heightScalePercent = Math.round((minHeight / height) * 100);
-    scalePercent = Math.max(scalePercent, heightScalePercent);
+    // Only enforce minimum output height if the source is at least that tall.
+    if (height >= minHeight) {
+        const heightScalePercent = Math.ceil((minHeight / height) * 100);
+        scalePercent = Math.max(scalePercent, heightScalePercent);
+    }
 
-    return Math.max(25, scalePercent);
+    // Do not allow upscaling above 100, and respect a sensible floor of 25%.
+    scalePercent = Math.min(100, Math.max(25, scalePercent));
+    return scalePercent;
 }
 

@@ -52,6 +52,9 @@
     let outputSizeValue = '--';
     let outputSizeDetails = '';
     let outputSizeSliderValue = 100;
+    let sliderStepValue = 1;
+    let effectiveMaxSizeNumeric: number = 0;
+    let sliderMaxRounded: number = 100;
     let codecSelectValue: CodecKey = 'quality';
     let codecHelperText = codecDetails.quality.helper;
     let showCancelButton = false;
@@ -105,6 +108,11 @@
         loadUserSettings();
         startFfmpegPolling();
     });
+
+    // Reactive derived values for slider
+    $: effectiveMaxSizeNumeric = getEffectiveMaxSize(originalSizeMb, sourceDuration, videoSegments) || (originalSizeMb || 0);
+    $: sliderMaxRounded = Math.max(1, Math.round(effectiveMaxSizeNumeric));
+    $: sliderStepValue = effectiveMaxSizeNumeric < 10 ? 0.1 : 1;
 
     function handleFileSelect(file: File) {
         if (!file.type.startsWith('video/')) {
@@ -179,7 +187,12 @@
 
     function handleSliderChange(value: number) {
         if (outputSizeSliderDisabled) return;
-        outputSizeSliderValue = value;
+        const effectiveMax = getEffectiveMaxSize(originalSizeMb, sourceDuration, videoSegments) || (originalSizeMb || 0);
+        if (effectiveMax && value > effectiveMax) {
+            outputSizeSliderValue = effectiveMax;
+        } else {
+            outputSizeSliderValue = value;
+        }
         updateOutputSizeDisplay();
     }
 
@@ -376,9 +389,11 @@
     }
 
     function handlePresetClick(targetPercent: string) {
-        if (outputSizeSliderDisabled || !originalSizeMb) return;
+        if (outputSizeSliderDisabled) return;
+        const effectiveMax = getEffectiveMaxSize(originalSizeMb, sourceDuration, videoSegments) || (originalSizeMb || 0);
+        if (!effectiveMax || effectiveMax <= 0) return;
         const percent = parseFloat(targetPercent);
-        outputSizeSliderValue = (originalSizeMb * percent) / 100;
+        outputSizeSliderValue = (effectiveMax * percent) / 100;
         updateOutputSizeDisplay();
     }
 
@@ -389,14 +404,21 @@
             return;
         }
 
-        const targetSizeMb = parseFloat(outputSizeSliderValue.toString());
+        let targetSizeMb = parseFloat(outputSizeSliderValue.toString());
         const effectiveMaxSize = getEffectiveMaxSize(originalSizeMb, sourceDuration, videoSegments);
+        
+        // Respect effective max size computed from edited segments - clamp user value
+        if (effectiveMaxSize > 0 && targetSizeMb > effectiveMaxSize) {
+            targetSizeMb = effectiveMaxSize;
+            outputSizeSliderValue = effectiveMaxSize;
+        }
         
         const displayValue = targetSizeMb >= 10 ? targetSizeMb.toFixed(0) : targetSizeMb.toFixed(1);
         outputSizeValue = `${displayValue} MB`;
 
         if (videoSegments.length > 0 && effectiveMaxSize !== originalSizeMb) {
-            outputSizeValue += ` (max: ${effectiveMaxSize.toFixed(1)} MB)`;
+            // Round to nearest whole megabyte for display
+            outputSizeValue += ` (max: ${Math.round(effectiveMaxSize)} MB)`;
         }
 
         if (!sourceDuration || !sourceVideoWidth || !sourceVideoHeight) {
@@ -1086,8 +1108,8 @@
                 {outputSizeDetails}
                 {outputSizeSliderValue}
                 {outputSizeSliderDisabled}
-                sliderMax={originalSizeMb || 100}
-                sliderStep={originalSizeMb && originalSizeMb < 10 ? 0.1 : 1}
+                sliderMax={sliderMaxRounded}
+                sliderStep={sliderStepValue}
                 codecSelectValue={codecSelectValue}
                 codecHelperText={codecHelperText}
                 uploadBtnDisabled={uploadBtnDisabled}
