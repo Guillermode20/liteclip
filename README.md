@@ -1,187 +1,46 @@
-# Smart Compressor
-![LiteClip logo](./wwwroot/assets/logo.svg)
+﻿<div align="center">
+  <img src="frontend/public/logo.svg" alt="LiteClip Logo" width="120" height="120">
+  <h1>LiteClip</h1>
+  <p><strong>The easiest way to compress and edit videos for social media.</strong></p>
+</div>
 
-An all-in-one desktop video editor and compressor designed for platforms with limited upload sizes. Built with ASP.NET Core, Svelte, and Photino—native window, cross-platform, no browser needed.
+---
 
-Perfect for cutting, editing, and compressing videos to fit strict file size limits on social media platforms, messaging apps, and file sharing services.
+## What is LiteClip?
 
-## Quick Start
+LiteClip is a simple, powerful tool designed to help you get your videos onto platforms with strict file size limits. 
 
-1. Download the executable from releases
-2. Ensure FFmpeg is installed and available in PATH
-3. Run the executable—a native window opens automatically
-4. Upload a video (drag & drop or file picker)
-5. Edit: trim, split into segments, and merge parts as needed
-6. Set target upload size or choose codec manually
-7. Compress and download
+Ever tried to send a video on Discord, WhatsApp, or Email only to be told "File too large"? LiteClip fixes that. It intelligently compresses your video to the exact size you need without ruining the quality. You can also trim out the boring parts before you compress!
 
-## Features
+## ✨ Features
 
-- **Video Editing**: Trim videos, split into segments, and merge multiple parts back together
-- **Smart Codec Selection**: Automatic quality-optimized or manual choice (H.264, H.265, VP9, AV1)
--- **Hardware Encoder Selection**: Uses encoder name heuristics and runtime checks to choose hardware encoders when appropriate
-- **Target Size Compression**: Set exact output size to meet platform upload limits
-- **Automatic Optimization**: Resolution and bitrate scales automatically to hit target size
-- **Resolution Presets**: Force 1080p/720p/480p/360p output when you need strict dimensions
-- **Two-Pass Encoding**: Accurate bitrate targeting for precise file sizes
-- **Audio Control**: One-click mute option to drop audio and save precious megabytes
-- **Video Preview**: Play compressed result before downloading
-- **Drag & Drop Upload**: Easy file selection
-- **Real-Time Progress**: Live status with queue position and ETA during compression
-- **Job Queue**: Configurable concurrent compression limit with queue management
-- **Retry Safety Net**: Failed jobs can be re-queued instantly without re-uploading files
-- **Update Notifications**: Built-in release checker so you always know when a new build ships
-- **Cross-Platform**: Runs on Windows, Linux, and macOS
-- **Native Desktop Window**: Photino-based UI, no browser required
-- **Single Executable**: Self-contained app (Release builds embed UI assets)
+- **🎯 Target File Size**: Just tell LiteClip "I need this under 8MB" (great for Discord!) and it handles the rest.
+- **✂️ Easy Editing**: Trim, cut, and merge video clips. Keep only the highlights.
+- **🚀 Smart Compression**: Uses advanced technology to keep your video looking crisp, even at small sizes.
+- **🔇 Audio Control**: Remove sound with one click to save even more space.
+- **🔒 Private & Offline**: Runs entirely on your computer. No uploading to sketchy websites.
+- **💻 Cross-Platform**: Works on Windows, Mac, and Linux.
 
-## System Requirements
+## 🚀 How to Use
 
-- **Windows 10/11, Linux (GTK3+), or macOS 10.14+** (64-bit)
-- **FFmpeg**: Install via your package manager or download from [ffmpeg.org](https://ffmpeg.org/download.html)
+1. **Open LiteClip**.
+2. **Drag & Drop** your video file into the window.
+3. **Edit (Optional)**: Use the timeline to cut or trim your video.
+4. **Choose a Size**: Select a preset (like "Discord 8MB") or type in a custom size.
+5. **Hit Compress**: Watch it shrink in real-time!
 
-### Installer FFmpeg Extraction Error
+## 📥 Download
 
-If the installer shows a dialog: "An error occurred while extracting or copying FFmpeg", try one of these options:
+Check the [Releases](../../releases) page for the latest version for your computer.
 
-- Ensure PowerShell is available and runnable (Windows default). If PowerShell is restricted, run installer as Administrator.
-- Download a Windows FFmpeg build (e.g. from https://www.gyan.dev/ffmpeg/builds/) and extract it. Copy `ffmpeg.exe` to the LiteClip install folder or place the parent `bin` on PATH.
-- Rebuild the installer including FFmpeg: run `.uild-installer.ps1 -IncludeFFmpeg -FFmpegPath "C:\path\to\ffmpeg\bin\ffmpeg.exe"`.
+## 🛠️ For Developers
 
-This installer fallback downloads and extracts a zip using PowerShell's `Expand-Archive` and copies `ffmpeg.exe` into the app folder. If PowerShell cannot extract the archive on the host machine, manual installation of FFmpeg or bundling it in the installer avoids the issue.
+Want to build LiteClip from source? Check out [BUILD.md](BUILD.md) for detailed instructions.
 
-## Use Cases
+## 📄 License
 
-- Compress videos to fit Discord's 8MB limit
-- Create TikTok/Instagram Reels under file size restrictions
-- Prepare videos for email with attachment limits
-- Cut and compress large recordings for cloud storage
-- Reduce video file sizes for messaging apps (WhatsApp, Telegram, etc.)
+This project is open source and available under the **MIT License**.
 
-## Developer Setup
+You are free to use, modify, and distribute this software, but you **must include the original copyright notice and license** in any copies or substantial portions of the software.
 
-### Prerequisites
-
-- [.NET 10.0 SDK](https://dotnet.microsoft.com/download/dotnet/10.0) or later
-- [Node.js](https://nodejs.org/) 18+
-- [FFmpeg](https://ffmpeg.org/) (ensure `ffmpeg` is in PATH)
-
-### Build
-
-**Cross-Platform (Linux, macOS, Windows):**
-```bash
-# Release build (self-contained single file)
-dotnet publish -c Release -r linux-x64  # or win-x64, osx-x64
-```
-
-The frontend builds automatically during .NET build/publish and before `dotnet run` via the `BuildFrontend` MSBuild target. `dotnet run` will wait for the UI build to complete; if the build fails, the application will not start.
-
-Output locations:
-- Windows: `publish/smart-compressor.exe`
-- Linux: `publish/smart-compressor`
-- macOS: `publish/smart-compressor`
-
-Optional: rebuild UI only
-```bash
-cd frontend
-npm install   # first time only
-npm run build
-```
-
-### Development
-
-Run the app with the native window:
-```bash
-dotnet run
-```
-
-The backend runs on a dynamic port (shown in console).
-
-### Project Layout
-
-```
-smart-compressor/
-├── Program.cs                           # ASP.NET Core minimal API + Photino window
-├── Services/
-│   ├── VideoCompressionService.cs       # Core compression logic & job queue
-│   ├── FfmpegPathResolver.cs            # FFmpeg binary discovery
-│   ├── (removed) FfmpegCapabilityProbe.cs         # Encoder probing removed
-│   └── JobCleanupService.cs             # Background cleanup of expired jobs
-├── CompressionStrategies/               # Strategy pattern for codec-specific logic
-│   ├── H264Strategy.cs
-│   ├── H265Strategy.cs
-│   ├── Vp9Strategy.cs
-│   ├── Av1Strategy.cs
-│   └── CompressionStrategyFactory.cs
-├── Models/                              # CompressionRequest, CompressionResult, CompressionJob
-├── frontend/                            # Svelte 5 UI (Vite-built)
-│   ├── src/
-│   │   ├── App.svelte                   # Main app with editor, upload, progress
-│   │   ├── VideoEditor.svelte           # Video segment trimming/merging
-│   │   └── components/                  # UI components
-│   └── vite.config.ts
-├── wwwroot/                             # Built UI assets (embedded in Release)
-├── appsettings.json                     # Configuration (concurrency, retention, temp paths)
-├── liteclip.csproj                      # Project file with auto-build targets
-└── liteclip.sln
-```
-
-### Configuration
-
-Edit `appsettings.json` to customize behavior:
-
-```json
-{
-  "Compression": {
-    "MaxConcurrentJobs": 1,
-    "MaxQueueSize": 50,
-    "JobRetentionMinutes": 30
-  },
-  "FileUpload": {
-    "MaxFileSizeBytes": 2147483648
-  },
-  "TempPaths": {
-    "Uploads": "temp/uploads",
-    "Outputs": "temp/outputs"
-  },
-  "FFmpeg": {
-    "Path": null
-  }
-}
-```
-
-**Settings:**
-- `MaxConcurrentJobs`: Number of videos to compress simultaneously (default: 1 to avoid system overload)
-- `MaxQueueSize`: Maximum jobs in queue before rejecting new uploads
-- `JobRetentionMinutes`: How long to keep completed jobs before auto-cleanup
-- `MaxFileSizeBytes`: Maximum upload size (default: 2 GB)
-- `FFmpeg.Path`: Force a specific FFmpeg executable path (leave null for auto-detection)
-
-### API Endpoints
-
-- `POST /api/compress` – Upload and start compression
-- `GET /api/status/{jobId}` – Check job status
-- `GET /api/download/{jobId}` – Download compressed video
-- `POST /api/cancel/{jobId}` – Cancel a job
-
-## Tech Stack
-
-- **Backend**: ASP.NET Core 10.0, Kestrel server
-- **Frontend**: Svelte 5 (runes mode) + TypeScript
-- **Build**: Vite (Rolldown)
-- **UI Framework**: Photino.NET (cross-platform native window)
-- **Video Processing**: FFmpeg with codec-specific strategies
-- **Platform Support**: Windows 10+, Linux (GTK3+), macOS 10.14+
-
-## Architecture Highlights
-
--- **Strategy Pattern**: Each codec (H.264, H.265, VP9, AV1) has its own compression strategy; strategies choose encoders at runtime
-- **Job Queue**: Semaphore-based concurrency control prevents system overload
-- **Two-Pass Encoding**: Automatic bitrate calculation with configurable container overhead for precise sizing
-- **Cross-Platform**: Single codebase builds to Windows, Linux, and macOS executables
-- **Embedded Assets**: Release builds embed UI assets into the executable for true single-file distribution
-- **Segment Editing**: Built-in trimming and merging capabilities without requiring external tools
-
-## License
-
-Provided as-is for personal and educational use.
+Copyright (c) 2025 LiteClip Contributors
