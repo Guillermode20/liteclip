@@ -1,4 +1,5 @@
 # Smart Compressor
+![LiteClip logo](./wwwroot/assets/logo.svg)
 
 An all-in-one desktop video editor and compressor designed for platforms with limited upload sizes. Built with ASP.NET Core, Svelte, and Photino—native window, cross-platform, no browser needed.
 

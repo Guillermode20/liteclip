@@ -248,6 +248,11 @@
         }
     }
 
+    function handleLogoError(e: Event) {
+        const img = e?.target as HTMLImageElement | null;
+        if (img) img.src = '/assets/logo.svg';
+    }
+
     function applyUserSettings(settings: UserSettingsPayload | null) {
         const effective = settings ?? fallbackSettings;
         codecSelectValue = effective.defaultCodec;
@@ -916,8 +921,9 @@
 
 <div class="app-layout">
     <header class="app-header">
-        <div class="header-title">
-            <h1>// liteclip</h1>
+            <div class="header-title">
+                <img class="app-logo" src="/logo.svg" alt="LiteClip logo" on:error={handleLogoError} />
+                <h1>liteclip</h1>
             {#if updateInfo}
                 <span class="version-chip">v{updateInfo.currentVersion}</span>
             {/if}

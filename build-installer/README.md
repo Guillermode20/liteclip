@@ -34,3 +34,5 @@ This script will:
 
 *   **WebView2**: The installer checks for the WebView2 Runtime and prompts the user to download it if missing.
 *   **FFmpeg**: The installer does NOT bundle FFmpeg by default to keep the size small. The application will look for FFmpeg in the system PATH.
+
+*   **Branding**: `logo.svg` is included in `publish-win` and `wwwroot/assets` for use in the UI and installer assets. If you'd like a native Windows installer icon, add a `logo.ico` to `publish-win` and uncomment `SetupIconFile` in `LiteClip.iss`.

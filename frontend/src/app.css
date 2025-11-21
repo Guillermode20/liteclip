@@ -74,6 +74,13 @@ body {
     align-items: center;
     gap: 12px;
 }
+/* App logo in header */
+.app-logo {
+    width: 36px;
+    height: 36px;
+    border-radius: 8px;
+    display: block;
+}
 
 .header-actions {
     display: flex;
