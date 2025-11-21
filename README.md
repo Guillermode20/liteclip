@@ -10,16 +10,16 @@ LiteClip is a simple, powerful tool designed to help you get your videos onto pl
 
 Ever tried to send a video on Discord, WhatsApp, or Email only to be told "File too large"? LiteClip fixes that. It intelligently compresses your video to the exact size you need without ruining the quality. You can also trim out the boring parts before you compress!
 
-## ✨ Features
+## Features
 
-- **🎯 Target File Size**: Just tell LiteClip "I need this under 8MB" (great for Discord!) and it handles the rest.
-- **✂️ Easy Editing**: Trim, cut, and merge video clips. Keep only the highlights.
-- **🚀 Smart Compression**: Uses advanced technology to keep your video looking crisp, even at small sizes.
-- **🔇 Audio Control**: Remove sound with one click to save even more space.
-- **🔒 Private & Offline**: Runs entirely on your computer. No uploading to sketchy websites.
-- **💻 Cross-Platform**: Works on Windows, Mac, and Linux.
+- **Target File Size**: Just tell LiteClip "I need this under 8MB" (great for Discord!) and it handles the rest.
+- **Easy Editing**: Trim, cut, and merge video clips. Keep only the highlights.
+- **Smart Compression**: Uses advanced technology to keep your video looking crisp, even at small sizes.
+- **Audio Control**: Remove sound with one click to save even more space.
+- **Private & Offline**: Runs entirely on your computer. No uploading to sketchy websites.
+- **Cross-Platform**: Works on Windows, Mac, and Linux.
 
-## 🚀 How to Use
+## How to Use
 
 1. **Open LiteClip**.
 2. **Drag & Drop** your video file into the window.
@@ -27,15 +27,15 @@ Ever tried to send a video on Discord, WhatsApp, or Email only to be told "File 
 4. **Choose a Size**: Select a preset (like "Discord 8MB") or type in a custom size.
 5. **Hit Compress**: Watch it shrink in real-time!
 
-## 📥 Download
+## Download
 
 Check the [Releases](../../releases) page for the latest version for your computer.
 
-## 🛠️ For Developers
+## For Developers
 
 Want to build LiteClip from source? Check out [BUILD.md](BUILD.md) for detailed instructions.
 
-## 📄 License
+## License
 
 This project is open source and available under the **MIT License**.
 
