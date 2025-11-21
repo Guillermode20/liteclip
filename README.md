@@ -4,8 +4,6 @@
   <p><strong>The easiest way to compress and edit videos for social media.</strong></p>
 </div>
 
----
-
 ## What is LiteClip?
 
 LiteClip is a simple, powerful tool designed to help you get your videos onto platforms with strict file size limits. 
