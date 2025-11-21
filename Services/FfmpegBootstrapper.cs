@@ -38,13 +38,15 @@ public record FfmpegBootstrapStatus
 public class FfmpegBootstrapper
 {
     private readonly ILogger<FfmpegBootstrapper> _logger;
+    private readonly IFfmpegPathResolver _resolver;
     private readonly object _ensureLock = new();
     private Task? _ensureTask;
     private volatile FfmpegBootstrapStatus _status = new();
 
-    public FfmpegBootstrapper(ILogger<FfmpegBootstrapper> logger)
+    public FfmpegBootstrapper(ILogger<FfmpegBootstrapper> logger, IFfmpegPathResolver resolver)
     {
         _logger = logger;
+        _resolver = resolver;
     }
 
     public FfmpegBootstrapStatus GetStatus() => _status;
@@ -75,6 +77,59 @@ public class FfmpegBootstrapper
         try
         {
             UpdateStatus(FfmpegBootstrapState.Checking, 0, "Checking FFmpeg binaries...");
+
+            // First, check if a valid FFmpeg exists already via the path resolver.
+            // This avoids attempting a download or other probing that may cause a visible window.
+            try
+            {
+                var resolved = _resolver?.ResolveFfmpegPath();
+                if (!string.IsNullOrWhiteSpace(resolved))
+                {
+                    string? fullPath = null;
+                    if (Path.IsPathRooted(resolved))
+                    {
+                        if (File.Exists(resolved)) fullPath = resolved;
+                    }
+                    else
+                    {
+                        // If resolver returned a non-rooted name (like "ffmpeg"), explicitly search PATH entries.
+                        var exeName = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "ffmpeg.exe" : "ffmpeg";
+                        var pathEnv = Environment.GetEnvironmentVariable("PATH");
+                        if (!string.IsNullOrWhiteSpace(pathEnv))
+                        {
+                            var paths = pathEnv.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries);
+                            foreach (var p in paths)
+                            {
+                                try
+                                {
+                                    var candidate = Path.Combine(p, exeName);
+                                    if (File.Exists(candidate))
+                                    {
+                                        fullPath = candidate;
+                                        break;
+                                    }
+                                }
+                                catch { }
+                            }
+                        }
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(fullPath))
+                    {
+                        UpdateStatus(
+                            FfmpegBootstrapState.Ready,
+                            100,
+                            $"FFmpeg already available at {fullPath}",
+                            fullPath
+                        );
+                        return;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "PathResolver check for existing ffmpeg failed; continuing with download attempt.");
+            }
 
             // Prefer the app base "ffmpeg" directory, but if running from Program Files
             // (or another protected location) we'll automatically fall back to a user-local path.
