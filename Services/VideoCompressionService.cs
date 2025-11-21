@@ -28,7 +28,10 @@ public class VideoCompressionService : IVideoCompressionService
         _ffmpegResolver = ffmpegResolver;
         _strategyFactory = strategyFactory;
         
-        var baseDir = AppContext.BaseDirectory;
+        // Use AppData for temp directories to avoid permission issues in Program Files
+        var appDataDirectory = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var baseDir = Path.Combine(appDataDirectory, "LiteClip");
+        
         _tempUploadPath = configuration["TempPaths:Uploads"] ?? Path.Combine(baseDir, "temp", "uploads");
 
         if (!Path.IsPathRooted(_tempUploadPath))

@@ -505,14 +505,7 @@ namespace liteclip
 
             // Load a local copy of the frontend early (fast) so UI shows while server starts
             var indexPath = Path.Combine(AppContext.BaseDirectory, "wwwroot", "index.html");
-            if (File.Exists(indexPath))
-            {
-                window.Load(new Uri(indexPath).AbsoluteUri);
-            }
-            else
-            {
-                window.Load("about:blank");
-            }
+            window.Load("about:blank");
 
             // Server will be started after the UI is shown; we'll navigate the window to the server URL
             // once the HTTP server reports it's ready (below).
