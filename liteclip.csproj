@@ -15,6 +15,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>liteclip</RootNamespace>
     <OutputType>WinExe</OutputType>
+    <ApplicationIcon>logo.ico</ApplicationIcon>
     
         <!-- Build optimization -->
     <UseAppHost>true</UseAppHost>

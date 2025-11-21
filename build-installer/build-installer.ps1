@@ -46,6 +46,10 @@ finally {
     Pop-Location
 }
 
+# Copy the logo.ico to publish-win for the installer
+Write-Host "Copying logo.ico to publish-win..." -ForegroundColor Cyan
+Copy-Item -Path (Join-Path $RootDir "logo.ico") -Destination (Join-Path $RootDir "publish-win") -ErrorAction Stop
+
 # 3. Compile the installer
 Write-Host "Compiling installer..." -ForegroundColor Cyan
 try {

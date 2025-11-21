@@ -35,7 +35,7 @@ OutputBaseFilename=LiteClip-Setup
 
 ; Note: set a custom installer icon using a Windows .ico file if desired.
 ; Example (uncomment to use):
-; SetupIconFile=..\publish-win\logo.ico
+SetupIconFile=..\publish-win\logo.ico
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
