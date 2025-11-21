@@ -1,6 +1,6 @@
 <script lang="ts">
     import { onMount } from 'svelte';
-    import type { VideoSegment } from './lib/types';
+    import type { VideoSegment } from './types';
 
     export let videoFile: File;
     export let onSegmentsChange: (segments: Array<{start: number, end: number}>) => void;

@@ -18,9 +18,19 @@
         UserSettingsPayload,
         VideoSegment,
         FfmpegStatusResponse
-    } from './lib/types';
-    import { formatFileSize, formatDurationLabel, formatTimeRemaining } from './lib/utils/format';
-    import { calculateOptimalResolution, getEffectiveDuration, getEffectiveMaxSize } from './lib/utils/video';
+    } from './types';
+    import { formatFileSize, formatDurationLabel, formatTimeRemaining } from './utils/format';
+    import { calculateOptimalResolution, getEffectiveDuration, getEffectiveMaxSize } from './utils/video';
+    import {
+        getSettings,
+        saveSettings,
+        getFfmpegStatus,
+        retryFfmpeg,
+        uploadVideo,
+        getJobStatus,
+        cancelJob,
+        retryJob
+    } from './services/api';
 
     let selectedFile: File | null = null;
     let jobId: string | null = null;
@@ -258,12 +268,7 @@
     async function loadUserSettings() {
         let fetched: UserSettingsPayload | null = null;
         try {
-            const response = await fetch('/api/settings');
-            if (response.ok) {
-                fetched = await response.json();
-            } else {
-                console.warn('Failed to load settings', response.status);
-            }
+            fetched = await getSettings();
         } catch (error) {
             console.warn('Settings fetch failed', error);
         } finally {
@@ -289,11 +294,7 @@
 
     async function fetchFfmpegStatus() {
         try {
-            const response = await fetch('/api/ffmpeg/status');
-            if (!response.ok) {
-                throw new Error(`FFmpeg status request failed (${response.status})`);
-            }
-            const payload: FfmpegStatusResponse = await response.json();
+            const payload = await getFfmpegStatus();
             ffmpegState = payload.state;
             ffmpegReady = payload.ready;
             ffmpegProgressPercent = typeof payload.progressPercent === 'number' ? payload.progressPercent : 0;
@@ -314,13 +315,7 @@
         ffmpegRetrying = true;
         ffmpegStatusMessage = 'Retrying FFmpeg download...';
         try {
-            const response = await fetch('/api/ffmpeg/retry', {
-                method: 'POST'
-            });
-            if (!response.ok) {
-                const errorText = await response.text();
-                throw new Error(errorText || `Retry failed (${response.status})`);
-            }
+            await retryFfmpeg();
             ffmpegError = null;
             stopFfmpegPolling();
             startFfmpegPolling();
@@ -361,20 +356,7 @@
     async function handleSettingsSave(event: CustomEvent<UserSettingsPayload>) {
         const payload = event.detail;
         try {
-            const response = await fetch('/api/settings', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify(payload)
-            });
-
-            if (!response.ok) {
-                const errorText = await response.text();
-                throw new Error(errorText || 'Failed to save settings');
-            }
-
-            const saved: UserSettingsPayload = await response.json();
+            const saved = await saveSettings(payload);
             userSettings = saved;
             applyUserSettings(saved);
             showSettingsModal = false;
@@ -521,28 +503,7 @@
         }
 
         try {
-            const response = await fetch('/api/compress', {
-                method: 'POST',
-                body: formData
-            });
-
-            if (!response.ok) {
-                let errorMsg = `Server error (${response.status})`;
-                try {
-                    const errorText = await response.text();
-                    try {
-                        const errorData = JSON.parse(errorText);
-                        errorMsg = errorData.error || errorData.detail || errorMsg;
-                    } catch {
-                        errorMsg = errorText || errorMsg;
-                    }
-                } catch {
-                    errorMsg = `Server error (${response.status})`;
-                }
-                throw new Error(errorMsg);
-            }
-
-            const result = await response.json();
+            const result = await uploadVideo(formData);
             jobId = result.jobId;
 
             progressPercent = 100;
@@ -571,9 +532,7 @@
     async function checkStatus() {
         if (!jobId) return;
         try {
-            const response = await fetch(`/api/status/${jobId}`);
-            if (response.ok) {
-                const result: CompressionStatusResponse = await response.json();
+            const result = await getJobStatus(jobId);
                 if (result.status === 'queued') {
                     showCancelButton = true;
                     canRetry = false;
@@ -650,29 +609,6 @@
                     progressVisible = false;
                     canRetry = true;
                 }
-            } else {
-                if (statusCheckInterval) {
-                    clearInterval(statusCheckInterval);
-                    statusCheckInterval = null;
-                }
-                isCompressing = false;
-                let errorMessage = 'Unknown error';
-                try {
-                    const errorText = await response.text();
-                    try {
-                        const errorData = JSON.parse(errorText);
-                        errorMessage = errorData.error || errorMessage;
-                    } catch {
-                        errorMessage = errorText || errorMessage;
-                    }
-                } catch {
-                    // ignore
-                }
-                showStatus('Processing failed: ' + errorMessage, 'error');
-                uploadBtnDisabled = false;
-                uploadBtnText = 'Process Video';
-                progressVisible = false;
-            }
         } catch (error) {
             console.error('Status check failed:', error);
             if (statusCheckInterval) {
@@ -695,16 +631,8 @@
         }
 
         try {
-            const response = await fetch(`/api/cancel/${jobId}`, {
-                method: 'POST'
-            });
-
-            if (response.ok) {
-                showStatus('Cancelling compression...', 'processing');
-            } else {
-                const error = await response.json();
-                showStatus('Failed to cancel: ' + (error.error || 'Unknown error'), 'error');
-            }
+            await cancelJob(jobId);
+            showStatus('Cancelling compression...', 'processing');
         } catch (error) {
             console.error('Cancel failed:', error);
             showStatus('Failed to cancel processing', 'error');
@@ -723,22 +651,7 @@
         showStatus('Re-queueing job...', 'processing');
 
         try {
-            const response = await fetch(`/api/retry/${jobId}`, {
-                method: 'POST'
-            });
-
-            if (!response.ok) {
-                let errorMessage = 'Unable to retry job';
-                try {
-                    const data = await response.json();
-                    errorMessage = data.error || errorMessage;
-                } catch {
-                    // text fallback
-                    const text = await response.text();
-                    errorMessage = text || errorMessage;
-                }
-                throw new Error(errorMessage);
-            }
+            await retryJob(jobId);
 
             if (statusCheckInterval) {
                 clearInterval(statusCheckInterval);

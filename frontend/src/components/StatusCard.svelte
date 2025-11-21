@@ -1,5 +1,5 @@
 <script lang="ts">
-    import type { StatusMessageType } from '../lib/types';
+    import type { StatusMessageType } from '../types';
 
     export let message = '';
     export let type: StatusMessageType = 'processing';

@@ -1,6 +1,6 @@
 <script lang="ts">
     import { createEventDispatcher } from 'svelte';
-    import type { OutputMetadata } from '../lib/types';
+    import type { OutputMetadata } from '../types';
 
     const dispatch = createEventDispatcher<{
         metadata: { duration: number | null; width: number; height: number };

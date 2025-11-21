@@ -1,6 +1,6 @@
 <script lang="ts">
     import { createEventDispatcher } from 'svelte';
-    import type { CodecKey, ResolutionPreset, UserSettingsPayload } from '../lib/types';
+    import type { CodecKey, ResolutionPreset, UserSettingsPayload } from '../types';
 
     const dispatch = createEventDispatcher();
 
