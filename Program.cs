@@ -435,6 +435,21 @@ namespace liteclip
             var serverReadyTcs = new TaskCompletionSource<string>();
             var cts = new CancellationTokenSource();
 
+            // Register graceful shutdown handler for Ctrl+C and other termination signals
+            app.Lifetime.ApplicationStopping.Register(() =>
+            {
+                try
+                {
+                    Console.WriteLine("\n🛑 Application shutdown signal received. Cancelling active jobs...");
+                    var compressionService = app.Services.GetRequiredService<VideoCompressionService>();
+                    compressionService.CancelAllJobs();
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Warning: Failed to cancel jobs during graceful shutdown: {ex.Message}");
+                }
+            });
+
             app.Lifetime.ApplicationStarted.Register(() =>
             {
                 try
@@ -546,6 +561,17 @@ namespace liteclip
 
             // --- Graceful Shutdown ---
             Console.WriteLine("\n👋 Window closed. Shutting down...");
+
+            // Cancel all active compression jobs and terminate FFmpeg processes
+            try
+            {
+                var compressionService = app.Services.GetRequiredService<VideoCompressionService>();
+                compressionService.CancelAllJobs();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Warning: Failed to cancel jobs during shutdown: {ex.Message}");
+            }
 
             cts.Cancel();
             await serverTask;

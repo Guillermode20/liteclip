@@ -1338,6 +1338,9 @@ public class VideoCompressionService : IVideoCompressionService
     {
         if (_jobs.TryRemove(jobId, out var job))
         {
+            // Ensure process is terminated first
+            TerminateJobProcess(job);
+            
             try
             {
                 if (File.Exists(job.InputPath))
@@ -1353,6 +1356,71 @@ public class VideoCompressionService : IVideoCompressionService
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error cleaning up files for job {JobId}", jobId);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Cancels all active jobs and terminates all FFmpeg processes.
+    /// Called during application shutdown to ensure clean exit.
+    /// </summary>
+    public void CancelAllJobs()
+    {
+        _logger.LogInformation("Cancelling all active jobs...");
+        
+        var jobsSnapshot = _jobs.Values.ToList();
+        foreach (var job in jobsSnapshot)
+        {
+            if (job.Status == "queued" || job.Status == "processing")
+            {
+                job.Status = "cancelled";
+                TerminateJobProcess(job);
+                _logger.LogInformation("Cancelled job {JobId}", job.JobId);
+            }
+        }
+        
+        _logger.LogInformation("All active jobs have been cancelled");
+    }
+
+    /// <summary>
+    /// Safely terminates and disposes the FFmpeg process associated with a job.
+    /// </summary>
+    private void TerminateJobProcess(JobMetadata job)
+    {
+        if (job.Process != null)
+        {
+            try
+            {
+                if (!job.Process.HasExited)
+                {
+                    _logger.LogDebug("Terminating FFmpeg process for job {JobId}", job.JobId);
+                    job.Process.Kill(entireProcessTree: true);
+                    
+                    // Wait for process to terminate with a reasonable timeout
+                    if (!job.Process.WaitForExit(5000))
+                    {
+                        _logger.LogWarning("FFmpeg process for job {JobId} did not terminate within 5 seconds", job.JobId);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Error terminating FFmpeg process for job {JobId}", job.JobId);
+            }
+            finally
+            {
+                try
+                {
+                    job.Process.Dispose();
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Error disposing FFmpeg process for job {JobId}", job.JobId);
+                }
+                finally
+                {
+                    job.Process = null;
+                }
             }
         }
     }

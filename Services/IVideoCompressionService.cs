@@ -55,4 +55,10 @@ public interface IVideoCompressionService
     /// Cleanup a specific job's files and remove it from in-memory tracking.
     /// </summary>
     void CleanupJob(string jobId);
+
+    /// <summary>
+    /// Cancels all active jobs and terminates all FFmpeg processes.
+    /// Called during application shutdown to ensure clean exit.
+    /// </summary>
+    void CancelAllJobs();
 }

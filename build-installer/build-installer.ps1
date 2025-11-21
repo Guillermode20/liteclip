@@ -29,6 +29,7 @@ Write-Host "Found Inno Setup Compiler: $InnoSetupPath" -ForegroundColor Green
 
 # 2. Run the publish script to generate the binaries
 Write-Host "Building and publishing application..." -ForegroundColor Cyan
+Push-Location $RootDir
 try {
     if ($IncludeFFmpeg) {
         Write-Host "Publishing with FFmpeg included. FFmpegPath = $FFmpegPath" -ForegroundColor Cyan
@@ -40,6 +41,9 @@ try {
 } catch {
     Write-Host "ERROR: Failed to run publish script: $_" -ForegroundColor Red
     exit 1
+}
+finally {
+    Pop-Location
 }
 
 # 3. Compile the installer
