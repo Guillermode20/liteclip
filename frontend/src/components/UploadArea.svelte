@@ -1,5 +1,6 @@
 <script lang="ts">
     import { createEventDispatcher } from 'svelte';
+    import { videoStore } from '../stores/video';
 
     const dispatch = createEventDispatcher<{ fileSelected: { file: File } }>();
 
@@ -16,7 +17,9 @@
 
     function handleFileSelection(files: FileList | null) {
         if (files && files.length > 0) {
-            dispatch('fileSelected', { file: files[0] });
+            const file = files[0];
+            videoStore.setFile(file);
+            dispatch('fileSelected', { file });
         }
     }
 

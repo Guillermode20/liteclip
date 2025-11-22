@@ -5,6 +5,7 @@
     import StatusCard from './components/StatusCard.svelte';
     import OutputPanel from './components/OutputPanel.svelte';
     import Sidebar from './components/sidebar/Sidebar.svelte';
+    import Header from './components/Header.svelte';
     import SettingsModal from './components/SettingsModal.svelte';
     import VideoEditor from './VideoEditor.svelte';
     import { codecDetails, createDefaultOutputMetadata } from './lib/constants';
@@ -326,10 +327,7 @@
         }
     }
 
-    function handleLogoError(e: Event) {
-        const img = e?.target as HTMLImageElement | null;
-        if (img) img.src = '/assets/logo.svg';
-    }
+    // logo error handling moved to Header component
 
     function applyUserSettings(settings: UserSettingsPayload | null) {
         const effective = settings ?? fallbackSettings;
@@ -925,39 +923,12 @@
 </script>
 
 <div class="app-layout">
-    <header class="app-header">
-            <div class="header-title">
-                <img class="app-logo" src="/logo.svg" alt="LiteClip logo" on:error={handleLogoError} />
-                <h1>liteclip</h1>
-            {#if updateInfo}
-                <span class="version-chip">v{updateInfo.currentVersion}</span>
-            {/if}
-        </div>
-        <div class="header-actions">
-            <button class="icon-btn" type="button" on:click={() => (showSettingsModal = true)}>
-                ⚙ settings
-            </button>
-        </div>
-    </header>
-
-    {#if showUpdateBanner && updateInfo?.updateAvailable}
-        <div class="update-banner">
-            <span>
-                New version <strong>{updateInfo.latestVersion}</strong> is available.
-            </span>
-            <a
-                class="update-link"
-                href={updateInfo.downloadUrl || 'https://github.com/Guillermode20/smart-compressor/releases'}
-                target="_blank"
-                rel="noreferrer"
-            >
-                download
-            </a>
-            <button type="button" class="dismiss-btn" on:click={dismissUpdateBanner}>
-                dismiss
-            </button>
-        </div>
-    {/if}
+    <Header
+        updateInfo={updateInfo}
+        showUpdateBanner={showUpdateBanner}
+        on:openSettings={() => (showSettingsModal = true)}
+        on:dismissUpdate={dismissUpdateBanner}
+    />
 
     <div class="main-layout">
         <main class="main-content">
