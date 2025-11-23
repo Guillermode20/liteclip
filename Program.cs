@@ -37,8 +37,8 @@ namespace liteclip
 
             var builder = WebApplication.CreateBuilder(args);
 
-            // Configure logging for maximum server-side logging
-            builder.Logging.SetMinimumLevel(LogLevel.Trace);
+            // Configure logging - be verbose during development, but quieter in production to reduce startup overhead
+            builder.Logging.SetMinimumLevel(builder.Environment.IsDevelopment() ? LogLevel.Trace : LogLevel.Information);
 
             // Configure Kestrel to accept large files (up to 2 GB)
             builder.Services.Configure<KestrelServerOptions>(options =>
@@ -570,9 +570,9 @@ namespace liteclip
                 .SetUseOsDefaultSize(false)
                 .SetUseOsDefaultLocation(false)
                 .SetResizable(true)
-                .SetDevToolsEnabled(true)
+                .SetDevToolsEnabled(app.Environment.IsDevelopment())
                 .SetContextMenuEnabled(true)
-                .SetLogVerbosity(4);
+                .SetLogVerbosity(app.Environment.IsDevelopment() ? 4 : 0);
 
             // Apply user preference: start maximized if requested
             try
@@ -615,10 +615,21 @@ namespace liteclip
             // Now start the server in background and wait for it to bind
             var serverTask = app.RunAsync(cts.Token);
 
-            string serverUrl;
+            string? serverUrl = null;
+            var serverReadyTask = serverReadyTcs.Task;
             try
             {
-                serverUrl = await serverReadyTcs.Task;
+                // Wait for the server to start up, but don't wait indefinitely.
+                var completed = await Task.WhenAny(serverReadyTask, Task.Delay(TimeSpan.FromSeconds(10)));
+                if (completed != serverReadyTask)
+                {
+                    Console.WriteLine("\n⚠️ Server start timed out after 10s. Proceeding with UI while continuing to start the server in background.");
+                }
+
+                if (serverReadyTask.IsCompletedSuccessfully)
+                {
+                    serverUrl = serverReadyTask.Result;
+                }
             }
             catch (Exception ex)
             {
@@ -630,7 +641,34 @@ namespace liteclip
             // When server is ready, navigate the UI to the running server
             try
             {
-                window.Load(serverUrl);
+                if (!string.IsNullOrWhiteSpace(serverUrl))
+                {
+                    // Warm up the HTTP server (static files, JIT) to improve perceived navigation speed.
+                    try
+                    {
+                        var httpFactory = app.Services.GetRequiredService<IHttpClientFactory>();
+                        _ = Task.Run(async () =>
+                        {
+                            try
+                            {
+                                var client = httpFactory.CreateClient();
+                                client.Timeout = TimeSpan.FromMilliseconds(1000);
+                                // Fire-and-forget request; don't await in startup path.
+                                await client.GetAsync(serverUrl);
+                            }
+                            catch
+                            {
+                                // Ignore warmup failures
+                            }
+                        });
+                    }
+                    catch
+                    {
+                        // If IHttpClientFactory is not available, continue without warmup
+                    }
+
+                    window.Load(serverUrl);
+                }
             }
             catch (Exception ex)
             {

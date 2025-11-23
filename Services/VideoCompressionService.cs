@@ -14,6 +14,7 @@ public class VideoCompressionService : IVideoCompressionService
     private readonly ConcurrentDictionary<string, JobMetadata> _jobs = new();
     private readonly ConcurrentQueue<string> _jobQueue = new();
     private readonly SemaphoreSlim _concurrencyLimiter;
+    private readonly Task? _startupCleanupTask;
     private readonly string _tempUploadPath;
     private readonly string _tempOutputPath;
     private readonly ILogger<VideoCompressionService> _logger;
@@ -54,7 +55,9 @@ public class VideoCompressionService : IVideoCompressionService
         Directory.CreateDirectory(_tempUploadPath);
         Directory.CreateDirectory(_tempOutputPath);
 
-        CleanStartupTempFiles();
+        // Schedule temp cleanup to run in background to avoid blocking the DI constructor during host startup.
+        // Store the Task so tests or other code can wait for completion if necessary.
+        _startupCleanupTask = Task.Run(() => CleanStartupTempFiles());
     }
 
     private void CleanStartupTempFiles()

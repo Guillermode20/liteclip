@@ -35,6 +35,8 @@ check the [releases](../../releases) page for the latest version for your comput
 
 want to build liteclip from source? check out [build.md](build.md) for detailed instructions.
 
+Note: when running in Debug (e.g. `dotnet run`), the application will show a console window for easier logging and troubleshooting. Release builds are configured as GUI-only (no console) to provide a native desktop experience.
+
 ## license
 
 this project is open source and available under the **mit license**.

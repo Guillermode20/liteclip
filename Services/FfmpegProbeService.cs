@@ -68,11 +68,14 @@ namespace liteclip.Services
 
                 var parsed = ParseEncodersFromOutput(output ?? err ?? string.Empty);
 
-                // Always verify hardware encoders by default to avoid showing 'present in binary' encoders
-                var hardwareEncoders = parsed.Where(e => e.IsHardware).ToList();
-                foreach (var e in hardwareEncoders)
+                // Only verify hardware encoders when explicitly requested via 'verify' to avoid heavy CPU workload
+                if (verify)
                 {
-                    e.IsAvailable = await IsEncoderAvailable(ffmpegPath, e.Name);
+                    var hardwareEncoders = parsed.Where(e => e.IsHardware).ToList();
+                    foreach (var e in hardwareEncoders)
+                    {
+                        e.IsAvailable = await IsEncoderAvailable(ffmpegPath, e.Name);
+                    }
                 }
 
                 // Optionally run availability checks for software encoders when verify=true

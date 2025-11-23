@@ -77,6 +77,8 @@
     <EnableCompressionInSingleFile>false</EnableCompressionInSingleFile>
     <IncludeNativeLibrariesForSelfExtract>false</IncludeNativeLibrariesForSelfExtract>
     <GenerateEmbeddedFilesManifest>false</GenerateEmbeddedFilesManifest>
+    <!-- In Debug builds show a console window for easier development/logging/debugging -->
+    <OutputType>Exe</OutputType>
   </PropertyGroup>
 
   <!-- Release tuning: optimized for fast startup -->
