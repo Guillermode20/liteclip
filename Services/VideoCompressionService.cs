@@ -857,17 +857,9 @@ public class VideoCompressionService : IVideoCompressionService
 
     private async Task<bool> RunSinglePassEncodingAsync(string jobId, JobMetadata job, List<string> arguments, double? totalDuration)
     {
-        var commandLine = $"ffmpeg {string.Join(" ", arguments.Select(a => a.Contains(" ") ? $"\"{a}\"" : a))}";
+        var processStartInfo = BuildFfmpegProcessStartInfo(arguments);
+        var commandLine = FormatFfmpegCommand(processStartInfo.FileName, arguments);
         _logger.LogInformation("Executing FFmpeg command for job {JobId}: {Command}", jobId, commandLine);
-
-        var processStartInfo = new ProcessStartInfo
-        {
-            FileName = _ffmpegResolver.GetFfmpegPath(),
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
 
         foreach (var arg in arguments)
         {
@@ -1233,19 +1225,7 @@ public class VideoCompressionService : IVideoCompressionService
 
     private async Task<bool> RunPassAsync(string jobId, JobMetadata job, List<string> arguments, double? totalDuration, int passNumber, int totalPasses)
     {
-        var processStartInfo = new ProcessStartInfo
-        {
-            FileName = _ffmpegResolver.GetFfmpegPath(),
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-
-        foreach (var arg in arguments)
-        {
-            processStartInfo.ArgumentList.Add(arg);
-        }
+        var processStartInfo = BuildFfmpegProcessStartInfo(arguments);
 
         using var process = new Process { StartInfo = processStartInfo };
         job.Process = process;
@@ -1928,21 +1908,9 @@ public class VideoCompressionService : IVideoCompressionService
                 });
             }
 
-            var extractionStartInfo = new ProcessStartInfo
-            {
-                FileName = _ffmpegResolver.GetFfmpegPath(),
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
-
-            foreach (var arg in extractionArguments)
-            {
-                extractionStartInfo.ArgumentList.Add(arg);
-            }
-
-            _logger.LogInformation("Extracting {Count} segments in a single ffmpeg invocation", segments.Count);
+            var extractionStartInfo = BuildFfmpegProcessStartInfo(extractionArguments);
+            var extractionCommand = FormatFfmpegCommand(extractionStartInfo.FileName, extractionArguments);
+            _logger.LogInformation("Extracting {Count} segments in a single ffmpeg invocation: {Command}", segments.Count, extractionCommand);
 
             using (var extractionProcess = new Process { StartInfo = extractionStartInfo })
             {
@@ -1995,24 +1963,10 @@ public class VideoCompressionService : IVideoCompressionService
                 mergedOutputPath
             };
             
-            var mergeProcessStartInfo = new ProcessStartInfo
-            {
-                FileName = _ffmpegResolver.GetFfmpegPath(),
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
-            
-            foreach (var arg in mergeArguments)
-            {
-                mergeProcessStartInfo.ArgumentList.Add(arg);
-            }
-            
-            _logger.LogInformation("Merging {Count} segments into single file", segmentFiles.Count);
-            
-            var ffmpegCommand = $"{_ffmpegResolver.GetFfmpegPath()} {string.Join(" ", mergeArguments.Select(a => a.Contains(" ") ? $"\"{a}\"" : a))}";
-            _logger.LogInformation("Running ffmpeg command: {Command}", ffmpegCommand);
+            var mergeProcessStartInfo = BuildFfmpegProcessStartInfo(mergeArguments);
+            var mergeCommand = FormatFfmpegCommand(mergeProcessStartInfo.FileName, mergeArguments);
+
+            _logger.LogInformation("Merging {Count} segments into single file using command: {Command}", segmentFiles.Count, mergeCommand);
             
             using var mergeProcess = new Process { StartInfo = mergeProcessStartInfo };
             mergeProcess.Start();
@@ -2213,6 +2167,33 @@ public class VideoCompressionService : IVideoCompressionService
         bool SegmentsApplied);
 
     private sealed record SegmentProcessingResult(bool SegmentsApplied, string PreparedInputPath, double? EffectiveDuration);
+
+    private ProcessStartInfo BuildFfmpegProcessStartInfo(IEnumerable<string> arguments)
+    {
+        var ffmpegPath = _ffmpegResolver.GetFfmpegPath();
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = ffmpegPath,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+
+        foreach (var arg in arguments)
+        {
+            startInfo.ArgumentList.Add(arg);
+        }
+
+        return startInfo;
+    }
+
+    private static string FormatFfmpegCommand(string executablePath, IEnumerable<string> arguments)
+    {
+        var quotedExe = executablePath.Contains(' ') ? $"\"{executablePath}\"" : executablePath;
+        var args = arguments.Select(arg => arg.Contains(' ') ? $"\"{arg}\"" : arg);
+        return string.Join(" ", new[] { quotedExe }.Concat(args));
+    }
 
     private string GetFfprobePath()
     {

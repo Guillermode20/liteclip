@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Configuration;
 #if !NET7_0_OR_GREATER
 using System.Diagnostics;
 #endif
@@ -39,14 +40,20 @@ public class FfmpegBootstrapper
 {
     private readonly ILogger<FfmpegBootstrapper> _logger;
     private readonly IFfmpegPathResolver _resolver;
+    private readonly IConfiguration _configuration;
     private readonly object _ensureLock = new();
     private Task? _ensureTask;
     private volatile FfmpegBootstrapStatus _status = new();
+    private readonly bool _downloadOnStartup;
+    private readonly bool _ffmpegRequired;
 
-    public FfmpegBootstrapper(ILogger<FfmpegBootstrapper> logger, IFfmpegPathResolver resolver)
+    public FfmpegBootstrapper(ILogger<FfmpegBootstrapper> logger, IFfmpegPathResolver resolver, IConfiguration configuration)
     {
         _logger = logger;
         _resolver = resolver;
+        _configuration = configuration;
+        _downloadOnStartup = !bool.TryParse(_configuration["FFmpeg:DownloadOnStartup"], out var download) || download;
+        _ffmpegRequired = !bool.TryParse(_configuration["FFmpeg:Required"], out var required) || required;
     }
 
     public FfmpegBootstrapStatus GetStatus() => _status;
@@ -83,53 +90,38 @@ public class FfmpegBootstrapper
             try
             {
                 var resolved = _resolver?.ResolveFfmpegPath();
-                if (!string.IsNullOrWhiteSpace(resolved))
+                if (!string.IsNullOrWhiteSpace(resolved) && File.Exists(resolved))
                 {
-                    string? fullPath = null;
-                    if (Path.IsPathRooted(resolved))
-                    {
-                        if (File.Exists(resolved)) fullPath = resolved;
-                    }
-                    else
-                    {
-                        // If resolver returned a non-rooted name (like "ffmpeg"), explicitly search PATH entries.
-                        var exeName = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "ffmpeg.exe" : "ffmpeg";
-                        var pathEnv = Environment.GetEnvironmentVariable("PATH");
-                        if (!string.IsNullOrWhiteSpace(pathEnv))
-                        {
-                            var paths = pathEnv.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries);
-                            foreach (var p in paths)
-                            {
-                                try
-                                {
-                                    var candidate = Path.Combine(p, exeName);
-                                    if (File.Exists(candidate))
-                                    {
-                                        fullPath = candidate;
-                                        break;
-                                    }
-                                }
-                                catch { }
-                            }
-                        }
-                    }
-
-                    if (!string.IsNullOrWhiteSpace(fullPath))
-                    {
-                        UpdateStatus(
-                            FfmpegBootstrapState.Ready,
-                            100,
-                            $"FFmpeg already available at {fullPath}",
-                            fullPath
-                        );
-                        _logger.LogInformation("FFmpeg already available and will be used: {Path}", fullPath);
-                        return;
-                    }
+                    UpdateStatus(
+                        FfmpegBootstrapState.Ready,
+                        100,
+                        $"FFmpeg already available at {resolved}",
+                        resolved
+                    );
+                    _logger.LogInformation("FFmpeg already available and will be used: {Path}", resolved);
+                    return;
                 }
             }
             catch (Exception ex)
             {
                 _logger.LogDebug(ex, "PathResolver check for existing ffmpeg failed; continuing with download attempt.");
+            }
+
+            if (!_downloadOnStartup)
+            {
+                var message = "FFmpeg binaries are not present and automatic download on startup is disabled.";
+                _status = _status with
+                {
+                    State = FfmpegBootstrapState.Error,
+                    Message = message,
+                    ErrorMessage = message
+                };
+                _logger.LogError(message);
+                if (_ffmpegRequired)
+                {
+                    throw new InvalidOperationException(message);
+                }
+                return;
             }
 
             // Prefer the app base "ffmpeg" directory, but if running from Program Files

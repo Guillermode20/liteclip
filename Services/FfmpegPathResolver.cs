@@ -1,3 +1,6 @@
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
 
@@ -7,72 +10,29 @@ public class FfmpegPathResolver : IFfmpegPathResolver
 {
     private readonly ILogger<FfmpegPathResolver> _logger;
     private readonly IConfiguration _configuration;
+    private readonly bool _allowSystemPath;
+    private readonly string _ffmpegExecutableName;
+    private readonly string? _bundledPathOverride;
     private string? _cachedFfmpegPath;
 
     public FfmpegPathResolver(ILogger<FfmpegPathResolver> logger, IConfiguration configuration)
     {
         _logger = logger;
         _configuration = configuration;
+        _allowSystemPath = bool.TryParse(_configuration["FFmpeg:AllowSystemPath"], out var allowSystemPath) && allowSystemPath;
+        _bundledPathOverride = _configuration["FFmpeg:BundledPath"];
+        _ffmpegExecutableName = GetFfmpegExecutableName();
     }
 
     public string GetFfmpegPath()
     {
-        if (_cachedFfmpegPath != null)
+        var resolved = ResolveFfmpegPath();
+        if (string.IsNullOrWhiteSpace(resolved))
         {
-            return _cachedFfmpegPath;
+            throw new InvalidOperationException("FFmpeg executable could not be resolved. Ensure the bundled binaries were downloaded or configure FFmpeg:Path.");
         }
 
-        // 1. Check configuration override
-        var configPath = _configuration["FFmpeg:Path"];
-        if (!string.IsNullOrWhiteSpace(configPath) && File.Exists(configPath))
-        {
-            _logger.LogInformation("Using FFmpeg from configuration: {Path}", configPath);
-            _cachedFfmpegPath = configPath;
-            return _cachedFfmpegPath;
-        }
-
-        // 2. Check bundled FFmpeg in the same directory as the executable
-        var executableDir = AppContext.BaseDirectory;
-        var bundledPath = Path.Combine(executableDir, "ffmpeg", GetFfmpegExecutableName());
-        if (File.Exists(bundledPath))
-        {
-            _logger.LogInformation("Using bundled FFmpeg: {Path}", bundledPath);
-            _cachedFfmpegPath = bundledPath;
-            return _cachedFfmpegPath;
-        }
-
-        // 2a. Also check the common per-user folder used by the runtime downloader
-        var localAppDataPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LiteClip", "ffmpeg", GetFfmpegExecutableName());
-        if (File.Exists(localAppDataPath))
-        {
-            _logger.LogInformation("Using FFmpeg from LocalAppData: {Path}", localAppDataPath);
-            _cachedFfmpegPath = localAppDataPath;
-            return _cachedFfmpegPath;
-        }
-
-        // 4. Check ffmpeg folder next to executable (for portable deployments)
-        var portablePath = Path.Combine(executableDir, GetFfmpegExecutableName());
-        if (File.Exists(portablePath))
-        {
-            _logger.LogInformation("Using portable FFmpeg: {Path}", portablePath);
-            _cachedFfmpegPath = portablePath;
-            return _cachedFfmpegPath;
-        }
-
-        // 5. Check system PATH
-        var systemFfmpeg = FindInSystemPath(GetFfmpegExecutableName());
-        if (systemFfmpeg != null)
-        {
-            _logger.LogInformation("Using system FFmpeg from PATH: {Path}", systemFfmpeg);
-            _cachedFfmpegPath = systemFfmpeg;
-            return _cachedFfmpegPath;
-        }
-
-        // 6. Default fallback - just use "ffmpeg" and hope it's in PATH
-        _logger.LogWarning("FFmpeg not found in expected locations. Falling back to 'ffmpeg' command. " +
-            "Please ensure FFmpeg is installed and available in system PATH, or configure FFmpeg:Path in appsettings.json");
-        _cachedFfmpegPath = GetFfmpegExecutableName();
-        return _cachedFfmpegPath;
+        return resolved;
     }
 
     /// <summary>
@@ -80,12 +40,129 @@ public class FfmpegPathResolver : IFfmpegPathResolver
     /// </summary>
     public string? ResolveFfmpegPath()
     {
-        return GetFfmpegPath();
+        if (!string.IsNullOrWhiteSpace(_cachedFfmpegPath) && File.Exists(_cachedFfmpegPath))
+        {
+            return _cachedFfmpegPath;
+        }
+
+        _cachedFfmpegPath = null;
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var candidate in GetCandidatePaths())
+        {
+            var normalized = NormalizePath(candidate);
+            if (string.IsNullOrWhiteSpace(normalized) || !seen.Add(normalized))
+            {
+                continue;
+            }
+
+            if (File.Exists(normalized))
+            {
+                _cachedFfmpegPath = normalized;
+                _logger.LogInformation("Using FFmpeg from {Path}", normalized);
+                return normalized;
+            }
+        }
+
+        if (_allowSystemPath)
+        {
+            var systemFfmpeg = FindInSystemPath(_ffmpegExecutableName);
+            if (!string.IsNullOrWhiteSpace(systemFfmpeg))
+            {
+                _cachedFfmpegPath = systemFfmpeg;
+                _logger.LogInformation("Using system FFmpeg from PATH: {Path}", systemFfmpeg);
+                return systemFfmpeg;
+            }
+        }
+        else
+        {
+            _logger.LogDebug("System PATH FFmpeg lookup disabled (FFmpeg:AllowSystemPath=false).");
+        }
+
+        return null;
     }
 
     private static string GetFfmpegExecutableName()
     {
         return RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "ffmpeg.exe" : "ffmpeg";
+    }
+
+    private static string? NormalizePath(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return null;
+        }
+
+        try
+        {
+            var trimmed = path.Trim();
+            if (Path.IsPathRooted(trimmed))
+            {
+                return Path.GetFullPath(trimmed);
+            }
+
+            return Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, trimmed));
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private IEnumerable<string> GetCandidatePaths()
+    {
+        if (!string.IsNullOrWhiteSpace(_configuration["FFmpeg:Path"]))
+        {
+            yield return _configuration["FFmpeg:Path"]!;
+        }
+
+        if (!string.IsNullOrWhiteSpace(_bundledPathOverride))
+        {
+            yield return _bundledPathOverride!;
+        }
+
+        var baseDir = AppContext.BaseDirectory;
+        yield return Path.Combine(baseDir, "ffmpeg", _ffmpegExecutableName);
+        yield return Path.Combine(baseDir, _ffmpegExecutableName);
+
+        var entryAssemblyLocation = Assembly.GetEntryAssembly()?.Location;
+        if (!string.IsNullOrWhiteSpace(entryAssemblyLocation))
+        {
+            var entryDir = Path.GetDirectoryName(entryAssemblyLocation);
+            if (!string.IsNullOrWhiteSpace(entryDir))
+            {
+                yield return Path.Combine(entryDir, "ffmpeg", _ffmpegExecutableName);
+                yield return Path.Combine(entryDir, _ffmpegExecutableName);
+            }
+        }
+
+        var processPath = Process.GetCurrentProcess().MainModule?.FileName;
+        if (!string.IsNullOrWhiteSpace(processPath))
+        {
+            var processDir = Path.GetDirectoryName(processPath);
+            if (!string.IsNullOrWhiteSpace(processDir))
+            {
+                yield return Path.Combine(processDir, "ffmpeg", _ffmpegExecutableName);
+                yield return Path.Combine(processDir, _ffmpegExecutableName);
+            }
+        }
+
+        var localAppData = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LiteClip", "ffmpeg", _ffmpegExecutableName);
+        yield return localAppData;
+
+        var runtimesDir = Path.Combine(baseDir, "runtimes");
+        if (Directory.Exists(runtimesDir))
+        {
+            foreach (var runtimeSubDir in Directory.EnumerateDirectories(runtimesDir))
+            {
+                var nativeDir = Path.Combine(runtimeSubDir, "native");
+                if (Directory.Exists(nativeDir))
+                {
+                    yield return Path.Combine(nativeDir, _ffmpegExecutableName);
+                }
+            }
+        }
     }
 
     private static string? FindInSystemPath(string fileName)
