@@ -68,7 +68,7 @@ public class UserSettingsStore
             }
 
             await using var stream = File.OpenRead(_settingsPath);
-            return await JsonSerializer.DeserializeAsync<UserSettings>(stream, JsonOptions, cancellationToken).ConfigureAwait(false);
+            return await System.Text.Json.JsonSerializer.DeserializeAsync<UserSettings>(stream, liteclip.Serialization.LiteClipJsonContext.Default.UserSettings, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -88,7 +88,7 @@ public class UserSettingsStore
             }
 
             await using var stream = File.Create(_settingsPath);
-            await JsonSerializer.SerializeAsync(stream, settings, JsonOptions, cancellationToken).ConfigureAwait(false);
+            await System.Text.Json.JsonSerializer.SerializeAsync(stream, settings, liteclip.Serialization.LiteClipJsonContext.Default.UserSettings, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
         {

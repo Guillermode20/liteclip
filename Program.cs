@@ -32,6 +32,7 @@ namespace liteclip
         }
 
         // All of your previous Program.cs logic is now inside this async method
+        [System.Diagnostics.CodeAnalysis.UnconditionalSuppressMessage("Trimming", "IL2026", Justification = "Endpoint mapping uses reflection; types used are preserved at runtime. This is expected for ASP.NET minimal APIs.")]
         static async Task RunServerAndWindow(string[] args)
         {
 
@@ -76,12 +77,36 @@ namespace liteclip
             var app = builder.Build();
 
             var ffmpegBootstrapper = app.Services.GetRequiredService<FfmpegBootstrapper>();
+            var ffmpegProbeService = app.Services.GetRequiredService<FfmpegProbeService>();
+            var programLogger = app.Services.GetRequiredService<ILogger<Program>>();
             var ffmpegStartupTask = ffmpegBootstrapper.EnsureReadyAsync();
             _ = ffmpegStartupTask.ContinueWith(t =>
             {
-                Console.WriteLine(t.IsCompletedSuccessfully
-                    ? "✓ FFmpeg ready"
-                    : $"⚠️ FFmpeg initialization failed: {t.Exception?.GetBaseException().Message}");
+                // Run an async probe in the background to get version info
+                _ = Task.Run(async () =>
+                {
+                    if (t.IsCompletedSuccessfully)
+                    {
+                        var executable = ffmpegBootstrapper.GetStatus().ExecutablePath;
+                        try
+                        {
+                            var version = await ffmpegProbeService.GetFfmpegVersionAsync();
+                            programLogger.LogInformation("FFmpeg ready. Executable path: {Path}, Version: {Version}", executable ?? "(unknown)", version ?? "(unknown)");
+                        }
+                        catch (Exception ex)
+                        {
+                            programLogger.LogInformation("FFmpeg ready. Executable path: {Path}", executable ?? "(unknown)");
+                            programLogger.LogDebug(ex, "Failed to query FFmpeg version");
+                        }
+
+                        Console.WriteLine("✓ FFmpeg ready");
+                    }
+                    else
+                    {
+                        programLogger.LogWarning(t.Exception, "FFmpeg initialization failed");
+                        Console.WriteLine($"⚠️ FFmpeg initialization failed: {t.Exception?.GetBaseException().Message}");
+                    }
+                });
             });
 
             // NOTE: Delay FFmpeg capability probing to background after the UI is loaded.
@@ -150,7 +175,11 @@ namespace liteclip
                 }
 
                 // Validate file size
-                var maxFileSize = configuration.GetValue<long>("FileUpload:MaxFileSizeBytes", 2_147_483_648);
+                var maxFileSize = 2_147_483_648L;
+                if (!string.IsNullOrWhiteSpace(configuration["FileUpload:MaxFileSizeBytes"]) && long.TryParse(configuration["FileUpload:MaxFileSizeBytes"], out var parsedMax))
+                {
+                    maxFileSize = parsedMax;
+                }
                 if (file.Length > maxFileSize)
                 {
                     var maxSizeMb = maxFileSize / (1024.0 * 1024.0);
@@ -170,7 +199,8 @@ namespace liteclip
                                 PropertyNameCaseInsensitive = true,
                                 NumberHandling = System.Text.Json.Serialization.JsonNumberHandling.AllowReadingFromString
                             };
-                            videoSegments = System.Text.Json.JsonSerializer.Deserialize<List<VideoSegment>>(segments, jsonOptions);
+                            var arr = System.Text.Json.JsonSerializer.Deserialize<VideoSegment[]>(segments, liteclip.Serialization.LiteClipJsonContext.Default.VideoSegmentArray);
+                            if (arr != null) videoSegments = arr.ToList();
                         }
                         catch (Exception ex)
                         {

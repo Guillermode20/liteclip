@@ -19,8 +19,18 @@ public class JobCleanupService : BackgroundService
         _compressionService = compressionService;
         _configuration = configuration;
         
-        _cleanupInterval = TimeSpan.FromMinutes(configuration.GetValue<int>("Compression:CleanupIntervalMinutes", 5));
-        _jobRetentionTime = TimeSpan.FromMinutes(configuration.GetValue<int>("Compression:JobRetentionMinutes", 30));
+        if (!int.TryParse(configuration["Compression:CleanupIntervalMinutes"], out var cleanupMinutes))
+        {
+            cleanupMinutes = 5;
+        }
+
+        if (!int.TryParse(configuration["Compression:JobRetentionMinutes"], out var retentionMinutes))
+        {
+            retentionMinutes = 30;
+        }
+
+        _cleanupInterval = TimeSpan.FromMinutes(cleanupMinutes);
+        _jobRetentionTime = TimeSpan.FromMinutes(retentionMinutes);
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)

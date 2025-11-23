@@ -47,8 +47,16 @@ public class VideoCompressionService : IVideoCompressionService
           _tempOutputPath = Path.Combine(baseDir, _tempOutputPath.TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
         }
 
-        _maxConcurrentJobs = configuration.GetValue<int>("Compression:MaxConcurrentJobs", 2);
-        _maxQueueSize = configuration.GetValue<int>("Compression:MaxQueueSize", 10);
+        if (!int.TryParse(configuration["Compression:MaxConcurrentJobs"], out var maxConcurrent))
+        {
+            maxConcurrent = 2;
+        }
+        if (!int.TryParse(configuration["Compression:MaxQueueSize"], out var maxQueue))
+        {
+            maxQueue = 10;
+        }
+        _maxConcurrentJobs = maxConcurrent;
+        _maxQueueSize = maxQueue;
 
         _concurrencyLimiter = new SemaphoreSlim(_maxConcurrentJobs, _maxConcurrentJobs);
 

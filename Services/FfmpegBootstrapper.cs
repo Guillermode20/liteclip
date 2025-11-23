@@ -122,6 +122,7 @@ public class FfmpegBootstrapper
                             $"FFmpeg already available at {fullPath}",
                             fullPath
                         );
+                        _logger.LogInformation("FFmpeg already available and will be used: {Path}", fullPath);
                         return;
                     }
                 }
@@ -174,6 +175,7 @@ public class FfmpegBootstrapper
                     $"FFmpeg already available at {ffmpegPath}",
                     ffmpegPath
                 );
+                _logger.LogInformation("FFmpeg already available and will be used: {Path}", ffmpegPath);
                 return;
             }
 
@@ -205,6 +207,7 @@ public class FfmpegBootstrapper
                 $"FFmpeg download completed ({executablesDirectory})",
                 ffmpegPath
             );
+            _logger.LogInformation("FFmpeg downloaded and ready at: {Path}", ffmpegPath);
         }
         catch (Exception ex)
         {

@@ -23,6 +23,97 @@ namespace liteclip.Services
             _logger = logger;
         }
 
+        /// <summary>
+        /// Returns a short version string from the ffmpeg executable (the first non-empty line of stdout/stderr) or null if unavailable.
+        /// </summary>
+        public async Task<string?> GetFfmpegVersionAsync()
+        {
+            try
+            {
+                var ffmpegPath = _pathResolver.GetFfmpegPath();
+                if (string.IsNullOrWhiteSpace(ffmpegPath)) return null;
+
+                var psi = new ProcessStartInfo
+                {
+                    FileName = ffmpegPath,
+                    Arguments = "-version",
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+
+                using var proc = Process.Start(psi);
+                if (proc == null) return null;
+
+                // Read the first non-empty line from stdout or stderr within a short timeout
+                string? firstLine = null;
+                var readStdOut = proc.StandardOutput.ReadLineAsync();
+                var readStdErr = proc.StandardError.ReadLineAsync();
+
+                var completed = await Task.WhenAny(readStdOut, readStdErr, Task.Delay(2000)).ConfigureAwait(false);
+                if (completed == readStdOut)
+                {
+                    firstLine = await readStdOut.ConfigureAwait(false);
+                }
+                else if (completed == readStdErr)
+                {
+                    firstLine = await readStdErr.ConfigureAwait(false);
+                }
+
+                try
+                {
+                    // Ensure ffmpeg process exits or kill after timeout
+                    await proc.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false);
+                }
+                catch
+                {
+                    try { proc.Kill(); } catch { }
+                }
+
+                if (string.IsNullOrWhiteSpace(firstLine))
+                {
+                    // Fallback: read any buffered output
+                    try
+                    {
+                        var outTxt = await proc.StandardOutput.ReadToEndAsync().ConfigureAwait(false);
+                        if (!string.IsNullOrWhiteSpace(outTxt))
+                        {
+                            var lines = outTxt.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                            firstLine = lines.FirstOrDefault();
+                        }
+                    }
+                    catch { }
+                }
+
+                if (string.IsNullOrWhiteSpace(firstLine))
+                {
+                    try
+                    {
+                        var errTxt = await proc.StandardError.ReadToEndAsync().ConfigureAwait(false);
+                        if (!string.IsNullOrWhiteSpace(errTxt))
+                        {
+                            var lines = errTxt.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                            firstLine = lines.FirstOrDefault();
+                        }
+                    }
+                    catch { }
+                }
+
+                if (!string.IsNullOrWhiteSpace(firstLine))
+                {
+                    return firstLine.Trim();
+                }
+
+                return null;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Failed to probe ffmpeg version");
+                return null;
+            }
+        }
+
         public async Task<List<FfmpegEncoderInfo>> GetEncodersAsync(bool verify = false)
         {
             // Return cached value if within TTL and verification not requested

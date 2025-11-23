@@ -1,5 +1,6 @@
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using liteclip.Models;
 using System.Reflection;
 using System.Text.Json.Serialization;
 using System.Threading;
@@ -90,7 +91,19 @@ public sealed class UpdateCheckerService
                 return null;
             }
 
-            return await response.Content.ReadFromJsonAsync<GitHubRelease>(cancellationToken: cancellationToken).ConfigureAwait(false);
+            // Use explicit deserialization to avoid ReadFromJsonAsync trimmer warnings
+            var json = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+            if (string.IsNullOrWhiteSpace(json)) return null;
+            try
+            {
+                var release = System.Text.Json.JsonSerializer.Deserialize<GitHubRelease>(json, liteclip.Serialization.LiteClipJsonContext.Default.GitHubRelease);
+                return release;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to parse GitHub release JSON");
+                return null;
+            }
         }
         catch (Exception ex)
         {
@@ -157,11 +170,7 @@ public sealed class UpdateCheckerService
         return new Version(0, 0, 0, 0);
     }
 
-    private sealed record GitHubRelease(
-        [property: JsonPropertyName("tag_name")] string? TagName,
-        [property: JsonPropertyName("html_url")] string? HtmlUrl,
-        [property: JsonPropertyName("name")] string? Name,
-        [property: JsonPropertyName("body")] string? Body);
+    // Use public GitHubRelease record defined in Models/GitHubRelease.cs
 }
 
 public sealed record UpdateInfo(
