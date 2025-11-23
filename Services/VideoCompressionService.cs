@@ -104,6 +104,14 @@ public class VideoCompressionService : IVideoCompressionService
         double? computedTargetKbps = null;
         double? computedVideoKbps = null;
         BitratePlan? bitratePlan = null;
+        // Cache ffprobe dimensions once per job to avoid spinning up duplicate processes later in the pipeline.
+        VideoDimensions? probedDims = null;
+
+        if (!skipCompression)
+        {
+            // Even if we end up skipping adaptive scaling, downstream encoding still needs the source dimensions.
+            probedDims = await ProbeVideoDimensionsAsync(artifacts.PreparedInputPath);
+        }
 
         if (!skipCompression &&
             normalizedRequest.TargetSizeMb.HasValue &&
@@ -131,20 +139,16 @@ public class VideoCompressionService : IVideoCompressionService
 
                 // Auto-resolution adjustment: Downscale if bitrate is too low for the resolution
                 // But only if the user hasn't explicitly requested "original" resolution (100% scale)
-                if (normalizedRequest.ScalePercent != 100)
+                if (normalizedRequest.ScalePercent != 100 && probedDims != null)
                 {
-                    var dims = await ProbeVideoDimensionsAsync(artifacts.PreparedInputPath);
-                    if (dims != null)
+                    var optimalScale = CalculateOptimalScale(probedDims.Width, probedDims.Height, bitratePlan.VideoKbps, normalizedRequest.TargetFps ?? 30, normalizedRequest.Codec);
+                    var currentScale = normalizedRequest.ScalePercent ?? 100;
+                    
+                    if (optimalScale < currentScale)
                     {
-                        var optimalScale = CalculateOptimalScale(dims.Width, dims.Height, bitratePlan.VideoKbps, normalizedRequest.TargetFps ?? 30, normalizedRequest.Codec);
-                        var currentScale = normalizedRequest.ScalePercent ?? 100;
-                        
-                        if (optimalScale < currentScale)
-                        {
-                            _logger.LogInformation("Auto-scaling triggered for job {JobId}: Reducing resolution to {Scale}% to maintain quality (Bitrate: {Bitrate}kbps, Input: {W}x{H})", 
-                                artifacts.JobId, optimalScale, bitratePlan.VideoKbps, dims.Width, dims.Height);
-                            normalizedRequest.ScalePercent = optimalScale;
-                        }
+                        _logger.LogInformation("Auto-scaling triggered for job {JobId}: Reducing resolution to {Scale}% to maintain quality (Bitrate: {Bitrate}kbps, Input: {W}x{H})", 
+                            artifacts.JobId, optimalScale, bitratePlan.VideoKbps, probedDims.Width, probedDims.Height);
+                        normalizedRequest.ScalePercent = optimalScale;
                     }
                 }
             }
@@ -166,7 +170,7 @@ public class VideoCompressionService : IVideoCompressionService
         _jobs[jobId] = compressionJob;
         _jobQueue.Enqueue(jobId);
 
-        _ = Task.Run(async () => await ProcessQueueAsync(jobId, normalizedRequest, codecConfig));
+        _ = Task.Run(async () => await ProcessQueueAsync(jobId, normalizedRequest, codecConfig, probedDims));
 
         return jobId;
     }
@@ -356,7 +360,7 @@ public class VideoCompressionService : IVideoCompressionService
         }
     }
 
-    private async Task ProcessQueueAsync(string jobId, CompressionRequest request, CodecConfig codecConfig)
+    private async Task ProcessQueueAsync(string jobId, CompressionRequest request, CodecConfig codecConfig, VideoDimensions? preProbedDimensions = null)
     {
         try
         {
@@ -376,7 +380,7 @@ public class VideoCompressionService : IVideoCompressionService
             _logger.LogInformation("Starting compression for job {JobId} (waited {WaitTime:F1}s in queue)", 
                 jobId, (job.StartedAt.Value - job.CreatedAt).TotalSeconds);
 
-            await RunFfmpegCompressionAsync(jobId, job, request, codecConfig);
+            await RunFfmpegCompressionAsync(jobId, job, request, codecConfig, preProbedDimensions);
         }
         finally
         {
@@ -498,7 +502,7 @@ public class VideoCompressionService : IVideoCompressionService
 
         _jobQueue.Enqueue(jobId);
         var codecConfig = GetCodecConfig(job.Codec);
-        _ = Task.Run(async () => await ProcessQueueAsync(jobId, replayRequest, codecConfig));
+        _ = Task.Run(async () => await ProcessQueueAsync(jobId, replayRequest, codecConfig, null));
 
         return (true, null);
     }
@@ -596,7 +600,7 @@ public class VideoCompressionService : IVideoCompressionService
             return filters;
         }
 
-        private async Task RunFfmpegCompressionAsync(string jobId, JobMetadata job, CompressionRequest request, CodecConfig codec)
+        private async Task RunFfmpegCompressionAsync(string jobId, JobMetadata job, CompressionRequest request, CodecConfig codec, VideoDimensions? preProbedDimensions)
     {
         try
         {
@@ -615,7 +619,12 @@ public class VideoCompressionService : IVideoCompressionService
             // Ensure we never scale to an output height below 480px (unless source is smaller)
             try
             {
-                var srcDims = await ProbeVideoDimensionsAsync(job.InputPath);
+                var srcDims = preProbedDimensions;
+                if (srcDims == null)
+                {
+                    srcDims = await ProbeVideoDimensionsAsync(job.InputPath);
+                }
+
                 if (srcDims != null && srcDims.Height >= 480)
                 {
                     var minPercent = (int)Math.Ceiling(480.0 * 100 / srcDims.Height);
@@ -952,7 +961,7 @@ public class VideoCompressionService : IVideoCompressionService
             if (!string.IsNullOrWhiteSpace(job.InputPath) && File.Exists(job.InputPath))
             {
                 File.Delete(job.InputPath);
-                job.InputPath = null; // Clear path so we know it's gone
+                job.InputPath = string.Empty; // Clear path so we know it's gone
                 _logger.LogInformation("Cleaned up input file for job {JobId}", job.JobId);
             }
         }
@@ -1882,57 +1891,60 @@ public class VideoCompressionService : IVideoCompressionService
         
         try
         {
-            // Extract each segment to a temporary file
+            // Prepare segment extraction plan and run a single ffmpeg process to extract all segments via stream copy
+            var extractionArguments = new List<string> { "-y", "-i", inputPath };
+
             for (int i = 0; i < segments.Count; i++)
             {
                 var segment = segments[i];
                 var segmentPath = Path.Combine(_tempOutputPath, $"{jobId}_segment_{i}.mp4");
                 segmentFiles.Add(segmentPath);
-                
+
                 var duration = segment.End - segment.Start;
-                
-                // Use ffmpeg to extract the segment via stream copy to keep quality
-                var arguments = new List<string>
-                {
-                    "-y", // Overwrite output file
-                    "-ss", segment.Start.ToString("F3", System.Globalization.CultureInfo.InvariantCulture),
-                    "-i", inputPath,
-                    "-t", duration.ToString("F3", System.Globalization.CultureInfo.InvariantCulture),
-                    "-c", "copy", // Stream copy for speed
-                    "-avoid_negative_ts", "make_zero", // Ensure proper timestamps
-                    segmentPath
-                };
-                
-                var processStartInfo = new ProcessStartInfo
-                {
-                    FileName = _ffmpegResolver.GetFfmpegPath(),
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                };
-                
-                foreach (var arg in arguments)
-                {
-                    processStartInfo.ArgumentList.Add(arg);
-                }
-                
-                _logger.LogInformation("Extracting segment {Index}/{Total}: {Start}s to {End}s (duration: {Duration}s)", 
+                var startText = segment.Start.ToString("F3", CultureInfo.InvariantCulture);
+                var durationText = duration.ToString("F3", CultureInfo.InvariantCulture);
+
+                _logger.LogInformation("Scheduled segment {Index}/{Total}: {Start}s to {End}s (duration: {Duration}s)",
                     i + 1, segments.Count, segment.Start, segment.End, duration);
-                
-                using var process = new Process { StartInfo = processStartInfo };
-                process.Start();
-                
-                var errorOutput = await process.StandardError.ReadToEndAsync();
-                await process.WaitForExitAsync();
-                
-                if (process.ExitCode != 0)
+
+                extractionArguments.AddRange(new[]
                 {
-                    _logger.LogError("Failed to extract segment {Index}: {Error}", i, errorOutput);
-                    throw new InvalidOperationException($"Failed to extract segment {i + 1}: ffmpeg exited with code {process.ExitCode}");
+                    "-ss", startText,
+                    "-t", durationText,
+                    "-avoid_negative_ts", "make_zero",
+                    "-c", "copy",
+                    segmentPath
+                });
+            }
+
+            var extractionStartInfo = new ProcessStartInfo
+            {
+                FileName = _ffmpegResolver.GetFfmpegPath(),
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            foreach (var arg in extractionArguments)
+            {
+                extractionStartInfo.ArgumentList.Add(arg);
+            }
+
+            _logger.LogInformation("Extracting {Count} segments in a single ffmpeg invocation", segments.Count);
+
+            using (var extractionProcess = new Process { StartInfo = extractionStartInfo })
+            {
+                extractionProcess.Start();
+
+                var extractionStdErr = await extractionProcess.StandardError.ReadToEndAsync();
+                await extractionProcess.WaitForExitAsync();
+
+                if (extractionProcess.ExitCode != 0)
+                {
+                    _logger.LogError("Failed to extract segments. Exit code: {ExitCode}. Error: {Error}", extractionProcess.ExitCode, extractionStdErr);
+                    throw new InvalidOperationException($"Failed to extract segments: ffmpeg exited with code {extractionProcess.ExitCode}. Error: {extractionStdErr}");
                 }
-                
-                _logger.LogInformation("Segment {Index} extracted successfully", i + 1);
             }
             
             // Create concat demuxer file with proper Windows path handling
