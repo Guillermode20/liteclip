@@ -562,6 +562,9 @@ namespace liteclip
             // NOTE: we delay starting the HTTP server until after we show the native UI so the app feels faster
 
             // Create the native UI early so it appears instantly for the user.
+            // Load user settings to honor StartMaximized preference
+            var userSettingsStore = app.Services.GetRequiredService<UserSettingsStore>();
+            var userSettings = await userSettingsStore.GetAsync();
             var window = new PhotinoWindow()
                 .SetTitle("LiteClip - Fast Video Compression")
                 .SetUseOsDefaultSize(false)
@@ -570,6 +573,20 @@ namespace liteclip
                 .SetDevToolsEnabled(true)
                 .SetContextMenuEnabled(true)
                 .SetLogVerbosity(4);
+
+            // Apply user preference: start maximized if requested
+            try
+            {
+                if (userSettings.StartMaximized)
+                {
+                    window.SetMaximized(true);
+                }
+            }
+            catch
+            {
+                // Photino may not implement SetMaximized on some platforms/versions;
+                // if so, gracefully ignore and fallback to a default size below.
+            }
 
             window.RegisterWebMessageReceivedHandler((sender, message) =>
                 {
@@ -622,8 +639,12 @@ namespace liteclip
 
             // FFmpeg capability probe removed: no background probing will be performed
 
-            window.SetSize(1200, 800);
-            window.Center();
+            // If the user didn't request maximized, use the default size and center.
+            if (!userSettings.StartMaximized)
+            {
+                window.SetSize(1200, 800);
+                window.Center();
+            }
 
             // This BLOCKS the [STAThread] (Main) until the window is closed.
             // This is the correct UI pattern.

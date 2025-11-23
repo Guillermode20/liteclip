@@ -15,7 +15,7 @@ liteclip is a small, cross-platform desktop application that makes it fast and e
 - `Program.cs` - app startup: DI registration, server routing, Photino window host
 - `Services/` - application services (FFmpeg bootstrapper, path resolver, compression service, update checker, job cleanup)
 - `CompressionStrategies/` - strategy implementations: H264/H265, factory, and `ICompressionStrategy` interface
-- `Models/` - shared DTOs: `CompressionRequest`, `CompressionJob`, `CompressionResult`, `UserSettings`
+- `Models/` - shared DTOs: `CompressionRequest`, `CompressionResult`, `UserSettings`
 - `frontend/` - Svelte app and public assets
 
 ## Architecture Patterns

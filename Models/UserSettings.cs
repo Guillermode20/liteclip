@@ -7,6 +7,7 @@ public class UserSettings
     public bool DefaultMuteAudio { get; set; }
     public double DefaultTargetSizeMb { get; set; } = 25;
     public bool CheckForUpdatesOnLaunch { get; set; } = true;
+    public bool StartMaximized { get; set; } = true;
 
     public static UserSettings CreateDefault() => new();
 }

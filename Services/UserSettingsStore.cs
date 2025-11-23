@@ -104,6 +104,7 @@ public class UserSettingsStore
             DefaultResolution = NormalizeResolution(settings.DefaultResolution),
             DefaultMuteAudio = settings.DefaultMuteAudio,
             DefaultTargetSizeMb = ClampMb(settings.DefaultTargetSizeMb),
+            StartMaximized = settings.StartMaximized,
             CheckForUpdatesOnLaunch = settings.CheckForUpdatesOnLaunch
         };
 
@@ -147,6 +148,7 @@ public class UserSettingsStore
             DefaultResolution = source.DefaultResolution,
             DefaultMuteAudio = source.DefaultMuteAudio,
             DefaultTargetSizeMb = source.DefaultTargetSizeMb,
+            StartMaximized = source.StartMaximized,
             CheckForUpdatesOnLaunch = source.CheckForUpdatesOnLaunch
         };
     }
