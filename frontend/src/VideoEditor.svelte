@@ -7,9 +7,11 @@
     export let onRemoveVideo: (() => void) | null = null;
     export let savedSegments: VideoSegment[] = [];
 
-    let videoElement: HTMLVideoElement;
-    let canvasElement: HTMLCanvasElement;
-    let timelineContainer: HTMLDivElement;
+    let videoElement: HTMLVideoElement | null = null;
+    let canvasElement: HTMLCanvasElement | null = null;
+    // Low-res preview canvas for scrubbing
+    let previewCanvas: HTMLCanvasElement | null = null;
+    let timelineContainer: HTMLDivElement | null = null;
     
     let duration: number = 0;
     let currentTime: number = 0;
@@ -18,6 +20,18 @@
     let isDragging: boolean = false;
     let wasPlayingBeforeDrag: boolean = false;
     let videoAspectRatio = 16 / 9;
+    // Seek scheduler state for live scrubbing
+    let desiredSeekTime: number | null = null;
+    let lastSeekMs = 0;
+    let seekTimer: number | null = null;
+    const MIN_SEEK_INTERVAL_MS = 40; // throttle seeks to ~25fps by default
+    const MAX_PREVIEW_WIDTH = 1280; // cap preview to 720p
+    const MAX_PREVIEW_HEIGHT = 720;
+
+    // Preview canvas context and sizes
+    let previewCtx: CanvasRenderingContext2D | null = null;
+    let previewWidth = 0;
+    let previewHeight = 0;
     
     // Trim segments (kept segments)
     let segments: Array<{start: number, end: number, id: string}> = [];
@@ -71,20 +85,27 @@
         window.addEventListener('keydown', handleKeyDown);
         window.addEventListener('mouseup', handleMouseUp);
         window.addEventListener('mousemove', handleMouseMove);
+        // Pointer events support (touch/stylus); keep mouse as fallback
+        window.addEventListener('pointerup', handleMouseUp);
+        window.addEventListener('pointermove', handleMouseMove);
         return () => {
             window.removeEventListener('keydown', handleKeyDown);
             window.removeEventListener('mouseup', handleMouseUp);
             window.removeEventListener('mousemove', handleMouseMove);
+            window.removeEventListener('pointerup', handleMouseUp);
+            window.removeEventListener('pointermove', handleMouseMove);
         };
     });
 
     function loadVideo() {
+        if (!videoElement) return;
         const url = URL.createObjectURL(videoFile);
         videoElement.src = url;
         videoElement.load();
     }
 
     function handleLoadedMetadata() {
+        if (!videoElement) return;
         const loadedDuration = videoElement.duration;
         duration = Number.isFinite(loadedDuration) ? loadedDuration : 0;
         isReady = duration > 0;
@@ -99,14 +120,68 @@
         
         notifySegmentsChange();
         updateThumbnails();
+        updatePreviewCanvasSize();
+        ensurePreviewContext();
+        // Draw an initial preview frame when metadata is ready
+        if (previewCanvas && videoElement) {
+            videoElement.addEventListener('seeked', () => {
+                // Update preview canvas after the browser finishes seeking
+                if (isDragging) drawPreviewFrame();
+            });
+            // Draw one initial preview frame
+            videoElement.addEventListener('seeked', () => drawPreviewFrame(), { once: true });
+        }
+    }
+
+    function updatePreviewCanvasSize() {
+        if (!previewCanvas || !videoElement) return;
+        const videoW = videoElement.videoWidth || 1280;
+        const videoH = videoElement.videoHeight || 720;
+        const aspect = videoW / videoH;
+        let targetW = Math.min(videoW, MAX_PREVIEW_WIDTH);
+        let targetH = Math.round(targetW / aspect);
+        if (targetH > MAX_PREVIEW_HEIGHT) {
+            targetH = MAX_PREVIEW_HEIGHT;
+            targetW = Math.round(targetH * aspect);
+        }
+        previewWidth = targetW;
+        previewHeight = targetH;
+        previewCanvas.width = previewWidth;
+        previewCanvas.height = previewHeight;
+        // scale to fill the frame; keep internal resolution lower than full-res
+        previewCanvas.style.width = `100%`;
+        previewCanvas.style.height = `100%`;
+    }
+
+    function ensurePreviewContext() {
+        if (!previewCanvas) return;
+        previewCtx = previewCanvas.getContext('2d');
+        if (previewCtx) {
+            previewCtx.imageSmoothingEnabled = true;
+            (previewCtx as any).imageSmoothingQuality = 'high';
+        }
+    }
+
+    function drawPreviewFrame() {
+        if (!previewCanvas || !previewCtx || !videoElement) return;
+        try {
+            previewCtx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
+            previewCtx.drawImage(videoElement, 0, 0, previewCanvas.width, previewCanvas.height);
+        } catch (e) {
+            // drawImage can throw if the video hasn't rendered yet or due to cross-origin; ignore silently
+        }
     }
 
     function handleTimeUpdate() {
-        if (isDragging) return;
+        if (!videoElement) return;
+        // When scrubbing, ignore timeupdate events unless the video was already playing
+        // before the drag started — in that case allow updates so playback continues.
+        if (isDragging && !wasPlayingBeforeDrag) return;
         currentTime = videoElement.currentTime;
     }
 
     function handlePlayPause() {
+        if (!videoElement) return;
         if (isPlaying) {
             videoElement.pause();
         } else {
@@ -116,36 +191,64 @@
     }
 
     function seekTo(time: number) {
+        if (!videoElement) return;
         videoElement.currentTime = Math.max(0, Math.min(time, duration));
     }
 
     function pauseVideo() {
-        if (videoElement && !videoElement.paused) {
+        if (!videoElement) return;
+        if (!videoElement.paused) {
             videoElement.pause();
         }
         isPlaying = false;
     }
 
-    function handleTimelineMouseDown(event: MouseEvent) {
-        if (!isReady) return;
+    function handleTimelineMouseDown(event: PointerEvent | MouseEvent) {
+        if (!isReady || !videoElement) return;
         wasPlayingBeforeDrag = isPlaying;
         isDragging = true;
-        pauseVideo();
+        // Pause only if the video was not already playing. If it was, keep it playing
+        // so scrubbing continues to play in real-time during the drag.
+        if (!isPlaying) pauseVideo();
+        // Show preview canvas overlay and hide native video to reduce full-res rendering while scrubbing
+        if (previewCanvas) previewCanvas.style.display = 'block';
+        if (videoElement) videoElement.style.opacity = '0';
         const time = updateCurrentTimeFromMouse(event);
         if (time !== undefined) {
+            // Keep immediate seek so the initial frame is visible quickly
             seekTo(time);
+            // And schedule live updates as the user drags
+            scheduleSeek(time);
         }
     }
 
-    function handleMouseMove(event: MouseEvent) {
+    function handleMouseMove(event: PointerEvent | MouseEvent) {
         if (!isDragging || !isReady || !timelineContainer) return;
         updateCurrentTimeFromMouse(event);
+        // Schedule a throttled seek to update the preview while dragging
+        scheduleSeek(currentTime);
+        if (isDragging) drawPreviewFrame();
     }
 
     function handleMouseUp() {
-        if (!isDragging || !isReady) return;
+        if (!isDragging || !isReady || !videoElement) return;
         isDragging = false;
-        seekTo(currentTime);
+        // Flush any pending seek so the final frame is shown
+        if (seekTimer !== null) {
+            clearTimeout(seekTimer);
+            seekTimer = null;
+        }
+        if (desiredSeekTime !== null && videoElement) {
+            videoElement.currentTime = desiredSeekTime;
+            lastSeekMs = performance.now();
+            desiredSeekTime = null;
+        } else {
+            seekTo(currentTime);
+        }
+        // Hide preview canvas and restore native video opacity
+        if (previewCanvas) previewCanvas.style.display = 'none';
+        if (videoElement) videoElement.style.opacity = '';
+
         if (wasPlayingBeforeDrag) {
             videoElement?.play();
             isPlaying = true;
@@ -153,19 +256,52 @@
         wasPlayingBeforeDrag = false;
     }
 
-    function updateCurrentTimeFromMouse(event: MouseEvent) {
+    function updateCurrentTimeFromMouse(event: PointerEvent | MouseEvent) {
         const time = calculateTimeFromMouse(event);
         if (time === null) return;
         currentTime = time;
         return time;
     }
 
-    function calculateTimeFromMouse(event: MouseEvent) {
+    function calculateTimeFromMouse(event: PointerEvent | MouseEvent) {
         if (!timelineContainer) return null;
         const rect = timelineContainer.getBoundingClientRect();
         const x = event.clientX - rect.left;
         const rawTime = (x / rect.width) * duration;
         return Math.max(0, Math.min(rawTime, duration));
+    }
+
+    function scheduleSeek(time: number) {
+        desiredSeekTime = time;
+        const now = performance.now();
+        const timeSince = now - lastSeekMs;
+
+        if (timeSince >= MIN_SEEK_INTERVAL_MS) {
+            // Seek now on next rAF to allow the browser to batch rendering
+            if (seekTimer !== null) {
+                clearTimeout(seekTimer);
+                seekTimer = null;
+            }
+            requestAnimationFrame(() => {
+                if (desiredSeekTime !== null && videoElement) {
+                    videoElement.currentTime = desiredSeekTime;
+                    lastSeekMs = performance.now();
+                }
+            });
+            return;
+        }
+
+        // Otherwise, schedule a seek after the remaining interval
+        if (seekTimer !== null) return;
+        seekTimer = window.setTimeout(() => {
+            seekTimer = null;
+            requestAnimationFrame(() => {
+                if (desiredSeekTime !== null && videoElement) {
+                    videoElement.currentTime = desiredSeekTime;
+                    lastSeekMs = performance.now();
+                }
+            });
+        }, Math.max(0, MIN_SEEK_INTERVAL_MS - timeSince));
     }
 
     function handleTimelineClick(event: MouseEvent) {
@@ -279,11 +415,51 @@
         canvasElement.width = 800;
         canvasElement.height = 60;
         
-        // Draw video frame to canvas
-        videoElement.currentTime = duration / 2;
-        videoElement.addEventListener('seeked', () => {
-            ctx.drawImage(videoElement, 0, 0, canvasElement.width, canvasElement.height);
-        }, { once: true });
+        // Draw video frame to canvas, then restore the previous playback time and state
+        const canvasRef = canvasElement;
+        const videoRef = videoElement;
+        const prevTime = videoRef.currentTime || 0;
+        const wasPlaying = !videoRef.paused;
+        const thumbnailTime = Math.min(duration / 2, duration);
+        const restoreState = () => {
+            // Restore previous time and playing state after drawing
+            try {
+                videoRef.currentTime = prevTime;
+            } catch (e) {
+                // ignore
+            }
+            if (wasPlaying) videoRef.play();
+        };
+
+        const onSeeked = () => {
+            if (!canvasRef) {
+                restoreState();
+                return;
+            }
+            const ctx2 = canvasRef.getContext('2d');
+            if (!ctx2) {
+                restoreState();
+                return;
+            }
+            try {
+                ctx2.drawImage(videoRef, 0, 0, canvasRef.width, canvasRef.height);
+            } catch (err) {
+                // ignore draw errors
+            }
+            restoreState();
+        };
+
+        // If the video is already at the thumbnail time, just draw immediately
+        if (Math.abs(videoRef.currentTime - thumbnailTime) < 0.01) {
+            onSeeked();
+        } else {
+            videoRef.addEventListener('seeked', onSeeked, { once: true });
+            try {
+                videoRef.currentTime = thumbnailTime;
+            } catch (e) {
+                // ignore set currentTime errors
+            }
+        }
     }
 
     $: totalDuration = segments.reduce((sum, seg) => sum + (seg.end - seg.start), 0);
@@ -327,6 +503,8 @@
                 on:pause={() => isPlaying = false}
                 class="editor-video"
             ></video>
+                <!-- Preview overlay; hidden by default and shown while scrubbing -->
+                <canvas bind:this={previewCanvas} class="preview-canvas" style="display:none; pointer-events: none;"></canvas>
         </div>
         
         <div class="video-controls">
@@ -397,6 +575,7 @@
             bind:this={timelineContainer}
             on:click={handleTimelineClick}
             on:mousedown={handleTimelineMouseDown}
+            on:pointerdown={handleTimelineMouseDown}
             role="slider"
             tabindex="0"
             aria-label="Video timeline"
@@ -565,12 +744,31 @@
         border-bottom: 1px solid #27272a;
     }
 
+    /* Limit displayed video preview to 720p maximum to reduce rendering cost */
+    .video-frame {
+        max-width: 1280px;
+        max-height: 720px;
+        margin-left: auto;
+        margin-right: auto;
+    }
+
     .editor-video {
         width: 100%;
         height: 100%;
         display: block;
         object-fit: contain;
         background: #09090b;
+    }
+
+    .preview-canvas {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        z-index: 6;
+        pointer-events: none;
     }
 
     .video-controls {
