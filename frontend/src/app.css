@@ -1129,25 +1129,36 @@ select::-ms-expand {
 
 /* Scrollbar */
 .sidebar::-webkit-scrollbar,
-.main-content::-webkit-scrollbar {
+.main-content::-webkit-scrollbar,
+.settings-modal::-webkit-scrollbar,
+.modal-body::-webkit-scrollbar {
     width: 8px;
 }
 
 .sidebar::-webkit-scrollbar-track,
-.main-content::-webkit-scrollbar-track {
+.main-content::-webkit-scrollbar-track,
+.settings-modal::-webkit-scrollbar-track,
+.modal-body::-webkit-scrollbar-track {
     background: transparent;
 }
 
 .sidebar::-webkit-scrollbar-thumb,
-.main-content::-webkit-scrollbar-thumb {
+.main-content::-webkit-scrollbar-thumb,
+.settings-modal::-webkit-scrollbar-thumb,
+.modal-body::-webkit-scrollbar-thumb {
     background: var(--border);
     border-radius: 4px;
 }
 
 .sidebar::-webkit-scrollbar-thumb:hover,
-.main-content::-webkit-scrollbar-thumb:hover {
+.main-content::-webkit-scrollbar-thumb:hover,
+.settings-modal::-webkit-scrollbar-thumb:hover,
+.modal-body::-webkit-scrollbar-thumb:hover {
     background: var(--border-hover);
 }
+
+/* Firefox scrollbar styling */
+.settings-modal, .modal-body { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
 
 /* Selection */
 ::selection,

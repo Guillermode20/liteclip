@@ -58,6 +58,7 @@ namespace liteclip
             builder.Services.AddHttpClient();
             builder.Services.AddSingleton<FfmpegPathResolver>();
             builder.Services.AddSingleton<IFfmpegPathResolver>(sp => sp.GetRequiredService<FfmpegPathResolver>());
+            builder.Services.AddSingleton<FfmpegProbeService>();
 
             builder.Services.AddSingleton<VideoCompressionService>();
             builder.Services.AddSingleton<IVideoCompressionService>(sp => sp.GetRequiredService<VideoCompressionService>());
@@ -483,7 +484,28 @@ namespace liteclip
             })
             .WithName("RetryFfmpegDownload");
 
-            // Encoder detection endpoint removed: frontend no longer queries encoder capabilities
+            app.MapGet("/api/ffmpeg/encoders", async (HttpRequest request, FfmpegProbeService probe, FfmpegBootstrapper bootstrapper) =>
+            {
+                // ensure ffmpeg ready
+                try
+                {
+                    await bootstrapper.EnsureReadyAsync();
+                }
+                catch (Exception ex)
+                {
+                    return Results.Problem(title: "FFmpeg is still preparing", detail: ex.Message, statusCode: 503);
+                }
+
+                var verify = false;
+                if (request.Query.TryGetValue("verify", out var v))
+                {
+                    if (bool.TryParse(v.ToString(), out var b)) verify = b;
+                }
+
+                var encoders = await probe.GetEncodersAsync(verify);
+                return Results.Ok(encoders);
+            })
+            .WithName("GetFfmpegEncoders");
 
             // --- Robust Server Startup and Shutdown Logic ---
 

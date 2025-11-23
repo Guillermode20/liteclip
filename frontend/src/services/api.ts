@@ -3,6 +3,7 @@ import type {
     FfmpegStatusResponse,
     UserSettingsPayload
 } from '../types';
+import type { EncoderInfo } from '../types';
 
 const API_BASE = '/api';
 
@@ -28,6 +29,16 @@ export async function saveSettings(settings: UserSettingsPayload): Promise<UserS
 export async function getFfmpegStatus(): Promise<FfmpegStatusResponse> {
     const response = await fetch(`${API_BASE}/ffmpeg/status`);
     if (!response.ok) throw new Error(`FFmpeg status request failed (${response.status})`);
+    return response.json();
+}
+
+export async function getFfmpegEncoders(verify = false): Promise<EncoderInfo[]> {
+    const response = await fetch(`${API_BASE}/ffmpeg/encoders${verify ? '?verify=true' : ''}`);
+    if (!response.ok) {
+        let message = `Failed to fetch encoders (${response.status})`;
+        try { message = (await response.text()) || message; } catch { }
+        throw new Error(message);
+    }
     return response.json();
 }
 

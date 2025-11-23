@@ -84,3 +84,12 @@ export interface FfmpegStatusResponse {
     ready: boolean;
 }
 
+export interface EncoderInfo {
+    name: string;
+    description?: string | null;
+    isHardware: boolean;
+    isAvailable?: boolean | null;
+    notes?: string | null;
+}
+
+

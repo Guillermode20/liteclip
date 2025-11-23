@@ -1,8 +1,9 @@
 <script lang="ts">
-    import { createEventDispatcher } from 'svelte';
+    import { createEventDispatcher, onDestroy } from 'svelte';
     import type { CodecKey, ResolutionPreset, UserSettingsPayload } from '../types';
 
     const dispatch = createEventDispatcher();
+    import { ffmpegEncodersStore } from '../stores/ffmpegEncoders';
 
     export let open = false;
     export let settings: UserSettingsPayload | null = null;
@@ -20,9 +21,15 @@
     $: if (open) {
         localSettings = { ...defaultState, ...settings };
         if (open) {
-            // no encoder detection is performed client-side
+            // Encoder list is loaded on demand when the modal opens
+            ffmpegEncodersStore.load();
         }
     }
+
+    let encodersUnsub: () => void;
+    let ffmpegEncodersState = { encoders: [], loading: false, error: null } as any;
+    encodersUnsub = ffmpegEncodersStore.subscribe(state => (ffmpegEncodersState = state));
+    onDestroy(() => encodersUnsub());
 
 
     function handleClose() {
@@ -131,7 +138,32 @@
                         </label>
                     </div>
 
-                    <!-- Encoder detection removed from settings -->
+                    <div class="form-group">
+                        <div class="setting-label"><strong>available encoders</strong></div>
+                        {#if ffmpegEncodersState.loading}
+                            <div>loading encoders...</div>
+                        {:else if ffmpegEncodersState.error}
+                            <div class="helper-text">{ffmpegEncodersState.error} <button type="button" on:click={() => ffmpegEncodersStore.refresh()}>retry</button></div>
+                        {:else if ffmpegEncodersState.encoders.length === 0}
+                            <div class="helper-text">No encoders found on this system</div>
+                        {:else}
+                            <div class="encoder-tags-wrapper">
+                                <div class="encoder-tags">
+                                    {#each ffmpegEncodersState.encoders as enc}
+                                        <span class="encoder-tag {enc.isAvailable === false ? 'muted' : ''}" title={enc.description}>
+                                            {enc.name}
+                                            {#if enc.isHardware}
+                                                <span class="hw-badge">HW</span>
+                                            {/if}
+                                        </span>
+                                    {/each}
+                                </div>
+                                <div class="encoder-action-row">
+                                    <button type="button" class="action-btn primary verify-button" on:click={() => ffmpegEncodersStore.refresh(true)} aria-label="Verify encoders">Verify</button>
+                                </div>
+                            </div>
+                        {/if}
+                    </div>
                 </div>
 
                 <footer class="modal-footer">
@@ -156,13 +188,18 @@
     }
 
     .settings-modal {
-        width: 100%;
+        width: min(480px, 94vw);
         max-width: 480px;
+        height: min(520px, 92vh);
+        max-height: calc(100vh - 48px);
         background: #0f0f14;
         border: 1px solid #27272a;
         border-radius: 6px;
         box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
         animation: fadeIn 0.2s ease-out;
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
     }
 
     form {
@@ -170,6 +207,8 @@
         flex-direction: column;
         gap: 16px;
         padding: 16px;
+        flex: 1 1 auto; /* allow form to fill modal and enable body scrolling */
+        min-height: 0; /* necessary for proper flexbox overflow behavior */
     }
 
     .modal-header {
@@ -200,12 +239,70 @@
         display: flex;
         flex-direction: column;
         gap: 16px;
+        /* Let the modal body scroll when contents exceed modal height */
+        overflow-y: auto;
+        padding: 16px 16px 12px;
+        flex: 1 1 auto; /* ensure modal-body takes available height */
+        min-height: 0; /* ensure internal overflow works in flexbox */
     }
 
     .form-group {
         display: flex;
         flex-direction: column;
         gap: 8px;
+    }
+
+    .encoder-tags-wrapper {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+    }
+
+    .encoder-tags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        padding: 8px 4px;
+    }
+
+    .encoder-tag {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 8px;
+        border-radius: 999px;
+        background: var(--bg-overlay);
+        border: 1px solid var(--border);
+        color: var(--text);
+        font-size: 0.85rem;
+        font-weight: 600;
+    }
+    .encoder-tag.muted { opacity: 0.6; filter: grayscale(0.2); }
+
+    .hw-badge {
+        display: inline-block;
+        padding: 2px 6px;
+        border-radius: 999px;
+        background: rgba(34, 211, 238, 0.12);
+        color: #22d3ee;
+        font-weight: 700;
+        font-size: 0.7rem;
+        border: 1px solid rgba(34, 211, 238, 0.08);
+    }
+
+    .encoder-action-row {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        width: 100%;
+    }
+
+    .verify-button {
+        width: 100%;
+        display: inline-block;
+        padding: 10px 12px;
+        border-radius: 6px;
+        font-weight: 700;
     }
 
     .form-group label {
