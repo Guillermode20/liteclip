@@ -580,6 +580,7 @@ namespace liteclip
                 if (userSettings.StartMaximized)
                 {
                     window.SetMaximized(true);
+                    window.SetMinSize(800, 600); // set a reasonable minimum size when maximized
                 }
             }
             catch
