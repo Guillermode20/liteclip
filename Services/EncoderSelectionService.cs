@@ -9,23 +9,19 @@ public sealed class EncoderSelectionService : IEncoderSelectionService
     private readonly IFfmpegEncoderProbe _encoderProbe;
     private readonly ILogger<EncoderSelectionService> _logger;
 
-    // Hardware encoder preference order by codec
+    // Hardware encoder preference order by codec (Windows-only: NVENC, QSV, AMF)
     private static readonly string[] H264_ENCODER_PREFERENCE = new[]
     {
         "h264_nvenc",       // NVIDIA
         "h264_qsv",         // Intel QuickSync
-        "h264_videotoolbox",// MacOS Apple Silicon
-        "h264_amf",         // AMD
-        "h264_vaapi"        // Linux Generic
+        "h264_amf"          // AMD
     };
 
     private static readonly string[] H265_ENCODER_PREFERENCE = new[]
     {
         "hevc_nvenc",       // NVIDIA (Best balance of speed/quality)
         "hevc_qsv",         // Intel QuickSync (Excellent speed)
-        "hevc_videotoolbox",// MacOS Apple Silicon (Fast)
-        "hevc_amf",         // AMD (Fast, requires careful tuning)
-        "hevc_vaapi"        // Linux Generic
+        "hevc_amf"          // AMD (Fast, requires careful tuning)
     };
 
     private static readonly string H264_FALLBACK = "libx264";
@@ -65,8 +61,6 @@ public sealed class EncoderSelectionService : IEncoderSelectionService
         var encoderLower = encoderName.ToLowerInvariant();
         return encoderLower.Contains("nvenc") || 
                encoderLower.Contains("qsv") || 
-               encoderLower.Contains("amf") || 
-               encoderLower.Contains("videotoolbox") || 
-               encoderLower.Contains("vaapi");
+               encoderLower.Contains("amf");
     }
 }

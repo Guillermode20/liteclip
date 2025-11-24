@@ -232,41 +232,6 @@ public static class EncodingModeConfigs
             }
         ),
 
-        // --- H.264 / VideoToolbox (MacOS) ---
-        new EncodingModeConfig(
-            CodecKey: "h264",
-            EncoderKey: "h264_videotoolbox",
-            Mode: EncodingMode.Fast,
-            DisplayName: "H.264 VideoToolbox Fast",
-            Description: "Apple Silicon H.264 tuned for speed.",
-            MaxRateMultiplier: 1.0,
-            MinRateMultiplier: 1.0,
-            BufferMultiplier: 1.0,
-            VideoArgs: new[]
-            {
-                "-pix_fmt", "yuv420p",
-                "-g", "60",
-                "-bf", "2"
-            }
-        ),
-        new EncodingModeConfig(
-            CodecKey: "h264",
-            EncoderKey: "h264_videotoolbox",
-            Mode: EncodingMode.Quality,
-            DisplayName: "H.264 VideoToolbox Quality",
-            Description: "Apple Silicon H.264 tuned for quality.",
-            MaxRateMultiplier: 1.0,
-            MinRateMultiplier: 1.0,
-            BufferMultiplier: 1.0,
-            VideoArgs: new[]
-            {
-                "-pix_fmt", "yuv420p",
-                "-g", "60",
-                "-bf", "3",
-                "-profile:v", "high"
-            }
-        ),
-
         // --- H.264 / Wildcard ---
         new EncodingModeConfig(
             CodecKey: "h264",
@@ -485,41 +450,6 @@ public static class EncodingModeConfigs
                 "-spatial-aq", "2",
                 "-profile:v", "main",
                 "-no-scenecut", "1"
-            }
-        ),
-
-        // --- H.265 / VideoToolbox (MacOS) ---
-        new EncodingModeConfig(
-            CodecKey: "h265",
-            EncoderKey: "hevc_videotoolbox",
-            Mode: EncodingMode.Fast,
-            DisplayName: "H.265 VideoToolbox Fast",
-            Description: "Apple Silicon H.265 tuned for speed.",
-            MaxRateMultiplier: 1.0,
-            MinRateMultiplier: 1.0,
-            BufferMultiplier: 1.0,
-            VideoArgs: new[]
-            {
-                "-pix_fmt", "yuv420p",
-                "-tag:v", "hvc1",
-                "-g", "60"
-            }
-        ),
-        new EncodingModeConfig(
-            CodecKey: "h265",
-            EncoderKey: "hevc_videotoolbox",
-            Mode: EncodingMode.Quality,
-            DisplayName: "H.265 VideoToolbox Quality",
-            Description: "Apple Silicon H.265 tuned for quality.",
-            MaxRateMultiplier: 1.0,
-            MinRateMultiplier: 1.0,
-            BufferMultiplier: 1.0,
-            VideoArgs: new[]
-            {
-                "-pix_fmt", "yuv420p",
-                "-tag:v", "hvc1",
-                "-g", "60",
-                "-preset", "quality"
             }
         ),
 

@@ -74,9 +74,6 @@ Desktop.ini
 Icon
 ._*
 
-# Linux
-*~
-
 # Entity Framework Core
 *.db
 *.db-shm
@@ -95,20 +92,12 @@ coverage/
 # Publishing
 publish/
 publish-win/
-publish-linux/
 *.publishproj
 *.pubxml
 
 # Build outputs (keep directory, ignore contents except .gitkeep)
 dist/*
 !dist/.gitkeep
-
-# AppImage build artifacts
-AppDir/
-appimagetool-*.AppImage
-
-# RPM build artifacts
-*.tar.gz
 
 # Docker
 .dockerignore

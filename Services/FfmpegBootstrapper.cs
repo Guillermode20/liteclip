@@ -153,8 +153,8 @@ public class FfmpegBootstrapper
 
             Directory.CreateDirectory(executablesDirectory);
 
-            var ffmpegName = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "ffmpeg.exe" : "ffmpeg";
-            var ffprobeName = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "ffprobe.exe" : "ffprobe";
+            var ffmpegName = "ffmpeg.exe";
+            var ffprobeName = "ffprobe.exe";
 
             var ffmpegPath = Path.Combine(executablesDirectory, ffmpegName);
             var ffprobePath = Path.Combine(executablesDirectory, ffprobeName);
@@ -244,11 +244,6 @@ public class FfmpegBootstrapper
     private static void GrantUnixPermissionsIfNeeded(string path)
     {
         if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
-        {
-            return;
-        }
-
-        if (!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS())
         {
             return;
         }

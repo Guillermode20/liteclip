@@ -17,7 +17,7 @@ ever tried to send a video on discord, whatsapp, or email only to be told "file 
 - **smart compression**: uses advanced technology to keep your video looking crisp, even at small sizes.
 - **audio control**: remove sound with one click to save even more space.
 - **private & offline**: runs entirely on your computer. no uploading to sketchy websites.
-- **cross-platform**: works on windows, mac, and linux.
+- **windows-native**: currently built and shipped for windows.
 
 ## how to use
 
