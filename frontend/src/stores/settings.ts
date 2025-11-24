@@ -1,17 +1,10 @@
 import { writable } from 'svelte/store';
 import type { UserSettingsPayload } from '../types';
 import { getSettings, saveSettings as apiSaveSettings } from '../services/api';
-
-const fallbackSettings: UserSettingsPayload = {
-    defaultCodec: 'quality',
-    defaultResolution: 'auto',
-    defaultMuteAudio: false,
-    defaultTargetSizeMb: 25,
-    checkForUpdatesOnLaunch: true
-};
+import { FALLBACK_SETTINGS } from '../lib/constants';
 
 function createSettingsStore() {
-    const { subscribe, set, update } = writable<UserSettingsPayload>(fallbackSettings);
+    const { subscribe, set, update } = writable<UserSettingsPayload>(FALLBACK_SETTINGS);
 
     return {
         subscribe,
@@ -21,7 +14,7 @@ function createSettingsStore() {
                 set(settings);
             } catch (error) {
                 console.warn('Failed to load settings, using fallback', error);
-                set(fallbackSettings);
+                set(FALLBACK_SETTINGS);
             }
         },
         save: async (newSettings: UserSettingsPayload) => {
@@ -34,7 +27,7 @@ function createSettingsStore() {
                 throw error;
             }
         },
-        reset: () => set(fallbackSettings)
+        reset: () => set(FALLBACK_SETTINGS)
     };
 }
 

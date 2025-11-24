@@ -8,7 +8,7 @@
     import Header from './components/Header.svelte';
     import SettingsModal from './components/SettingsModal.svelte';
     import VideoEditor from './VideoEditor.svelte';
-    import { codecDetails, createDefaultOutputMetadata } from './lib/constants';
+    import { codecDetails, createDefaultOutputMetadata, FALLBACK_SETTINGS } from './lib/constants';
     import type {
         CodecKey,
         CompressionStatusResponse,
@@ -91,14 +91,6 @@
     let ffmpegStatusInterval: number | null = null;
     let ffmpegState: FfmpegStatusResponse['state'] = 'idle';
     let ffmpegRetrying = false;
-
-    const fallbackSettings: UserSettingsPayload = {
-        defaultCodec: 'quality',
-        defaultResolution: 'auto',
-        defaultMuteAudio: false,
-        defaultTargetSizeMb: 25,
-        checkForUpdatesOnLaunch: true
-    };
 
     let outputMetadata: OutputMetadata = createDefaultOutputMetadata();
 
@@ -307,7 +299,7 @@
         } catch (error) {
             console.warn('Settings fetch failed', error);
         } finally {
-            userSettings = fetched ?? { ...fallbackSettings };
+            userSettings = fetched ?? { ...FALLBACK_SETTINGS };
             applyUserSettings(userSettings);
         }
     }
@@ -364,7 +356,7 @@
     // logo error handling moved to Header component
 
     function applyUserSettings(settings: UserSettingsPayload | null) {
-        const effective = settings ?? fallbackSettings;
+        const effective = settings ?? FALLBACK_SETTINGS;
         codecSelectValue = effective.defaultCodec;
         updateCodecHelper();
         resolutionPreset = effective.defaultResolution;

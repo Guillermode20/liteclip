@@ -1,4 +1,4 @@
-import type { CodecDetailsMap, OutputMetadata } from '../types';
+import type { CodecDetailsMap, OutputMetadata, UserSettingsPayload } from '../types';
 
 export const codecDetails: CodecDetailsMap = {
     fast: {
@@ -10,6 +10,14 @@ export const codecDetails: CodecDetailsMap = {
         container: 'mp4'
     },
     // NOTE: A more aggressive encoding mode was removed from the frontend UI due to performance and compatibility concerns.
+};
+
+export const FALLBACK_SETTINGS: UserSettingsPayload = {
+    defaultCodec: 'quality',
+    defaultResolution: 'auto',
+    defaultMuteAudio: false,
+    defaultTargetSizeMb: 25,
+    checkForUpdatesOnLaunch: true
 };
 
 export function createDefaultOutputMetadata(): OutputMetadata {
