@@ -64,15 +64,19 @@ namespace liteclip
             builder.Services.AddSingleton<IFfmpegRunner, FfmpegProcessRunner>();
             builder.Services.AddSingleton<FfmpegProbeService>();
 
+            // New encoder services
+            builder.Services.AddSingleton<IFfmpegEncoderProbe, FfmpegEncoderProbe>();
+            builder.Services.AddSingleton<IEncoderSelectionService, EncoderSelectionService>();
+
             builder.Services.AddSingleton<ICompressionPlanner, DefaultCompressionPlanner>();
             builder.Services.AddSingleton<IJobStore, InMemoryJobStore>();
 
             builder.Services.AddSingleton<VideoCompressionService>();
             builder.Services.AddSingleton<IVideoCompressionService>(sp => sp.GetRequiredService<VideoCompressionService>());
 
-            // Compression strategies and factory
-            builder.Services.AddSingleton<ICompressionStrategy, H264Strategy>();
-            builder.Services.AddSingleton<ICompressionStrategy, H265Strategy>();
+            // Compression strategies and factory - now depend on encoder selection service
+            builder.Services.AddSingleton<ICompressionStrategy>(sp => new H264Strategy(sp.GetRequiredService<IEncoderSelectionService>()));
+            builder.Services.AddSingleton<ICompressionStrategy>(sp => new H265Strategy(sp.GetRequiredService<IEncoderSelectionService>()));
             builder.Services.AddSingleton<ICompressionStrategyFactory, CompressionStrategyFactory>();
 
             builder.Services.AddHostedService<JobCleanupService>();

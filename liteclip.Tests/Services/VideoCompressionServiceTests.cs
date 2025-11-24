@@ -26,10 +26,11 @@ public class VideoCompressionServiceTests
 
         var logger = new NullLogger<VideoCompressionService>();
         var ffmpegResolver = new FfmpegPathResolver(new NullLogger<FfmpegPathResolver>(), config);
+        var encoderSelectionService = new MockEncoderSelectionService();
         var strategyFactory = new CompressionStrategyFactory(new ICompressionStrategy[]
         {
-            new H264Strategy(),
-            new H265Strategy()
+            new H264Strategy(encoderSelectionService),
+            new H265Strategy(encoderSelectionService)
         });
 
         var planner = new DefaultCompressionPlanner();
@@ -61,5 +62,19 @@ public class VideoCompressionServiceTests
                 StandardError = string.Empty
             });
         }
+    }
+
+    // Mock implementation for testing
+    private class MockEncoderSelectionService : IEncoderSelectionService
+    {
+        public string GetBestH264Encoder() => "libx264";
+        public string GetBestH265Encoder() => "libx265";
+        public string GetBestEncoder(string codecKey) => codecKey.ToLowerInvariant() switch
+        {
+            "h264" => "libx264",
+            "h265" or "hevc" => "libx265",
+            _ => throw new ArgumentException($"Unsupported codec: {codecKey}")
+        };
+        public bool IsHardwareEncoder(string encoderName) => false;
     }
 }

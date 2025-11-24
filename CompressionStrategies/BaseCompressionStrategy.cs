@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Linq;
 using liteclip.Services;
 
@@ -12,9 +11,13 @@ namespace liteclip.CompressionStrategies;
 /// </summary>
 public abstract class BaseCompressionStrategy : ICompressionStrategy
 {
-    // Probe removed - encoder detection is now runtime-only
-    protected string? _detectedEncoder;
-    protected bool _encoderDetected = false;
+    private readonly IEncoderSelectionService _encoderSelectionService;
+    private string? _cachedEncoder;
+
+    protected BaseCompressionStrategy(IEncoderSelectionService encoderSelectionService)
+    {
+        _encoderSelectionService = encoderSelectionService ?? throw new ArgumentNullException(nameof(encoderSelectionService));
+    }
 
     public abstract string CodecKey { get; }
     public abstract string OutputExtension { get; }
@@ -23,101 +26,13 @@ public abstract class BaseCompressionStrategy : ICompressionStrategy
     public abstract string AudioCodec { get; }
     public abstract int AudioBitrateKbps { get; }
 
-    protected BaseCompressionStrategy()
-    {
-        // noop
-    }
-
-    /// <summary>
-    /// Returns the list of encoders to try in order of preference.
-    /// </summary>
-    protected abstract string[] GetEncodersToTry();
-
-    /// <summary>
-    /// Returns the fallback software encoder name.
-    /// </summary>
-    protected abstract string GetFallbackEncoder();
-
     protected virtual string GetBestEncoder()
     {
-        if (_encoderDetected)
-            return _detectedEncoder ?? GetFallbackEncoder();
-
-        _encoderDetected = true;
-
-        var encodersToTry = GetEncodersToTry();
-
-            foreach (var encoder in encodersToTry)
+        if (_cachedEncoder == null)
         {
-                // Runtime check
-                if (IsEncoderAvailable(encoder))
-            {
-                _detectedEncoder = encoder;
-                return encoder;
-            }
+            _cachedEncoder = _encoderSelectionService.GetBestEncoder(CodecKey);
         }
-
-        // Fallback to software
-        _detectedEncoder = GetFallbackEncoder();
-        return _detectedEncoder;
-    }
-
-    protected virtual bool IsEncoderAvailable(string encoderName)
-    {
-        try
-        {
-            // Try two more robust tests before falling back to a minimal one:
-            // 1) testsrc with NV12 pix_fmt, reasonable resolution/frame-rate and GOP (-g)
-            // 2) fallback to the older minimal color test if the first fails
-            var attempts = new[]
-            {
-                // Use testsrc (video test signal) and set NV12 pixel format which AMF expects
-                $"-loglevel error -f lavfi -i testsrc=duration=0.5:size=1280x720:rate=30 -pix_fmt nv12 -c:v {encoderName} -g 60 -b:v 2000k -bf 0 -f null -",
-                // Fallback minimal test (keeps previous behavior)
-                $"-f lavfi -i color=black:s=64x64:d=0.1 -c:v {encoderName} -f null -"
-            };
-
-            foreach (var args in attempts)
-            {
-                var psi = new ProcessStartInfo
-                {
-                    FileName = "ffmpeg",
-                    Arguments = args,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                };
-
-                using var process = Process.Start(psi);
-                if (process == null) continue;
-
-                // Read stderr (some encoders print diagnostics there)
-                var error = process.StandardError.ReadToEnd();
-                process.WaitForExit();
-
-                // If exit code is zero, the encoder initialized successfully
-                if (process.ExitCode == 0)
-                {
-                    return true;
-                }
-
-                // If the error clearly indicates the encoder is unavailable, break early
-                var errLower = error.ToLowerInvariant();
-                if (errLower.Contains("not available") || errLower.Contains("cannot load") || errLower.Contains("no nvenc") )
-                {
-                    return false;
-                }
-
-                // Otherwise try the next attempt (the fallback may succeed for some drivers)
-            }
-
-            return false;
-        }
-        catch
-        {
-            return false;
-        }
+        return _cachedEncoder;
     }
 
     public virtual IEnumerable<string> BuildVideoArgs(double videoBitrateKbps, EncodingMode mode)
@@ -208,7 +123,7 @@ public abstract class BaseCompressionStrategy : ICompressionStrategy
         // They use internal rate control or specific flags (like -multipass qres for NVENC).
         // If we are using a hardware encoder, we should not return standard pass flags.
         var encoder = GetBestEncoder();
-        var isHardware = encoder.Contains("nvenc") || encoder.Contains("qsv") || encoder.Contains("amf") || encoder.Contains("videotoolbox") || encoder.Contains("vaapi");
+        var isHardware = _encoderSelectionService.IsHardwareEncoder(encoder);
         
         if (isHardware)
         {

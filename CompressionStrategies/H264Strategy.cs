@@ -12,24 +12,7 @@ public class H264Strategy : BaseCompressionStrategy
     public override string AudioCodec => "aac";
     public override int AudioBitrateKbps => 128;
 
-    public H264Strategy() : base()
+    public H264Strategy(IEncoderSelectionService encoderSelectionService) : base(encoderSelectionService)
     {
-    }
-
-    protected override string[] GetEncodersToTry()
-    {
-        return new[] 
-        { 
-            "h264_nvenc",       // NVIDIA
-            "h264_qsv",         // Intel QuickSync
-            "h264_videotoolbox",// MacOS Apple Silicon
-            "h264_amf",         // AMD
-            "h264_vaapi"        // Linux Generic
-        };
-    }
-
-    protected override string GetFallbackEncoder()
-    {
-        return "libx264";
     }
 }

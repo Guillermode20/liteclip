@@ -64,16 +64,16 @@ Rough, high-level checklist to gradually de-fragment the backend. Tweak ordering
 
 ## Phase 4 – Hardware Encoder Detection & Strategy Cleanup
 
-- [ ] Centralize hardware encoder probing
-  - [ ] Move encoder availability checks out of `BaseCompressionStrategy`
-  - [ ] Use/extend `FfmpegCapabilityProbe` (or create `IFfmpegEncoderProbe`)
-  - [ ] Cache probe results for the process lifetime
-- [ ] Create an `IEncoderSelectionService`
-  - [ ] Encapsulate policy: NVENC → QSV → VideoToolbox → AMF → software
-  - [ ] Strategy classes ask this service for the best encoder per codec
-- [ ] Keep strategies focused on argument construction
-  - [ ] `BuildVideoArgs` uses `EncodingModeConfigs` + `CompressionPlan`
-  - [ ] No direct process spawning or probing in strategies
+- [x] Centralize hardware encoder probing
+  - [x] Move encoder availability checks out of `BaseCompressionStrategy`
+  - [x] Use/extend `FfmpegCapabilityProbe` (or create `IFfmpegEncoderProbe`)
+  - [x] Cache probe results for the process lifetime
+- [x] Create an `IEncoderSelectionService`
+  - [x] Encapsulate policy: NVENC → QSV → VideoToolbox → AMF → software
+  - [x] Strategy classes ask this service for the best encoder per codec
+- [x] Keep strategies focused on argument construction
+  - [x] `BuildVideoArgs` uses `EncodingModeConfigs` + `CompressionPlan`
+  - [x] No direct process spawning or probing in strategies
 
 ---
 
