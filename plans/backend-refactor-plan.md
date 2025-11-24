@@ -6,18 +6,18 @@ Rough, high-level checklist to gradually de-fragment the backend. Tweak ordering
 
 ## Phase 1 – Program.cs & Endpoints
 
-- [ ] Extract compression-related endpoints into `Endpoints/CompressionEndpoints.cs`
-  - [ ] Map `/api/compress`
-  - [ ] Map `/api/status/{jobId}`
-  - [ ] Map `/api/download/{jobId}`
-- [ ] Extract settings & FFmpeg status endpoints into dedicated endpoint modules
-  - [ ] `Endpoints/SettingsEndpoints.cs` for `/api/settings`
-  - [ ] `Endpoints/SystemEndpoints.cs` (or similar) for `/api/ffmpeg/status` and `/api/update`
-- [ ] Keep `Program.cs` focused on:
-  - [ ] Service registration (DI)
-  - [ ] Building the `WebApplication`
-  - [ ] Mapping endpoint groups via extension methods
-  - [ ] Photino window + Kestrel startup wiring only
+- [x] Extract compression-related endpoints into `Endpoints/CompressionEndpoints.cs`
+  - [x] Map `/api/compress`
+  - [x] Map `/api/status/{jobId}`
+  - [x] Map `/api/download/{jobId}`
+- [x] Extract settings & FFmpeg status endpoints into dedicated endpoint modules
+  - [x] `Endpoints/SettingsEndpoints.cs` for `/api/settings`
+  - [x] `Endpoints/SystemEndpoints.cs` (or similar) for `/api/ffmpeg/status` and `/api/update`
+- [x] Keep `Program.cs` focused on:
+  - [x] Service registration (DI)
+  - [x] Building the `WebApplication`
+  - [x] Mapping endpoint groups via extension methods
+  - [x] Photino window + Kestrel startup wiring only
 
 ---
 

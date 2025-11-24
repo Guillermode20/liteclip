@@ -11,8 +11,7 @@ namespace liteclip.Services;
 
 public class VideoCompressionService : IVideoCompressionService
 {
-    private readonly ConcurrentDictionary<string, JobMetadata> _jobs = new();
-    private readonly ConcurrentQueue<string> _jobQueue = new();
+    private readonly IJobStore _jobStore;
     private readonly SemaphoreSlim _concurrencyLimiter;
     private readonly Task? _startupCleanupTask;
     private readonly string _tempUploadPath;
@@ -20,14 +19,17 @@ public class VideoCompressionService : IVideoCompressionService
     private readonly ILogger<VideoCompressionService> _logger;
     private readonly FfmpegPathResolver _ffmpegResolver;
     private readonly ICompressionStrategyFactory _strategyFactory;
+    private readonly ICompressionPlanner _planner;
     private readonly int _maxConcurrentJobs;
     private readonly int _maxQueueSize;
 
-    public VideoCompressionService(IConfiguration configuration, ILogger<VideoCompressionService> logger, FfmpegPathResolver ffmpegResolver, ICompressionStrategyFactory strategyFactory)
+    public VideoCompressionService(IConfiguration configuration, ILogger<VideoCompressionService> logger, FfmpegPathResolver ffmpegResolver, ICompressionStrategyFactory strategyFactory, ICompressionPlanner planner, IJobStore jobStore)
     {
         _logger = logger;
         _ffmpegResolver = ffmpegResolver;
         _strategyFactory = strategyFactory;
+        _planner = planner;
+        _jobStore = jobStore;
         
         // Use AppData for temp directories to avoid permission issues in Program Files
         var appDataDirectory = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
@@ -101,7 +103,7 @@ public class VideoCompressionService : IVideoCompressionService
         // Log job header and request details
         _logger.LogJobHeader("RECEIVED", jobId, videoFile.FileName);
 
-        var normalizedRequest = NormalizeRequest(request);
+        var normalizedRequest = _planner.NormalizeRequest(request);
         _logger.LogCompressionRequest(jobId, 
             normalizedRequest.Mode.ToString(),
             normalizedRequest.TargetSizeMb, 
@@ -119,7 +121,6 @@ public class VideoCompressionService : IVideoCompressionService
         // Calculate bitrates for compression (only if we're actually compressing)
         double? computedTargetKbps = null;
         double? computedVideoKbps = null;
-        BitratePlan? bitratePlan = null;
         // Cache ffprobe dimensions once per job to avoid spinning up duplicate processes later in the pipeline.
         VideoDimensions? probedDims = null;
 
@@ -127,40 +128,37 @@ public class VideoCompressionService : IVideoCompressionService
         {
             // Even if we end up skipping adaptive scaling, downstream encoding still needs the source dimensions.
             probedDims = await ProbeVideoDimensionsAsync(artifacts.PreparedInputPath);
-        }
 
-        if (!skipCompression &&
-            normalizedRequest.TargetSizeMb.HasValue &&
-            normalizedRequest.SourceDuration.HasValue &&
-            normalizedRequest.SourceDuration.Value > 0)
-        {
-            bitratePlan = CalculateBitratePlan(normalizedRequest, codecConfig);
+            var codecContext = new CodecPlanningContext(
+                codecConfig.Key,
+                codecConfig.FileExtension,
+                codecConfig.AudioBitrateKbps);
 
-            if (bitratePlan != null)
+            var plan = _planner.BuildPlan(
+                jobId,
+                normalizedRequest,
+                codecContext,
+                probedDims?.Width,
+                probedDims?.Height);
+
+            if (plan != null)
             {
-                computedTargetKbps = bitratePlan.TotalKbps;
-                computedVideoKbps = bitratePlan.VideoKbps;
+                computedTargetKbps = plan.TotalKbps;
+                computedVideoKbps = plan.VideoKbps;
 
-                _logger.LogBitratePlan(artifacts.JobId, 
-                    normalizedRequest.TargetSizeMb.Value,
-                    normalizedRequest.SourceDuration.Value,
-                    bitratePlan.VideoKbps,
-                    codecConfig.AudioBitrateKbps,
-                    bitratePlan.TotalKbps);
-
-                // Auto-resolution adjustment: Downscale if bitrate is too low for the resolution
-                // But only if the user hasn't explicitly requested "original" resolution (100% scale)
-                if (normalizedRequest.ScalePercent != 100 && probedDims != null)
+                if (computedTargetKbps.HasValue &&
+                    computedVideoKbps.HasValue &&
+                    normalizedRequest.TargetSizeMb.HasValue &&
+                    normalizedRequest.SourceDuration.HasValue &&
+                    normalizedRequest.SourceDuration.Value > 0)
                 {
-                    var optimalScale = CalculateOptimalScale(probedDims.Width, probedDims.Height, bitratePlan.VideoKbps, normalizedRequest.TargetFps ?? 30, normalizedRequest.Codec);
-                    var currentScale = normalizedRequest.ScalePercent ?? 100;
-                    
-                    if (optimalScale < currentScale)
-                    {
-                        _logger.LogInformation("Auto-scaling triggered for job {JobId}: Reducing resolution to {Scale}% to maintain quality (Bitrate: {Bitrate}kbps, Input: {W}x{H})", 
-                            artifacts.JobId, optimalScale, bitratePlan.VideoKbps, probedDims.Width, probedDims.Height);
-                        normalizedRequest.ScalePercent = optimalScale;
-                    }
+                    _logger.LogBitratePlan(
+                        artifacts.JobId,
+                        normalizedRequest.TargetSizeMb.Value,
+                        normalizedRequest.SourceDuration.Value,
+                        computedVideoKbps.Value,
+                        codecConfig.AudioBitrateKbps,
+                        computedTargetKbps.Value);
                 }
             }
         }
@@ -178,8 +176,8 @@ public class VideoCompressionService : IVideoCompressionService
         var requestSnapshot = CloneRequest(normalizedRequest);
         var compressionJob = BuildQueuedJob(artifacts, requestSnapshot, codecConfig, computedTargetKbps, computedVideoKbps, enableTwoPass);
 
-        _jobs[jobId] = compressionJob;
-        _jobQueue.Enqueue(jobId);
+        _jobStore.AddOrUpdate(compressionJob);
+        _jobStore.Enqueue(jobId);
 
         _ = Task.Run(async () => await ProcessQueueAsync(jobId, normalizedRequest, codecConfig, probedDims));
 
@@ -334,7 +332,7 @@ public class VideoCompressionService : IVideoCompressionService
             job.OutputSizeBytes = new FileInfo(artifacts.OutputPath).Length;
         }
 
-        _jobs[artifacts.JobId] = job;
+        _jobStore.AddOrUpdate(job);
         _logger.LogJobCompletion(artifacts.JobId, true, "COMPLETED (NO COMPRESSION)", job.OutputSizeBytes / (1024.0 * 1024.0), true);
 
         return artifacts.JobId;
@@ -366,7 +364,7 @@ public class VideoCompressionService : IVideoCompressionService
 
     private void EnsureQueueCapacity()
     {
-        if (_jobQueue.Count >= _maxQueueSize)
+        if (_jobStore.GetQueueLength() >= _maxQueueSize)
         {
             throw new InvalidOperationException($"Queue is full. Maximum queue size is {_maxQueueSize}. Please try again later.");
         }
@@ -380,7 +378,7 @@ public class VideoCompressionService : IVideoCompressionService
             await _concurrencyLimiter.WaitAsync();
 
             // Check if job was cancelled while waiting
-            if (!_jobs.TryGetValue(jobId, out var job) || job.Status == "cancelled")
+            if (!_jobStore.TryGet(jobId, out var job) || job == null || job.Status == "cancelled")
             {
                 _logger.LogInformation("Job {JobId} was cancelled before processing started", jobId);
                 return;
@@ -402,7 +400,7 @@ public class VideoCompressionService : IVideoCompressionService
 
     public bool CancelJob(string jobId)
     {
-        if (!_jobs.TryGetValue(jobId, out var job))
+        if (!_jobStore.TryGet(jobId, out var job) || job == null)
         {
             return false;
         }
@@ -453,7 +451,7 @@ public class VideoCompressionService : IVideoCompressionService
 
     public (bool Success, string? Error) RetryJob(string jobId)
     {
-        if (!_jobs.TryGetValue(jobId, out var job))
+        if (!_jobStore.TryGet(jobId, out var job) || job == null)
         {
             return (false, "Job not found");
         }
@@ -511,7 +509,7 @@ public class VideoCompressionService : IVideoCompressionService
             _logger.LogWarning(ex, "Failed to delete previous output for job {JobId}", jobId);
         }
 
-        _jobQueue.Enqueue(jobId);
+        _jobStore.Enqueue(jobId);
         var codecConfig = GetCodecConfig(job.Codec);
         _ = Task.Run(async () => await ProcessQueueAsync(jobId, replayRequest, codecConfig, null));
 
@@ -520,25 +518,7 @@ public class VideoCompressionService : IVideoCompressionService
 
     public int GetQueuePosition(string jobId)
     {
-        if (!_jobs.TryGetValue(jobId, out var job) || job.Status != "queued")
-        {
-            return 0;
-        }
-
-        var position = 1;
-        foreach (var queuedJobId in _jobQueue)
-        {
-            if (queuedJobId == jobId)
-            {
-                return position;
-            }
-            if (_jobs.TryGetValue(queuedJobId, out var queuedJob) && queuedJob.Status == "queued")
-            {
-                position++;
-            }
-        }
-
-        return 0;
+        return _jobStore.GetQueuePosition(jobId);
     }
 
         /// <summary>
@@ -1317,13 +1297,13 @@ public class VideoCompressionService : IVideoCompressionService
 
     public JobMetadata? GetJob(string jobId)
     {
-        _jobs.TryGetValue(jobId, out var job);
+        _jobStore.TryGet(jobId, out var job);
         return job;
     }
 
     public IEnumerable<JobMetadata> GetAllJobsInternal()
     {
-        return _jobs.Values.ToList();
+        return _jobStore.GetAll();
     }
 
     /// <summary>
@@ -1337,7 +1317,7 @@ public class VideoCompressionService : IVideoCompressionService
 
     public void CleanupJob(string jobId)
     {
-        if (_jobs.TryRemove(jobId, out var job))
+        if (_jobStore.TryRemove(jobId, out var job) && job != null)
         {
             // Ensure process is terminated first
             TerminateJobProcess(job);
@@ -1369,7 +1349,7 @@ public class VideoCompressionService : IVideoCompressionService
     {
         _logger.LogInformation("Cancelling all active jobs...");
         
-        var jobsSnapshot = _jobs.Values.ToList();
+        var jobsSnapshot = _jobStore.GetAll().ToList();
         foreach (var job in jobsSnapshot)
         {
             if (job.Status == "queued" || job.Status == "processing")
@@ -1424,61 +1404,6 @@ public class VideoCompressionService : IVideoCompressionService
                 }
             }
         }
-    }
-
-        private static CompressionRequest NormalizeRequest(CompressionRequest request)
-    {
-        // Derive unified encoding mode from flags first
-        var mode = DeriveEncodingMode(request.UseQualityMode);
-        
-        // Determine codec based on the derived encoding mode
-        // Fast → H.264, Quality → H.265
-        var codec = mode switch
-        {
-            EncodingMode.Quality => "h265",
-            _ => "h264"  // Default to Fast (H.264)
-        };
-
-        var normalized = new CompressionRequest
-        {
-            Codec = codec,
-            ScalePercent = request.ScalePercent,
-            TargetFps = request.TargetFps,
-            TargetSizeMb = request.TargetSizeMb,
-            SourceDuration = request.SourceDuration,
-            Segments = NormalizeSegments(request.Segments, request.SourceDuration),
-            SkipCompression = request.SkipCompression,
-            MuteAudio = request.MuteAudio,
-            UseQualityMode = request.UseQualityMode,
-            Mode = mode
-        };
-
-        if (normalized.ScalePercent.HasValue)
-        {
-            normalized.ScalePercent = Math.Clamp(normalized.ScalePercent.Value, 10, 100);
-        }
-
-        if (normalized.TargetSizeMb.HasValue && normalized.TargetSizeMb.Value <= 0)
-        {
-            normalized.TargetSizeMb = null;
-        }
-
-        if (normalized.SourceDuration.HasValue && normalized.SourceDuration.Value <= 0)
-        {
-            normalized.SourceDuration = null;
-        }
-
-        // Normalize target framerate: clamp to reasonable range and default to 30 if not provided
-        if (normalized.TargetFps.HasValue)
-        {
-            normalized.TargetFps = Math.Clamp(normalized.TargetFps.Value, 1, 240);
-        }
-        else
-        {
-            normalized.TargetFps = 30;
-        }
-
-        return normalized;
     }
 
     private static CodecConfig GetCodecConfig(string codec)
@@ -1669,102 +1594,6 @@ public class VideoCompressionService : IVideoCompressionService
 
         var correction = targetSizeMb / actualSizeMb;
         return Math.Max(60, currentVideoKbps * correction * 0.98);
-    }
-
-    private BitratePlan? CalculateBitratePlan(CompressionRequest request, CodecConfig codecConfig)
-    {
-        if (!request.TargetSizeMb.HasValue || request.TargetSizeMb.Value <= 0 ||
-            !request.SourceDuration.HasValue || request.SourceDuration.Value <= 0)
-        {
-            return null;
-        }
-
-        // TikTok‑style tuning: be more aggressive on size safety, but
-        // free up as much payload as possible for texture/edges.
-        // We still err on the side of staying under target, but bias
-        // budgets to video instead of container overhead.
-
-        // Slightly stronger under‑target to give the rate control room
-        // to breathe while we push psychovisual quality.
-        var targetSizeMb = request.TargetSizeMb.Value * 0.90;
-        var durationSeconds = request.SourceDuration.Value;
-
-        var reserveBudgetMb = CalculateReserveBudget(targetSizeMb, durationSeconds, codecConfig);
-        var containerShare = GetContainerShare(codecConfig);
-
-        // Bias reserves towards safety rather than container – containers
-        // are cheap, bits are precious.
-        var containerReserveMb = reserveBudgetMb * (containerShare * 0.7);
-        var safetyMarginMb = reserveBudgetMb - containerReserveMb;
-
-        // Ensure we always have a positive payload budget to hand to the encoder
-        var payloadBudgetMb = targetSizeMb - reserveBudgetMb;
-        if (payloadBudgetMb <= 0)
-        {
-            payloadBudgetMb = Math.Max(targetSizeMb * 0.1, 0.05);
-            var adjustedReserve = Math.Max(targetSizeMb - payloadBudgetMb, 0);
-            if (reserveBudgetMb > 0)
-            {
-                var scale = adjustedReserve / reserveBudgetMb;
-                containerReserveMb *= scale;
-                safetyMarginMb *= scale;
-                reserveBudgetMb = adjustedReserve;
-            }
-        }
-
-        var payloadBits = payloadBudgetMb * 1024 * 1024 * 8;
-        var totalKbps = payloadBits / durationSeconds / 1000d;
-
-        // Add a slight buffer to the reserved audio bitrate so container muxing remains under target
-        // Keep audio lean so more bits land on video. Modern
-        // platforms are very forgiving to slightly lower audio.
-        var audioBudgetKbps = request.MuteAudio ? 0 : codecConfig.AudioBitrateKbps * 0.9;
-        var videoKbps = Math.Max(80, totalKbps - audioBudgetKbps);
-
-        return new BitratePlan(
-            Math.Round(totalKbps, 2),
-            Math.Round(videoKbps, 2),
-            Math.Round(payloadBudgetMb, 3),
-            Math.Round(containerReserveMb, 3),
-            Math.Round(safetyMarginMb, 3));
-    }
-
-    private static double CalculateReserveBudget(double targetSizeMb, double durationSeconds, CodecConfig codecConfig)
-    {
-        // Conservative reserves to ensure we stay under target with two-pass encoding
-        var baseReserve = 0.20;
-        var linearComponent = targetSizeMb * (codecConfig.FileExtension.Equals(".mp4", StringComparison.OrdinalIgnoreCase) ? 0.004 : 0.0032);
-        var reserve = baseReserve + linearComponent;
-
-        if (durationSeconds >= 1800)
-        {
-            reserve += 0.14;
-        }
-        else if (durationSeconds >= 900)
-        {
-            reserve += 0.07;
-        }
-        else if (durationSeconds >= 300)
-        {
-            reserve += 0.035;
-        }
-
-        var maxReserve = codecConfig.FileExtension.Equals(".mp4", StringComparison.OrdinalIgnoreCase) ? 1.1 : 0.85;
-        var minReserve = 0.28;
-        reserve = Math.Clamp(reserve, minReserve, maxReserve);
-
-        var maxAllowed = targetSizeMb * 0.82;
-        if (reserve > maxAllowed)
-        {
-            reserve = maxAllowed;
-        }
-
-        return Math.Max(reserve, 0);
-    }
-
-    private static double GetContainerShare(CodecConfig codecConfig)
-    {
-        return codecConfig.FileExtension.Equals(".mp4", StringComparison.OrdinalIgnoreCase) ? 0.68 : 0.48;
     }
 
     // Attempts to sanitize libx265 parameters to avoid unsupported options on some builds.
@@ -2020,75 +1849,6 @@ public class VideoCompressionService : IVideoCompressionService
         }
     }
 
-    private static List<VideoSegment>? NormalizeSegments(List<VideoSegment>? segments, double? sourceDuration)
-    {
-        if (segments == null || segments.Count == 0)
-        {
-            return null;
-        }
-
-        var normalized = new List<VideoSegment>();
-        foreach (var segment in segments)
-        {
-            if (segment == null)
-            {
-                continue;
-            }
-
-            var start = double.IsFinite(segment.Start) ? Math.Max(0, segment.Start) : 0;
-            var end = double.IsFinite(segment.End) ? Math.Max(0, segment.End) : 0;
-
-            if (sourceDuration.HasValue)
-            {
-                start = Math.Min(start, sourceDuration.Value);
-                end = Math.Min(end, sourceDuration.Value);
-            }
-
-            if (end - start < 0.05)
-            {
-                continue;
-            }
-
-            normalized.Add(new VideoSegment
-            {
-                Start = start,
-                End = end
-            });
-        }
-
-        if (normalized.Count == 0)
-        {
-            return null;
-        }
-
-        normalized = normalized
-            .OrderBy(s => s.Start)
-            .ThenBy(s => s.End)
-            .ToList();
-
-        var merged = new List<VideoSegment>();
-        foreach (var segment in normalized)
-        {
-            if (merged.Count == 0)
-            {
-                merged.Add(new VideoSegment { Start = segment.Start, End = segment.End });
-                continue;
-            }
-
-            var last = merged[^1];
-            if (segment.Start <= last.End + 0.01)
-            {
-                last.End = Math.Max(last.End, segment.End);
-            }
-            else
-            {
-                merged.Add(new VideoSegment { Start = segment.Start, End = segment.End });
-            }
-        }
-
-        return merged;
-    }
-
     private static CompressionRequest CloneRequest(CompressionRequest source)
     {
         return new CompressionRequest
@@ -2112,17 +1872,6 @@ public class VideoCompressionService : IVideoCompressionService
 
 
 
-    private static EncodingMode DeriveEncodingMode(bool useQualityMode)
-    {
-        if (useQualityMode)
-        {
-            return EncodingMode.Quality;
-        }
-
-        return EncodingMode.Fast;
-    }
-
-    private sealed record BitratePlan(double TotalKbps, double VideoKbps, double PayloadBudgetMb, double ContainerReserveMb, double SafetyMarginMb);
     private sealed record AudioPlan(int BitrateKbps, int Channels, bool Muted = false);
 
     private sealed class CodecConfig

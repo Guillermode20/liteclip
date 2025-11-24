@@ -32,7 +32,10 @@ public class VideoCompressionServiceTests
             new H265Strategy()
         });
 
-        var service = new VideoCompressionService(config, logger, ffmpegResolver, strategyFactory);
+        var planner = new DefaultCompressionPlanner();
+        var jobStore = new InMemoryJobStore();
+
+        var service = new VideoCompressionService(config, logger, ffmpegResolver, strategyFactory, planner, jobStore);
 
         Assert.NotNull(service);
         Assert.True(Directory.Exists(Path.Combine(tempRoot, "uploads")));

@@ -67,6 +67,8 @@ public class ApiIntegrationTests : IAsyncLifetime
         builder.Services.AddSingleton<FfmpegPathResolver>();
         builder.Services.AddSingleton<IFfmpegPathResolver>(sp => sp.GetRequiredService<FfmpegPathResolver>());
         builder.Services.AddSingleton<FfmpegProbeService>();
+        builder.Services.AddSingleton<ICompressionPlanner, DefaultCompressionPlanner>();
+        builder.Services.AddSingleton<IJobStore, InMemoryJobStore>();
         builder.Services.AddSingleton<VideoCompressionService>();
         builder.Services.AddSingleton<IVideoCompressionService>(sp => sp.GetRequiredService<VideoCompressionService>());
         builder.Services.AddSingleton<ICompressionStrategy, H264Strategy>();
