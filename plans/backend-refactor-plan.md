@@ -23,24 +23,24 @@ Rough, high-level checklist to gradually de-fragment the backend. Tweak ordering
 
 ## Phase 2 – Decompose VideoCompressionService
 
-- [ ] Introduce a `CompressionPlan` model that captures:
-  - [ ] Target size / bitrate budget
+- [x] Introduce a `CompressionPlan` model that captures:
+  - [x] Target size / bitrate budget
   - [ ] Selected codec & encoder
   - [ ] Scale / FPS decisions
   - [ ] Filter chain / quality settings
-  - [ ] Normalized segments
-- [ ] Extract a planning component (e.g., `ICompressionPlanner`)
-  - [ ] Move `CalculateBitratePlan` logic
-  - [ ] Move `CalculateOptimalScale` and related resolution logic
-  - [ ] Centralize segment normalization and validation
-- [ ] Extract a job store / lifecycle abstraction (e.g., `IJobStore`)
-  - [ ] Own `_jobs` dictionary and `_jobQueue`
-  - [ ] Provide `CreateJob`, `UpdateJob`, `GetJob`, `GetAllJobs`, `Enqueue`, etc.
-  - [ ] Hide concurrent access details from the rest of the code
-- [ ] Slim `VideoCompressionService` down to orchestration:
-  - [ ] Validate input
-  - [ ] Ask `ICompressionPlanner` for a `CompressionPlan`
-  - [ ] Use `IJobStore` to create/enqueue jobs
+  - [x] Normalized segments
+- [x] Extract a planning component (e.g., `ICompressionPlanner`)
+  - [x] Move `CalculateBitratePlan` logic
+  - [x] Move `CalculateOptimalScale` and related resolution logic
+  - [x] Centralize segment normalization and validation
+- [x] Extract a job store / lifecycle abstraction (e.g., `IJobStore`)
+  - [x] Own `_jobs` dictionary and `_jobQueue`
+  - [x] Provide `CreateJob`, `UpdateJob`, `GetJob`, `GetAllJobs`, `Enqueue`, etc.
+  - [x] Hide concurrent access details from the rest of the code
+- [x] Slim `VideoCompressionService` down to orchestration:
+  - [x] Validate input
+  - [x] Ask `ICompressionPlanner` for a `CompressionPlan`
+  - [x] Use `IJobStore` to create/enqueue jobs
   - [ ] Delegate execution to an FFmpeg executor (next phase)
 
 ---
