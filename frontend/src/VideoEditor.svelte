@@ -1,11 +1,12 @@
 <script lang="ts">
-    import { onMount } from 'svelte';
+    import { onDestroy, onMount } from 'svelte';
     import type { VideoSegment } from './types';
 
     export let videoFile: File;
     export let onSegmentsChange: (segments: Array<{start: number, end: number}>) => void;
     export let onRemoveVideo: (() => void) | null = null;
     export let savedSegments: VideoSegment[] = [];
+    export let onMetadataLoaded: ((payload: { width: number; height: number; duration: number }) => void) | null = null;
 
     let videoElement: HTMLVideoElement | null = null;
     let canvasElement: HTMLCanvasElement | null = null;
@@ -20,11 +21,12 @@
     let isDragging: boolean = false;
     let wasPlayingBeforeDrag: boolean = false;
     let videoAspectRatio = 16 / 9;
+    let isHeavyVideo: boolean = false;
     // Seek scheduler state for live scrubbing
     let desiredSeekTime: number | null = null;
     let lastSeekMs = 0;
     let seekTimer: number | null = null;
-    const MIN_SEEK_INTERVAL_MS = 40; // throttle seeks to ~25fps by default
+    const MIN_SEEK_INTERVAL_MS = 80; // throttle seeks to ~25fps by default
     const MAX_PREVIEW_WIDTH = 1280; // cap preview to 720p
     const MAX_PREVIEW_HEIGHT = 720;
 
@@ -36,6 +38,7 @@
     // Trim segments (kept segments)
     let segments: Array<{start: number, end: number, id: string}> = [];
     let nextSegmentId = 1;
+    let objectUrl: string | null = null;
     
     function clampTime(value: number) {
         if (!Number.isFinite(value)) return 0;
@@ -97,10 +100,20 @@
         };
     });
 
+    onDestroy(() => {
+        if (objectUrl) {
+            URL.revokeObjectURL(objectUrl);
+            objectUrl = null;
+        }
+    });
+
     function loadVideo() {
         if (!videoElement) return;
-        const url = URL.createObjectURL(videoFile);
-        videoElement.src = url;
+        if (objectUrl) {
+            URL.revokeObjectURL(objectUrl);
+        }
+        objectUrl = URL.createObjectURL(videoFile);
+        videoElement.src = objectUrl;
         videoElement.load();
     }
 
@@ -109,12 +122,20 @@
         const loadedDuration = videoElement.duration;
         duration = Number.isFinite(loadedDuration) ? loadedDuration : 0;
         isReady = duration > 0;
-        if (videoElement.videoWidth && videoElement.videoHeight) {
-            videoAspectRatio = videoElement.videoWidth / videoElement.videoHeight;
+        const width = videoElement.videoWidth || 0;
+        const height = videoElement.videoHeight || 0;
+        if (width && height) {
+            videoAspectRatio = width / height;
         }
+        // Treat very long or high-resolution videos as "heavy" and use a lighter scrubbing mode
+        isHeavyVideo = (duration >= 600) || (width * height >= 1920 * 1080);
         currentTime = 0;
         videoElement.currentTime = 0;
         nextSegmentId = 1;
+        
+        if (onMetadataLoaded && duration > 0) {
+            onMetadataLoaded({ width, height, duration });
+        }
         
         initializeSegmentsFromSavedState();
         
@@ -207,27 +228,19 @@
         if (!isReady || !videoElement) return;
         wasPlayingBeforeDrag = isPlaying;
         isDragging = true;
-        // Pause only if the video was not already playing. If it was, keep it playing
-        // so scrubbing continues to play in real-time during the drag.
+        // Pause only if the video was not already playing.
         if (!isPlaying) pauseVideo();
         // Show preview canvas overlay and hide native video to reduce full-res rendering while scrubbing
         if (previewCanvas) previewCanvas.style.display = 'block';
         if (videoElement) videoElement.style.opacity = '0';
-        const time = updateCurrentTimeFromMouse(event);
-        if (time !== undefined) {
-            // Keep immediate seek so the initial frame is visible quickly
-            seekTo(time);
-            // And schedule live updates as the user drags
-            scheduleSeek(time);
-        }
+        // Only update the timeline cursor; defer the actual seek until mouse up
+        updateCurrentTimeFromMouse(event);
     }
 
     function handleMouseMove(event: PointerEvent | MouseEvent) {
         if (!isDragging || !isReady || !timelineContainer) return;
+        // Update the scrubber position only; heavy seeks happen on mouse up
         updateCurrentTimeFromMouse(event);
-        // Schedule a throttled seek to update the preview while dragging
-        scheduleSeek(currentTime);
-        if (isDragging) drawPreviewFrame();
     }
 
     function handleMouseUp() {

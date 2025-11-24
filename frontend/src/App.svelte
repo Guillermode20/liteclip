@@ -146,45 +146,38 @@
         outputSizeDetails = 'Reading video metadata...';
 
         updateCodecHelper();
+    }
 
-        if (objectUrl) {
-            URL.revokeObjectURL(objectUrl);
+    function handleSourceMetadataLoaded(payload: { width: number; height: number; duration: number }) {
+        if (!selectedFile) {
+            return;
         }
-        objectUrl = URL.createObjectURL(file);
-        const videoEl = document.createElement('video');
-        videoEl.preload = 'metadata';
-        videoEl.src = objectUrl;
-        videoEl.addEventListener(
-            'loadedmetadata',
-            () => {
-                sourceVideoWidth = videoEl.videoWidth || null;
-                sourceVideoHeight = videoEl.videoHeight || null;
-                const duration = isFinite(videoEl.duration) ? videoEl.duration : null;
-                sourceDuration = duration;
-                const kbps = duration ? Math.round((file.size * 8) / duration / 1000) : null;
-                const dimsText =
-                    sourceVideoWidth && sourceVideoHeight
-                        ? `${sourceVideoWidth}×${sourceVideoHeight}`
-                        : 'Unknown';
-                const durationText = duration ? `${duration.toFixed(2)}s` : 'Unknown';
-                const bitrateText = kbps ? `${kbps} kbps (approx)` : 'Unknown';
-                metadataContent = `
-                    <div><strong>file_size</strong>: ${formatFileSize(file.size)}</div>
-                    <div><strong>type</strong>: ${file.type || 'unknown'}</div>
-                    <div><strong>duration</strong>: ${durationText}</div>
-                    <div><strong>resolution</strong>: ${dimsText}</div>
-                    <div><strong>bitrate</strong>: ${bitrateText}</div>
-                `;
-                metadataVisible = true;
 
-                const safeOriginalMb = originalSizeMb || 0;
-                const initialMb = Math.min(safeOriginalMb, defaultTargetMb);
-                outputSizeSliderValue = initialMb > 0 ? initialMb : defaultTargetMb;
-                outputSizeSliderDisabled = false;
-                updateOutputSizeDisplay();
-            },
-            { once: true }
-        );
+        sourceVideoWidth = payload.width || null;
+        sourceVideoHeight = payload.height || null;
+        const duration = Number.isFinite(payload.duration) ? payload.duration : null;
+        sourceDuration = duration;
+        const kbps = duration ? Math.round((selectedFile.size * 8) / duration / 1000) : null;
+        const dimsText =
+                sourceVideoWidth && sourceVideoHeight
+                    ? `${sourceVideoWidth}×${sourceVideoHeight}`
+                    : 'Unknown';
+        const durationText = duration ? `${duration.toFixed(2)}s` : 'Unknown';
+        const bitrateText = kbps ? `${kbps} kbps (approx)` : 'Unknown';
+        metadataContent = `
+            <div><strong>file_size</strong>: ${formatFileSize(selectedFile.size)}</div>
+            <div><strong>type</strong>: ${selectedFile.type || 'unknown'}</div>
+            <div><strong>duration</strong>: ${durationText}</div>
+            <div><strong>resolution</strong>: ${dimsText}</div>
+            <div><strong>bitrate</strong>: ${bitrateText}</div>
+        `;
+        metadataVisible = true;
+
+        const safeOriginalMb = originalSizeMb || 0;
+        const initialMb = Math.min(safeOriginalMb, defaultTargetMb);
+        outputSizeSliderValue = initialMb > 0 ? initialMb : defaultTargetMb;
+        outputSizeSliderDisabled = false;
+        updateOutputSizeDisplay();
     }
 
     function updateCodecHelper() {
@@ -948,6 +941,7 @@
                         onSegmentsChange={handleSegmentsChange}
                         onRemoveVideo={resetInterface}
                         savedSegments={videoSegments}
+                        onMetadataLoaded={handleSourceMetadataLoaded}
                     />
                 </div>
             {/if}
