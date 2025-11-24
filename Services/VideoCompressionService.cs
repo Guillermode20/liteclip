@@ -24,8 +24,9 @@ public class VideoCompressionService : IVideoCompressionService
     private readonly IEncoderSelectionService _encoderSelectionService;
     private readonly int _maxConcurrentJobs;
     private readonly int _maxQueueSize;
+    private readonly IVideoEncodingPipeline _encodingPipeline;
 
-    public VideoCompressionService(IConfiguration configuration, ILogger<VideoCompressionService> logger, FfmpegPathResolver ffmpegResolver, IFfmpegRunner ffmpegRunner, ICompressionStrategyFactory strategyFactory, ICompressionPlanner planner, IJobStore jobStore, IEncoderSelectionService encoderSelectionService)
+    public VideoCompressionService(IConfiguration configuration, ILogger<VideoCompressionService> logger, FfmpegPathResolver ffmpegResolver, IFfmpegRunner ffmpegRunner, ICompressionStrategyFactory strategyFactory, ICompressionPlanner planner, IJobStore jobStore, IEncoderSelectionService encoderSelectionService, IVideoEncodingPipeline encodingPipeline)
     {
         _logger = logger;
         _ffmpegResolver = ffmpegResolver;
@@ -34,6 +35,7 @@ public class VideoCompressionService : IVideoCompressionService
         _planner = planner;
         _jobStore = jobStore;
         _encoderSelectionService = encoderSelectionService;
+        _encodingPipeline = encodingPipeline;
         
         // Use AppData for temp directories to avoid permission issues in Program Files
         var appDataDirectory = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
@@ -835,46 +837,7 @@ public class VideoCompressionService : IVideoCompressionService
 
     private async Task<bool> RunSinglePassEncodingAsync(string jobId, JobMetadata job, List<string> arguments, double? totalDuration)
     {
-        var result = await _ffmpegRunner.RunAsync(
-            jobId,
-            arguments,
-            totalDuration,
-            1,
-            1,
-            update =>
-            {
-                if (update.Percent.HasValue)
-                {
-                    job.Progress = Math.Clamp(update.Percent.Value, 0, 100);
-                }
-
-                if (update.EstimatedSecondsRemaining.HasValue)
-                {
-                    job.EstimatedSecondsRemaining = update.EstimatedSecondsRemaining.Value;
-                }
-            },
-            process => job.Process = process);
-
-        if (job.Status == "cancelled")
-        {
-            _logger.LogInformation("Job {JobId} was cancelled", jobId);
-            return false;
-        }
-
-        if (result.ExitCode == 0)
-        {
-            if (File.Exists(job.OutputPath))
-            {
-                var outputSize = new FileInfo(job.OutputPath).Length;
-                job.OutputSizeBytes = outputSize;
-            }
-            return true;
-        }
-
-        job.Status = "failed";
-        job.ErrorMessage = result.StandardError;
-        _logger.LogError("Video compression failed for job {JobId}. Exit code {ExitCode}. Error: {Error}", jobId, result.ExitCode, result.StandardError);
-        return false;
+        return await _encodingPipeline.RunSinglePassEncodingAsync(jobId, job, arguments, totalDuration);
     }
 
     private void FinalizeSuccessfulJob(JobMetadata job, CodecConfig codec)

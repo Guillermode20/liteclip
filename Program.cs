@@ -71,6 +71,7 @@ namespace liteclip
             builder.Services.AddSingleton<ICompressionPlanner, DefaultCompressionPlanner>();
             builder.Services.AddSingleton<IJobStore, InMemoryJobStore>();
 
+            builder.Services.AddSingleton<IVideoEncodingPipeline, VideoEncodingPipeline>();
             builder.Services.AddSingleton<VideoCompressionService>();
             builder.Services.AddSingleton<IVideoCompressionService>(sp => sp.GetRequiredService<VideoCompressionService>());
 
