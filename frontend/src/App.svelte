@@ -107,12 +107,7 @@
             clearInterval(statusCheckInterval);
         }
         stopFfmpegPolling();
-        if (objectUrl) {
-            URL.revokeObjectURL(objectUrl);
-        }
-        if (videoPreviewUrl) {
-            URL.revokeObjectURL(videoPreviewUrl);
-        }
+        cleanupVideoUrls();
     });
 
     onMount(() => {
@@ -125,11 +120,57 @@
     $: sliderMaxRounded = Math.max(1, Math.round(effectiveMaxSizeNumeric));
     $: sliderStepValue = effectiveMaxSizeNumeric < 10 ? 0.1 : 1;
 
-    function handleFileSelect(file: File) {
+    /** Cleans up all video-related object URLs to prevent memory leaks */
+    function cleanupVideoUrls() {
+        if (objectUrl) {
+            URL.revokeObjectURL(objectUrl);
+            objectUrl = null;
+        }
+        if (videoPreviewUrl) {
+            URL.revokeObjectURL(videoPreviewUrl);
+            videoPreviewUrl = null;
+        }
+    }
+
+    /** Cancels any active job and cleans up its resources */
+    async function cancelActiveJob() {
+        if (jobId && isCompressing) {
+            try {
+                await cancelJob(jobId);
+            } catch (e) {
+                // Ignore cancel errors for cleanup
+            }
+        }
+        if (statusCheckInterval) {
+            clearInterval(statusCheckInterval);
+            statusCheckInterval = null;
+        }
+        jobId = null;
+        isCompressing = false;
+        showCancelButton = false;
+        progressVisible = false;
+        progressPercent = 0;
+    }
+
+    async function handleFileSelect(file: File) {
         if (!file.type.startsWith('video/')) {
             alert('Please select a video file');
             return;
         }
+
+        // Cancel any existing job and clean up before accepting new file
+        await cancelActiveJob();
+        cleanupVideoUrls();
+
+        // Reset output-related state
+        videoPreviewVisible = false;
+        downloadVisible = false;
+        downloadFileName = null;
+        downloadMimeType = null;
+        outputMetadata = createDefaultOutputMetadata();
+        compressionSkipped = false;
+        canRetry = false;
+        statusVisible = false;
 
         videoSegments = [];
         selectedFile = file;
@@ -719,6 +760,7 @@
     }
 
     function handleClearResult() {
+        // Only clean up the preview URL, keep objectUrl for the source video
         if (videoPreviewUrl) {
             URL.revokeObjectURL(videoPreviewUrl);
             videoPreviewUrl = null;
@@ -868,10 +910,7 @@
         downloadMimeType = null;
         showCancelButton = false;
         compressionSkipped = false;
-        if (videoPreviewUrl) {
-            URL.revokeObjectURL(videoPreviewUrl);
-            videoPreviewUrl = null;
-        }
+        cleanupVideoUrls();
         outputSizeSliderDisabled = true;
         outputSizeSliderValue = defaultTargetMb;
         outputSizeValue = '--';
@@ -885,10 +924,6 @@
         muteAudio = userSettings?.defaultMuteAudio ?? false;
         resolutionPreset = userSettings?.defaultResolution ?? 'auto';
         canRetry = false;
-        if (objectUrl) {
-            URL.revokeObjectURL(objectUrl);
-        }
-        objectUrl = null;
         outputMetadata = createDefaultOutputMetadata();
         showVideoEditor = false;
         videoSegments = [];

@@ -28,6 +28,28 @@
     let previewCtx: CanvasRenderingContext2D | null = null;
     let previewWidth = 0;
     let previewHeight = 0;
+
+    // Scrubbing optimization: throttle interval (ms)
+    const SCRUB_THROTTLE_MS = 8; // ~120fps for smooth scrubbing
+    let lastScrubTime = 0;
+    let scrubAnimationFrame: number | null = null;
+
+    // Timeline thumbnail strip
+    const TIMELINE_THUMBNAIL_COUNT = 10;
+    let timelineThumbnailsGenerated = false;
+
+    // === LIVE SCRUB PREVIEW SYSTEM ===
+    // Pre-generated frames for instant scrub preview (adaptive frame count based on duration)
+    const SCRUB_FRAME_INTERVAL = 0.25; // seconds between scrub frames
+    const MAX_SCRUB_FRAMES = 300; // Increased to support longer videos (75 seconds at 0.25s intervals)
+    const scrubFrames = new Map<number, ImageBitmap>(); // time -> ImageBitmap (GPU-optimized)
+    let scrubFramesGenerated = false;
+    let scrubFrameGenerationInProgress = false;
+    let scrubFrameAbortController: AbortController | null = null;
+    
+    // Offscreen canvas for frame extraction (doesn't touch DOM)
+    let offscreenCanvas: OffscreenCanvas | null = null;
+    let offscreenCtx: OffscreenCanvasRenderingContext2D | null = null;
     
     // Trim segments (kept segments)
     let segments: Array<{start: number, end: number, id: string}> = [];
@@ -99,6 +121,12 @@
             URL.revokeObjectURL(objectUrl);
             objectUrl = null;
         }
+        // Clean up animation frame and caches
+        if (scrubAnimationFrame !== null) {
+            cancelAnimationFrame(scrubAnimationFrame);
+            scrubAnimationFrame = null;
+        }
+        clearScrubFrames();
     });
 
     function loadVideo() {
@@ -106,6 +134,10 @@
         if (objectUrl) {
             URL.revokeObjectURL(objectUrl);
         }
+        // Reset state for new video
+        timelineThumbnailsGenerated = false;
+        clearScrubFrames();
+        
         objectUrl = URL.createObjectURL(videoFile);
         videoElement.src = objectUrl;
         videoElement.load();
@@ -135,15 +167,10 @@
         updateThumbnails();
         updatePreviewCanvasSize();
         ensurePreviewContext();
-        // Draw an initial preview frame when metadata is ready
-        if (previewCanvas && videoElement) {
-            videoElement.addEventListener('seeked', () => {
-                // Update preview canvas after the browser finishes seeking
-                if (isDragging) drawPreviewFrame();
-            });
-            // Draw one initial preview frame
-            videoElement.addEventListener('seeked', () => drawPreviewFrame(), { once: true });
-        }
+        
+        // Start generating scrub preview frames in background (non-blocking)
+        // This enables instant live preview during scrubbing
+        generateScrubFrames();
     }
 
     function updatePreviewCanvasSize() {
@@ -175,13 +202,169 @@
         }
     }
 
+    // === LIVE SCRUB PREVIEW FUNCTIONS ===
+    
+    /** Clear all pre-generated scrub frames and abort any in-progress generation */
+    function clearScrubFrames() {
+        // Abort any in-progress generation
+        if (scrubFrameAbortController) {
+            scrubFrameAbortController.abort();
+            scrubFrameAbortController = null;
+        }
+        // Close all ImageBitmaps to free GPU memory
+        for (const bitmap of scrubFrames.values()) {
+            bitmap.close();
+        }
+        scrubFrames.clear();
+        scrubFramesGenerated = false;
+        scrubFrameGenerationInProgress = false;
+    }
+    
+    /** Get the nearest pre-generated scrub frame for a given time */
+    function getNearestScrubFrame(time: number): ImageBitmap | null {
+        if (scrubFrames.size === 0) return null;
+        
+        // Find nearest available frame (since interval is now dynamic)
+        let nearestTime = 0;
+        let nearestDist = Infinity;
+        for (const t of scrubFrames.keys()) {
+            const dist = Math.abs(t - time);
+            if (dist < nearestDist) {
+                nearestDist = dist;
+                nearestTime = t;
+            }
+        }
+        
+        return scrubFrames.get(nearestTime) ?? null;
+    }
+    
+    /** Generate scrub preview frames in the background (non-blocking) */
+    async function generateScrubFrames() {
+        if (scrubFrameGenerationInProgress || scrubFramesGenerated) return;
+        if (!videoElement || !duration || duration <= 0) return;
+        
+        scrubFrameGenerationInProgress = true;
+        scrubFrameAbortController = new AbortController();
+        const signal = scrubFrameAbortController.signal;
+        
+        // Calculate how many frames to generate - now adaptive to video duration
+        // For longer videos, increase interval to keep frame count reasonable
+        let frameInterval = SCRUB_FRAME_INTERVAL;
+        let frameCount = Math.ceil(duration / frameInterval);
+        
+        // If video is very long, increase interval to keep frames manageable
+        if (frameCount > MAX_SCRUB_FRAMES) {
+            frameInterval = duration / MAX_SCRUB_FRAMES;
+            frameCount = MAX_SCRUB_FRAMES;
+        }
+        
+        const times: number[] = [];
+        for (let i = 0; i < frameCount; i++) {
+            times.push(i * frameInterval);
+        }
+        
+        // Create a hidden video element for frame extraction (doesn't affect main video)
+        const extractionVideo = document.createElement('video');
+        extractionVideo.muted = true;
+        extractionVideo.preload = 'auto';
+        extractionVideo.src = objectUrl!;
+        
+        // Wait for video to be ready
+        await new Promise<void>((resolve, reject) => {
+            extractionVideo.onloadeddata = () => resolve();
+            extractionVideo.onerror = () => reject(new Error('Failed to load video for frame extraction'));
+            signal.addEventListener('abort', () => reject(new Error('Aborted')));
+        }).catch(() => {
+            scrubFrameGenerationInProgress = false;
+            return;
+        });
+        
+        if (signal.aborted) {
+            scrubFrameGenerationInProgress = false;
+            return;
+        }
+        
+        // Create offscreen canvas for frame extraction
+        const frameWidth = Math.min(640, extractionVideo.videoWidth || 640);
+        const frameHeight = Math.round(frameWidth / (extractionVideo.videoWidth / extractionVideo.videoHeight || 16/9));
+        
+        if (typeof OffscreenCanvas !== 'undefined') {
+            offscreenCanvas = new OffscreenCanvas(frameWidth, frameHeight);
+            offscreenCtx = offscreenCanvas.getContext('2d');
+        }
+        
+        // Generate frames one at a time with yielding to keep UI responsive
+        for (let i = 0; i < times.length; i++) {
+            if (signal.aborted) break;
+            
+            const time = times[i];
+            
+            try {
+                // Seek to frame time
+                extractionVideo.currentTime = time;
+                await new Promise<void>((resolve) => {
+                    const onSeeked = () => {
+                        extractionVideo.removeEventListener('seeked', onSeeked);
+                        resolve();
+                    };
+                    extractionVideo.addEventListener('seeked', onSeeked);
+                });
+                
+                if (signal.aborted) break;
+                
+                // Create ImageBitmap from video frame (GPU-accelerated)
+                const bitmap = await createImageBitmap(extractionVideo, {
+                    resizeWidth: frameWidth,
+                    resizeHeight: frameHeight,
+                    resizeQuality: 'low' // Fast resize for scrubbing
+                });
+                
+                scrubFrames.set(time, bitmap);
+                
+                // Yield every 5 frames to keep UI responsive
+                if (i % 5 === 0) {
+                    await new Promise(r => setTimeout(r, 0));
+                }
+            } catch (e) {
+                // Skip failed frames
+                continue;
+            }
+        }
+        
+        // Cleanup
+        extractionVideo.src = '';
+        extractionVideo.load();
+        
+        scrubFrameGenerationInProgress = false;
+        if (!signal.aborted) {
+            scrubFramesGenerated = true;
+        }
+    }
+    
+    /** Draw the live scrub preview frame - INSTANT using pre-generated frames */
     function drawPreviewFrame() {
-        if (!previewCanvas || !previewCtx || !videoElement) return;
-        try {
-            previewCtx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
-            previewCtx.drawImage(videoElement, 0, 0, previewCanvas.width, previewCanvas.height);
-        } catch (e) {
-            // drawImage can throw if the video hasn't rendered yet or due to cross-origin; ignore silently
+        if (!previewCanvas || !previewCtx) return;
+        
+        // Try to get pre-generated scrub frame (instant)
+        const scrubFrame = getNearestScrubFrame(currentTime);
+        if (scrubFrame) {
+            try {
+                previewCtx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
+                previewCtx.drawImage(scrubFrame, 0, 0, previewCanvas.width, previewCanvas.height);
+                return;
+            } catch (e) {
+                // Fall through to video element fallback
+            }
+        }
+        
+        // Fallback: draw from video element (may show stale frame if video hasn't seeked)
+        if (videoElement) {
+            try {
+                previewCtx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
+                previewCtx.drawImage(videoElement, 0, 0, previewCanvas.width, previewCanvas.height);
+            } catch (e) {
+                // ignore
+            }
         }
     }
 
@@ -223,19 +406,46 @@
         if (!isPlaying) pauseVideo();
         if (previewCanvas) previewCanvas.style.display = 'block';
         if (videoElement) videoElement.style.opacity = '0';
-        // Only update the scrubber; actual seek happens on mouse up
+        // Update position and draw preview immediately for instant feedback
         updateCurrentTimeFromMouse(event);
+        drawPreviewFrame();
     }
 
     function handleMouseMove(event: PointerEvent | MouseEvent) {
         if (!isDragging || !isReady || !timelineContainer) return;
-        // Update the scrubber only; heavy seek on mouse up
+
+        // Throttle scrubbing updates for performance
+        const now = performance.now();
+        if (now - lastScrubTime < SCRUB_THROTTLE_MS) {
+            // Schedule an update for the end of the throttle window
+            if (scrubAnimationFrame === null) {
+                scrubAnimationFrame = requestAnimationFrame(() => {
+                    scrubAnimationFrame = null;
+                    if (isDragging) {
+                        updateCurrentTimeFromMouse(event);
+                        drawPreviewFrame();
+                    }
+                });
+            }
+            return;
+        }
+        lastScrubTime = now;
+
+        // Update the scrubber position and draw preview
         updateCurrentTimeFromMouse(event);
+        drawPreviewFrame();
     }
 
     function handleMouseUp() {
         if (!isDragging || !isReady || !videoElement) return;
         isDragging = false;
+
+        // Cancel any pending animation frame
+        if (scrubAnimationFrame !== null) {
+            cancelAnimationFrame(scrubAnimationFrame);
+            scrubAnimationFrame = null;
+        }
+
         // Perform a single seek to the final scrub position
         seekTo(currentTime);
         // Hide preview canvas and restore native video opacity
@@ -365,24 +575,35 @@
         }
 
     function updateThumbnails() {
-        // Generate thumbnails for timeline (simplified version)
-        // In production, you might want to generate multiple thumbnails
-        if (!canvasElement || !videoElement) return;
+        // Generate multiple thumbnails across the timeline
+        if (!canvasElement || !videoElement || !duration || duration <= 0) return;
+        if (timelineThumbnailsGenerated) return; // Only generate once per video
         
         const ctx = canvasElement.getContext('2d');
         if (!ctx) return;
         
-        canvasElement.width = 800;
-        canvasElement.height = 60;
+        const thumbWidth = 80;
+        const thumbHeight = 60;
+        canvasElement.width = thumbWidth * TIMELINE_THUMBNAIL_COUNT;
+        canvasElement.height = thumbHeight;
         
-        // Draw video frame to canvas, then restore the previous playback time and state
-        const canvasRef = canvasElement;
         const videoRef = videoElement;
+        const canvasRef = canvasElement;
         const prevTime = videoRef.currentTime || 0;
         const wasPlaying = !videoRef.paused;
-        const thumbnailTime = Math.min(duration / 2, duration);
+        
+        // Calculate times for each thumbnail
+        const times: number[] = [];
+        for (let i = 0; i < TIMELINE_THUMBNAIL_COUNT; i++) {
+            // Distribute thumbnails evenly, avoiding exact 0 and duration
+            const t = ((i + 0.5) / TIMELINE_THUMBNAIL_COUNT) * duration;
+            times.push(Math.max(0.1, Math.min(t, duration - 0.1)));
+        }
+        
+        let currentIndex = 0;
+        
         const restoreState = () => {
-            // Restore previous time and playing state after drawing
+            timelineThumbnailsGenerated = true;
             try {
                 videoRef.currentTime = prevTime;
             } catch (e) {
@@ -390,35 +611,50 @@
             }
             if (wasPlaying) videoRef.play();
         };
-
-        const onSeeked = () => {
-            if (!canvasRef) {
+        
+        const drawNextThumbnail = () => {
+            if (currentIndex >= TIMELINE_THUMBNAIL_COUNT) {
                 restoreState();
                 return;
             }
+            
             const ctx2 = canvasRef.getContext('2d');
             if (!ctx2) {
                 restoreState();
                 return;
             }
+            
             try {
-                ctx2.drawImage(videoRef, 0, 0, canvasRef.width, canvasRef.height);
+                // Draw the current frame at the appropriate position
+                const xOffset = currentIndex * thumbWidth;
+                ctx2.drawImage(videoRef, xOffset, 0, thumbWidth, thumbHeight);
             } catch (err) {
                 // ignore draw errors
             }
-            restoreState();
-        };
-
-        // If the video is already at the thumbnail time, just draw immediately
-        if (Math.abs(videoRef.currentTime - thumbnailTime) < 0.01) {
-            onSeeked();
-        } else {
-            videoRef.addEventListener('seeked', onSeeked, { once: true });
-            try {
-                videoRef.currentTime = thumbnailTime;
-            } catch (e) {
-                // ignore set currentTime errors
+            
+            currentIndex++;
+            
+            if (currentIndex < TIMELINE_THUMBNAIL_COUNT) {
+                // Seek to next time
+                videoRef.addEventListener('seeked', drawNextThumbnail, { once: true });
+                try {
+                    videoRef.currentTime = times[currentIndex];
+                } catch (e) {
+                    // If seeking fails, skip to restore
+                    restoreState();
+                }
+            } else {
+                restoreState();
             }
+        };
+        
+        // Start the thumbnail generation chain
+        videoRef.addEventListener('seeked', drawNextThumbnail, { once: true });
+        try {
+            videoRef.currentTime = times[0];
+        } catch (e) {
+            // If initial seek fails, abort
+            restoreState();
         }
     }
 
