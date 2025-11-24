@@ -250,12 +250,12 @@ public class FfmpegBootstrapper
 
         try
         {
-#if NET7_0_OR_GREATER
+#if NET7_0_OR_GREATER && !WINDOWS
             var mode = UnixFileMode.UserExecute | UnixFileMode.UserRead | UnixFileMode.UserWrite |
                        UnixFileMode.GroupExecute | UnixFileMode.GroupRead |
                        UnixFileMode.OtherExecute | UnixFileMode.OtherRead;
             File.SetUnixFileMode(path, mode);
-#else
+#elif !WINDOWS
             // Fallback: rely on chmod
             System.Diagnostics.Process.Start("chmod", $"+x \"{path}\"");
 #endif

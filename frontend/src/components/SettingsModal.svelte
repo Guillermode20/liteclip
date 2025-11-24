@@ -138,6 +138,8 @@
                         </label>
                     </div>
 
+                    
+
                     <div class="form-group">
                         <div class="setting-label"><strong>available encoders</strong></div>
                         {#if ffmpegEncodersState.loading}
@@ -327,6 +329,8 @@
     input[type='range'] {
         accent-color: #22d3ee;
     }
+
+    
 
     .helper-text {
         font-size: 0.75rem;

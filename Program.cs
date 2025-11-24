@@ -193,11 +193,6 @@ namespace liteclip
                         return;
                     }
                     
-                    Console.WriteLine($"\n🎉 LiteClip - Fast Video Compression");
-                    Console.WriteLine($"📅 Started at {DateTime.Now:O}");
-                    Console.WriteLine($"📡 Server running at: {url}");
-                    Console.WriteLine($"🪟 Creating native desktop window...\n");
-                    
                     serverReadyTcs.TrySetResult(url);
                 }
                 catch (Exception ex)
@@ -206,9 +201,42 @@ namespace liteclip
                 }
             });
 
-            // NOTE: we delay starting the HTTP server until after we show the native UI so the app feels faster
+            // NOTE: we start the HTTP server BEFORE creating the UI to ensure consistency
+            // This eliminates race conditions between file availability and server startup
 
-            // Create the native UI early so it appears instantly for the user.
+            // Now start the server in background and wait for it to bind
+            var serverTask = app.RunAsync(cts.Token);
+
+            // Wait for server to be ready before creating the window
+            string? serverUrl = null;
+            var serverReadyTask = serverReadyTcs.Task;
+            try
+            {
+                // Wait for the server to start up, but don't wait indefinitely.
+                var completed = await Task.WhenAny(serverReadyTask, Task.Delay(TimeSpan.FromSeconds(15)));
+                if (completed != serverReadyTask)
+                {
+                    Console.WriteLine("\n⚠️ Server start timed out after 15s. UI may not load properly.");
+                }
+
+                if (serverReadyTask.IsCompletedSuccessfully)
+                {
+                    serverUrl = serverReadyTask.Result;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"\n❌ Failed to start server: {ex.Message}");
+                await serverTask; 
+                return; 
+            }
+
+            Console.WriteLine($"\n🎉 LiteClip - Fast Video Compression");
+            Console.WriteLine($"📅 Started at {DateTime.Now:O}");
+            Console.WriteLine($"📡 Server running at: {serverUrl}");
+            Console.WriteLine($"🪟 Creating native desktop window...\n");
+
+            // Create the native UI only after server is ready
             // Load user settings to honor StartMaximized preference
             var userSettingsStore = app.Services.GetRequiredService<UserSettingsStore>();
             var userSettings = await userSettingsStore.GetAsync();
@@ -245,59 +273,7 @@ namespace liteclip
                     }
                 });
 
-            // Load a local copy of the frontend early (fast) so UI shows while server starts
-            var indexPath = Path.Combine(AppContext.BaseDirectory, "wwwroot", "index.html");
-            if (File.Exists(indexPath))
-            {
-                // Load local file first to ensure webview is properly initialized on Windows
-                var indexUri = new Uri(indexPath);
-                window.Load(indexUri.AbsoluteUri);
-                Console.WriteLine($"✓ Loaded local index.html while server starts");
-            }
-            else
-            {
-                // Fallback to blank page if local file not available
-                window.Load("about:blank");
-                Console.WriteLine($"⚠️ Local index.html not found at {indexPath}, using blank page");
-            }
-
-            // Server will be started after the UI is shown; we'll navigate the window to the server URL
-            // once the HTTP server reports it's ready (below).
-
-
-            // Skipping duplicate web handler registration — already set above.
-
-            // The UI already loaded a local index earlier - avoid duplicate load.
-
-            // Probe already started earlier; no need to start a second probe.
-
-            // Now start the server in background and wait for it to bind
-            var serverTask = app.RunAsync(cts.Token);
-
-            string? serverUrl = null;
-            var serverReadyTask = serverReadyTcs.Task;
-            try
-            {
-                // Wait for the server to start up, but don't wait indefinitely.
-                var completed = await Task.WhenAny(serverReadyTask, Task.Delay(TimeSpan.FromSeconds(10)));
-                if (completed != serverReadyTask)
-                {
-                    Console.WriteLine("\n⚠️ Server start timed out after 10s. Proceeding with UI while continuing to start the server in background.");
-                }
-
-                if (serverReadyTask.IsCompletedSuccessfully)
-                {
-                    serverUrl = serverReadyTask.Result;
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"\n❌ Failed to start server: {ex.Message}");
-                await serverTask; 
-                return; 
-            }
-
-            // When server is ready, navigate the UI to the running server
+            // Load the UI consistently from the running server
             try
             {
                 if (!string.IsNullOrWhiteSpace(serverUrl))
@@ -327,12 +303,30 @@ namespace liteclip
                     }
 
                     window.Load(serverUrl);
+                    Console.WriteLine($"✓ Loading UI from server: {serverUrl}");
+                }
+                else
+                {
+                    // Fallback: try local file if server failed to start
+                    var indexPath = Path.Combine(AppContext.BaseDirectory, "wwwroot", "index.html");
+                    if (File.Exists(indexPath))
+                    {
+                        var indexUri = new Uri(indexPath);
+                        window.Load(indexUri.AbsoluteUri);
+                        Console.WriteLine($"⚠️ Server failed, loading local file: {indexPath}");
+                    }
+                    else
+                    {
+                        window.Load("about:blank");
+                        Console.WriteLine("❌ Both server and local file failed, showing blank page");
+                    }
                 }
             }
             catch (Exception ex)
             {
                 var logger = app.Services.GetRequiredService<ILogger<Program>>();
-                logger.LogWarning(ex, "Failed to navigate to server URL - continuing with existing UI");
+                logger.LogWarning(ex, "Failed to load UI - continuing with blank page");
+                window.Load("about:blank");
             }
 
             // FFmpeg capability probe removed: no background probing will be performed

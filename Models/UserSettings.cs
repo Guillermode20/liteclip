@@ -8,6 +8,7 @@ public class UserSettings
     public double DefaultTargetSizeMb { get; set; } = 25;
     public bool CheckForUpdatesOnLaunch { get; set; } = true;
     public bool StartMaximized { get; set; } = true;
+    public string DefaultFolder { get; set; } = string.Empty;
 
     public static UserSettings CreateDefault() => new();
 }

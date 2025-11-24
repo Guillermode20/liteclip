@@ -105,7 +105,8 @@ public class UserSettingsStore
             DefaultMuteAudio = settings.DefaultMuteAudio,
             DefaultTargetSizeMb = ClampMb(settings.DefaultTargetSizeMb),
             StartMaximized = settings.StartMaximized,
-            CheckForUpdatesOnLaunch = settings.CheckForUpdatesOnLaunch
+            CheckForUpdatesOnLaunch = settings.CheckForUpdatesOnLaunch,
+            DefaultFolder = NormalizeFolder(settings.DefaultFolder)
         };
 
         return sanitized;
@@ -140,6 +141,26 @@ public class UserSettingsStore
         return Math.Max(1, value.Value);
     }
 
+    private static string NormalizeFolder(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
+        try
+        {
+            // Convert to absolute path and validate it exists or is potentially valid
+            var fullPath = Path.GetFullPath(value);
+            return fullPath;
+        }
+        catch
+        {
+            // If path is invalid, return empty string
+            return string.Empty;
+        }
+    }
+
     private static UserSettings Clone(UserSettings source)
     {
         return new UserSettings
@@ -149,7 +170,8 @@ public class UserSettingsStore
             DefaultMuteAudio = source.DefaultMuteAudio,
             DefaultTargetSizeMb = source.DefaultTargetSizeMb,
             StartMaximized = source.StartMaximized,
-            CheckForUpdatesOnLaunch = source.CheckForUpdatesOnLaunch
+            CheckForUpdatesOnLaunch = source.CheckForUpdatesOnLaunch,
+            DefaultFolder = source.DefaultFolder
         };
     }
 
