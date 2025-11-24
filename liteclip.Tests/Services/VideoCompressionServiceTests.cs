@@ -37,7 +37,7 @@ public class VideoCompressionServiceTests
         var jobStore = new InMemoryJobStore();
 
         var ffmpegRunner = new NoopFfmpegRunner();
-        var service = new VideoCompressionService(config, logger, ffmpegResolver, ffmpegRunner, strategyFactory, planner, jobStore);
+        var service = new VideoCompressionService(config, logger, ffmpegResolver, ffmpegRunner, strategyFactory, planner, jobStore, encoderSelectionService);
 
         Assert.NotNull(service);
         Assert.True(Directory.Exists(Path.Combine(tempRoot, "uploads")));

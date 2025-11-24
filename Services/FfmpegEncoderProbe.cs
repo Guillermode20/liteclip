@@ -9,10 +9,12 @@ namespace liteclip.Services;
 public sealed class FfmpegEncoderProbe : IFfmpegEncoderProbe
 {
     private readonly ConcurrentDictionary<string, bool> _encoderCache = new();
+    private readonly IFfmpegPathResolver _pathResolver;
     private readonly ILogger<FfmpegEncoderProbe> _logger;
 
-    public FfmpegEncoderProbe(ILogger<FfmpegEncoderProbe> logger)
+    public FfmpegEncoderProbe(IFfmpegPathResolver pathResolver, ILogger<FfmpegEncoderProbe> logger)
     {
+        _pathResolver = pathResolver;
         _logger = logger;
     }
 
@@ -69,6 +71,13 @@ public sealed class FfmpegEncoderProbe : IFfmpegEncoderProbe
     {
         try
         {
+            var ffmpegPath = _pathResolver.ResolveFfmpegPath();
+            if (string.IsNullOrWhiteSpace(ffmpegPath) || !File.Exists(ffmpegPath))
+            {
+                _logger.LogWarning("FFmpeg path could not be resolved while testing encoder {EncoderName}", encoderName);
+                return false;
+            }
+
             // Try two more robust tests before falling back to a minimal one:
             // 1) testsrc with NV12 pix_fmt, reasonable resolution/frame-rate and GOP (-g)
             // 2) fallback to the older minimal color test if the first fails
@@ -84,7 +93,7 @@ public sealed class FfmpegEncoderProbe : IFfmpegEncoderProbe
             {
                 var psi = new ProcessStartInfo
                 {
-                    FileName = "ffmpeg",
+                    FileName = ffmpegPath,
                     Arguments = args,
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,

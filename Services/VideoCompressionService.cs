@@ -21,10 +21,11 @@ public class VideoCompressionService : IVideoCompressionService
     private readonly IFfmpegRunner _ffmpegRunner;
     private readonly ICompressionStrategyFactory _strategyFactory;
     private readonly ICompressionPlanner _planner;
+    private readonly IEncoderSelectionService _encoderSelectionService;
     private readonly int _maxConcurrentJobs;
     private readonly int _maxQueueSize;
 
-    public VideoCompressionService(IConfiguration configuration, ILogger<VideoCompressionService> logger, FfmpegPathResolver ffmpegResolver, IFfmpegRunner ffmpegRunner, ICompressionStrategyFactory strategyFactory, ICompressionPlanner planner, IJobStore jobStore)
+    public VideoCompressionService(IConfiguration configuration, ILogger<VideoCompressionService> logger, FfmpegPathResolver ffmpegResolver, IFfmpegRunner ffmpegRunner, ICompressionStrategyFactory strategyFactory, ICompressionPlanner planner, IJobStore jobStore, IEncoderSelectionService encoderSelectionService)
     {
         _logger = logger;
         _ffmpegResolver = ffmpegResolver;
@@ -32,6 +33,7 @@ public class VideoCompressionService : IVideoCompressionService
         _strategyFactory = strategyFactory;
         _planner = planner;
         _jobStore = jobStore;
+        _encoderSelectionService = encoderSelectionService;
         
         // Use AppData for temp directories to avoid permission issues in Program Files
         var appDataDirectory = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
@@ -661,13 +663,7 @@ public class VideoCompressionService : IVideoCompressionService
                 {
                     var encoderName = strategy.VideoCodec;
                     job.EncoderName = encoderName;
-                    // determine whether the encoder is hardware-backed - prefer probe info when available
-                    var lower = encoderName?.ToLowerInvariant() ?? string.Empty;
-                    var hardwareEncoders = new[] { "nvenc", "qsv", "amf", "vaapi", "v4l2m2m" };
-
-                    var isHardwareName = hardwareEncoders.Any(h => lower.Contains(h));
-                    // ensure probe says it's supported
-                    job.EncoderIsHardware = isHardwareName && !string.IsNullOrWhiteSpace(encoderName);
+                    job.EncoderIsHardware = _encoderSelectionService.IsHardwareEncoder(encoderName);
                 }
                 catch
                 {
@@ -679,7 +675,7 @@ public class VideoCompressionService : IVideoCompressionService
                 try
                 {
                     job.EncoderName = codec.VideoCodec;
-                    job.EncoderIsHardware = false;
+                    job.EncoderIsHardware = _encoderSelectionService.IsHardwareEncoder(job.EncoderName);
                 }
                 catch
                 {
