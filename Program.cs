@@ -154,7 +154,8 @@ namespace liteclip
                 
                 VideoCompressionService compressionService,
                 IConfiguration configuration,
-                FfmpegBootstrapper ffmpegBootstrapper) =>
+                FfmpegBootstrapper ffmpegBootstrapper,
+                ILogger<Program> logger) =>
             {
                 if (file == null || file.Length == 0)
                 {
@@ -199,8 +200,8 @@ namespace liteclip
                                 PropertyNameCaseInsensitive = true,
                                 NumberHandling = System.Text.Json.Serialization.JsonNumberHandling.AllowReadingFromString
                             };
-                            var arr = System.Text.Json.JsonSerializer.Deserialize<VideoSegment[]>(segments, liteclip.Serialization.LiteClipJsonContext.Default.VideoSegmentArray);
-                            if (arr != null) videoSegments = arr.ToList();
+                            // Try to deserialize as List<VideoSegment> first
+                            videoSegments = System.Text.Json.JsonSerializer.Deserialize<List<VideoSegment>>(segments, jsonOptions);
                         }
                         catch (Exception ex)
                         {
@@ -260,7 +261,7 @@ namespace liteclip
             // GET endpoint to check job status
             app.MapGet("/api/status/{jobId}", (string jobId, VideoCompressionService compressionService, ILogger<Program> logger) =>
             {
-                logger.LogInformation("Status check request for jobId: {JobId}", jobId);
+                logger.LogApiRequest("GET", $"/api/status/{jobId}", "Job status check");
 
                 if (string.IsNullOrWhiteSpace(jobId))
                 {
@@ -317,7 +318,7 @@ namespace liteclip
             // POST endpoint to cancel a job
             app.MapPost("/api/cancel/{jobId}", (string jobId, VideoCompressionService compressionService, ILogger<Program> logger) =>
             {
-                logger.LogInformation("Cancel request for jobId: {JobId}", jobId);
+                logger.LogApiRequest("POST", $"/api/cancel/{jobId}", "Job cancellation");
 
                 if (string.IsNullOrWhiteSpace(jobId))
                 {
@@ -342,13 +343,14 @@ namespace liteclip
                     return Results.Problem("Failed to cancel job", statusCode: 500);
                 }
 
+                logger.LogJobCompletion(jobId, true, "CANCELLED");
                 return Results.Ok(new { message = "Job cancelled successfully", jobId });
             })
             .WithName("CancelJob");
 
             app.MapPost("/api/retry/{jobId}", (string jobId, VideoCompressionService compressionService, ILogger<Program> logger) =>
             {
-                logger.LogInformation("Retry request for jobId: {JobId}", jobId);
+                logger.LogApiRequest("POST", $"/api/retry/{jobId}", "Job retry");
 
                 if (string.IsNullOrWhiteSpace(jobId))
                 {
@@ -361,6 +363,7 @@ namespace liteclip
                     return Results.BadRequest(new { error = error ?? "Unable to retry job." });
                 }
 
+                logger.LogInformation("🔄 Job {JobId} re-queued for processing", jobId);
                 return Results.Ok(new { message = "Job re-queued for processing", jobId });
             })
             .WithName("RetryJob");
@@ -368,11 +371,11 @@ namespace liteclip
             // GET endpoint to check status and download compressed video
             app.MapGet("/api/download/{jobId}", async (string jobId, VideoCompressionService compressionService, ILogger<Program> logger) =>
             {
-                logger.LogInformation("Download request for jobId: {JobId}", jobId);
+                logger.LogApiRequest("GET", $"/api/download/{jobId}", "File download");
 
                 if (string.IsNullOrWhiteSpace(jobId))
                 {
-                    logger.LogWarning("Empty jobId provided");
+                    logger.LogWarning("Empty jobId provided for download");
                     return Results.BadRequest(new { error = "Job ID is required" });
                 }
 
@@ -380,11 +383,11 @@ namespace liteclip
 
                 if (job == null)
                 {
-                    logger.LogWarning("Job not found: {JobId}", jobId);
+                    logger.LogWarning("Job not found for download: {JobId}", jobId);
                     return Results.NotFound(new { error = $"Job not found. The job may have expired or the application was restarted. JobId: {jobId}" });
                 }
 
-                logger.LogInformation("Job found: {JobId}, Status: {Status}", jobId, job.Status);
+                logger.LogInformation("📁 Job found: {JobId}, Status: {Status}", jobId, job.Status);
 
                 if (job.Status == "processing")
                 {
@@ -433,7 +436,7 @@ namespace liteclip
                         var fileBytes = await File.ReadAllBytesAsync(job.OutputPath);
                         var fileName = !string.IsNullOrWhiteSpace(job.OutputFilename) ? job.OutputFilename : $"compressed_{job.OriginalFilename}";
                         
-                        logger.LogInformation("Serving file for job: {JobId}, Size: {Size} bytes", jobId, fileBytes.Length);
+                        logger.LogFileOperation("Serving", job.OutputPath, fileBytes.Length);
                         
                         var mimeType = !string.IsNullOrWhiteSpace(job.OutputMimeType) ? job.OutputMimeType : "video/mp4";
                         return Results.File(fileBytes, mimeType, fileName);

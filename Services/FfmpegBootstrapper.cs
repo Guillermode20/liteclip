@@ -98,7 +98,7 @@ public class FfmpegBootstrapper
                         $"FFmpeg already available at {resolved}",
                         resolved
                     );
-                    _logger.LogInformation("FFmpeg already available and will be used: {Path}", resolved);
+                    _logger.LogInformation("🎬 FFmpeg already available and will be used: {Path}", resolved);
                     return;
                 }
             }

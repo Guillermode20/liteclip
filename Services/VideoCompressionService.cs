@@ -96,15 +96,20 @@ public class VideoCompressionService : IVideoCompressionService
 
     public async Task<string> CompressVideoAsync(IFormFile videoFile, CompressionRequest request)
     {
-        _logger.LogInformation("Compression request received - Mode: {Mode}, TargetSizeMb: {TargetSizeMb}, SourceDuration: {SourceDuration}",
-            $"{(request.UseUltraMode ? "Ultra" : request.UseQualityMode ? "Quality" : "Fast")}", request.TargetSizeMb, request.SourceDuration);
+        var jobId = Guid.NewGuid().ToString();
+        
+        // Log job header and request details
+        _logger.LogJobHeader("RECEIVED", jobId, videoFile.FileName);
+        _logger.LogCompressionRequest(jobId, 
+            request.UseUltraMode ? "Ultra" : request.UseQualityMode ? "Quality" : "Fast",
+            request.TargetSizeMb, 
+            request.SourceDuration,
+            request.Segments?.Count);
 
         var normalizedRequest = NormalizeRequest(request);
-        _logger.LogInformation("Normalized codec from mode: {Mode} → {Codec}",
-            normalizedRequest.Mode, normalizedRequest.Codec);
+        _logger.LogInformation("🎛️  Normalized codec: {Mode} → {Codec}", normalizedRequest.Mode, normalizedRequest.Codec);
+        
         var codecConfig = GetCodecConfig(normalizedRequest.Codec);
-
-        var jobId = Guid.NewGuid().ToString();
         var artifacts = await PrepareJobArtifactsAsync(jobId, videoFile, normalizedRequest, codecConfig);
 
         normalizedRequest.SourceDuration = artifacts.EffectiveDuration ?? normalizedRequest.SourceDuration;
@@ -136,17 +141,12 @@ public class VideoCompressionService : IVideoCompressionService
                 computedTargetKbps = bitratePlan.TotalKbps;
                 computedVideoKbps = bitratePlan.VideoKbps;
 
-                _logger.LogInformation(
-                    "Bitrate plan for job {JobId}: TargetSize={TargetMb}MB, Duration={Duration}s, PayloadBudget={PayloadMb}MB, ContainerReserve={ContainerMb}MB, SafetyMargin={SafetyMb}MB, TotalKbps={TotalKbps}, VideoKbps={VideoKbps}, AudioKbps={AudioKbps}",
-                    artifacts.JobId,
+                _logger.LogBitratePlan(artifacts.JobId, 
                     normalizedRequest.TargetSizeMb.Value,
                     normalizedRequest.SourceDuration.Value,
-                    bitratePlan.PayloadBudgetMb,
-                    bitratePlan.ContainerReserveMb,
-                    bitratePlan.SafetyMarginMb,
-                    bitratePlan.TotalKbps,
                     bitratePlan.VideoKbps,
-                    codecConfig.AudioBitrateKbps);
+                    codecConfig.AudioBitrateKbps,
+                    bitratePlan.TotalKbps);
 
                 // Auto-resolution adjustment: Downscale if bitrate is too low for the resolution
                 // But only if the user hasn't explicitly requested "original" resolution (100% scale)
@@ -242,7 +242,7 @@ public class VideoCompressionService : IVideoCompressionService
     {
         if (segments == null || segments.Count == 0)
         {
-            _logger.LogInformation("No segments provided - using full video for job {JobId}", jobId);
+            _logger.LogInformation("📹 No segments provided - using full video for job {JobId}", jobId);
             return new SegmentProcessingResult(false, inputPath, originalDuration);
         }
 
@@ -253,24 +253,24 @@ public class VideoCompressionService : IVideoCompressionService
 
         if (isFullVideo)
         {
-            _logger.LogInformation("Segments represent full video - not processing segments for job {JobId}", jobId);
+            _logger.LogInformation("📹 Segments represent full video - using full video for job {JobId}", jobId);
             return new SegmentProcessingResult(false, inputPath, originalDuration);
         }
 
-        _logger.LogInformation("Processing {Count} video segments for job {JobId}", segments.Count, jobId);
-
+        _logger.LogSection("SEGMENT PROCESSING");
+        
         for (int i = 0; i < segments.Count; i++)
         {
             var seg = segments[i];
-            _logger.LogInformation("Segment {Index}: {Start}s - {End}s (duration: {Duration}s)",
+            _logger.LogInformation("   Segment {Index}: {Start}s - {End}s (duration: {Duration}s)",
                 i + 1, seg.Start, seg.End, seg.End - seg.Start);
         }
 
         var mergedPath = await MergeVideoSegmentsAsync(jobId, inputPath, segments);
         var totalEditedDuration = segments.Sum(s => s.End - s.Start);
-        _logger.LogInformation("Updated source duration from segments: {Duration}s (original was {OriginalDuration}s)",
-            totalEditedDuration, originalDuration);
-
+        
+        _logger.LogSegmentProcessing(jobId, segments.Count, totalEditedDuration, originalDuration ?? 0);
+        
         return new SegmentProcessingResult(true, mergedPath, totalEditedDuration);
     }
 
@@ -283,13 +283,13 @@ public class VideoCompressionService : IVideoCompressionService
 
         if (request.SkipCompression)
         {
-            _logger.LogInformation("Skip compression flag is set for job {JobId} - user requested no compression", jobId);
+            _logger.LogInformation("⏭️  Skip compression flag set for job {JobId} - user requested no compression", jobId);
             return true;
         }
 
         if (request.TargetSizeMb.HasValue && request.TargetSizeMb.Value >= (effectiveMaxSizeMb - 0.01))
         {
-            _logger.LogInformation("Target size ({TargetMb}MB) is >= effective max size ({EffectiveMaxMb}MB) - skipping compression for job {JobId}",
+            _logger.LogInformation("⏭️  Target size ({TargetMb}MB) >= effective max size ({EffectiveMaxMb}MB) - skipping compression for job {JobId}",
                 request.TargetSizeMb.Value, effectiveMaxSizeMb, jobId);
             return true;
         }
@@ -299,9 +299,10 @@ public class VideoCompressionService : IVideoCompressionService
 
     private string CompleteSkippedJob(JobPreparationArtifacts artifacts, CodecConfig codecConfig, CompressionRequest request)
     {
-        _logger.LogInformation("Skipping compression for job {JobId} - copying file directly", artifacts.JobId);
+        _logger.LogInformation("⏭️  Skipping compression for job {JobId} - copying file directly", artifacts.JobId);
 
         File.Copy(artifacts.PreparedInputPath, artifacts.OutputPath, overwrite: true);
+        _logger.LogFileOperation("Copied", artifacts.OutputPath, new FileInfo(artifacts.OutputPath).Length);
 
         var job = new JobMetadata
         {
@@ -334,7 +335,7 @@ public class VideoCompressionService : IVideoCompressionService
         }
 
         _jobs[artifacts.JobId] = job;
-        _logger.LogInformation("Job {JobId} completed immediately (no compression)", artifacts.JobId);
+        _logger.LogJobCompletion(artifacts.JobId, true, "COMPLETED (NO COMPRESSION)", job.OutputSizeBytes / (1024.0 * 1024.0), true);
 
         return artifacts.JobId;
     }

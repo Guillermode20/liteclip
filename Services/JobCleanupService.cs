@@ -35,8 +35,7 @@ public class JobCleanupService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        _logger.LogInformation("Job Cleanup Service started. Cleanup interval: {Interval}, Retention time: {Retention}", 
-            _cleanupInterval, _jobRetentionTime);
+        _logger.LogServiceStartup("Job Cleanup Service", $"Cleanup interval: {_cleanupInterval}, Retention time: {_jobRetentionTime}");
 
         while (!stoppingToken.IsCancellationRequested)
         {
