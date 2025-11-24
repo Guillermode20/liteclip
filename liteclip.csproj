@@ -42,6 +42,10 @@
     <PackageReference Include="Xabe.FFmpeg.Downloader" Version="6.0.2" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Compile Remove="liteclip.Tests\**\*.cs" />
+  </ItemGroup>
+
   <!-- Development: copy wwwroot to output directory -->
   <ItemGroup Condition="'$(Configuration)'=='Debug'">
     <Content Include="wwwroot\**\*" CopyToOutputDirectory="PreserveNewest" />

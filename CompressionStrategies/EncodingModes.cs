@@ -341,7 +341,7 @@ public static class EncodingModeConfigs
                 "-bf", "4",
                 "-refs", "5",
                 "-x265-params",
-                "vbv-bufsize={buffer}:vbv-maxrate={maxrate}:aq-mode=3:aq-strength=1.4:psy-rd=2.5:psy-rdoq=1.5:rc-lookahead=80:me=star:subme=10:rd=6:ref=6:sao=1:deblock=-1,-1:rdoq-level=2:ctu=32:tu-intra-depth=3:tu-inter-depth=3"
+                "vbv-bufsize={buffer}:vbv-maxrate={maxrate}:aq-mode=3:aq-strength=1.4:psy-rd=2.5:psy-rdoq=1.5:rc-lookahead=80:me=star:subme=7:rd=6:ref=6:sao=1:deblock=-1,-1:rdoq-level=2:ctu=32:tu-intra-depth=3:tu-inter-depth=3"
             }
         ),
 

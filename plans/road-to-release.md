@@ -13,10 +13,10 @@ This document outlines the tasks and checklist for preparing liteclip for its fi
 
 ### Code Quality & Testing
 - [ ] **Backend Testing**
-  - [ ] Add unit tests for compression strategies (H264/H265)
-  - [ ] Add unit tests for VideoCompressionService
-  - [ ] Add unit tests for FfmpegBootstrapper
-  - [ ] Add integration tests for API endpoints
+  - [x] Add unit tests for compression strategies (H264/H265)
+  - [x] Add unit tests for VideoCompressionService
+  - [x] Add unit tests for FfmpegBootstrapper
+  - [x] Add integration tests for API endpoints
   - [ ] Test with various video formats and sizes
 
 - [ ] **Frontend Testing**
