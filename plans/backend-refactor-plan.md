@@ -47,18 +47,18 @@ Rough, high-level checklist to gradually de-fragment the backend. Tweak ordering
 
 ## Phase 3 – FFmpeg Execution & Progress Parsing
 
-- [ ] Introduce an `IFfmpegRunner` / `FfmpegProcessRunner`
-  - [ ] Centralize `ProcessStartInfo` construction for both passes
-  - [ ] Handle cancellation, timeouts, and error codes in one place
-  - [ ] Return a result object (exit code, logs, output path)
-- [ ] Extract stderr progress parsing into a dedicated component
-  - [ ] `IProgressParser` that parses `time=`, `bitrate=`, `speed=`, etc.
-  - [ ] Calculate ETA and percent complete based on total duration
-  - [ ] Keep job mutation (updating `job.Progress`, ETA) outside parser
-- [ ] Make `RunTwoPassEncodingAsync` just:
-  - [ ] Build arguments for pass 1 & 2
-  - [ ] Call `IFfmpegRunner` with a progress callback
-  - [ ] Update `CompressionJob` state from progress events
+- [x] Introduce an `IFfmpegRunner` / `FfmpegProcessRunner`
+  - [x] Centralize `ProcessStartInfo` construction for both passes
+  - [x] Handle cancellation, timeouts, and error codes in one place
+  - [x] Return a result object (exit code, logs, output path)
+- [x] Extract stderr progress parsing into a dedicated component
+  - [x] `IProgressParser` that parses `time=`, `bitrate=`, `speed=`, etc.
+  - [x] Calculate ETA and percent complete based on total duration
+  - [x] Keep job mutation (updating `job.Progress`, ETA) outside parser
+- [x] Make `RunTwoPassEncodingAsync` just:
+  - [x] Build arguments for pass 1 & 2
+  - [x] Call `IFfmpegRunner` with a progress callback
+  - [x] Update `CompressionJob` state from progress events
 
 ---
 

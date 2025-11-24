@@ -60,6 +60,8 @@ namespace liteclip
             builder.Services.AddHttpClient();
             builder.Services.AddSingleton<FfmpegPathResolver>();
             builder.Services.AddSingleton<IFfmpegPathResolver>(sp => sp.GetRequiredService<FfmpegPathResolver>());
+            builder.Services.AddSingleton<IProgressParser, FfmpegProgressParser>();
+            builder.Services.AddSingleton<IFfmpegRunner, FfmpegProcessRunner>();
             builder.Services.AddSingleton<FfmpegProbeService>();
 
             builder.Services.AddSingleton<ICompressionPlanner, DefaultCompressionPlanner>();

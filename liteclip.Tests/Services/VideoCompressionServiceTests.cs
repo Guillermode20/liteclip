@@ -35,10 +35,31 @@ public class VideoCompressionServiceTests
         var planner = new DefaultCompressionPlanner();
         var jobStore = new InMemoryJobStore();
 
-        var service = new VideoCompressionService(config, logger, ffmpegResolver, strategyFactory, planner, jobStore);
+        var ffmpegRunner = new NoopFfmpegRunner();
+        var service = new VideoCompressionService(config, logger, ffmpegResolver, ffmpegRunner, strategyFactory, planner, jobStore);
 
         Assert.NotNull(service);
         Assert.True(Directory.Exists(Path.Combine(tempRoot, "uploads")));
         Assert.True(Directory.Exists(Path.Combine(tempRoot, "outputs")));
+    }
+
+    private sealed class NoopFfmpegRunner : IFfmpegRunner
+    {
+        public Task<FfmpegRunResult> RunAsync(
+            string jobId,
+            IReadOnlyList<string> arguments,
+            double? totalDuration,
+            int passNumber,
+            int totalPasses,
+            Action<FfmpegProgressUpdate>? onProgress,
+            Action<System.Diagnostics.Process>? onProcessStarted = null,
+            CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(new FfmpegRunResult
+            {
+                ExitCode = 0,
+                StandardError = string.Empty
+            });
+        }
     }
 }

@@ -66,6 +66,8 @@ public class ApiIntegrationTests : IAsyncLifetime
         builder.Services.AddHttpClient();
         builder.Services.AddSingleton<FfmpegPathResolver>();
         builder.Services.AddSingleton<IFfmpegPathResolver>(sp => sp.GetRequiredService<FfmpegPathResolver>());
+        builder.Services.AddSingleton<IProgressParser, FfmpegProgressParser>();
+        builder.Services.AddSingleton<IFfmpegRunner, NoopFfmpegRunner>();
         builder.Services.AddSingleton<FfmpegProbeService>();
         builder.Services.AddSingleton<ICompressionPlanner, DefaultCompressionPlanner>();
         builder.Services.AddSingleton<IJobStore, InMemoryJobStore>();
@@ -308,5 +310,25 @@ public class ApiIntegrationTests : IAsyncLifetime
 
         Assert.NotNull(updated);
         Assert.Equal(initialSettings.StartMaximized, updated!.StartMaximized);
+    }
+
+    private sealed class NoopFfmpegRunner : IFfmpegRunner
+    {
+        public Task<FfmpegRunResult> RunAsync(
+            string jobId,
+            IReadOnlyList<string> arguments,
+            double? totalDuration,
+            int passNumber,
+            int totalPasses,
+            Action<FfmpegProgressUpdate>? onProgress,
+            Action<System.Diagnostics.Process>? onProcessStarted = null,
+            CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(new FfmpegRunResult
+            {
+                ExitCode = 0,
+                StandardError = string.Empty
+            });
+        }
     }
 }

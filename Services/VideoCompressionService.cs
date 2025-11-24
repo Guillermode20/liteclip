@@ -18,15 +18,17 @@ public class VideoCompressionService : IVideoCompressionService
     private readonly string _tempOutputPath;
     private readonly ILogger<VideoCompressionService> _logger;
     private readonly FfmpegPathResolver _ffmpegResolver;
+    private readonly IFfmpegRunner _ffmpegRunner;
     private readonly ICompressionStrategyFactory _strategyFactory;
     private readonly ICompressionPlanner _planner;
     private readonly int _maxConcurrentJobs;
     private readonly int _maxQueueSize;
 
-    public VideoCompressionService(IConfiguration configuration, ILogger<VideoCompressionService> logger, FfmpegPathResolver ffmpegResolver, ICompressionStrategyFactory strategyFactory, ICompressionPlanner planner, IJobStore jobStore)
+    public VideoCompressionService(IConfiguration configuration, ILogger<VideoCompressionService> logger, FfmpegPathResolver ffmpegResolver, IFfmpegRunner ffmpegRunner, ICompressionStrategyFactory strategyFactory, ICompressionPlanner planner, IJobStore jobStore)
     {
         _logger = logger;
         _ffmpegResolver = ffmpegResolver;
+        _ffmpegRunner = ffmpegRunner;
         _strategyFactory = strategyFactory;
         _planner = planner;
         _jobStore = jobStore;
@@ -837,70 +839,25 @@ public class VideoCompressionService : IVideoCompressionService
 
     private async Task<bool> RunSinglePassEncodingAsync(string jobId, JobMetadata job, List<string> arguments, double? totalDuration)
     {
-        var processStartInfo = BuildFfmpegProcessStartInfo(arguments);
-        var commandLine = FormatFfmpegCommand(processStartInfo.FileName, arguments);
-        _logger.LogInformation("Executing FFmpeg command for job {JobId}: {Command}", jobId, commandLine);
-
-        using var process = new Process { StartInfo = processStartInfo };
-        job.Process = process;
-
-        var errorBuilder = new StringBuilder();
-        var startTime = DateTime.UtcNow;
-        var lastProgressUpdate = startTime;
-
-        process.OutputDataReceived += (_, e) =>
-        {
-            if (!string.IsNullOrEmpty(e.Data))
+        var result = await _ffmpegRunner.RunAsync(
+            jobId,
+            arguments,
+            totalDuration,
+            1,
+            1,
+            update =>
             {
-                // Log output if needed
-            }
-        };
-
-        process.ErrorDataReceived += (_, e) =>
-        {
-            if (!string.IsNullOrEmpty(e.Data))
-            {
-                errorBuilder.AppendLine(e.Data);
-
-                // Parse FFmpeg progress output for real-time progress
-                string line = e.Data.Trim();
-                if (line.StartsWith("frame=") || line.Contains("time="))
+                if (update.Percent.HasValue)
                 {
-                    try
-                    {
-                        var now = DateTime.UtcNow;
-                        var progress = ParseFfmpegProgress(line, totalDuration, out var currentTimeSeconds);
-                        if (progress.HasValue)
-                        {
-                            job.Progress = Math.Clamp(progress.Value, 0, 100);
-                            
-                            // Calculate ETA every 2 seconds
-                            if ((now - lastProgressUpdate).TotalSeconds >= 2 && currentTimeSeconds.HasValue && totalDuration.HasValue)
-                            {
-                                var elapsed = (now - startTime).TotalSeconds;
-                                var speed = currentTimeSeconds.Value / elapsed; // x speed
-                                if (speed > 0)
-                                {
-                                    var remainingSeconds = (totalDuration.Value - currentTimeSeconds.Value) / speed;
-                                    job.EstimatedSecondsRemaining = (int)Math.Ceiling(remainingSeconds);
-                                }
-                                lastProgressUpdate = now;
-                            }
-                        }
-                    }
-                    catch
-                    {
-                        // Ignore parsing errors, continue with compression
-                    }
+                    job.Progress = Math.Clamp(update.Percent.Value, 0, 100);
                 }
-            }
-        };
 
-        process.Start();
-        process.BeginOutputReadLine();
-        process.BeginErrorReadLine();
-
-        await process.WaitForExitAsync();
+                if (update.EstimatedSecondsRemaining.HasValue)
+                {
+                    job.EstimatedSecondsRemaining = update.EstimatedSecondsRemaining.Value;
+                }
+            },
+            process => job.Process = process);
 
         if (job.Status == "cancelled")
         {
@@ -908,7 +865,7 @@ public class VideoCompressionService : IVideoCompressionService
             return false;
         }
 
-        if (process.ExitCode == 0)
+        if (result.ExitCode == 0)
         {
             if (File.Exists(job.OutputPath))
             {
@@ -917,13 +874,11 @@ public class VideoCompressionService : IVideoCompressionService
             }
             return true;
         }
-        else
-        {
-            job.Status = "failed";
-            job.ErrorMessage = errorBuilder.ToString();
-            _logger.LogError("Video compression failed for job {JobId}. Exit code {ExitCode}. Error: {Error}", jobId, process.ExitCode, errorBuilder.ToString());
-            return false;
-        }
+
+        job.Status = "failed";
+        job.ErrorMessage = result.StandardError;
+        _logger.LogError("Video compression failed for job {JobId}. Exit code {ExitCode}. Error: {Error}", jobId, result.ExitCode, result.StandardError);
+        return false;
     }
 
     private void FinalizeSuccessfulJob(JobMetadata job, CodecConfig codec)
@@ -1187,62 +1142,25 @@ public class VideoCompressionService : IVideoCompressionService
 
     private async Task<bool> RunPassAsync(string jobId, JobMetadata job, List<string> arguments, double? totalDuration, int passNumber, int totalPasses)
     {
-        var processStartInfo = BuildFfmpegProcessStartInfo(arguments);
-
-        using var process = new Process { StartInfo = processStartInfo };
-        job.Process = process;
-
-        var errorBuilder = new StringBuilder();
-        var startTime = DateTime.UtcNow;
-        var lastProgressUpdate = startTime;
-
-        process.ErrorDataReceived += (_, e) =>
-        {
-            if (!string.IsNullOrEmpty(e.Data))
+        var result = await _ffmpegRunner.RunAsync(
+            jobId,
+            arguments,
+            totalDuration,
+            passNumber,
+            totalPasses,
+            update =>
             {
-                errorBuilder.AppendLine(e.Data);
-
-                string line = e.Data.Trim();
-                if (line.StartsWith("frame=") || line.Contains("time="))
+                if (update.Percent.HasValue)
                 {
-                    try
-                    {
-                        var now = DateTime.UtcNow;
-                        var progress = ParseFfmpegProgress(line, totalDuration, out var currentTimeSeconds);
-                        if (progress.HasValue)
-                        {
-                            // Adjust progress based on pass number
-                            var adjustedProgress = ((passNumber - 1) * 100.0 / totalPasses) + (progress.Value / totalPasses);
-                            job.Progress = Math.Clamp(adjustedProgress, 0, 100);
-                            
-                            // Calculate ETA
-                            if ((now - lastProgressUpdate).TotalSeconds >= 2 && currentTimeSeconds.HasValue && totalDuration.HasValue)
-                            {
-                                var elapsed = (now - startTime).TotalSeconds;
-                                var speed = currentTimeSeconds.Value / elapsed;
-                                if (speed > 0)
-                                {
-                                    var remainingThisPass = (totalDuration.Value - currentTimeSeconds.Value) / speed;
-                                    var remainingPasses = (totalPasses - passNumber) * (totalDuration.Value / speed);
-                                    job.EstimatedSecondsRemaining = (int)Math.Ceiling(remainingThisPass + remainingPasses);
-                                }
-                                lastProgressUpdate = now;
-                            }
-                        }
-                    }
-                    catch
-                    {
-                        // Ignore parsing errors
-                    }
+                    job.Progress = Math.Clamp(update.Percent.Value, 0, 100);
                 }
-            }
-        };
 
-        process.Start();
-        process.BeginOutputReadLine();
-        process.BeginErrorReadLine();
-
-        await process.WaitForExitAsync();
+                if (update.EstimatedSecondsRemaining.HasValue)
+                {
+                    job.EstimatedSecondsRemaining = update.EstimatedSecondsRemaining.Value;
+                }
+            },
+            process => job.Process = process);
 
         if (job.Status == "cancelled")
         {
@@ -1250,49 +1168,15 @@ public class VideoCompressionService : IVideoCompressionService
             return false;
         }
 
-        if (process.ExitCode != 0)
+        if (result.ExitCode != 0)
         {
             job.Status = "failed";
-            job.ErrorMessage = $"Pass {passNumber} failed: {errorBuilder}";
-            _logger.LogError("Pass {Pass} failed for job {JobId}. Exit code {ExitCode}", passNumber, jobId, process.ExitCode);
+            job.ErrorMessage = $"Pass {passNumber} failed: {result.StandardError}";
+            _logger.LogError("Pass {Pass} failed for job {JobId}. Exit code {ExitCode}", passNumber, jobId, result.ExitCode);
             return false;
         }
 
         return true;
-    }
-
-    private static double? ParseFfmpegProgress(string line, double? totalDuration, out double? currentTimeSeconds)
-    {
-        currentTimeSeconds = null;
-        
-        if (string.IsNullOrEmpty(line) || !totalDuration.HasValue || totalDuration.Value <= 0)
-        {
-            return null;
-        }
-
-        try
-        {
-            // Look for time= pattern like "time=00:01:23.45"
-            var timeMatch = System.Text.RegularExpressions.Regex.Match(line, @"time=(\d{2}):(\d{2}):(\d{2}(?:\.\d+)?)");
-            if (timeMatch.Success)
-            {
-                var hours = double.Parse(timeMatch.Groups[1].Value);
-                var minutes = double.Parse(timeMatch.Groups[2].Value);
-                var seconds = double.Parse(timeMatch.Groups[3].Value);
-
-                var currentTime = hours * 3600 + minutes * 60 + seconds;
-                currentTimeSeconds = currentTime;
-                var progress = (currentTime / totalDuration.Value) * 100;
-
-                return Math.Clamp(progress, 0, 100);
-            }
-        }
-        catch
-        {
-            // Parsing failed, return null
-        }
-
-        return null;
     }
 
     public JobMetadata? GetJob(string jobId)
