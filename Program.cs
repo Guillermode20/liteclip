@@ -611,7 +611,7 @@ namespace liteclip
                 if (userSettings.StartMaximized)
                 {
                     window.SetMaximized(true);
-                    window.SetMinSize(800, 600); // set a reasonable minimum size when maximized
+                    window.SetMinSize(854, 480); // set a reasonable minimum size when maximized
                 }
             }
             catch
@@ -634,7 +634,8 @@ namespace liteclip
             if (File.Exists(indexPath))
             {
                 // Load local file first to ensure webview is properly initialized on Windows
-                window.Load($"file://{indexPath}");
+                var indexUri = new Uri(indexPath);
+                window.Load(indexUri.AbsoluteUri);
                 Console.WriteLine($"✓ Loaded local index.html while server starts");
             }
             else
