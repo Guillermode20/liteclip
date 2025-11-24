@@ -132,7 +132,6 @@ public class ApiIntegrationTests : IAsyncLifetime
                 SourceDuration = null,
                 Segments = null,
                 UseQualityMode = false,
-                UseUltraMode = false,
                 MuteAudio = false
             };
 

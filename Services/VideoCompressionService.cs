@@ -100,13 +100,13 @@ public class VideoCompressionService : IVideoCompressionService
         
         // Log job header and request details
         _logger.LogJobHeader("RECEIVED", jobId, videoFile.FileName);
-        _logger.LogCompressionRequest(jobId, 
-            request.UseUltraMode ? "Ultra" : request.UseQualityMode ? "Quality" : "Fast",
-            request.TargetSizeMb, 
-            request.SourceDuration,
-            request.Segments?.Count);
 
         var normalizedRequest = NormalizeRequest(request);
+        _logger.LogCompressionRequest(jobId, 
+            normalizedRequest.Mode.ToString(),
+            normalizedRequest.TargetSizeMb, 
+            normalizedRequest.SourceDuration,
+            normalizedRequest.Segments?.Count);
         _logger.LogInformation("🎛️  Normalized codec: {Mode} → {Codec}", normalizedRequest.Mode, normalizedRequest.Codec);
         
         var codecConfig = GetCodecConfig(normalizedRequest.Codec);
@@ -242,7 +242,7 @@ public class VideoCompressionService : IVideoCompressionService
     {
         if (segments == null || segments.Count == 0)
         {
-            _logger.LogInformation("📹 No segments provided - using full video for job {JobId}", jobId);
+            _logger.LogInformation(" No segments provided - using full video for job {JobId}", jobId);
             return new SegmentProcessingResult(false, inputPath, originalDuration);
         }
 
@@ -253,7 +253,7 @@ public class VideoCompressionService : IVideoCompressionService
 
         if (isFullVideo)
         {
-            _logger.LogInformation("📹 Segments represent full video - using full video for job {JobId}", jobId);
+            _logger.LogInformation(" Segments represent full video - using full video for job {JobId}", jobId);
             return new SegmentProcessingResult(false, inputPath, originalDuration);
         }
 
@@ -283,13 +283,13 @@ public class VideoCompressionService : IVideoCompressionService
 
         if (request.SkipCompression)
         {
-            _logger.LogInformation("⏭️  Skip compression flag set for job {JobId} - user requested no compression", jobId);
+            _logger.LogInformation(" Skip compression flag set for job {JobId} - user requested no compression", jobId);
             return true;
         }
 
         if (request.TargetSizeMb.HasValue && request.TargetSizeMb.Value >= (effectiveMaxSizeMb - 0.01))
         {
-            _logger.LogInformation("⏭️  Target size ({TargetMb}MB) >= effective max size ({EffectiveMaxMb}MB) - skipping compression for job {JobId}",
+            _logger.LogInformation(" Target size ({TargetMb}MB) >= effective max size ({EffectiveMaxMb}MB) - skipping compression for job {JobId}",
                 request.TargetSizeMb.Value, effectiveMaxSizeMb, jobId);
             return true;
         }
@@ -299,7 +299,7 @@ public class VideoCompressionService : IVideoCompressionService
 
     private string CompleteSkippedJob(JobPreparationArtifacts artifacts, CodecConfig codecConfig, CompressionRequest request)
     {
-        _logger.LogInformation("⏭️  Skipping compression for job {JobId} - copying file directly", artifacts.JobId);
+        _logger.LogInformation(" Skipping compression for job {JobId} - copying file directly", artifacts.JobId);
 
         File.Copy(artifacts.PreparedInputPath, artifacts.OutputPath, overwrite: true);
         _logger.LogFileOperation("Copied", artifacts.OutputPath, new FileInfo(artifacts.OutputPath).Length);
@@ -483,7 +483,6 @@ public class VideoCompressionService : IVideoCompressionService
             SkipCompression = false,
             MuteAudio = job.MuteAudio,
             UseQualityMode = string.Equals(job.Codec, "h265", StringComparison.OrdinalIgnoreCase),
-            UseUltraMode = false,
             Mode = job.RequestSnapshot?.Mode ?? EncodingMode.Fast
         };
 
@@ -548,71 +547,71 @@ public class VideoCompressionService : IVideoCompressionService
         /// Filters are automatically tuned based on the compression level and target size.
         /// </summary>
         private static List<string> BuildAdaptiveFilters(int scalePercent, int targetFps, double? targetSizeMb, double? sourceDuration)
+    {
+        var filters = new List<string>();
+        
+        // Calculate compression intensity (higher = more aggressive compression)
+        var isHeavyCompression = false;
+        if (targetSizeMb.HasValue && sourceDuration.HasValue && sourceDuration.Value > 0)
         {
-            var filters = new List<string>();
-            
-            // Calculate compression intensity (higher = more aggressive compression)
-            var isHeavyCompression = false;
-            if (targetSizeMb.HasValue && sourceDuration.HasValue && sourceDuration.Value > 0)
-            {
-                var bitrateKbps = (targetSizeMb.Value * 8 * 1024) / sourceDuration.Value;
-                isHeavyCompression = bitrateKbps < 1000; // < 1 Mbps is heavy compression
-            }
-            
-            // 1. Temporal denoising - ALWAYS apply before scaling
-            // Removes noise/grain that's difficult to compress efficiently
-            // More aggressive denoising for heavy compression to maximize efficiency
-            if (isHeavyCompression)
-            {
-                // Stronger denoising for heavy compression
-                filters.Add("hqdn3d=2.5:2.0:4.0:4.0");
-            }
-            else
-            {
-                // Moderate denoising for lighter compression
-                filters.Add("hqdn3d=1.5:1.0:3.0:3.0");
-            }
-            
-            // 2. Scaling (if needed)
-            if (scalePercent < 100)
-            {
-                var factor = scalePercent / 100.0;
-                var factorStr = factor.ToString(CultureInfo.InvariantCulture);
-                filters.Add($"scale=trunc(iw*{factorStr}/2)*2:trunc(ih*{factorStr}/2)*2:flags=lanczos");
-            }
-            
-            // 3. Debanding - ALWAYS apply after scaling
-            // Prevents banding in gradients (skies, sunsets, dark scenes)
-            // This is critical for compressed video quality
-            // Parameters: range=16 pixels, threshold1/2/3/4 for each plane
-            filters.Add("deband=1thr=0.02:2thr=0.02:3thr=0.02:range=16:blur=0");
-            
-            // 4. Contrast-adaptive sharpening - ALWAYS apply
-            // Compensates for softness from denoising and enhances perceived sharpness
-            if (scalePercent < 100)
-            {
-                // Adaptive sharpening based on downscaling amount
-                var downscaleFactor = 1.0 - (scalePercent / 100.0);
-                var unsharpStrength = Math.Round(0.5 + (downscaleFactor * 1.5), 2);
-                var unsharpStrengthStr = unsharpStrength.ToString(CultureInfo.InvariantCulture);
-                filters.Add($"unsharp=3:3:{unsharpStrengthStr}");
-            }
-            else
-            {
-                // Light sharpening even without downscaling
-                filters.Add("unsharp=3:3:0.3");
-            }
-            
-            // 5. FPS limiting (if specified)
-            if (targetFps > 0)
-            {
-                filters.Add($"fps={targetFps}");
-            }
-            
-            return filters;
+            var bitrateKbps = (targetSizeMb.Value * 8 * 1024) / sourceDuration.Value;
+            isHeavyCompression = bitrateKbps < 1000; // < 1 Mbps is heavy compression
         }
+        
+        // 1. Temporal denoising - ALWAYS apply before scaling
+        // Removes noise/grain that's difficult to compress efficiently
+        // More aggressive denoising for heavy compression to maximize efficiency
+        if (isHeavyCompression)
+        {
+            // Stronger denoising for heavy compression
+            filters.Add("hqdn3d=2.5:2.0:4.0:4.0");
+        }
+        else
+        {
+            // Moderate denoising for lighter compression
+            filters.Add("hqdn3d=1.5:1.0:3.0:3.0");
+        }
+        
+        // 2. Scaling (if needed)
+        if (scalePercent < 100)
+        {
+            var factor = scalePercent / 100.0;
+            var factorStr = factor.ToString(CultureInfo.InvariantCulture);
+            filters.Add($"scale=trunc(iw*{factorStr}/2)*2:trunc(ih*{factorStr}/2)*2:flags=lanczos");
+        }
+        
+        // 3. Debanding - ALWAYS apply after scaling
+        // Prevents banding in gradients (skies, sunsets, dark scenes)
+        // This is critical for compressed video quality
+        // Parameters: range=16 pixels, threshold1/2/3/4 for each plane
+        filters.Add("deband=1thr=0.02:2thr=0.02:3thr=0.02:range=16:blur=0");
+        
+        // 4. Contrast-adaptive sharpening - ALWAYS apply
+        // Compensates for softness from denoising and enhances perceived sharpness
+        if (scalePercent < 100)
+        {
+            // Adaptive sharpening based on downscaling amount
+            var downscaleFactor = 1.0 - (scalePercent / 100.0);
+            var unsharpStrength = Math.Round(0.5 + (downscaleFactor * 1.5), 2);
+            var unsharpStrengthStr = unsharpStrength.ToString(CultureInfo.InvariantCulture);
+            filters.Add($"unsharp=3:3:{unsharpStrengthStr}");
+        }
+        else
+        {
+            // Light sharpening even without downscaling
+            filters.Add("unsharp=3:3:0.3");
+        }
+        
+        // 5. FPS limiting (if specified)
+        if (targetFps > 0)
+        {
+            filters.Add($"fps={targetFps}");
+        }
+        
+        return filters;
+    }
 
-        private async Task RunFfmpegCompressionAsync(string jobId, JobMetadata job, CompressionRequest request, CodecConfig codec, VideoDimensions? preProbedDimensions)
+    private async Task RunFfmpegCompressionAsync(string jobId, JobMetadata job, CompressionRequest request, CodecConfig codec, VideoDimensions? preProbedDimensions)
     {
         try
         {
@@ -1106,21 +1105,8 @@ public class VideoCompressionService : IVideoCompressionService
                 {
                     _logger.LogWarning("Pass 1 failed for job {JobId} — retrying after removing x265 params", jobId);
                     pass1Args = new List<string>(sanitizedBase);
-                    if (strategy != null)
-                    {
-                        pass1Args.AddRange(strategy.GetPassExtras(1, passLogFile));
-                    }
-                    else
-                    {
-                        if (codec.Key == "h264" || codec.Key == "h265")
-                        {
-                            pass1Args.AddRange(new[] { "-pass", "1", "-passlogfile", passLogFile, "-f", codec.Key == "h264" ? "mp4" : "mp4" });
-                        }
-                        else if (codec.Key == "vp9" || codec.Key == "av1")
-                        {
-                            pass1Args.AddRange(new[] { "-pass", "1", "-passlogfile", passLogFile, "-f", "webm" });
-                        }
-                    }
+                    if (strategy != null) pass1Args.AddRange(strategy.GetPassExtras(1, passLogFile));
+                    else pass1Args.AddRange(new[] { "-pass", "1", "-passlogfile", passLogFile, "-f", codec.Key == "h264" ? "mp4" : "mp4" });
                     EnsurePass1NullOutput(pass1Args);
 
                     success = await RunPassAsync(jobId, job, pass1Args, totalDuration, 1, 2);
@@ -1448,7 +1434,7 @@ public class VideoCompressionService : IVideoCompressionService
         private static CompressionRequest NormalizeRequest(CompressionRequest request)
     {
         // Derive unified encoding mode from flags first
-        var mode = DeriveEncodingMode(request.UseQualityMode, request.UseUltraMode);
+        var mode = DeriveEncodingMode(request.UseQualityMode);
         
         // Determine codec based on the derived encoding mode
         // Fast → H.264, Quality → H.265
@@ -1469,7 +1455,6 @@ public class VideoCompressionService : IVideoCompressionService
             SkipCompression = request.SkipCompression,
             MuteAudio = request.MuteAudio,
             UseQualityMode = request.UseQualityMode,
-            UseUltraMode = request.UseUltraMode,
             Mode = mode
         };
 
@@ -2126,16 +2111,14 @@ public class VideoCompressionService : IVideoCompressionService
                 End = segment.End
             }).ToList(),
             UseQualityMode = source.UseQualityMode,
-            UseUltraMode = source.UseUltraMode,
             Mode = source.Mode
         };
     }
 
 
 
-    private static EncodingMode DeriveEncodingMode(bool useQualityMode, bool useUltraMode)
+    private static EncodingMode DeriveEncodingMode(bool useQualityMode)
     {
-        // useUltraMode is ignored; we only support Fast and Quality modes
         if (useQualityMode)
         {
             return EncodingMode.Quality;

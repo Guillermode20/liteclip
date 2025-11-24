@@ -19,10 +19,9 @@ public class CompressionRequest
     public double? SourceDuration { get; set; }
     public List<VideoSegment>? Segments { get; set; }
     public bool UseQualityMode { get; set; }
-    public bool UseUltraMode { get; set; }
 
     /// <summary>
-    /// Unified logical encoding mode derived from the quality/ultra flags.
+    /// Unified logical encoding mode derived from the quality flag.
     /// This is not supplied directly by the client; it is normalized on the server.
     /// </summary>
     public EncodingMode Mode { get; set; } = EncodingMode.Fast;

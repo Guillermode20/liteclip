@@ -1,4 +1,4 @@
-import type { CodecDetailsMap, OutputMetadata } from './types';
+import type { CodecDetailsMap, OutputMetadata } from '../types';
 
 export const codecDetails: CodecDetailsMap = {
     fast: {
@@ -9,7 +9,7 @@ export const codecDetails: CodecDetailsMap = {
         helper: 'H.265 optimized for quality and file size. Better compression with good encoding speed.',
         container: 'mp4'
     },
-    // NOTE: 'ultra' mode removed from frontend UI due to performance and compatibility concerns.
+    // NOTE: A more aggressive encoding mode was removed from the frontend UI due to performance and compatibility concerns.
 };
 
 export function createDefaultOutputMetadata(): OutputMetadata {

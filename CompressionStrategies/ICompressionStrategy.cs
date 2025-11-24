@@ -6,7 +6,7 @@ namespace liteclip.CompressionStrategies;
 /// Strategy interface for codec-specific compression argument generation and metadata.
 /// 
 /// The <see cref="EncodingMode"/> value is the single source of truth for
-/// how \"fast\", \"quality\", and \"ultra\" are interpreted per codec.
+/// how the exposed encoding modes (for example, \"fast\" and \"quality\") are interpreted per codec.
 /// Concrete strategies should use the central <see cref="EncodingModeConfigs"/>
 /// table so all mode-specific behavior can be inspected in one place.
 /// </summary>

@@ -149,7 +149,6 @@ namespace liteclip
                 [FromForm] string? segments,
                 [FromForm] bool? skipCompression,
                 [FromForm] bool? qualityMode,
-                [FromForm] bool? ultraMode,
                 [FromForm] bool? muteAudio,
                 
                 VideoCompressionService compressionService,
@@ -218,8 +217,7 @@ namespace liteclip
                         MuteAudio = muteAudio ?? false,
                         SourceDuration = sourceDuration,
                         Segments = videoSegments,
-                        UseQualityMode = qualityMode ?? false,
-                        UseUltraMode = ultraMode ?? false
+                        UseQualityMode = qualityMode ?? false
                     };
 
                     var jobId = await compressionService.CompressVideoAsync(file, compressionRequest);
