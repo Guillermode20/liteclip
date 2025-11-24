@@ -633,7 +633,18 @@ namespace liteclip
 
             // Load a local copy of the frontend early (fast) so UI shows while server starts
             var indexPath = Path.Combine(AppContext.BaseDirectory, "wwwroot", "index.html");
-            window.Load("about:blank");
+            if (File.Exists(indexPath))
+            {
+                // Load local file first to ensure webview is properly initialized on Windows
+                window.Load($"file://{indexPath}");
+                Console.WriteLine($"✓ Loaded local index.html while server starts");
+            }
+            else
+            {
+                // Fallback to blank page if local file not available
+                window.Load("about:blank");
+                Console.WriteLine($"⚠️ Local index.html not found at {indexPath}, using blank page");
+            }
 
             // Server will be started after the UI is shown; we'll navigate the window to the server URL
             // once the HTTP server reports it's ready (below).
