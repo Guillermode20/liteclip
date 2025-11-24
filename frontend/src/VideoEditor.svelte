@@ -21,12 +21,6 @@
     let isDragging: boolean = false;
     let wasPlayingBeforeDrag: boolean = false;
     let videoAspectRatio = 16 / 9;
-    let isHeavyVideo: boolean = false;
-    // Seek scheduler state for live scrubbing
-    let desiredSeekTime: number | null = null;
-    let lastSeekMs = 0;
-    let seekTimer: number | null = null;
-    const MIN_SEEK_INTERVAL_MS = 80; // throttle seeks to ~25fps by default
     const MAX_PREVIEW_WIDTH = 1280; // cap preview to 720p
     const MAX_PREVIEW_HEIGHT = 720;
 
@@ -127,8 +121,6 @@
         if (width && height) {
             videoAspectRatio = width / height;
         }
-        // Treat very long or high-resolution videos as "heavy" and use a lighter scrubbing mode
-        isHeavyVideo = (duration >= 600) || (width * height >= 1920 * 1080);
         currentTime = 0;
         videoElement.currentTime = 0;
         nextSegmentId = 1;
@@ -228,36 +220,24 @@
         if (!isReady || !videoElement) return;
         wasPlayingBeforeDrag = isPlaying;
         isDragging = true;
-        // Pause only if the video was not already playing.
         if (!isPlaying) pauseVideo();
-        // Show preview canvas overlay and hide native video to reduce full-res rendering while scrubbing
         if (previewCanvas) previewCanvas.style.display = 'block';
         if (videoElement) videoElement.style.opacity = '0';
-        // Only update the timeline cursor; defer the actual seek until mouse up
+        // Only update the scrubber; actual seek happens on mouse up
         updateCurrentTimeFromMouse(event);
     }
 
     function handleMouseMove(event: PointerEvent | MouseEvent) {
         if (!isDragging || !isReady || !timelineContainer) return;
-        // Update the scrubber position only; heavy seeks happen on mouse up
+        // Update the scrubber only; heavy seek on mouse up
         updateCurrentTimeFromMouse(event);
     }
 
     function handleMouseUp() {
         if (!isDragging || !isReady || !videoElement) return;
         isDragging = false;
-        // Flush any pending seek so the final frame is shown
-        if (seekTimer !== null) {
-            clearTimeout(seekTimer);
-            seekTimer = null;
-        }
-        if (desiredSeekTime !== null && videoElement) {
-            videoElement.currentTime = desiredSeekTime;
-            lastSeekMs = performance.now();
-            desiredSeekTime = null;
-        } else {
-            seekTo(currentTime);
-        }
+        // Perform a single seek to the final scrub position
+        seekTo(currentTime);
         // Hide preview canvas and restore native video opacity
         if (previewCanvas) previewCanvas.style.display = 'none';
         if (videoElement) videoElement.style.opacity = '';
@@ -282,39 +262,6 @@
         const x = event.clientX - rect.left;
         const rawTime = (x / rect.width) * duration;
         return Math.max(0, Math.min(rawTime, duration));
-    }
-
-    function scheduleSeek(time: number) {
-        desiredSeekTime = time;
-        const now = performance.now();
-        const timeSince = now - lastSeekMs;
-
-        if (timeSince >= MIN_SEEK_INTERVAL_MS) {
-            // Seek now on next rAF to allow the browser to batch rendering
-            if (seekTimer !== null) {
-                clearTimeout(seekTimer);
-                seekTimer = null;
-            }
-            requestAnimationFrame(() => {
-                if (desiredSeekTime !== null && videoElement) {
-                    videoElement.currentTime = desiredSeekTime;
-                    lastSeekMs = performance.now();
-                }
-            });
-            return;
-        }
-
-        // Otherwise, schedule a seek after the remaining interval
-        if (seekTimer !== null) return;
-        seekTimer = window.setTimeout(() => {
-            seekTimer = null;
-            requestAnimationFrame(() => {
-                if (desiredSeekTime !== null && videoElement) {
-                    videoElement.currentTime = desiredSeekTime;
-                    lastSeekMs = performance.now();
-                }
-            });
-        }, Math.max(0, MIN_SEEK_INTERVAL_MS - timeSince));
     }
 
     function handleTimelineClick(event: MouseEvent) {
