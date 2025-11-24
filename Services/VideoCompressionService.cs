@@ -861,11 +861,6 @@ public class VideoCompressionService : IVideoCompressionService
         var commandLine = FormatFfmpegCommand(processStartInfo.FileName, arguments);
         _logger.LogInformation("Executing FFmpeg command for job {JobId}: {Command}", jobId, commandLine);
 
-        foreach (var arg in arguments)
-        {
-            processStartInfo.ArgumentList.Add(arg);
-        }
-
         using var process = new Process { StartInfo = processStartInfo };
         job.Process = process;
 
