@@ -9,47 +9,18 @@
     export let onMetadataLoaded: ((payload: { width: number; height: number; duration: number }) => void) | null = null;
 
     let videoElement: HTMLVideoElement | null = null;
-    let canvasElement: HTMLCanvasElement | null = null;
-    // Low-res preview canvas for scrubbing
-    let previewCanvas: HTMLCanvasElement | null = null;
-    let timelineContainer: HTMLDivElement | null = null;
-    
     let duration: number = 0;
     let currentTime: number = 0;
+    let visualScrubTime: number = 0; // Visual position during drag
     let isPlaying: boolean = false;
     let isReady: boolean = false;
+    let videoAspectRatio = 16 / 9;
+    
+    // Timeline drag state
     let isDragging: boolean = false;
     let wasPlayingBeforeDrag: boolean = false;
-    let videoAspectRatio = 16 / 9;
-    const MAX_PREVIEW_WIDTH = 1280; // cap preview to 720p
-    const MAX_PREVIEW_HEIGHT = 720;
-
-    // Preview canvas context and sizes
-    let previewCtx: CanvasRenderingContext2D | null = null;
-    let previewWidth = 0;
-    let previewHeight = 0;
-
-    // Scrubbing optimization: throttle interval (ms)
-    const SCRUB_THROTTLE_MS = 8; // ~120fps for smooth scrubbing
-    let lastScrubTime = 0;
-    let scrubAnimationFrame: number | null = null;
-
-    // Timeline thumbnail strip
-    const TIMELINE_THUMBNAIL_COUNT = 10;
-    let timelineThumbnailsGenerated = false;
-
-    // === LIVE SCRUB PREVIEW SYSTEM ===
-    // Pre-generated frames for instant scrub preview (adaptive frame count based on duration)
-    const SCRUB_FRAME_INTERVAL = 0.25; // seconds between scrub frames
-    const MAX_SCRUB_FRAMES = 300; // Increased to support longer videos (75 seconds at 0.25s intervals)
-    const scrubFrames = new Map<number, ImageBitmap>(); // time -> ImageBitmap (GPU-optimized)
-    let scrubFramesGenerated = false;
-    let scrubFrameGenerationInProgress = false;
-    let scrubFrameAbortController: AbortController | null = null;
-    
-    // Offscreen canvas for frame extraction (doesn't touch DOM)
-    let offscreenCanvas: OffscreenCanvas | null = null;
-    let offscreenCtx: OffscreenCanvasRenderingContext2D | null = null;
+    let lastVideoUpdateTime: number = 0;
+    const VIDEO_UPDATE_INTERVAL_MS = 200; // Update video every 200ms during drag (5 FPS)
     
     // Trim segments (kept segments)
     let segments: Array<{start: number, end: number, id: string}> = [];
@@ -104,15 +75,10 @@
         window.addEventListener('keydown', handleKeyDown);
         window.addEventListener('mouseup', handleMouseUp);
         window.addEventListener('mousemove', handleMouseMove);
-        // Pointer events support (touch/stylus); keep mouse as fallback
-        window.addEventListener('pointerup', handleMouseUp);
-        window.addEventListener('pointermove', handleMouseMove);
         return () => {
             window.removeEventListener('keydown', handleKeyDown);
             window.removeEventListener('mouseup', handleMouseUp);
             window.removeEventListener('mousemove', handleMouseMove);
-            window.removeEventListener('pointerup', handleMouseUp);
-            window.removeEventListener('pointermove', handleMouseMove);
         };
     });
 
@@ -121,12 +87,6 @@
             URL.revokeObjectURL(objectUrl);
             objectUrl = null;
         }
-        // Clean up animation frame and caches
-        if (scrubAnimationFrame !== null) {
-            cancelAnimationFrame(scrubAnimationFrame);
-            scrubAnimationFrame = null;
-        }
-        clearScrubFrames();
     });
 
     function loadVideo() {
@@ -134,9 +94,6 @@
         if (objectUrl) {
             URL.revokeObjectURL(objectUrl);
         }
-        // Reset state for new video
-        timelineThumbnailsGenerated = false;
-        clearScrubFrames();
         
         objectUrl = URL.createObjectURL(videoFile);
         videoElement.src = objectUrl;
@@ -162,218 +119,17 @@
         }
         
         initializeSegmentsFromSavedState();
-        
         notifySegmentsChange();
-        updateThumbnails();
-        updatePreviewCanvasSize();
-        ensurePreviewContext();
-        
-        // Start generating scrub preview frames in background (non-blocking)
-        // This enables instant live preview during scrubbing
-        generateScrubFrames();
     }
 
-    function updatePreviewCanvasSize() {
-        if (!previewCanvas || !videoElement) return;
-        const videoW = videoElement.videoWidth || 1280;
-        const videoH = videoElement.videoHeight || 720;
-        const aspect = videoW / videoH;
-        let targetW = Math.min(videoW, MAX_PREVIEW_WIDTH);
-        let targetH = Math.round(targetW / aspect);
-        if (targetH > MAX_PREVIEW_HEIGHT) {
-            targetH = MAX_PREVIEW_HEIGHT;
-            targetW = Math.round(targetH * aspect);
-        }
-        previewWidth = targetW;
-        previewHeight = targetH;
-        previewCanvas.width = previewWidth;
-        previewCanvas.height = previewHeight;
-        // scale to fill the frame; keep internal resolution lower than full-res
-        previewCanvas.style.width = `100%`;
-        previewCanvas.style.height = `100%`;
-    }
-
-    function ensurePreviewContext() {
-        if (!previewCanvas) return;
-        previewCtx = previewCanvas.getContext('2d');
-        if (previewCtx) {
-            previewCtx.imageSmoothingEnabled = true;
-            (previewCtx as any).imageSmoothingQuality = 'high';
-        }
-    }
-
-    // === LIVE SCRUB PREVIEW FUNCTIONS ===
-    
-    /** Clear all pre-generated scrub frames and abort any in-progress generation */
-    function clearScrubFrames() {
-        // Abort any in-progress generation
-        if (scrubFrameAbortController) {
-            scrubFrameAbortController.abort();
-            scrubFrameAbortController = null;
-        }
-        // Close all ImageBitmaps to free GPU memory
-        for (const bitmap of scrubFrames.values()) {
-            bitmap.close();
-        }
-        scrubFrames.clear();
-        scrubFramesGenerated = false;
-        scrubFrameGenerationInProgress = false;
-    }
-    
-    /** Get the nearest pre-generated scrub frame for a given time */
-    function getNearestScrubFrame(time: number): ImageBitmap | null {
-        if (scrubFrames.size === 0) return null;
-        
-        // Find nearest available frame (since interval is now dynamic)
-        let nearestTime = 0;
-        let nearestDist = Infinity;
-        for (const t of scrubFrames.keys()) {
-            const dist = Math.abs(t - time);
-            if (dist < nearestDist) {
-                nearestDist = dist;
-                nearestTime = t;
-            }
-        }
-        
-        return scrubFrames.get(nearestTime) ?? null;
-    }
-    
-    /** Generate scrub preview frames in the background (non-blocking) */
-    async function generateScrubFrames() {
-        if (scrubFrameGenerationInProgress || scrubFramesGenerated) return;
-        if (!videoElement || !duration || duration <= 0) return;
-        
-        scrubFrameGenerationInProgress = true;
-        scrubFrameAbortController = new AbortController();
-        const signal = scrubFrameAbortController.signal;
-        
-        // Calculate how many frames to generate - now adaptive to video duration
-        // For longer videos, increase interval to keep frame count reasonable
-        let frameInterval = SCRUB_FRAME_INTERVAL;
-        let frameCount = Math.ceil(duration / frameInterval);
-        
-        // If video is very long, increase interval to keep frames manageable
-        if (frameCount > MAX_SCRUB_FRAMES) {
-            frameInterval = duration / MAX_SCRUB_FRAMES;
-            frameCount = MAX_SCRUB_FRAMES;
-        }
-        
-        const times: number[] = [];
-        for (let i = 0; i < frameCount; i++) {
-            times.push(i * frameInterval);
-        }
-        
-        // Create a hidden video element for frame extraction (doesn't affect main video)
-        const extractionVideo = document.createElement('video');
-        extractionVideo.muted = true;
-        extractionVideo.preload = 'auto';
-        extractionVideo.src = objectUrl!;
-        
-        // Wait for video to be ready
-        await new Promise<void>((resolve, reject) => {
-            extractionVideo.onloadeddata = () => resolve();
-            extractionVideo.onerror = () => reject(new Error('Failed to load video for frame extraction'));
-            signal.addEventListener('abort', () => reject(new Error('Aborted')));
-        }).catch(() => {
-            scrubFrameGenerationInProgress = false;
-            return;
-        });
-        
-        if (signal.aborted) {
-            scrubFrameGenerationInProgress = false;
-            return;
-        }
-        
-        // Create offscreen canvas for frame extraction
-        const frameWidth = Math.min(640, extractionVideo.videoWidth || 640);
-        const frameHeight = Math.round(frameWidth / (extractionVideo.videoWidth / extractionVideo.videoHeight || 16/9));
-        
-        if (typeof OffscreenCanvas !== 'undefined') {
-            offscreenCanvas = new OffscreenCanvas(frameWidth, frameHeight);
-            offscreenCtx = offscreenCanvas.getContext('2d');
-        }
-        
-        // Generate frames one at a time with yielding to keep UI responsive
-        for (let i = 0; i < times.length; i++) {
-            if (signal.aborted) break;
-            
-            const time = times[i];
-            
-            try {
-                // Seek to frame time
-                extractionVideo.currentTime = time;
-                await new Promise<void>((resolve) => {
-                    const onSeeked = () => {
-                        extractionVideo.removeEventListener('seeked', onSeeked);
-                        resolve();
-                    };
-                    extractionVideo.addEventListener('seeked', onSeeked);
-                });
-                
-                if (signal.aborted) break;
-                
-                // Create ImageBitmap from video frame (GPU-accelerated)
-                const bitmap = await createImageBitmap(extractionVideo, {
-                    resizeWidth: frameWidth,
-                    resizeHeight: frameHeight,
-                    resizeQuality: 'low' // Fast resize for scrubbing
-                });
-                
-                scrubFrames.set(time, bitmap);
-                
-                // Yield every 5 frames to keep UI responsive
-                if (i % 5 === 0) {
-                    await new Promise(r => setTimeout(r, 0));
-                }
-            } catch (e) {
-                // Skip failed frames
-                continue;
-            }
-        }
-        
-        // Cleanup
-        extractionVideo.src = '';
-        extractionVideo.load();
-        
-        scrubFrameGenerationInProgress = false;
-        if (!signal.aborted) {
-            scrubFramesGenerated = true;
-        }
-    }
-    
-    /** Draw the live scrub preview frame - INSTANT using pre-generated frames */
-    function drawPreviewFrame() {
-        if (!previewCanvas || !previewCtx) return;
-        
-        // Try to get pre-generated scrub frame (instant)
-        const scrubFrame = getNearestScrubFrame(currentTime);
-        if (scrubFrame) {
-            try {
-                previewCtx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
-                previewCtx.drawImage(scrubFrame, 0, 0, previewCanvas.width, previewCanvas.height);
-                return;
-            } catch (e) {
-                // Fall through to video element fallback
-            }
-        }
-        
-        // Fallback: draw from video element (may show stale frame if video hasn't seeked)
-        if (videoElement) {
-            try {
-                previewCtx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
-                previewCtx.drawImage(videoElement, 0, 0, previewCanvas.width, previewCanvas.height);
-            } catch (e) {
-                // ignore
-            }
-        }
-    }
 
     function handleTimeUpdate() {
         if (!videoElement) return;
-        // When scrubbing, ignore timeupdate events unless the video was already playing
-        // before the drag started — in that case allow updates so playback continues.
-        if (isDragging && !wasPlayingBeforeDrag) return;
+        // Update currentTime from video, but keep visualScrubTime in sync during drag
         currentTime = videoElement.currentTime;
+        if (isDragging) {
+            visualScrubTime = currentTime;
+        }
     }
 
     function handlePlayPause() {
@@ -399,95 +155,70 @@
         isPlaying = false;
     }
 
-    function handleTimelineMouseDown(event: PointerEvent | MouseEvent) {
+
+    function handleTimelineClick(event: MouseEvent) {
+        if (!isReady || !videoElement) return;
+        const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+        const x = event.clientX - rect.left;
+        const time = (x / rect.width) * duration;
+        videoElement.currentTime = Math.max(0, Math.min(time, duration));
+    }
+
+    function handleTimelineMouseDown(event: MouseEvent) {
         if (!isReady || !videoElement) return;
         wasPlayingBeforeDrag = isPlaying;
         isDragging = true;
-        if (!isPlaying) pauseVideo();
-        if (previewCanvas) previewCanvas.style.display = 'block';
-        if (videoElement) videoElement.style.opacity = '0';
-        // Update position and draw preview immediately for instant feedback
-        updateCurrentTimeFromMouse(event);
-        drawPreviewFrame();
+        if (isPlaying) {
+            videoElement.pause();
+        }
+        // Update visual position immediately for responsive feel
+        const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+        const x = event.clientX - rect.left;
+        visualScrubTime = Math.max(0, Math.min((x / rect.width) * duration, duration));
     }
 
-    function handleMouseMove(event: PointerEvent | MouseEvent) {
-        if (!isDragging || !isReady || !timelineContainer) return;
-
-        // Throttle scrubbing updates for performance
+    function handleMouseMove(event: MouseEvent) {
+        if (!isDragging || !isReady) return;
+        
+        const timeline = document.querySelector('.timeline-container');
+        if (!timeline) return;
+        
+        const rect = timeline.getBoundingClientRect();
+        const x = event.clientX - rect.left;
+        visualScrubTime = Math.max(0, Math.min((x / rect.width) * duration, duration));
+        
+        // Periodically update video for live feedback (low priority)
         const now = performance.now();
-        if (now - lastScrubTime < SCRUB_THROTTLE_MS) {
-            // Schedule an update for the end of the throttle window
-            if (scrubAnimationFrame === null) {
-                scrubAnimationFrame = requestAnimationFrame(() => {
-                    scrubAnimationFrame = null;
-                    if (isDragging) {
-                        updateCurrentTimeFromMouse(event);
-                        drawPreviewFrame();
-                    }
-                });
+        if (now - lastVideoUpdateTime >= VIDEO_UPDATE_INTERVAL_MS) {
+            lastVideoUpdateTime = now;
+            if (videoElement) {
+                videoElement.currentTime = visualScrubTime;
             }
-            return;
         }
-        lastScrubTime = now;
-
-        // Update the scrubber position and draw preview
-        updateCurrentTimeFromMouse(event);
-        drawPreviewFrame();
     }
 
-    function handleMouseUp() {
-        if (!isDragging || !isReady || !videoElement) return;
+    function handleMouseUp(event: MouseEvent) {
+        if (!isDragging || !videoElement) return;
         isDragging = false;
-
-        // Cancel any pending animation frame
-        if (scrubAnimationFrame !== null) {
-            cancelAnimationFrame(scrubAnimationFrame);
-            scrubAnimationFrame = null;
-        }
-
-        // Perform a single seek to the final scrub position
-        seekTo(currentTime);
-        // Hide preview canvas and restore native video opacity
-        if (previewCanvas) previewCanvas.style.display = 'none';
-        if (videoElement) videoElement.style.opacity = '';
-
+        
+        // Now seek the video to the visual position
+        videoElement.currentTime = visualScrubTime;
+        currentTime = visualScrubTime;
+        
         if (wasPlayingBeforeDrag) {
-            videoElement?.play();
+            videoElement.play();
             isPlaying = true;
         }
         wasPlayingBeforeDrag = false;
     }
 
-    function updateCurrentTimeFromMouse(event: PointerEvent | MouseEvent) {
-        const time = calculateTimeFromMouse(event);
-        if (time === null) return;
-        currentTime = time;
-        return time;
-    }
-
-    function calculateTimeFromMouse(event: PointerEvent | MouseEvent) {
-        if (!timelineContainer) return null;
-        const rect = timelineContainer.getBoundingClientRect();
-        const x = event.clientX - rect.left;
-        const rawTime = (x / rect.width) * duration;
-        return Math.max(0, Math.min(rawTime, duration));
-    }
-
-    function handleTimelineClick(event: MouseEvent) {
-        if (!isReady) return;
-        const time = updateCurrentTimeFromMouse(event);
-        if (time !== undefined) {
-            seekTo(time);
-        }
-    }
-
     function cutAtCurrentTime() {
-        if (!isReady || currentTime <= 0 || currentTime >= duration) return;
+        const cutTime = isDragging ? visualScrubTime : currentTime;
+        if (!isReady || cutTime <= 0 || cutTime >= duration) return;
         
         // Find which segment contains the current time
         const segmentIndex = segments.findIndex(seg => 
-            currentTime > seg.start && currentTime < seg.end
+            cutTime > seg.start && cutTime < seg.end
         );
         
         if (segmentIndex === -1) return;
@@ -495,9 +226,9 @@
         const segment = segments[segmentIndex];
         
         // Split the segment at current time
-        const leftSegment = createSegmentRange(segment.start, currentTime);
+        const leftSegment = createSegmentRange(segment.start, cutTime);
         
-        const rightSegment = createSegmentRange(currentTime, segment.end);
+        const rightSegment = createSegmentRange(cutTime, segment.end);
         
         // Replace the original segment with the two new segments
         segments = [
@@ -574,89 +305,6 @@
             return `${mins}:${secs.toString().padStart(2, '0')}`;
         }
 
-    function updateThumbnails() {
-        // Generate multiple thumbnails across the timeline
-        if (!canvasElement || !videoElement || !duration || duration <= 0) return;
-        if (timelineThumbnailsGenerated) return; // Only generate once per video
-        
-        const ctx = canvasElement.getContext('2d');
-        if (!ctx) return;
-        
-        const thumbWidth = 80;
-        const thumbHeight = 60;
-        canvasElement.width = thumbWidth * TIMELINE_THUMBNAIL_COUNT;
-        canvasElement.height = thumbHeight;
-        
-        const videoRef = videoElement;
-        const canvasRef = canvasElement;
-        const prevTime = videoRef.currentTime || 0;
-        const wasPlaying = !videoRef.paused;
-        
-        // Calculate times for each thumbnail
-        const times: number[] = [];
-        for (let i = 0; i < TIMELINE_THUMBNAIL_COUNT; i++) {
-            // Distribute thumbnails evenly, avoiding exact 0 and duration
-            const t = ((i + 0.5) / TIMELINE_THUMBNAIL_COUNT) * duration;
-            times.push(Math.max(0.1, Math.min(t, duration - 0.1)));
-        }
-        
-        let currentIndex = 0;
-        
-        const restoreState = () => {
-            timelineThumbnailsGenerated = true;
-            try {
-                videoRef.currentTime = prevTime;
-            } catch (e) {
-                // ignore
-            }
-            if (wasPlaying) videoRef.play();
-        };
-        
-        const drawNextThumbnail = () => {
-            if (currentIndex >= TIMELINE_THUMBNAIL_COUNT) {
-                restoreState();
-                return;
-            }
-            
-            const ctx2 = canvasRef.getContext('2d');
-            if (!ctx2) {
-                restoreState();
-                return;
-            }
-            
-            try {
-                // Draw the current frame at the appropriate position
-                const xOffset = currentIndex * thumbWidth;
-                ctx2.drawImage(videoRef, xOffset, 0, thumbWidth, thumbHeight);
-            } catch (err) {
-                // ignore draw errors
-            }
-            
-            currentIndex++;
-            
-            if (currentIndex < TIMELINE_THUMBNAIL_COUNT) {
-                // Seek to next time
-                videoRef.addEventListener('seeked', drawNextThumbnail, { once: true });
-                try {
-                    videoRef.currentTime = times[currentIndex];
-                } catch (e) {
-                    // If seeking fails, skip to restore
-                    restoreState();
-                }
-            } else {
-                restoreState();
-            }
-        };
-        
-        // Start the thumbnail generation chain
-        videoRef.addEventListener('seeked', drawNextThumbnail, { once: true });
-        try {
-            videoRef.currentTime = times[0];
-        } catch (e) {
-            // If initial seek fails, abort
-            restoreState();
-        }
-    }
 
     $: totalDuration = segments.reduce((sum, seg) => sum + (seg.end - seg.start), 0);
 </script>
@@ -699,61 +347,52 @@
                 on:pause={() => isPlaying = false}
                 class="editor-video"
             ></video>
-                <!-- Preview overlay; hidden by default and shown while scrubbing -->
-                <canvas bind:this={previewCanvas} class="preview-canvas" style="display:none; pointer-events: none;"></canvas>
         </div>
         
-        <div class="video-controls">
+        <div class="simple-controls">
             <button 
                 type="button"
                 on:click={handlePlayPause} 
                 disabled={!isReady}
-                class="control-btn"
+                class="simple-btn play-btn"
                 title="Play/Pause (Space)"
             >
                 {#if isPlaying}
-                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <rect x="6" y="4" width="4" height="16"></rect>
                         <rect x="14" y="4" width="4" height="16"></rect>
                     </svg>
+                    Pause
                 {:else}
-                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <polygon points="5 3 19 12 5 21 5 3"></polygon>
                     </svg>
+                    Play
                 {/if}
             </button>
             
             <div class="time-display">
-                {formatTime(currentTime)} / {formatTime(duration)}
+                {formatTime(isDragging ? visualScrubTime : currentTime)} / {formatTime(duration)}
             </div>
             
             <button 
                 type="button"
                 on:click={cutAtCurrentTime}
-                disabled={!isReady || currentTime <= 0 || currentTime >= duration}
-                class="control-btn cut-btn"
+                disabled={!isReady || (isDragging ? visualScrubTime : currentTime) <= 0 || (isDragging ? visualScrubTime : currentTime) >= duration}
+                class="simple-btn"
                 title="Cut at current time (C)"
             >
-                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <circle cx="6" cy="6" r="3"></circle>
-                    <circle cx="6" cy="18" r="3"></circle>
-                    <line x1="20" y1="4" x2="8.12" y2="15.88"></line>
-                    <line x1="14.47" y1="14.48" x2="20" y2="20"></line>
-                    <line x1="8.12" y1="8.12" x2="12" y2="12"></line>
-                </svg>
+                Cut at {formatTime(isDragging ? visualScrubTime : currentTime)}
             </button>
             
             <button 
                 type="button"
                 on:click={resetSegments}
                 disabled={!isReady}
-                class="control-btn"
+                class="simple-btn"
                 title="Reset to full video (R)"
             >
-                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <polyline points="23 4 23 10 17 10"></polyline>
-                    <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
-                </svg>
+                Reset
             </button>
         </div>
     </div>
@@ -762,16 +401,14 @@
     <!-- svelte-ignore a11y_click_events_have_key_events -->
     <div class="timeline-section">
         <div class="timeline-help">
-            // Space: play/pause • C: cut • R: reset • Drag scrubber to seek
+            // Space: play/pause • C: cut • R: reset • Click or drag timeline to seek
         </div>
         
         <div 
             class="timeline-container"
             class:dragging={isDragging}
-            bind:this={timelineContainer}
             on:click={handleTimelineClick}
             on:mousedown={handleTimelineMouseDown}
-            on:pointerdown={handleTimelineMouseDown}
             role="slider"
             tabindex="0"
             aria-label="Video timeline"
@@ -779,14 +416,11 @@
             aria-valuemin="0"
             aria-valuemax="{duration}"
         >
-            <!-- Background canvas for thumbnails -->
-            <canvas bind:this={canvasElement} class="timeline-canvas"></canvas>
-            
             <!-- Current time indicator -->
             {#if isReady}
                 <div 
                     class="timeline-cursor" 
-                    style="left: {(currentTime / duration) * 100}%"
+                    style="left: {(isDragging ? visualScrubTime : currentTime) / duration * 100}%"
                 ></div>
             {/if}
             
@@ -956,59 +590,42 @@
         background: #09090b;
     }
 
-    .preview-canvas {
-        position: absolute;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 100%;
-        object-fit: contain;
-        z-index: 6;
-        pointer-events: none;
-    }
-
-    .video-controls {
+    .simple-controls {
         display: flex;
         align-items: center;
-        gap: 1rem;
+        gap: 0.5rem;
         padding: 0.75rem 1rem;
         background: rgba(9, 9, 11, 0.8);
         border-top: 1px solid #27272a;
     }
 
-    .control-btn {
+    .simple-btn {
         background: rgba(255, 255, 255, 0.1);
         border: 1px solid rgba(255, 255, 255, 0.2);
         color: #fafafa;
-        padding: 0.5rem;
+        padding: 0.5rem 1rem;
         border-radius: 2px;
         cursor: pointer;
-        display: flex;
-        align-items: center;
-        justify-content: center;
+        font-size: 0.85rem;
         transition: all 0.2s;
         outline: none;
-        -webkit-tap-highlight-color: transparent;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
     }
 
-    .control-btn:hover:not(:disabled) {
+    .play-btn {
+        padding: 0.5rem 0.75rem;
+    }
+
+    .simple-btn:hover:not(:disabled) {
         background: rgba(24, 24, 27, 0.8);
         border-color: #3f3f46;
     }
 
-    .control-btn:disabled {
+    .simple-btn:disabled {
         opacity: 0.3;
         cursor: not-allowed;
-    }
-
-    .cut-btn:not(:disabled) {
-        background: rgba(24, 24, 27, 0.8);
-        border-color: #3f3f46;
-    }
-
-    .cut-btn:hover:not(:disabled) {
-        background: rgba(39, 39, 42, 0.8);
-        border-color: #52525b;
     }
 
     .time-display {
@@ -1044,16 +661,6 @@
 
     .timeline-container.dragging {
         cursor: grabbing;
-    }
-
-    .timeline-canvas {
-        position: absolute;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 100%;
-        opacity: 0.3;
-        pointer-events: none;
     }
 
     .timeline-cursor {
