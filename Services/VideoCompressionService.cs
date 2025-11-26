@@ -177,7 +177,9 @@ public class VideoCompressionService : IVideoCompressionService
         EnsureQueueCapacity();
 
         // ALWAYS enable two-pass encoding for best quality and bitrate accuracy.
-        var enableTwoPass = true;
+        var effectiveDurationSeconds = normalizedRequest.SourceDuration;
+        var enableTwoPass = ShouldUseTwoPass(normalizedRequest.TargetSizeMb, artifacts.EffectiveMaxSizeMb, effectiveDurationSeconds);
+        _logger.LogInformation("Selected {Mode} encoding for job {JobId} (duration={Duration:F1}s, targetSizeMb={TargetSizeMb}, effectiveMaxSizeMb={EffectiveMaxSizeMb})", enableTwoPass ? "two-pass" : "single-pass", jobId, effectiveDurationSeconds ?? 0, normalizedRequest.TargetSizeMb, artifacts.EffectiveMaxSizeMb);
 
         var requestSnapshot = CloneRequest(normalizedRequest);
         var compressionJob = BuildQueuedJob(artifacts, requestSnapshot, codecConfig, computedTargetKbps, computedVideoKbps, enableTwoPass);
@@ -1410,6 +1412,35 @@ public class VideoCompressionService : IVideoCompressionService
         }
 
         return Array.Empty<string>();
+    }
+
+    private static bool ShouldUseTwoPass(double? targetSizeMb, double effectiveMaxSizeMb, double? durationSeconds)
+    {
+        if (!durationSeconds.HasValue || durationSeconds.Value <= 0)
+        {
+            return true;
+        }
+
+        if (!targetSizeMb.HasValue || targetSizeMb.Value <= 0)
+        {
+            return true;
+        }
+
+        if (effectiveMaxSizeMb > 0)
+        {
+            var ratio = targetSizeMb.Value / effectiveMaxSizeMb;
+            if (ratio >= 0.9)
+            {
+                return false;
+            }
+        }
+
+        if (durationSeconds.Value <= 15)
+        {
+            return false;
+        }
+
+        return true;
     }
 
     private static bool ShouldEnableFeedbackRetry(double? targetSizeMb)

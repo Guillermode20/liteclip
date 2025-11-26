@@ -25,23 +25,6 @@ The goal is to treat v0.1 as the **quality baseline** for the project:
   - Frontend: `npm run check` is the gate for Svelte/TS types.
   - CI: PRs must pass `dotnet build`, `dotnet test`, and `npm run check` before merging.
 
-- [ ] **Backend Testing**
-  - [x] Add unit tests for compression strategies (H264/H265)
-  - [x] Add unit tests for VideoCompressionService
-  - [x] Add unit tests for FfmpegBootstrapper
-  - [x] Add integration tests for API endpoints
-
-- [ ] **Frontend Testing**
-  - [ ] Run `npm run check` to validate TypeScript/Svelte before every release/PR.
-  - [ ] Add component tests for critical UI components (job list, progress indicators, error toasts/dialogs).
-  - [ ] Test file upload/download functionality (happy path and failure cases).
-  - [ ] Test error handling in UI (FFmpeg missing, oversized files, invalid formats).
-
-- [ ] **Cross-Platform / Environment Testing**
-  - [ ] Test on Windows (primary target) with at least one low-end and one mid/high-end machine.
-  - [ ] Verify FFmpeg downloads correctly on Windows (fresh machine, no cache).
-  - [ ] Manually sanity-check compression results for visual quality vs. target size.
-
 ### Documentation
 - [ ] **README.md Updates**
   - [ ] Add clear installation instructions
