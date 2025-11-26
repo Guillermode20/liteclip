@@ -43,6 +43,11 @@
     let sourceVideoHeight: number | null = null;
     let sourceDuration: number | null = null;
     let originalSizeMb: number | null = null;
+    
+    // Memory management and abort controllers
+    let uploadAbortController: AbortController | null = null;
+    let previewAbortController: AbortController | null = null;
+    let fileSequenceId: number = 0;
 
     let fileInfo = '';
     let metadataVisible = false;
@@ -123,6 +128,18 @@
             videoPreviewUrl = null;
         }
     }
+    
+    /** Cancels all pending async operations to prevent race conditions */
+    function cancelPendingOperations() {
+        if (uploadAbortController) {
+            uploadAbortController.abort();
+            uploadAbortController = null;
+        }
+        if (previewAbortController) {
+            previewAbortController.abort();
+            previewAbortController = null;
+        }
+    }
 
     /** Cancels any active job and cleans up its resources */
     async function cancelActiveJob() {
@@ -137,6 +154,7 @@
             clearInterval(statusCheckInterval);
             statusCheckInterval = null;
         }
+        cancelPendingOperations();
         jobId = null;
         isCompressing = false;
         showCancelButton = false;
@@ -149,6 +167,9 @@
             alert('Please select a video file');
             return;
         }
+
+        // Increment sequence ID to track this file operation
+        const currentSequenceId = ++fileSequenceId;
 
         // Cancel any existing job and clean up before accepting new file
         await cancelActiveJob();
@@ -179,6 +200,12 @@
         outputSizeDetails = 'Reading video metadata...';
 
         updateCodecHelper();
+        
+        // Early return if a newer file has been selected during this operation
+        if (currentSequenceId !== fileSequenceId) {
+            console.log('File selection superseded by newer operation');
+            return;
+        }
     }
 
     function handleSourceMetadataLoaded(payload: { width: number; height: number; duration: number }) {
@@ -477,6 +504,13 @@
             return;
         }
 
+        // Cancel any previous upload operations
+        if (uploadAbortController) {
+            uploadAbortController.abort();
+        }
+        uploadAbortController = new AbortController();
+        const currentSequenceId = fileSequenceId;
+
         uploadBtnDisabled = true;
         uploadBtnText = 'Uploading...';
         progressVisible = true;
@@ -527,15 +561,28 @@
         }
 
         try {
-            const result = await uploadVideo(formData);
+            const result = await uploadVideo(formData, uploadAbortController.signal);
+            
+            // Check if this operation is still valid
+            if (currentSequenceId !== fileSequenceId) {
+                console.log('Upload completed but superseded by newer file selection');
+                return;
+            }
+            
             jobId = result.jobId;
 
             progressPercent = 100;
             isCompressing = true;
             showStatus('Video uploaded successfully. Processing...', 'processing');
 
-            statusCheckInterval = window.setInterval(checkStatus, 2000);
+            statusCheckInterval = window.setInterval(() => checkStatus(currentSequenceId), 2000);
         } catch (error) {
+            // Don't show error if operation was aborted due to new file selection
+            if (error instanceof Error && error.name === 'AbortError') {
+                console.log('Upload aborted due to new file selection');
+                return;
+            }
+            
             console.error('Upload failed:', error);
             let errorMessage = (error as Error).message;
 
@@ -550,13 +597,29 @@
             uploadBtnDisabled = false;
             uploadBtnText = 'Process Video';
             progressVisible = false;
+        } finally {
+            uploadAbortController = null;
         }
     }
 
-    async function checkStatus() {
-        if (!jobId) return;
+    async function checkStatus(sequenceId: number = fileSequenceId) {
+        if (!jobId || sequenceId !== fileSequenceId) {
+            // This status check is for an outdated operation
+            if (statusCheckInterval) {
+                clearInterval(statusCheckInterval);
+                statusCheckInterval = null;
+            }
+            return;
+        }
+        
         try {
             const result = await getJobStatus(jobId);
+            
+            // Double-check sequence ID after async operation
+            if (sequenceId !== fileSequenceId) {
+                return;
+            }
+            
                 if (result.status === 'queued') {
                     showCancelButton = true;
                     canRetry = false;
@@ -594,6 +657,12 @@
                         clearInterval(statusCheckInterval);
                         statusCheckInterval = null;
                     }
+                    
+                    // Final sequence check before updating UI
+                    if (sequenceId !== fileSequenceId) {
+                        return;
+                    }
+                    
                     progressPercent = 100;
                     isCompressing = false;
                     showCancelButton = false;
@@ -601,7 +670,7 @@
                     downloadMimeType = result.outputMimeType || 'video/mp4';
 
                     calculateOutputMetadata(result);
-                    await loadVideoPreview();
+                    await loadVideoPreview(sequenceId);
 
                     showStatus('Processing complete! Preview and download your video.', 'success');
                     videoPreviewVisible = true;
@@ -752,6 +821,9 @@
     }
 
     function handleClearResult() {
+        // Cancel any pending operations
+        cancelPendingOperations();
+        
         // Only clean up the preview URL, keep objectUrl for the source video
         if (videoPreviewUrl) {
             URL.revokeObjectURL(videoPreviewUrl);
@@ -782,13 +854,33 @@
         }, 3000);
     }
 
-    async function loadVideoPreview() {
-        if (!jobId) return;
+    async function loadVideoPreview(sequenceId: number = fileSequenceId) {
+        if (!jobId || sequenceId !== fileSequenceId) return;
+
+        // Cancel any previous preview loading
+        if (previewAbortController) {
+            previewAbortController.abort();
+        }
+        previewAbortController = new AbortController();
 
         try {
-            const response = await fetch(`/api/download/${jobId}`);
+            const response = await fetch(`/api/download/${jobId}`, {
+                signal: previewAbortController.signal
+            });
+            
+            // Check if operation is still valid
+            if (sequenceId !== fileSequenceId) {
+                return;
+            }
+            
             if (response.ok) {
                 const blob = await response.blob();
+                
+                // Final check before updating UI
+                if (sequenceId !== fileSequenceId) {
+                    return;
+                }
+                
                 if (videoPreviewUrl) {
                     URL.revokeObjectURL(videoPreviewUrl);
                 }
@@ -814,7 +906,13 @@
                 console.warn('Failed to load video preview');
             }
         } catch (error) {
+            if (error instanceof Error && error.name === 'AbortError') {
+                console.log('Preview loading aborted due to new file selection');
+                return;
+            }
             console.warn('Failed to load video preview:', error);
+        } finally {
+            previewAbortController = null;
         }
     }
 

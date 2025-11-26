@@ -50,10 +50,11 @@ export async function retryFfmpeg(): Promise<void> {
     }
 }
 
-export async function uploadVideo(formData: FormData): Promise<{ jobId: string }> {
+export async function uploadVideo(formData: FormData, signal?: AbortSignal): Promise<{ jobId: string }> {
     const response = await fetch(`${API_BASE}/compress`, {
         method: 'POST',
-        body: formData
+        body: formData,
+        signal
     });
     if (!response.ok) {
         let errorMsg = `Server error (${response.status})`;

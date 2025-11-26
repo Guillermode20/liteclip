@@ -1,6 +1,7 @@
 <script lang="ts">
     import { onDestroy, onMount } from 'svelte';
     import type { VideoSegment } from './types';
+    import { loadVideoFile, waitForMetadata, type VideoMetadata, type VideoLoadError } from './services/videoLoader';
 
     export let videoFile: File;
     export let onSegmentsChange: (segments: Array<{start: number, end: number}>) => void;
@@ -14,18 +15,32 @@
     let visualScrubTime: number = 0; // Visual position during drag
     let isPlaying: boolean = false;
     let isReady: boolean = false;
+    let isLoading: boolean = false;
+    let loadError: string | null = null;
     let videoAspectRatio = 16 / 9;
     
-    // Timeline drag state
+    // Timeline drag state with optimized performance
     let isDragging: boolean = false;
     let wasPlayingBeforeDrag: boolean = false;
     let lastVideoUpdateTime: number = 0;
-    const VIDEO_UPDATE_INTERVAL_MS = 200; // Update video every 200ms during drag (5 FPS)
+    let animationFrameId: number | null = null;
+    let videoSeekTimeout: ReturnType<typeof setTimeout> | null = null;
+    const VIDEO_UPDATE_INTERVAL_MS = 100; // Reduced to 100ms for better responsiveness
+    
+    // Visual scrubber position for smooth updates
+    let visualScrubberPosition: number = 0;
     
     // Trim segments (kept segments)
     let segments: Array<{start: number, end: number, id: string}> = [];
     let nextSegmentId = 1;
     let objectUrl: string | null = null;
+    
+    // Abort controller for cancelling pending load operations
+    let loadAbortController: AbortController | null = null;
+    let fileLoadSequence = 0;
+    
+    // Track previous file to detect prop changes
+    let prevVideoFile: File | null = null;
     
     function clampTime(value: number) {
         if (!Number.isFinite(value)) return 0;
@@ -69,8 +84,11 @@
     // No selection or dragging - we just cut and delete
 
     onMount(() => {
+        // Set prevVideoFile to match current file to prevent reactive statement from re-triggering
+        prevVideoFile = videoFile;
+        
         if (videoFile) {
-            loadVideo();
+            loadVideoAsync();
         }
         window.addEventListener('keydown', handleKeyDown);
         window.addEventListener('mouseup', handleMouseUp);
@@ -83,43 +101,172 @@
     });
 
     onDestroy(() => {
+        cancelPendingLoad();
+        cleanupResources();
+    });
+    
+    /** Cancels any pending video load operation */
+    function cancelPendingLoad() {
+        if (loadAbortController) {
+            loadAbortController.abort();
+            loadAbortController = null;
+        }
+    }
+    
+    /** Cleans up all resources (URLs, timers, animation frames) */
+    function cleanupResources() {
         if (objectUrl) {
             URL.revokeObjectURL(objectUrl);
             objectUrl = null;
         }
-    });
-
-    function loadVideo() {
-        if (!videoElement) return;
-        if (objectUrl) {
-            URL.revokeObjectURL(objectUrl);
+        if (animationFrameId) {
+            cancelAnimationFrame(animationFrameId);
+            animationFrameId = null;
         }
-        
-        objectUrl = URL.createObjectURL(videoFile);
-        videoElement.src = objectUrl;
-        videoElement.load();
+        if (videoSeekTimeout) {
+            clearTimeout(videoSeekTimeout);
+            videoSeekTimeout = null;
+        }
     }
 
-    function handleLoadedMetadata() {
-        if (!videoElement) return;
-        const loadedDuration = videoElement.duration;
-        duration = Number.isFinite(loadedDuration) ? loadedDuration : 0;
-        isReady = duration > 0;
-        const width = videoElement.videoWidth || 0;
-        const height = videoElement.videoHeight || 0;
-        if (width && height) {
-            videoAspectRatio = width / height;
-        }
+    /**
+     * Loads the video file asynchronously with proper error handling.
+     * Uses the videoLoader service for reliable metadata extraction.
+     */
+    async function loadVideoAsync() {
+        // Cancel any previous load operation
+        cancelPendingLoad();
+        
+        // Increment sequence to track this load operation
+        const currentSequence = ++fileLoadSequence;
+        
+        // Reset state
+        isReady = false;
+        isLoading = true;
+        loadError = null;
+        duration = 0;
         currentTime = 0;
-        videoElement.currentTime = 0;
+        
+        // Clean up previous object URL
+        if (objectUrl) {
+            URL.revokeObjectURL(objectUrl);
+            objectUrl = null;
+        }
+        
+        // Create new abort controller for this operation
+        loadAbortController = new AbortController();
+        const signal = loadAbortController.signal;
+        
+        try {
+            // Load video and extract metadata using the service
+            const result = await loadVideoFile(videoFile, signal);
+            
+            // Check if this load is still valid (not superseded by newer load)
+            if (currentSequence !== fileLoadSequence || signal.aborted) {
+                // This load was superseded - clean up the URL we got
+                URL.revokeObjectURL(result.objectUrl);
+                return;
+            }
+            
+            // Apply the loaded data
+            objectUrl = result.objectUrl;
+            applyMetadata(result.metadata);
+            
+            // Set the video element source now that we have validated metadata
+            if (videoElement) {
+                videoElement.src = objectUrl;
+                // Wait for the video element to also have the metadata ready
+                await waitForVideoElementReady();
+            }
+            
+            isReady = duration > 0;
+            isLoading = false;
+            
+        } catch (error) {
+            // Check if this was an intentional abort
+            if (currentSequence !== fileLoadSequence) {
+                return;
+            }
+            
+            isLoading = false;
+            
+            const loadErr = error as VideoLoadError;
+            if (loadErr.type === 'aborted') {
+                // Intentional abort, no error to display
+                return;
+            }
+            
+            loadError = loadErr.message || 'Failed to load video';
+            console.error('Video load failed:', loadError);
+        } finally {
+            if (currentSequence === fileLoadSequence) {
+                loadAbortController = null;
+            }
+        }
+    }
+    
+    /**
+     * Waits for the video element to be ready after setting its source.
+     */
+    function waitForVideoElementReady(): Promise<void> {
+        return new Promise((resolve) => {
+            if (!videoElement) {
+                resolve();
+                return;
+            }
+            
+            // If already has metadata, resolve immediately
+            if (videoElement.readyState >= HTMLMediaElement.HAVE_METADATA) {
+                resolve();
+                return;
+            }
+            
+            const onReady = () => {
+                videoElement?.removeEventListener('loadedmetadata', onReady);
+                videoElement?.removeEventListener('error', onReady);
+                resolve();
+            };
+            
+            videoElement.addEventListener('loadedmetadata', onReady, { once: true });
+            videoElement.addEventListener('error', onReady, { once: true });
+        });
+    }
+    
+    /**
+     * Applies extracted metadata to component state.
+     */
+    function applyMetadata(metadata: VideoMetadata) {
+        duration = metadata.duration;
+        videoAspectRatio = metadata.aspectRatio;
+        currentTime = 0;
         nextSegmentId = 1;
         
+        // Notify parent of metadata
         if (onMetadataLoaded && duration > 0) {
-            onMetadataLoaded({ width, height, duration });
+            onMetadataLoaded({
+                width: metadata.width,
+                height: metadata.height,
+                duration: metadata.duration
+            });
         }
         
+        // Initialize segments from saved state or default to full video
         initializeSegmentsFromSavedState();
         notifySegmentsChange();
+    }
+    
+    /**
+     * Handles the loadedmetadata event from the video element.
+     * This is a fallback/sync handler for when the video element fires this event.
+     */
+    function handleLoadedMetadata() {
+        if (!videoElement) return;
+        
+        // Reset currentTime to beginning
+        if (videoElement.currentTime !== 0) {
+            videoElement.currentTime = 0;
+            currentTime = 0;
+        }
     }
 
 
@@ -187,21 +334,51 @@
         const x = event.clientX - rect.left;
         visualScrubTime = Math.max(0, Math.min((x / rect.width) * duration, duration));
         
-        // Periodically update video for live feedback (low priority)
+        // Update visual scrubber position immediately for smooth feedback
+        visualScrubberPosition = visualScrubTime;
+        
+        // Debounced video seeks for performance
+        scheduleVideoSeek();
+    }
+    
+    function scheduleVideoSeek() {
+        if (videoSeekTimeout) {
+            clearTimeout(videoSeekTimeout);
+        }
+        
         const now = performance.now();
         if (now - lastVideoUpdateTime >= VIDEO_UPDATE_INTERVAL_MS) {
-            lastVideoUpdateTime = now;
-            if (videoElement) {
-                videoElement.currentTime = visualScrubTime;
-            }
+            // Immediate seek if enough time has passed
+            performVideoSeek();
+        } else {
+            // Debounced seek
+            videoSeekTimeout = setTimeout(performVideoSeek, VIDEO_UPDATE_INTERVAL_MS);
         }
+    }
+    
+    function performVideoSeek() {
+        if (!videoElement || !isDragging) return;
+        
+        lastVideoUpdateTime = performance.now();
+        videoElement.currentTime = visualScrubTime;
+        videoSeekTimeout = null;
     }
 
     function handleMouseUp(event: MouseEvent) {
         if (!isDragging || !videoElement) return;
         isDragging = false;
         
-        // Now seek the video to the visual position
+        // Cancel any pending operations
+        if (animationFrameId) {
+            cancelAnimationFrame(animationFrameId);
+            animationFrameId = null;
+        }
+        if (videoSeekTimeout) {
+            clearTimeout(videoSeekTimeout);
+            videoSeekTimeout = null;
+        }
+        
+        // Final seek to ensure video is at the correct position
         videoElement.currentTime = visualScrubTime;
         currentTime = visualScrubTime;
         
@@ -213,7 +390,7 @@
     }
 
     function cutAtCurrentTime() {
-        const cutTime = isDragging ? visualScrubTime : currentTime;
+        const cutTime = isDragging ? visualScrubberPosition : currentTime;
         if (!isReady || cutTime <= 0 || cutTime >= duration) return;
         
         // Find which segment contains the current time
@@ -307,6 +484,15 @@
 
 
     $: totalDuration = segments.reduce((sum, seg) => sum + (seg.end - seg.start), 0);
+    
+    // Reactive statement to reload when videoFile changes
+    $: if (videoFile && videoFile !== prevVideoFile) {
+        prevVideoFile = videoFile;
+        // Only reload if component is mounted (videoElement exists or was null initially)
+        if (typeof window !== 'undefined') {
+            loadVideoAsync();
+        }
+    }
 </script>
 
 <div class="video-editor">
@@ -372,17 +558,17 @@
             </button>
             
             <div class="time-display">
-                {formatTime(isDragging ? visualScrubTime : currentTime)} / {formatTime(duration)}
+                {formatTime(isDragging ? visualScrubberPosition : currentTime)} / {formatTime(duration)}
             </div>
             
             <button 
                 type="button"
                 on:click={cutAtCurrentTime}
-                disabled={!isReady || (isDragging ? visualScrubTime : currentTime) <= 0 || (isDragging ? visualScrubTime : currentTime) >= duration}
+                disabled={!isReady || (isDragging ? visualScrubberPosition : currentTime) <= 0 || (isDragging ? visualScrubberPosition : currentTime) >= duration}
                 class="simple-btn"
                 title="Cut at current time (C)"
             >
-                Cut at {formatTime(isDragging ? visualScrubTime : currentTime)}
+                Cut at {formatTime(isDragging ? visualScrubberPosition : currentTime)}
             </button>
             
             <button 
@@ -420,7 +606,7 @@
             {#if isReady}
                 <div 
                     class="timeline-cursor" 
-                    style="left: {(isDragging ? visualScrubTime : currentTime) / duration * 100}%"
+                    style="left: {(isDragging ? visualScrubberPosition : currentTime) / duration * 100}%"
                 ></div>
             {/if}
             
