@@ -87,38 +87,8 @@ namespace liteclip
 
             var app = builder.Build();
 
-            var ffmpegBootstrapper = app.Services.GetRequiredService<FfmpegBootstrapper>();
-            var ffmpegProbeService = app.Services.GetRequiredService<FfmpegProbeService>();
-            var programLogger = app.Services.GetRequiredService<ILogger<Program>>();
-            var ffmpegStartupTask = ffmpegBootstrapper.EnsureReadyAsync();
-            _ = ffmpegStartupTask.ContinueWith(t =>
-            {
-                // Run an async probe in the background to get version info
-                _ = Task.Run(async () =>
-                {
-                    if (t.IsCompletedSuccessfully)
-                    {
-                        var executable = ffmpegBootstrapper.GetStatus().ExecutablePath;
-                        try
-                        {
-                            var version = await ffmpegProbeService.GetFfmpegVersionAsync();
-                            programLogger.LogInformation("FFmpeg ready. Executable path: {Path}, Version: {Version}", executable ?? "(unknown)", version ?? "(unknown)");
-                        }
-                        catch (Exception ex)
-                        {
-                            programLogger.LogInformation("FFmpeg ready. Executable path: {Path}", executable ?? "(unknown)");
-                            programLogger.LogDebug(ex, "Failed to query FFmpeg version");
-                        }
-
-                        Console.WriteLine("✓ FFmpeg ready");
-                    }
-                    else
-                    {
-                        programLogger.LogWarning(t.Exception, "FFmpeg initialization failed");
-                        Console.WriteLine($"⚠️ FFmpeg initialization failed: {t.Exception?.GetBaseException().Message}");
-                    }
-                });
-            });
+            // NOTE: Do NOT auto-start FFmpeg bootstrap here.
+            // We will start it only after the user explicitly consents via /api/ffmpeg/start.
 
             // NOTE: Delay FFmpeg capability probing to background after the UI is loaded.
             // Running the probe synchronously on startup makes the UI wait on long ffmpeg checks.
@@ -289,6 +259,7 @@ namespace liteclip
                     Console.WriteLine($"Message received from frontend: {message}");
                     if (message == "close-app")
                     {
+                        Console.WriteLine("Closing app due to 'close-app' message...");
                         window.Close();
                     }
                 });

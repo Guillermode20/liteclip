@@ -50,6 +50,18 @@ export async function retryFfmpeg(): Promise<void> {
     }
 }
 
+export async function startFfmpeg(): Promise<void> {
+    const response = await fetch(`${API_BASE}/ffmpeg/start`, { method: 'POST' });
+    if (!response.ok) {
+        const text = await response.text();
+        throw new Error(text || `Start failed (${response.status})`);
+    }
+}
+
+export async function closeApp(): Promise<void> {
+    await fetch(`${API_BASE}/app/close`, { method: 'POST' });
+}
+
 export async function uploadVideo(formData: FormData, signal?: AbortSignal): Promise<{ jobId: string }> {
     const response = await fetch(`${API_BASE}/compress`, {
         method: 'POST',

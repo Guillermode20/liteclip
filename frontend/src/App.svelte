@@ -27,6 +27,8 @@
         saveSettings,
         getFfmpegStatus,
         retryFfmpeg,
+        startFfmpeg,
+        closeApp,
         uploadVideo,
         getJobStatus,
         cancelJob,
@@ -96,6 +98,7 @@
     let ffmpegStatusInterval: number | null = null;
     let ffmpegState: FfmpegStatusResponse['state'] = 'idle';
     let ffmpegRetrying = false;
+    let ffmpegConsentGiven = false;
 
     let outputMetadata: OutputMetadata = createDefaultOutputMetadata();
 
@@ -109,7 +112,6 @@
 
     onMount(() => {
         loadUserSettings();
-        startFfmpegPolling();
     });
 
     // Reactive derived values for slider
@@ -344,6 +346,44 @@
             clearInterval(ffmpegStatusInterval);
             ffmpegStatusInterval = null;
         }
+    }
+
+    async function handleFfmpegConsent(accepted: boolean) {
+        if (!accepted) {
+            try {
+                console.log('Attempting to close app...');
+                
+                // Try native Photino message first
+                if ((window as any).external && (window as any).external.sendMessage) {
+                    console.log('Using window.external.sendMessage');
+                    (window as any).external.sendMessage('close-app');
+                } 
+                // Fallback for older Photino or different setups
+                else if (typeof window !== 'undefined' && (window as any).Photino) {
+                    console.log('Using window.Photino.sendWebMessage');
+                    (window as any).Photino.sendWebMessage('close-app');
+                }
+                // Ultimate fallback: call backend endpoint to kill the process
+                else {
+                    console.warn('Native interop not found, calling backend kill switch...');
+                    await closeApp();
+                }
+            } catch (e) {
+                console.error('Native close failed, calling backend kill switch:', e);
+                await closeApp();
+            }
+            return;
+        }
+
+        ffmpegConsentGiven = true;
+        try {
+            await startFfmpeg();
+        } catch (e) {
+            ffmpegError = (e as Error).message;
+            ffmpegStatusMessage = 'Failed to start FFmpeg download';
+            return;
+        }
+        startFfmpegPolling();
     }
 
     async function fetchFfmpegStatus() {
@@ -1135,23 +1175,42 @@
 {#if !ffmpegReady}
     <div class="ffmpeg-overlay">
         <div class="ffmpeg-card">
-            <h2>Preparing FFmpeg…</h2>
-            <p class="ffmpeg-message">{ffmpegStatusMessage}</p>
-            <div class="ffmpeg-progress">
-                <div class="ffmpeg-progress-track">
-                    <div
-                        class="ffmpeg-progress-fill"
-                        style={`width: ${Math.min(100, Math.max(5, ffmpegProgressPercent || 0)).toFixed(1)}%;`}
-                    ></div>
+            {#if !ffmpegConsentGiven}
+                <h2>Download FFmpeg to get started</h2>
+                <p class="ffmpeg-message">
+                    LiteClip uses FFmpeg, a small open-source video tool, to compress and trim your videos.
+                </p>
+                <p class="ffmpeg-message">
+                    The app will download the FFmpeg program file it needs and store it locally. It does not install
+                    anything else or change your PC.
+                </p>
+                <div class="action-buttons">
+                    <button class="action-btn primary" on:click={() => handleFfmpegConsent(true)}>
+                        download ffmpeg and continue
+                    </button>
+                    <button class="action-btn secondary" on:click={() => handleFfmpegConsent(false)}>
+                        close app
+                    </button>
                 </div>
-                <span>{Math.max(0, Math.min(100, ffmpegProgressPercent || 0)).toFixed(1)}%</span>
-            </div>
-            <span class="ffmpeg-state">{ffmpegState.toUpperCase()}</span>
-            {#if ffmpegError}
-                <p class="ffmpeg-error">{ffmpegError}</p>
-                <button class="retry-btn" on:click={handleFfmpegRetry} disabled={ffmpegRetrying}>
-                    {ffmpegRetrying ? 'retrying...' : 'retry download'}
-                </button>
+            {:else}
+                <h2>Preparing FFmpeg…</h2>
+                <p class="ffmpeg-message">{ffmpegStatusMessage}</p>
+                <div class="ffmpeg-progress">
+                    <div class="ffmpeg-progress-track">
+                        <div
+                            class="ffmpeg-progress-fill"
+                            style={`width: ${Math.min(100, Math.max(5, ffmpegProgressPercent || 0)).toFixed(1)}%;`}
+                        ></div>
+                    </div>
+                    <span>{Math.max(0, Math.min(100, ffmpegProgressPercent || 0)).toFixed(1)}%</span>
+                </div>
+                <span class="ffmpeg-state">{ffmpegState.toUpperCase()}</span>
+                {#if ffmpegError}
+                    <p class="ffmpeg-error">{ffmpegError}</p>
+                    <button class="retry-btn" on:click={handleFfmpegRetry} disabled={ffmpegRetrying}>
+                        {ffmpegRetrying ? 'retrying...' : 'retry download'}
+                    </button>
+                {/if}
             {/if}
         </div>
     </div>

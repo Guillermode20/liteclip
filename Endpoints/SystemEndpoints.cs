@@ -56,6 +56,36 @@ public static class SystemEndpoints
             })
             .WithName("RetryFfmpegDownload");
 
+        endpoints.MapPost("/api/ffmpeg/start", async (FfmpegBootstrapper bootstrapper) =>
+            {
+                // Start bootstrap if not already started
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await bootstrapper.EnsureReadyAsync();
+                    }
+                    catch
+                    {
+                        // Errors will be reflected in status endpoint
+                    }
+                });
+
+                var status = bootstrapper.GetStatus();
+                return Results.Ok(new
+                {
+                    state = status.State.ToString().ToLowerInvariant(),
+                    status.ProgressPercent,
+                    status.DownloadedBytes,
+                    status.TotalBytes,
+                    status.Message,
+                    status.ExecutablePath,
+                    status.ErrorMessage,
+                    status.Ready
+                });
+            })
+            .WithName("StartFfmpegDownload");
+
         endpoints.MapGet("/api/ffmpeg/encoders", async (HttpRequest request, FfmpegProbeService probe, FfmpegBootstrapper bootstrapper) =>
             {
                 // ensure ffmpeg ready
@@ -78,6 +108,18 @@ public static class SystemEndpoints
                 return Results.Ok(encoders);
             })
             .WithName("GetFfmpegEncoders");
+
+        endpoints.MapPost("/api/app/close", () =>
+            {
+                Task.Run(async () =>
+                {
+                    // Give time for the response to be sent
+                    await Task.Delay(100);
+                    Environment.Exit(0);
+                });
+                return Results.Ok();
+            })
+            .WithName("CloseApp");
 
         return endpoints;
     }
