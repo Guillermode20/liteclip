@@ -14,7 +14,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>liteclip</RootNamespace>
-    <OutputType>WinExe</OutputType>
+    <OutputType>Exe</OutputType>
     <ApplicationIcon>logo.ico</ApplicationIcon>
     
         <!-- Build optimization -->
@@ -51,9 +51,10 @@
     <Content Include="wwwroot\**\*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
-  <!-- Release: embed static content into the assembly -->
+  <!-- Release: copy static content to output directory (not embedded) -->
+  <!-- Embedded resources don't work reliably with PublishSingleFile=true -->
   <ItemGroup Condition="'$(Configuration)'=='Release'">
-    <EmbeddedResource Include="wwwroot\**\*" />
+    <Content Include="wwwroot\**\*" CopyToPublishDirectory="Always" />
   </ItemGroup>
 
   <!-- 
@@ -93,7 +94,7 @@
     <IncludeAllContentForSelfExtract>false</IncludeAllContentForSelfExtract>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <PublishReadyToRun>true</PublishReadyToRun>
-    <GenerateEmbeddedFilesManifest>true</GenerateEmbeddedFilesManifest>
+    <GenerateEmbeddedFilesManifest>false</GenerateEmbeddedFilesManifest>
     <!-- Native AOT disabled - incompatible with ASP.NET Core and Photino -->
     <PublishAot>false</PublishAot>
     <!-- Trimming disabled to ensure full ASP.NET Core server is bundled -->
@@ -113,7 +114,7 @@
   </PropertyGroup>
   
   <PropertyGroup Condition="'$(Configuration)'=='Release'">
-    <EmbedStaticFiles Condition="$(EmbedStaticFiles) == ''">true</EmbedStaticFiles>
+    <EmbedStaticFiles>false</EmbedStaticFiles>
   </PropertyGroup>
 
   <!-- Preserve assemblies that use reflection (prevent trim issues) -->
@@ -151,33 +152,33 @@
     <Content Update="web.config" CopyToPublishDirectory="Never" />
   </ItemGroup>
   
-  <!-- Custom target to clean up unnecessary published files in Release -->
+  <!-- DISABLED: We're not embedding static files anymore due to single-file compatibility issues -->
+  <!--
   <Target Name="CleanupPublishedFiles" AfterTargets="Publish" Condition="'$(Configuration)'=='Release' and '$(EmbedStaticFiles)'=='true'">
-    <!-- Remove wwwroot folder (it's embedded) -->
     <RemoveDir Directories="$(PublishDir)wwwroot" />
-    
-    <!-- Remove frontend folder (not needed) -->
     <RemoveDir Directories="$(PublishDir)frontend" />
-    
-    <!-- Remove XML documentation files -->
     <ItemGroup>
       <FilesToDelete Include="$(PublishDir)*.xml" />
       <FilesToDelete Include="$(PublishDir)*.pdb" />
     </ItemGroup>
     <Delete Files="@(FilesToDelete)" />
-    
-    <!-- Remove static web assets metadata files -->
     <ItemGroup>
       <StaticAssetFiles Include="$(PublishDir)*.staticwebassets.*" />
     </ItemGroup>
     <Delete Files="@(StaticAssetFiles)" />
-    
-    <!-- Remove web.config (must be deleted separately after other operations) -->
     <Delete Files="$(PublishDir)web.config" Condition="Exists('$(PublishDir)web.config')" />
   </Target>
+  -->
 
   <ItemGroup Condition="'$(Configuration)'=='Release' and '$(EmbedStaticFiles)'=='false'">
     <Content Include="wwwroot\**\*" CopyToPublishDirectory="Always" />
   </ItemGroup>
+
+  <!-- Diagnostic: for Release on Windows when using dotnet publish directly,
+       disable single-file & self-contained to test Photino/WebView2 behavior. -->
+  <PropertyGroup Condition="'$(Configuration)'=='Release' and '$(OS)'=='Windows_NT'">
+    <PublishSingleFile>false</PublishSingleFile>
+    <SelfContained>false</SelfContained>
+  </PropertyGroup>
 
 </Project>

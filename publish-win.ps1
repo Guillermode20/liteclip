@@ -1,12 +1,11 @@
 # PowerShell script to build and publish LiteClip as a Windows executable
 #
-# TRIMMING FIX (2025-11-14):
+# TRIMMING FIX (2025-11-26):
 # - Disabled Native AOT (PublishAot=false) - incompatible with ASP.NET Core & Photino
-# - Changed TrimMode from 'link' to 'partial' for better compatibility
-# - Added comprehensive TrimmerRootAssembly entries for all ASP.NET Core components
-# - Result: Trimmed executable (~96 MB) that runs properly without runtime errors
-#
-# Trimming is important for keeping file size reasonable while maintaining full functionality.
+# - Disabled PublishTrimmed entirely - TrimMode=link breaks ManifestEmbeddedFileProvider
+#   which is required to serve the embedded wwwroot static files in Release builds.
+#   With trimming enabled, the app shows a black window because static files fail to load.
+# - R2R (ReadyToRun) is still enabled for fast startup without breaking embedded resources.
 
 param(
     [string]$Configuration = 'Release',
@@ -138,24 +137,20 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host "Packages restored successfully" -ForegroundColor Green
 
-# Publish .NET application
-Write-Host ""
-Write-Host "Publishing .NET application with optimized settings..." -ForegroundColor Yellow
+# Publish .NET application (folder-based, framework-dependent)
+Write-Host "" 
+Write-Host "Publishing .NET application (folder-based Release build)..." -ForegroundColor Yellow
 
-# Optimized publish args for fast startup (R2R compilation enabled)
+# Folder-based publish args. Single-file + self-contained are disabled via csproj
+# for this Windows Release build to keep Photino/WebView2 stable.
 $publishArgs = @(
     'publish',
     'liteclip.csproj',
     '--configuration', $Configuration,
     '--runtime', 'win-x64',
-    '--self-contained', 'true',
     '--output', $OutputDir,
     '--no-restore',
-    '/p:PublishSingleFile=true',
-    '/p:EnableCompressionInSingleFile=false',
-    '/p:PublishReadyToRun=true',
-    '/p:PublishTrimmed=true',
-    '/p:TrimMode=link',
+    '/p:PublishTrimmed=false',
     '/maxcpucount'
 )
 
@@ -280,20 +275,20 @@ else {
 # Display summary
 Write-Host ""
 Write-Host "=== Build Complete ===" -ForegroundColor Green
-Write-Host ""
+Write-Host "" 
 Write-Host "Output location: $OutputDir" -ForegroundColor Cyan
 Write-Host "Executable: liteclip.exe" -ForegroundColor White
-Write-Host ""
-Write-Host "Portable version: $DestExe" -ForegroundColor Cyan
-Write-Host ""
-Write-Host "✨ Portable Release build (single-file per csproj settings)." -ForegroundColor Green
-Write-Host "   Frontend is embedded." -ForegroundColor Green
+Write-Host "" 
+Write-Host "Release exe copy (for convenience): $DestExe" -ForegroundColor Cyan
+Write-Host "" 
+Write-Host "✨ Release build (folder-based, no trimming for embedded/static file compatibility)." -ForegroundColor Green
+Write-Host "   Frontend is served from wwwroot in the publish folder." -ForegroundColor Green
 Write-Host "   FFmpeg must be installed separately (system PATH or config)." -ForegroundColor Yellow
-Write-Host "   You can move the exe anywhere and it will work!" -ForegroundColor Green
-Write-Host ""
+Write-Host "   NOTE: liteclip.exe depends on its nearby files; keep the folder together." -ForegroundColor Yellow
+Write-Host "" 
 Write-Host "To run the application:" -ForegroundColor Yellow
-Write-Host "  1. Copy 'liteclip.exe' anywhere you want" -ForegroundColor White
-Write-Host "  2. Double-click it or run from command line" -ForegroundColor White
+Write-Host "  1. Open the '$OutputDir' folder" -ForegroundColor White
+Write-Host "  2. Double-click 'liteclip.exe' or run 'run.bat' from command line" -ForegroundColor White
 Write-Host "  3. A native desktop window will open automatically!" -ForegroundColor White
 Write-Host ""
 Write-Host "Note: WebView2 Runtime required (pre-installed on Windows 10/11)" -ForegroundColor Cyan

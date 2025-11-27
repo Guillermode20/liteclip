@@ -136,13 +136,33 @@ namespace liteclip
             {
                 try
                 {
-                    var embeddedProvider = new ManifestEmbeddedFileProvider(typeof(Program).Assembly, "wwwroot");
-                    app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = embeddedProvider });
-                    app.UseStaticFiles(new StaticFileOptions { FileProvider = embeddedProvider });
-                    Console.WriteLine("✓ Using embedded static files (Non-Development)");
+                    // Check if embedded files manifest is actually available
+                    var assembly = typeof(Program).Assembly;
+                    Console.WriteLine($"✓ Assembly: {assembly.FullName}");
+                    Console.WriteLine($"✓ BaseDirectory: {AppContext.BaseDirectory}");
+                    
+                    // Try to get embedded files manifest - if it fails, use physical files
+                    var embeddedProvider = new ManifestEmbeddedFileProvider(assembly, "wwwroot");
+                    
+                    // Test if we can find index.html
+                    var fileInfo = embeddedProvider.GetFileInfo("index.html");
+                    Console.WriteLine($"✓ Embedded index.html exists: {fileInfo.Exists}");
+                    if (fileInfo.Exists)
+                    {
+                        Console.WriteLine($"✓ Embedded index.html length: {fileInfo.Length}");
+                        app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = embeddedProvider });
+                        app.UseStaticFiles(new StaticFileOptions { FileProvider = embeddedProvider });
+                        Console.WriteLine("✓ Using embedded static files (Non-Development)");
+                    }
+                    else
+                    {
+                        throw new InvalidOperationException("Embedded files not found");
+                    }
                 }
-                catch (InvalidOperationException ex) when (ex.Message.Contains("embedded file manifest"))
+                catch (Exception ex)
                 {
+                    Console.WriteLine($"⚠️ Embedded files not available, using physical fallback: {ex.Message}");
+                    
                     var physicalProvider = new PhysicalFileProvider(Path.Combine(AppContext.BaseDirectory, "wwwroot"));
                     app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = physicalProvider });
                     app.UseStaticFiles(new StaticFileOptions { FileProvider = physicalProvider });
@@ -245,7 +265,7 @@ namespace liteclip
                 .SetUseOsDefaultSize(false)
                 .SetUseOsDefaultLocation(false)
                 .SetResizable(true)
-                .SetDevToolsEnabled(app.Environment.IsDevelopment())
+                .SetDevToolsEnabled(true) // Enable in production for debugging
                 .SetContextMenuEnabled(true)
                 .SetLogVerbosity(app.Environment.IsDevelopment() ? 4 : 0);
 
@@ -273,63 +293,21 @@ namespace liteclip
                     }
                 });
 
-            // Load the UI consistently from the running server
+            // Load the UI directly from the ASP.NET Core server
             try
             {
-                if (!string.IsNullOrWhiteSpace(serverUrl))
-                {
-                    // Warm up the HTTP server (static files, JIT) to improve perceived navigation speed.
-                    try
-                    {
-                        var httpFactory = app.Services.GetRequiredService<IHttpClientFactory>();
-                        _ = Task.Run(async () =>
-                        {
-                            try
-                            {
-                                var client = httpFactory.CreateClient();
-                                client.Timeout = TimeSpan.FromMilliseconds(1000);
-                                // Fire-and-forget request; don't await in startup path.
-                                await client.GetAsync(serverUrl);
-                            }
-                            catch
-                            {
-                                // Ignore warmup failures
-                            }
-                        });
-                    }
-                    catch
-                    {
-                        // If IHttpClientFactory is not available, continue without warmup
-                    }
+                var urlToLoad = !string.IsNullOrWhiteSpace(serverUrl)
+                    ? serverUrl
+                    : "http://localhost:5000";
 
-                    window.Load(serverUrl);
-                    Console.WriteLine($"✓ Loading UI from server: {serverUrl}");
-                }
-                else
-                {
-                    // Fallback: try local file if server failed to start
-                    var indexPath = Path.Combine(AppContext.BaseDirectory, "wwwroot", "index.html");
-                    if (File.Exists(indexPath))
-                    {
-                        var indexUri = new Uri(indexPath);
-                        window.Load(indexUri.AbsoluteUri);
-                        Console.WriteLine($"⚠️ Server failed, loading local file: {indexPath}");
-                    }
-                    else
-                    {
-                        window.Load("about:blank");
-                        Console.WriteLine("❌ Both server and local file failed, showing blank page");
-                    }
-                }
+                Console.WriteLine($"Loading UI in Photino from: {urlToLoad}");
+                window.Load(urlToLoad);
             }
             catch (Exception ex)
             {
-                var logger = app.Services.GetRequiredService<ILogger<Program>>();
-                logger.LogWarning(ex, "Failed to load UI - continuing with blank page");
+                Console.WriteLine($"Failed to load UI in Photino: {ex.Message}");
                 window.Load("about:blank");
             }
-
-            // FFmpeg capability probe removed: no background probing will be performed
 
             // If the user didn't request maximized, use the default size and center.
             if (!userSettings.StartMaximized)
@@ -362,7 +340,6 @@ namespace liteclip
             Console.WriteLine("Server stopped. Exiting.");
             Environment.Exit(0);
         }
-
 
         // --- Helper Function ---
         static string FormatTimeRemaining(int seconds)
