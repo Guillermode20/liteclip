@@ -112,6 +112,8 @@
 
     onMount(() => {
         loadUserSettings();
+        // Check FFmpeg status immediately to see if it's already ready
+        checkInitialFfmpegStatus();
     });
 
     // Reactive derived values for slider
@@ -384,6 +386,28 @@
             return;
         }
         startFfmpegPolling();
+    }
+
+    async function checkInitialFfmpegStatus() {
+        try {
+            const payload = await getFfmpegStatus();
+            ffmpegState = payload.state;
+            ffmpegReady = payload.ready;
+            ffmpegProgressPercent = typeof payload.progressPercent === 'number' ? payload.progressPercent : 0;
+            ffmpegStatusMessage = payload.message ?? 'Preparing FFmpeg dependencies...';
+            ffmpegError = payload.errorMessage ?? null;
+
+            // If FFmpeg is already ready, mark consent as given and skip the modal entirely
+            if (payload.ready) {
+                ffmpegConsentGiven = true;
+                ffmpegReady = true;
+                console.log('FFmpeg already available, skipping download modal');
+            }
+        } catch (error) {
+            console.warn('Initial FFmpeg status check failed:', error);
+            ffmpegError = (error as Error).message || 'Unable to check FFmpeg status';
+            ffmpegStatusMessage = 'Unable to check FFmpeg status';
+        }
     }
 
     async function fetchFfmpegStatus() {

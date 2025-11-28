@@ -56,7 +56,15 @@ public class FfmpegBootstrapper
         _ffmpegRequired = !bool.TryParse(_configuration["FFmpeg:Required"], out var required) || required;
     }
 
-    public FfmpegBootstrapStatus GetStatus() => _status;
+    public FfmpegBootstrapStatus GetStatus()
+    {
+        if (_status.State == FfmpegBootstrapState.Idle)
+        {
+            TryFastResolveExistingFfmpeg();
+        }
+
+        return _status;
+    }
 
     public Task EnsureReadyAsync()
     {
@@ -79,14 +87,15 @@ public class FfmpegBootstrapper
         return existingTask!;
     }
 
-    private async Task EnsureInternalAsync()
+    private void TryFastResolveExistingFfmpeg()
     {
-        try
+        lock (_ensureLock)
         {
-            UpdateStatus(FfmpegBootstrapState.Checking, 0, "Checking FFmpeg binaries...");
+            if (_status.State != FfmpegBootstrapState.Idle)
+            {
+                return;
+            }
 
-            // First, check if a valid FFmpeg exists already via the path resolver.
-            // This avoids attempting a download or other probing that may cause a visible window.
             try
             {
                 var resolved = _resolver?.ResolveFfmpegPath();
@@ -98,13 +107,27 @@ public class FfmpegBootstrapper
                         $"FFmpeg already available at {resolved}",
                         resolved
                     );
-                    _logger.LogInformation("🎬 FFmpeg already available and will be used: {Path}", resolved);
-                    return;
+                    _logger.LogInformation("FFmpeg already available and will be used: {Path}", resolved);
                 }
             }
             catch (Exception ex)
             {
-                _logger.LogDebug(ex, "PathResolver check for existing ffmpeg failed; continuing with download attempt.");
+                _logger.LogDebug(ex, "PathResolver check for existing ffmpeg failed; continuing without changing status.");
+            }
+        }
+    }
+
+    private async Task EnsureInternalAsync()
+    {
+        try
+        {
+            UpdateStatus(FfmpegBootstrapState.Checking, 0, "Checking FFmpeg binaries...");
+
+            TryFastResolveExistingFfmpeg();
+
+            if (_status.State == FfmpegBootstrapState.Ready && !string.IsNullOrWhiteSpace(_status.ExecutablePath))
+            {
+                return;
             }
 
             if (!_downloadOnStartup)

@@ -267,17 +267,12 @@ namespace liteclip
                 return false;
             };
 
-            // Determine the server URL up-front. In Development this respects
-            // launchSettings.json; in Release it typically resolves to http://localhost:5000.
-            var urls = app.Urls;
-            var serverUrl = urls.FirstOrDefault(u => u.StartsWith("http://")) ??
-                            urls.FirstOrDefault()?.Replace("https://", "http://") ??
-                            "http://localhost:5000";
+            // Always use port 5000 for consistency
+            var serverUrl = "http://localhost:5000";
 
             Console.WriteLine($"\n🎉 LiteClip - Fast Video Compression");
             Console.WriteLine($"📅 Started at {DateTime.Now:O}");
             Console.WriteLine($"📡 Server running at: {serverUrl}");
-            Console.WriteLine("🪟 Loading native desktop window...\n");
 
             // Start the HTTP server and block until it is listening BEFORE
             // we navigate the Photino window. This fixed the intermittent
