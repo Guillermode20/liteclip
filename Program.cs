@@ -101,14 +101,81 @@ namespace liteclip
             // We will start the probe later (non-blocking) once the native window has been loaded.
 
             // Configure the HTTP request pipeline.
-            // Always serve static files from a physical wwwroot folder.
-            // This keeps Debug and Release behavior identical and avoids
-            // ManifestEmbeddedFileProvider + single-file quirks that caused
-            // the published Photino window to render blank even though
-            // the UI worked in a normal browser.
-            app.UseDefaultFiles();
-            app.UseStaticFiles();
-            Console.WriteLine($"✓ Using physical static files ({app.Environment.EnvironmentName})");
+            // In Development, serve static files directly from the physical wwwroot.
+            // In Release/Production, prefer embedded wwwroot via ManifestEmbeddedFileProvider
+            // but fall back to a physical wwwroot next to the executable if needed.
+            if (app.Environment.IsDevelopment())
+            {
+                app.UseDefaultFiles();
+                app.UseStaticFiles();
+                Console.WriteLine("✓ Using physical static files (Development)");
+            }
+            else
+            {
+                try
+                {
+                    // Primary path: serve from embedded wwwroot.
+                    var assembly = typeof(Program).Assembly;
+                    Console.WriteLine($"✓ Assembly: {assembly.FullName}");
+                    Console.WriteLine($"✓ BaseDirectory: {AppContext.BaseDirectory}");
+
+                    var embeddedProvider = new ManifestEmbeddedFileProvider(assembly, "wwwroot");
+
+                    // Test that index.html is present in the embedded manifest.
+                    var fileInfo = embeddedProvider.GetFileInfo("index.html");
+                    Console.WriteLine($"✓ Embedded index.html exists: {fileInfo.Exists}");
+                    if (fileInfo.Exists)
+                    {
+                        Console.WriteLine($"✓ Embedded index.html length: {fileInfo.Length}");
+                        app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = embeddedProvider });
+                        app.UseStaticFiles(new StaticFileOptions { FileProvider = embeddedProvider });
+                        Console.WriteLine("✓ Using embedded static files (Non-Development)");
+                    }
+                    else
+                    {
+                        throw new InvalidOperationException("Embedded wwwroot not found");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"⚠️ Embedded wwwroot not available, using physical fallback: {ex.Message}");
+
+                    static string? FindWwwRoot()
+                    {
+                        var candidates = new[]
+                        {
+                            Path.Combine(AppContext.BaseDirectory, "wwwroot"),
+                            Environment.ProcessPath is null
+                                ? null
+                                : Path.Combine(Path.GetDirectoryName(Environment.ProcessPath)!, "wwwroot"),
+                        };
+
+                        foreach (var candidate in candidates.Where(c => !string.IsNullOrEmpty(c)))
+                        {
+                            if (Directory.Exists(candidate))
+                            {
+                                return candidate;
+                            }
+                        }
+
+                        return null;
+                    }
+
+                    var physicalRoot = FindWwwRoot();
+                    if (physicalRoot is not null)
+                    {
+                        var physicalProvider = new PhysicalFileProvider(physicalRoot);
+                        app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = physicalProvider });
+                        app.UseStaticFiles(new StaticFileOptions { FileProvider = physicalProvider });
+                        Console.WriteLine($"✓ Using physical static files (fallback) from {physicalRoot}");
+                    }
+                    else
+                    {
+                        Console.WriteLine("❌ Could not locate wwwroot next to the executable or extraction directory. UI will not load.");
+                        app.MapGet("/", () => Results.Problem("Static assets unavailable. Please reinstall LiteClip."));
+                    }
+                }
+            }
 
             app.MapCompressionEndpoints();
             app.MapSettingsEndpoints();

@@ -75,15 +75,16 @@
     <OutputType>Exe</OutputType>
   </PropertyGroup>
 
-  <!-- Release tuning: folder-based layout (no single-file) -->
+  <!-- Release tuning: single-file, self-contained EXE (portable) -->
   <PropertyGroup Condition="'$(Configuration)'=='Release'">
-    <PublishSingleFile>false</PublishSingleFile>
+    <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>
     <PublishReadyToRun>true</PublishReadyToRun>
     <PublishTrimmed>false</PublishTrimmed>
     <PublishAot>false</PublishAot>
-    <EnableCompressionInSingleFile>false</EnableCompressionInSingleFile>
-    <IncludeNativeLibrariesForSelfExtract>false</IncludeNativeLibrariesForSelfExtract>
+    <!-- Bundle native libraries into the single-file image -->
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <IncludeAllContentForSelfExtract>false</IncludeAllContentForSelfExtract>
   </PropertyGroup>
 
@@ -105,9 +106,17 @@
     <TrimmerRootAssembly Include="Photino.NET" />
   </ItemGroup>
 
-  <!-- Release: copy wwwroot to publish output (physical static files next to exe) -->
+  <!-- Release: copy wwwroot to publish output (physical static files next to exe).
+       Mark as ExcludeFromSingleFile so static assets stay loose beside the EXE. -->
   <ItemGroup Condition="'$(Configuration)'=='Release'">
-    <Content Include="wwwroot\**\*" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="wwwroot\**\*" CopyToPublishDirectory="PreserveNewest">
+      <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+    </Content>
+  </ItemGroup>
+
+  <!-- Release: also embed wwwroot into the assembly (for tools/tests that rely on EmbeddedResources) -->
+  <ItemGroup Condition="'$(Configuration)'=='Release'">
+    <EmbeddedResource Include="wwwroot\**\*" />
   </ItemGroup>
 
 </Project>
