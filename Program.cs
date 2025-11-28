@@ -27,14 +27,20 @@ namespace liteclip
         [STAThread] // The most important line in the whole file
         static void Main(string[] args)
         {
-            // This runs the async main method and blocks the STA thread
-            // which is the correct pattern for .NET UI apps.
-            RunServerAndWindow(args).GetAwaiter().GetResult();
+            // NOTE: Main MUST stay synchronous and on the STA thread.
+            // Photino/WebView2 require their message pump (WaitForClose)
+            // to run on this original STA thread, so we avoid async Main
+            // and any awaits that could resume on a ThreadPool thread.
+            RunServerAndWindow(args);
         }
 
-        // All of your previous Program.cs logic is now inside this async method
+        // All of the hosting + Photino setup is inside this method.
+        // It is intentionally synchronous so that:
+        //   - Kestrel is started with StartAsync().GetResult() BEFORE
+        //     we call window.Load(serverUrl), and
+        //   - window.WaitForClose() always runs on the STA thread.
         [System.Diagnostics.CodeAnalysis.UnconditionalSuppressMessage("Trimming", "IL2026", Justification = "Endpoint mapping uses reflection; types used are preserved at runtime. This is expected for ASP.NET minimal APIs.")]
-        static async Task RunServerAndWindow(string[] args)
+        static void RunServerAndWindow(string[] args)
         {
 
             var builder = WebApplication.CreateBuilder(args);
@@ -95,81 +101,15 @@ namespace liteclip
             // We will start the probe later (non-blocking) once the native window has been loaded.
 
             // Configure the HTTP request pipeline.
-            // Serve static files: physical in Development, embedded in non-Development
-            if (app.Environment.IsDevelopment())
-            {
-                app.UseDefaultFiles();
-                app.UseStaticFiles();
-                Console.WriteLine("✓ Using physical static files (Development)");
-            }
-            else
-            {
-                try
-                {
-                    // Check if embedded files manifest is actually available
-                    var assembly = typeof(Program).Assembly;
-                    Console.WriteLine($"✓ Assembly: {assembly.FullName}");
-                    Console.WriteLine($"✓ BaseDirectory: {AppContext.BaseDirectory}");
-                    
-                    // Try to get embedded files manifest - if it fails, use physical files
-                    var embeddedProvider = new ManifestEmbeddedFileProvider(assembly, "wwwroot");
-                    
-                    // Test if we can find index.html
-                    var fileInfo = embeddedProvider.GetFileInfo("index.html");
-                    Console.WriteLine($"✓ Embedded index.html exists: {fileInfo.Exists}");
-                    if (fileInfo.Exists)
-                    {
-                        Console.WriteLine($"✓ Embedded index.html length: {fileInfo.Length}");
-                        app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = embeddedProvider });
-                        app.UseStaticFiles(new StaticFileOptions { FileProvider = embeddedProvider });
-                        Console.WriteLine("✓ Using embedded static files (Non-Development)");
-                    }
-                    else
-                    {
-                        throw new InvalidOperationException("Embedded files not found");
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"⚠️ Embedded files not available, using physical fallback: {ex.Message}");
+            // Always serve static files from a physical wwwroot folder.
+            // This keeps Debug and Release behavior identical and avoids
+            // ManifestEmbeddedFileProvider + single-file quirks that caused
+            // the published Photino window to render blank even though
+            // the UI worked in a normal browser.
+            app.UseDefaultFiles();
+            app.UseStaticFiles();
+            Console.WriteLine($"✓ Using physical static files ({app.Environment.EnvironmentName})");
 
-                    static string? FindWwwRoot()
-                    {
-                        var candidates = new[]
-                        {
-                            Path.Combine(AppContext.BaseDirectory, "wwwroot"),
-                            Environment.ProcessPath is null
-                                ? null
-                                : Path.Combine(Path.GetDirectoryName(Environment.ProcessPath)!, "wwwroot"),
-                        };
-
-                        foreach (var candidate in candidates.Where(c => !string.IsNullOrEmpty(c)))
-                        {
-                            if (Directory.Exists(candidate))
-                            {
-                                return candidate;
-                            }
-                        }
-
-                        return null;
-                    }
-
-                    var physicalRoot = FindWwwRoot();
-                    if (physicalRoot is not null)
-                    {
-                        var physicalProvider = new PhysicalFileProvider(physicalRoot);
-                        app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = physicalProvider });
-                        app.UseStaticFiles(new StaticFileOptions { FileProvider = physicalProvider });
-                        Console.WriteLine($"✓ Using physical static files (fallback) from {physicalRoot}");
-                    }
-                    else
-                    {
-                        Console.WriteLine("❌ Could not locate wwwroot next to the executable or extraction directory. UI will not load.");
-                        app.MapGet("/", () => Results.Problem("Static assets unavailable. Please reinstall LiteClip."));
-                    }
-                }
-            }
-            
             app.MapCompressionEndpoints();
             app.MapSettingsEndpoints();
             app.MapSystemEndpoints();
@@ -178,7 +118,6 @@ namespace liteclip
 
             var cts = new CancellationTokenSource();
             var lifetime = app.Services.GetRequiredService<IHostApplicationLifetime>();
-            var serverReadyTcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
 
             // Register graceful shutdown handler for Ctrl+C and other termination signals
             lifetime.ApplicationStopping.Register(() =>
@@ -197,7 +136,27 @@ namespace liteclip
 
             // Load user settings to honor StartMaximized preference
             var userSettingsStore = app.Services.GetRequiredService<UserSettingsStore>();
-            var userSettings = await userSettingsStore.GetAsync();
+            var userSettings = userSettingsStore.GetAsync().GetAwaiter().GetResult();
+
+            // Prepare a safe WebView2 user data folder
+            // This prevents "Window closed immediately" issues caused by locked files from previous zombie processes
+            string webView2Path = Path.Combine(Path.GetTempPath(), "LiteClip_WebView2");
+            try
+            {
+                if (Directory.Exists(webView2Path))
+                {
+                    Directory.Delete(webView2Path, true);
+                }
+                Directory.CreateDirectory(webView2Path);
+            }
+            catch
+            {
+                // If deletion fails, the folder is likely locked by a zombie process.
+                // Use a unique path to ensure the app can still start.
+                webView2Path = Path.Combine(Path.GetTempPath(), $"LiteClip_WebView2_{DateTime.Now.Ticks}");
+                Directory.CreateDirectory(webView2Path);
+            }
+
             var window = new PhotinoWindow()
                 .SetTitle("LiteClip - Fast Video Compression")
                 .SetUseOsDefaultSize(false)
@@ -205,6 +164,7 @@ namespace liteclip
                 .SetResizable(true)
                 .SetDevToolsEnabled(true) // Enable in production for debugging
                 .SetContextMenuEnabled(true)
+                .SetTemporaryFilesPath(webView2Path) // Explicitly set the user data folder
                 .SetLogVerbosity(app.Environment.IsDevelopment() ? 4 : 0);
 
             // Apply user preference: start maximized if requested
@@ -240,57 +200,30 @@ namespace liteclip
                 return false;
             };
 
-            lifetime.ApplicationStarted.Register(() =>
+            // Determine the server URL up-front. In Development this respects
+            // launchSettings.json; in Release it typically resolves to http://localhost:5000.
+            var urls = app.Urls;
+            var serverUrl = urls.FirstOrDefault(u => u.StartsWith("http://")) ??
+                            urls.FirstOrDefault()?.Replace("https://", "http://") ??
+                            "http://localhost:5000";
+
+            Console.WriteLine($"\n🎉 LiteClip - Fast Video Compression");
+            Console.WriteLine($"📅 Started at {DateTime.Now:O}");
+            Console.WriteLine($"📡 Server running at: {serverUrl}");
+            Console.WriteLine("🪟 Loading native desktop window...\n");
+
+            // Start the HTTP server and block until it is listening BEFORE
+            // we navigate the Photino window. This fixed the intermittent
+            // "blank window" issue where WebView2 never sent any HTTP
+            // requests in some runs of the published app.
+            app.StartAsync(cts.Token).GetAwaiter().GetResult();
+
+            window.Load(serverUrl);
+
+            if (!userSettings.StartMaximized)
             {
-                try
-                {
-                    var urls = app.Urls;
-                    var url = urls.FirstOrDefault(u => u.StartsWith("http://")) ??
-                              urls.FirstOrDefault()?.Replace("https://", "http://");
-
-                    if (url == null)
-                    {
-                        throw new InvalidOperationException("No server URL found.");
-                    }
-
-                    Console.WriteLine($"\n🎉 LiteClip - Fast Video Compression");
-                    Console.WriteLine($"📅 Started at {DateTime.Now:O}");
-                    Console.WriteLine($"📡 Server running at: {url}");
-                    Console.WriteLine("🪟 Loading native desktop window...\n");
-
-                    serverReadyTcs.TrySetResult(url);
-                    window.Load(url);
-
-                    if (!userSettings.StartMaximized)
-                    {
-                        window.SetSize(1200, 800);
-                        window.Center();
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"\n❌ Failed to determine server URL: {ex.Message}");
-                    serverReadyTcs.TrySetException(ex);
-                    window.Load("about:blank");
-                }
-            });
-
-            // Start the HTTP server; Photino will load once ApplicationStarted fires.
-            var serverTask = app.RunAsync(cts.Token);
-
-            try
-            {
-                await serverReadyTcs.Task.WaitAsync(TimeSpan.FromSeconds(30));
-            }
-            catch (TimeoutException)
-            {
-                Console.WriteLine("\n⚠️ Server start timed out after 30s. Window will load once the host is ready.");
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"\n❌ Failed to start server: {ex.Message}");
-                await serverTask;
-                return;
+                window.SetSize(1200, 800);
+                window.Center();
             }
 
             // This BLOCKS the [STAThread] (Main) until the window is closed.
@@ -312,7 +245,7 @@ namespace liteclip
             }
 
             cts.Cancel();
-            await serverTask;
+            app.StopAsync(cts.Token).GetAwaiter().GetResult();
 
             Console.WriteLine("Server stopped. Exiting.");
             Environment.Exit(0);

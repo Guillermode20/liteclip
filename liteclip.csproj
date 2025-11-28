@@ -75,15 +75,15 @@
     <OutputType>Exe</OutputType>
   </PropertyGroup>
 
-  <!-- Release tuning: single-file exe + loose static assets -->
+  <!-- Release tuning: folder-based layout (no single-file) -->
   <PropertyGroup Condition="'$(Configuration)'=='Release'">
-    <PublishSingleFile>true</PublishSingleFile>
+    <PublishSingleFile>false</PublishSingleFile>
     <SelfContained>true</SelfContained>
     <PublishReadyToRun>true</PublishReadyToRun>
     <PublishTrimmed>false</PublishTrimmed>
     <PublishAot>false</PublishAot>
-    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
-    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>false</EnableCompressionInSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>false</IncludeNativeLibrariesForSelfExtract>
     <IncludeAllContentForSelfExtract>false</IncludeAllContentForSelfExtract>
   </PropertyGroup>
 
@@ -104,12 +104,10 @@
     <TrimmerRootAssembly Include="System.Text.Json" />
     <TrimmerRootAssembly Include="Photino.NET" />
   </ItemGroup>
-  <!-- Release: keep wwwroot outside the single-file bundle -->
+
+  <!-- Release: copy wwwroot to publish output (physical static files next to exe) -->
   <ItemGroup Condition="'$(Configuration)'=='Release'">
-    <Content Include="wwwroot\**\*" CopyToPublishDirectory="PreserveNewest">
-      <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
-      <CopyToOutputDirectory>Never</CopyToOutputDirectory>
-    </Content>
+    <Content Include="wwwroot\**\*" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>
