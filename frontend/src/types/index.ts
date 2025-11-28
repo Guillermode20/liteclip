@@ -68,6 +68,7 @@ export interface UserSettingsPayload {
     defaultMuteAudio: boolean;
     defaultTargetSizeMb: number;
     checkForUpdatesOnLaunch: boolean;
+    appScale: number;
 }
 
 // Encoder detection removed: frontend no longer receives probe data

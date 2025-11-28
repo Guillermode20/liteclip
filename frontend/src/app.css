@@ -12,6 +12,7 @@
     --text-muted: #71717a;
     --text-dark: #52525b;
     --blur: blur(8px);
+    --app-scale: 1;
 }
 
 * {

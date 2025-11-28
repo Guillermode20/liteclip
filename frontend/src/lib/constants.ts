@@ -17,7 +17,8 @@ export const FALLBACK_SETTINGS: UserSettingsPayload = {
     defaultResolution: 'auto',
     defaultMuteAudio: false,
     defaultTargetSizeMb: 25,
-    checkForUpdatesOnLaunch: true
+    checkForUpdatesOnLaunch: true,
+    appScale: 1.0
 };
 
 export function createDefaultOutputMetadata(): OutputMetadata {

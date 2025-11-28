@@ -8,20 +8,30 @@
     export let open = false;
     export let settings: UserSettingsPayload | null = null;
 
+    type SettingsSection = 'compression' | 'appearance' | 'system';
+    let activeSection: SettingsSection = 'compression';
+
+    const sections: { id: SettingsSection; label: string; icon: string }[] = [
+        { id: 'compression', label: 'Compression', icon: '⚙' },
+        { id: 'appearance', label: 'Appearance', icon: '🎨' },
+        { id: 'system', label: 'System', icon: '💻' }
+    ];
+
     const defaultState: UserSettingsPayload = {
         defaultCodec: 'quality',
         defaultResolution: 'auto',
         defaultMuteAudio: false,
         defaultTargetSizeMb: 25,
-        checkForUpdatesOnLaunch: true
+        checkForUpdatesOnLaunch: true,
+        appScale: 1.0
     };
 
     let localSettings: UserSettingsPayload = { ...defaultState };
 
     $: if (open) {
         localSettings = { ...defaultState, ...settings };
+        activeSection = 'compression';
         if (open) {
-            // Encoder list is loaded on demand when the modal opens
             ffmpegEncodersStore.load();
         }
     }
@@ -30,7 +40,6 @@
     let ffmpegEncodersState = { encoders: [], loading: false, error: null } as any;
     encodersUnsub = ffmpegEncodersStore.subscribe(state => (ffmpegEncodersState = state));
     onDestroy(() => encodersUnsub());
-
 
     function handleClose() {
         dispatch('close');
@@ -66,6 +75,13 @@
     function handleUpdateToggle(event: Event) {
         localSettings = { ...localSettings, checkForUpdatesOnLaunch: (event.target as HTMLInputElement).checked };
     }
+
+    function handleAppScaleChange(event: Event) {
+        const value = parseFloat((event.target as HTMLInputElement).value);
+        if (!Number.isNaN(value)) {
+            localSettings = { ...localSettings, appScale: Math.max(0.5, Math.min(2.0, value)) };
+        }
+    }
 </script>
 
 {#if open}
@@ -81,87 +97,160 @@
                     </button>
                 </header>
 
-                <div class="modal-body">
-                    <div class="form-group">
-                        <label for="defaultCodec">default codec</label>
-                        <select id="defaultCodec" value={localSettings.defaultCodec} on:change={handleCodecChange}>
-                            <option value="fast">fast (h.264)</option>
-                            <option value="quality">quality (h.265)</option>
-                        </select>
-                    </div>
+                <div class="modal-content">
+                    <!-- Sidebar Navigation -->
+                    <nav class="settings-sidebar">
+                        {#each sections as section}
+                            <button
+                                type="button"
+                                class="sidebar-item {activeSection === section.id ? 'active' : ''}"
+                                on:click={() => (activeSection = section.id)}
+                            >
+                                <span class="sidebar-icon">{section.icon}</span>
+                                <span class="sidebar-label">{section.label}</span>
+                            </button>
+                        {/each}
+                    </nav>
 
-                    <div class="form-group">
-                        <label for="defaultResolution">default resolution</label>
-                        <select
-                            id="defaultResolution"
-                            value={localSettings.defaultResolution}
-                            on:change={handleResolutionChange}
-                        >
-                            <option value="auto">auto (smart)</option>
-                            <option value="source">original</option>
-                            <option value="1080p">1080p</option>
-                            <option value="720p">720p</option>
-                            <option value="480p">480p</option>
-                            <option value="360p">360p</option>
-                        </select>
-                    </div>
+                    <!-- Main Content Area -->
+                    <div class="settings-main">
+                        {#if activeSection === 'compression'}
+                            <div class="section-content">
+                                <h3 class="section-title">Compression Settings</h3>
+                                <p class="section-description">Configure default compression behavior for new videos.</p>
 
-                    <div class="form-group">
-                        <!-- svelte-ignore a11y_label_has_associated_control -->
-                        <label>default compression target</label>
-                        <input
-                            type="range"
-                            min="1"
-                            max="100"
-                            step="1"
-                            value={localSettings.defaultTargetSizeMb}
-                            on:input={handleTargetMbChange}
-                        />
-                        <div class="helper-text">{localSettings.defaultTargetSizeMb} MB</div>
-                    </div>
+                                <div class="settings-grid">
+                                    <div class="form-group">
+                                        <label for="defaultCodec">default codec</label>
+                                        <select id="defaultCodec" value={localSettings.defaultCodec} on:change={handleCodecChange}>
+                                            <option value="fast">fast (h.264)</option>
+                                            <option value="quality">quality (h.265)</option>
+                                        </select>
+                                        <div class="helper-text">H.265 provides better compression but may be slower on some devices.</div>
+                                    </div>
 
-                    <div class="form-group toggle">
-                        <label>
-                            <input type="checkbox" checked={localSettings.defaultMuteAudio} on:change={handleMuteToggle} />
-                            mute audio by default
-                        </label>
-                    </div>
+                                    <div class="form-group">
+                                        <label for="defaultResolution">default resolution</label>
+                                        <select
+                                            id="defaultResolution"
+                                            value={localSettings.defaultResolution}
+                                            on:change={handleResolutionChange}
+                                        >
+                                            <option value="auto">auto (smart)</option>
+                                            <option value="source">original</option>
+                                            <option value="1080p">1080p</option>
+                                            <option value="720p">720p</option>
+                                            <option value="480p">480p</option>
+                                            <option value="360p">360p</option>
+                                        </select>
+                                        <div class="helper-text">Auto mode selects the best resolution based on target file size.</div>
+                                    </div>
 
-                    <div class="form-group toggle">
-                        <label>
-                            <input
-                                type="checkbox"
-                                checked={localSettings.checkForUpdatesOnLaunch}
-                                on:change={handleUpdateToggle}
-                            />
-                            check for updates on launch
-                        </label>
-                    </div>
+                                    <div class="form-group full-width">
+                                        <!-- svelte-ignore a11y_label_has_associated_control -->
+                                        <label>default compression target</label>
+                                        <div class="slider-container">
+                                            <input
+                                                type="range"
+                                                min="1"
+                                                max="100"
+                                                step="1"
+                                                value={localSettings.defaultTargetSizeMb}
+                                                on:input={handleTargetMbChange}
+                                            />
+                                            <span class="slider-value">{localSettings.defaultTargetSizeMb} MB</span>
+                                        </div>
+                                        <div class="helper-text">Default target file size for compression.</div>
+                                    </div>
 
-                    
-
-                    <div class="form-group">
-                        <div class="setting-label"><strong>available encoders</strong></div>
-                        {#if ffmpegEncodersState.loading}
-                            <div>loading encoders...</div>
-                        {:else if ffmpegEncodersState.error}
-                            <div class="helper-text">{ffmpegEncodersState.error} <button type="button" on:click={() => ffmpegEncodersStore.refresh()}>retry</button></div>
-                        {:else if ffmpegEncodersState.encoders.length === 0}
-                            <div class="helper-text">No encoders found on this system</div>
-                        {:else}
-                            <div class="encoder-tags-wrapper">
-                                <div class="encoder-tags">
-                                    {#each ffmpegEncodersState.encoders as enc}
-                                        <span class="encoder-tag {enc.isAvailable === false ? 'muted' : ''}" title={enc.description}>
-                                            {enc.name}
-                                            {#if enc.isHardware}
-                                                <span class="hw-badge">HW</span>
-                                            {/if}
-                                        </span>
-                                    {/each}
+                                    <div class="form-group toggle full-width">
+                                        <label>
+                                            <input type="checkbox" checked={localSettings.defaultMuteAudio} on:change={handleMuteToggle} />
+                                            mute audio by default
+                                        </label>
+                                        <div class="helper-text">Remove audio track from compressed videos.</div>
+                                    </div>
                                 </div>
-                                <div class="encoder-action-row">
-                                    <button type="button" class="action-btn primary verify-button" on:click={() => ffmpegEncodersStore.refresh(true)} aria-label="Verify encoders">Verify</button>
+                            </div>
+                        {:else if activeSection === 'appearance'}
+                            <div class="section-content">
+                                <h3 class="section-title">Appearance</h3>
+                                <p class="section-description">Customize the look and feel of the application.</p>
+
+                                <div class="settings-grid">
+                                    <div class="form-group full-width">
+                                        <!-- svelte-ignore a11y_label_has_associated_control -->
+                                        <label>app scale</label>
+                                        <div class="slider-container">
+                                            <input
+                                                type="range"
+                                                min="0.5"
+                                                max="2"
+                                                step="0.1"
+                                                value={localSettings.appScale}
+                                                on:input={handleAppScaleChange}
+                                            />
+                                            <span class="slider-value">{(localSettings.appScale * 100).toFixed(0)}%</span>
+                                        </div>
+                                        <div class="helper-text">Scale the entire UI (50% - 200%). Changes apply after saving.</div>
+                                    </div>
+
+                                    <div class="scale-preview full-width">
+                                        <div class="preview-label">Preview</div>
+                                        <div class="preview-box" style="transform: scale({localSettings.appScale}); transform-origin: top left;">
+                                            <div class="preview-content">
+                                                <span class="preview-icon">📹</span>
+                                                <span class="preview-text">Sample UI Element</span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        {:else if activeSection === 'system'}
+                            <div class="section-content">
+                                <h3 class="section-title">System</h3>
+                                <p class="section-description">System settings and encoder information.</p>
+
+                                <div class="settings-grid">
+                                    <div class="form-group toggle full-width">
+                                        <label>
+                                            <input
+                                                type="checkbox"
+                                                checked={localSettings.checkForUpdatesOnLaunch}
+                                                on:change={handleUpdateToggle}
+                                            />
+                                            check for updates on launch
+                                        </label>
+                                        <div class="helper-text">Automatically check for new versions when the app starts.</div>
+                                    </div>
+
+                                    <div class="form-group full-width">
+                                        <div class="setting-label"><strong>available encoders</strong></div>
+                                        {#if ffmpegEncodersState.loading}
+                                            <div class="encoder-loading">loading encoders...</div>
+                                        {:else if ffmpegEncodersState.error}
+                                            <div class="helper-text">{ffmpegEncodersState.error} <button type="button" class="inline-btn" on:click={() => ffmpegEncodersStore.refresh()}>retry</button></div>
+                                        {:else if ffmpegEncodersState.encoders.length === 0}
+                                            <div class="helper-text">No encoders found on this system</div>
+                                        {:else}
+                                            <div class="encoder-tags-wrapper">
+                                                <div class="encoder-tags">
+                                                    {#each ffmpegEncodersState.encoders as enc}
+                                                        <span class="encoder-tag {enc.isAvailable === false ? 'muted' : ''}" title={enc.description}>
+                                                            {enc.name}
+                                                            {#if enc.isHardware}
+                                                                <span class="hw-badge">HW</span>
+                                                            {/if}
+                                                        </span>
+                                                    {/each}
+                                                </div>
+                                                <div class="encoder-action-row">
+                                                    <button type="button" class="action-btn primary verify-button" on:click={() => ffmpegEncodersStore.refresh(true)} aria-label="Verify encoders">Verify Encoders</button>
+                                                </div>
+                                            </div>
+                                        {/if}
+                                        <div class="helper-text">Hardware encoders (HW) provide faster compression when available.</div>
+                                    </div>
                                 </div>
                             </div>
                         {/if}
@@ -181,7 +270,7 @@
     .modal-backdrop {
         position: fixed;
         inset: 0;
-        background: rgba(0, 0, 0, 0.6);
+        background: rgba(0, 0, 0, 0.7);
         display: flex;
         align-items: center;
         justify-content: center;
@@ -190,14 +279,14 @@
     }
 
     .settings-modal {
-        width: min(480px, 94vw);
-        max-width: 480px;
-        height: min(520px, 92vh);
-        max-height: calc(100vh - 48px);
+        width: calc(100vw - 48px);
+        max-width: 900px;
+        height: calc(100vh - 48px);
+        max-height: 700px;
         background: #0f0f14;
         border: 1px solid #27272a;
-        border-radius: 6px;
-        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+        border-radius: 8px;
+        box-shadow: 0 25px 80px rgba(0, 0, 0, 0.6);
         animation: fadeIn 0.2s ease-out;
         overflow: hidden;
         display: flex;
@@ -207,21 +296,23 @@
     form {
         display: flex;
         flex-direction: column;
-        gap: 16px;
-        padding: 16px;
-        flex: 1 1 auto; /* allow form to fill modal and enable body scrolling */
-        min-height: 0; /* necessary for proper flexbox overflow behavior */
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow: hidden;
     }
 
     .modal-header {
         display: flex;
         align-items: center;
         justify-content: space-between;
+        padding: 20px 24px;
+        border-bottom: 1px solid #27272a;
+        flex-shrink: 0;
     }
 
     .modal-header h2 {
         margin: 0;
-        font-size: 1rem;
+        font-size: 1.1rem;
         text-transform: lowercase;
         color: #fafafa;
     }
@@ -231,21 +322,102 @@
         background: transparent;
         color: #fafafa;
         border-radius: 4px;
-        width: 28px;
-        height: 28px;
+        width: 32px;
+        height: 32px;
         cursor: pointer;
-        font-size: 0.9rem;
+        font-size: 1rem;
+        transition: background 0.15s, border-color 0.15s;
     }
 
-    .modal-body {
+    .icon-button:hover {
+        background: rgba(255, 255, 255, 0.05);
+        border-color: #3f3f46;
+    }
+
+    .modal-content {
+        display: flex;
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow: hidden;
+    }
+
+    /* Sidebar Navigation */
+    .settings-sidebar {
+        width: 200px;
+        min-width: 200px;
+        background: rgba(24, 24, 27, 0.5);
+        border-right: 1px solid #27272a;
+        padding: 16px 12px;
         display: flex;
         flex-direction: column;
-        gap: 16px;
-        /* Let the modal body scroll when contents exceed modal height */
+        gap: 4px;
+        flex-shrink: 0;
+    }
+
+    .sidebar-item {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 12px 16px;
+        border: none;
+        background: transparent;
+        color: #a1a1aa;
+        font-size: 0.9rem;
+        text-align: left;
+        border-radius: 6px;
+        cursor: pointer;
+        transition: background 0.15s, color 0.15s;
+    }
+
+    .sidebar-item:hover {
+        background: rgba(255, 255, 255, 0.05);
+        color: #fafafa;
+    }
+
+    .sidebar-item.active {
+        background: rgba(34, 211, 238, 0.1);
+        color: #22d3ee;
+    }
+
+    .sidebar-icon {
+        font-size: 1.1rem;
+        width: 24px;
+        text-align: center;
+    }
+
+    .sidebar-label {
+        font-weight: 500;
+    }
+
+    /* Main Content Area */
+    .settings-main {
+        flex: 1 1 auto;
         overflow-y: auto;
-        padding: 16px 16px 12px;
-        flex: 1 1 auto; /* ensure modal-body takes available height */
-        min-height: 0; /* ensure internal overflow works in flexbox */
+        padding: 24px 32px;
+        min-height: 0;
+    }
+
+    .section-content {
+        max-width: 600px;
+    }
+
+    .section-title {
+        margin: 0 0 8px 0;
+        font-size: 1.25rem;
+        font-weight: 600;
+        color: #fafafa;
+    }
+
+    .section-description {
+        margin: 0 0 24px 0;
+        font-size: 0.9rem;
+        color: #71717a;
+    }
+
+    .settings-grid {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 24px;
     }
 
     .form-group {
@@ -254,57 +426,8 @@
         gap: 8px;
     }
 
-    .encoder-tags-wrapper {
-        display: flex;
-        flex-direction: column;
-        gap: 8px;
-    }
-
-    .encoder-tags {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 8px;
-        padding: 8px 4px;
-    }
-
-    .encoder-tag {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-        padding: 6px 8px;
-        border-radius: 999px;
-        background: var(--bg-overlay);
-        border: 1px solid var(--border);
-        color: var(--text);
-        font-size: 0.85rem;
-        font-weight: 600;
-    }
-    .encoder-tag.muted { opacity: 0.6; filter: grayscale(0.2); }
-
-    .hw-badge {
-        display: inline-block;
-        padding: 2px 6px;
-        border-radius: 999px;
-        background: rgba(34, 211, 238, 0.12);
-        color: #22d3ee;
-        font-weight: 700;
-        font-size: 0.7rem;
-        border: 1px solid rgba(34, 211, 238, 0.08);
-    }
-
-    .encoder-action-row {
-        display: flex;
-        gap: 8px;
-        align-items: center;
-        width: 100%;
-    }
-
-    .verify-button {
-        width: 100%;
-        display: inline-block;
-        padding: 10px 12px;
-        border-radius: 6px;
-        font-weight: 700;
+    .form-group.full-width {
+        grid-column: 1 / -1;
     }
 
     .form-group label {
@@ -313,56 +436,218 @@
         text-transform: lowercase;
     }
 
-    select,
-    input[type='range'] {
-        width: 100%;
-    }
-
     select {
-        padding: 10px 12px;
-        border-radius: 4px;
+        width: 100%;
+        padding: 12px 14px;
+        border-radius: 6px;
         border: 1px solid #27272a;
         background: rgba(24, 24, 27, 0.8);
         color: #fafafa;
+        font-size: 0.9rem;
+        transition: border-color 0.15s;
     }
 
-    input[type='range'] {
+    select:focus {
+        outline: none;
+        border-color: #22d3ee;
+    }
+
+    .slider-container {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+    }
+
+    .slider-container input[type='range'] {
+        flex: 1;
         accent-color: #22d3ee;
     }
 
-    
+    .slider-value {
+        min-width: 60px;
+        text-align: right;
+        font-size: 0.9rem;
+        font-weight: 600;
+        color: #22d3ee;
+    }
 
     .helper-text {
         font-size: 0.75rem;
         color: #71717a;
+        line-height: 1.4;
     }
 
     .form-group.toggle label {
         display: inline-flex;
         align-items: center;
-        gap: 8px;
+        gap: 10px;
         color: #fafafa;
-        font-size: 0.85rem;
+        font-size: 0.9rem;
         text-transform: lowercase;
+        cursor: pointer;
     }
 
+    .form-group.toggle input[type='checkbox'] {
+        width: 18px;
+        height: 18px;
+        accent-color: #22d3ee;
+    }
+
+    /* Scale Preview */
+    .scale-preview {
+        margin-top: 8px;
+    }
+
+    .preview-label {
+        font-size: 0.75rem;
+        color: #71717a;
+        margin-bottom: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+    }
+
+    .preview-box {
+        background: rgba(24, 24, 27, 0.6);
+        border: 1px solid #27272a;
+        border-radius: 8px;
+        padding: 16px;
+        display: inline-block;
+        transition: transform 0.2s ease;
+    }
+
+    .preview-content {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        color: #fafafa;
+    }
+
+    .preview-icon {
+        font-size: 1.5rem;
+    }
+
+    .preview-text {
+        font-size: 0.9rem;
+        font-weight: 500;
+    }
+
+    /* Encoder Tags */
+    .setting-label {
+        font-size: 0.85rem;
+        color: #a1a1aa;
+        margin-bottom: 4px;
+    }
+
+    .encoder-loading {
+        color: #71717a;
+        font-size: 0.85rem;
+        padding: 8px 0;
+    }
+
+    .encoder-tags-wrapper {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+    }
+
+    .encoder-tags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        padding: 8px 0;
+    }
+
+    .encoder-tag {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 8px 12px;
+        border-radius: 999px;
+        background: rgba(39, 39, 42, 0.6);
+        border: 1px solid #3f3f46;
+        color: #fafafa;
+        font-size: 0.85rem;
+        font-weight: 500;
+    }
+
+    .encoder-tag.muted {
+        opacity: 0.5;
+        filter: grayscale(0.3);
+    }
+
+    .hw-badge {
+        display: inline-block;
+        padding: 2px 6px;
+        border-radius: 999px;
+        background: rgba(34, 211, 238, 0.15);
+        color: #22d3ee;
+        font-weight: 700;
+        font-size: 0.7rem;
+        border: 1px solid rgba(34, 211, 238, 0.1);
+    }
+
+    .encoder-action-row {
+        display: flex;
+        gap: 8px;
+    }
+
+    .verify-button {
+        padding: 10px 20px;
+        border-radius: 6px;
+        font-weight: 600;
+        font-size: 0.85rem;
+    }
+
+    .inline-btn {
+        background: transparent;
+        border: none;
+        color: #22d3ee;
+        cursor: pointer;
+        text-decoration: underline;
+        font-size: inherit;
+    }
+
+    .action-btn.primary {
+        background: #22d3ee;
+        color: #0f0f14;
+        border: none;
+        cursor: pointer;
+        transition: background 0.15s;
+    }
+
+    .action-btn.primary:hover {
+        background: #06b6d4;
+    }
+
+    /* Footer */
     .modal-footer {
         display: flex;
         justify-content: flex-end;
         gap: 12px;
+        padding: 16px 24px;
+        border-top: 1px solid #27272a;
+        flex-shrink: 0;
     }
 
     .modal-footer button {
-        padding: 8px 14px;
-        border-radius: 4px;
+        padding: 10px 20px;
+        border-radius: 6px;
         border: 1px solid #27272a;
         cursor: pointer;
         text-transform: lowercase;
+        font-size: 0.9rem;
+        font-weight: 500;
+        transition: background 0.15s, border-color 0.15s;
     }
 
     .modal-footer .secondary {
         background: transparent;
         color: #a1a1aa;
+    }
+
+    .modal-footer .secondary:hover {
+        background: rgba(255, 255, 255, 0.05);
+        color: #fafafa;
     }
 
     .modal-footer .primary {
@@ -372,18 +657,49 @@
         font-weight: 600;
     }
 
+    .modal-footer .primary:hover {
+        background: #06b6d4;
+        border-color: #06b6d4;
+    }
+
     @keyframes fadeIn {
         from {
             opacity: 0;
-            transform: translateY(10px);
+            transform: scale(0.98);
         }
         to {
             opacity: 1;
-            transform: translateY(0);
+            transform: scale(1);
         }
     }
 
-    /* Encoder detection UI removed */
+    /* Responsive adjustments */
+    @media (max-width: 700px) {
+        .settings-sidebar {
+            width: 60px;
+            min-width: 60px;
+            padding: 16px 8px;
+        }
 
-    /* Removed encoder-specific loading/error UI */
+        .sidebar-label {
+            display: none;
+        }
+
+        .sidebar-item {
+            justify-content: center;
+            padding: 12px;
+        }
+
+        .sidebar-icon {
+            margin: 0;
+        }
+
+        .settings-grid {
+            grid-template-columns: 1fr;
+        }
+
+        .settings-main {
+            padding: 20px;
+        }
+    }
 </style>

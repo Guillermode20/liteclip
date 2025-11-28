@@ -431,6 +431,11 @@
         defaultTargetMb = effective.defaultTargetSizeMb;
         autoUpdateEnabled = effective.checkForUpdatesOnLaunch;
 
+        // Apply app scale
+        const scale = effective.appScale ?? 1.0;
+        document.documentElement.style.setProperty('--app-scale', String(scale));
+        document.documentElement.style.fontSize = `${16 * scale}px`;
+
         if (!selectedFile) {
             outputSizeSliderValue = defaultTargetMb;
         }

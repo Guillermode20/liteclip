@@ -9,6 +9,7 @@ public class UserSettings
     public bool CheckForUpdatesOnLaunch { get; set; } = true;
     public bool StartMaximized { get; set; } = true;
     public string DefaultFolder { get; set; } = string.Empty;
+    public double AppScale { get; set; } = 1.0;
 
     public static UserSettings CreateDefault() => new();
 }
