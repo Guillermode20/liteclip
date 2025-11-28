@@ -99,6 +99,7 @@
     let ffmpegState: FfmpegStatusResponse['state'] = 'idle';
     let ffmpegRetrying = false;
     let ffmpegConsentGiven = false;
+    let ffmpegStatusChecked = false; // Prevents flash by waiting for initial status check
 
     let outputMetadata: OutputMetadata = createDefaultOutputMetadata();
 
@@ -407,6 +408,9 @@
             console.warn('Initial FFmpeg status check failed:', error);
             ffmpegError = (error as Error).message || 'Unable to check FFmpeg status';
             ffmpegStatusMessage = 'Unable to check FFmpeg status';
+        } finally {
+            // Mark status as checked so UI can render appropriately
+            ffmpegStatusChecked = true;
         }
     }
 
@@ -1201,7 +1205,7 @@
     </div>
 </div>
 
-{#if !ffmpegReady}
+{#if ffmpegStatusChecked && !ffmpegReady}
     <div class="ffmpeg-overlay">
         <div class="ffmpeg-card">
             {#if !ffmpegConsentGiven}
