@@ -26,7 +26,7 @@
     <TieredCompilationQuickJit>true</TieredCompilationQuickJit>
     
     <!-- Embedded files manifest only needed in Release when embedding -->
-    <GenerateEmbeddedFilesManifest>false</GenerateEmbeddedFilesManifest>
+    <GenerateEmbeddedFilesManifest>true</GenerateEmbeddedFilesManifest>
     
     <!-- Disable default content items to avoid conflicts with explicit Content includes -->
     <EnableDefaultContentItems>false</EnableDefaultContentItems>
@@ -50,17 +50,6 @@
   <ItemGroup Condition="'$(Configuration)'=='Debug'">
     <Content Include="wwwroot\**\*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
-
-  <!-- Release: copy static content to output directory (not embedded) -->
-  <!-- Embedded resources don't work reliably with PublishSingleFile=true -->
-  <ItemGroup Condition="'$(Configuration)'=='Release'">
-    <Content Include="wwwroot\**\*" CopyToPublishDirectory="Always" />
-  </ItemGroup>
-
-  <!-- 
-    REMOVED: The redundant <EmbeddedResource> ItemGroup was here.
-    It's no longer needed because the conditional groups above handle it.
-  -->
 
   <!-- 
     Frontend auto-build: Build Svelte/Vite UI before .NET build/publish.
@@ -86,35 +75,16 @@
     <OutputType>Exe</OutputType>
   </PropertyGroup>
 
-  <!-- Release tuning: optimized for fast startup -->
+  <!-- Release tuning: single-file exe + loose static assets -->
   <PropertyGroup Condition="'$(Configuration)'=='Release'">
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>
-    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
-    <IncludeAllContentForSelfExtract>false</IncludeAllContentForSelfExtract>
-    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <PublishReadyToRun>true</PublishReadyToRun>
-    <GenerateEmbeddedFilesManifest>false</GenerateEmbeddedFilesManifest>
-    <!-- Native AOT disabled - incompatible with ASP.NET Core and Photino -->
-    <PublishAot>false</PublishAot>
-    <!-- Trimming disabled to ensure full ASP.NET Core server is bundled -->
     <PublishTrimmed>false</PublishTrimmed>
-    <!-- Suppress trimming warnings -->
-    <SuppressTrimAnalysisWarnings>false</SuppressTrimAnalysisWarnings>
-    <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
-    <!-- Optimize startup -->
-    <EventSourceSupport>false</EventSourceSupport>
-    <HttpActivityPropagationSupport>false</HttpActivityPropagationSupport>
-    <MetricsSupport>false</MetricsSupport>
-    <!-- Ensure Release publish outputs a single-file to publish directory by default -->
-    <PublishSingleFile>true</PublishSingleFile>
-    <SelfContained>true</SelfContained>
-    <!-- PublishDir set to publish at project root (platform-specific subdirs can be added via CLI) -->
-    <PublishDir>$(MSBuildProjectDirectory)\publish\</PublishDir>
-  </PropertyGroup>
-  
-  <PropertyGroup Condition="'$(Configuration)'=='Release'">
-    <EmbedStaticFiles>false</EmbedStaticFiles>
+    <PublishAot>false</PublishAot>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <IncludeAllContentForSelfExtract>false</IncludeAllContentForSelfExtract>
   </PropertyGroup>
 
   <!-- Preserve assemblies that use reflection (prevent trim issues) -->
@@ -134,51 +104,12 @@
     <TrimmerRootAssembly Include="System.Text.Json" />
     <TrimmerRootAssembly Include="Photino.NET" />
   </ItemGroup>
-
-  <!-- rd.xml is for Native AOT, not needed with partial trimming -->
-  <!--
+  <!-- Release: keep wwwroot outside the single-file bundle -->
   <ItemGroup Condition="'$(Configuration)'=='Release'">
-    <TrimmerRootDescriptorFiles Include="rd.xml" />
+    <Content Include="wwwroot\**\*" CopyToPublishDirectory="PreserveNewest">
+      <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+      <CopyToOutputDirectory>Never</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
-  -->
-
-  <!-- Exclude files from publish output (they're embedded) -->
-  <ItemGroup Condition="'$(Configuration)'=='Release'">
-    <!-- Exclude appsettings files (embed or exclude as needed) -->
-    <Content Update="appsettings.json" CopyToPublishDirectory="Never" />
-    <Content Update="appsettings.Development.json" CopyToPublishDirectory="Never" />
-    
-    <!-- Exclude web.config -->
-    <Content Update="web.config" CopyToPublishDirectory="Never" />
-  </ItemGroup>
-  
-  <!-- DISABLED: We're not embedding static files anymore due to single-file compatibility issues -->
-  <!--
-  <Target Name="CleanupPublishedFiles" AfterTargets="Publish" Condition="'$(Configuration)'=='Release' and '$(EmbedStaticFiles)'=='true'">
-    <RemoveDir Directories="$(PublishDir)wwwroot" />
-    <RemoveDir Directories="$(PublishDir)frontend" />
-    <ItemGroup>
-      <FilesToDelete Include="$(PublishDir)*.xml" />
-      <FilesToDelete Include="$(PublishDir)*.pdb" />
-    </ItemGroup>
-    <Delete Files="@(FilesToDelete)" />
-    <ItemGroup>
-      <StaticAssetFiles Include="$(PublishDir)*.staticwebassets.*" />
-    </ItemGroup>
-    <Delete Files="@(StaticAssetFiles)" />
-    <Delete Files="$(PublishDir)web.config" Condition="Exists('$(PublishDir)web.config')" />
-  </Target>
-  -->
-
-  <ItemGroup Condition="'$(Configuration)'=='Release' and '$(EmbedStaticFiles)'=='false'">
-    <Content Include="wwwroot\**\*" CopyToPublishDirectory="Always" />
-  </ItemGroup>
-
-  <!-- Diagnostic: for Release on Windows when using dotnet publish directly,
-       disable single-file & self-contained to test Photino/WebView2 behavior. -->
-  <PropertyGroup Condition="'$(Configuration)'=='Release' and '$(OS)'=='Windows_NT'">
-    <PublishSingleFile>false</PublishSingleFile>
-    <SelfContained>false</SelfContained>
-  </PropertyGroup>
 
 </Project>

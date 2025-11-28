@@ -132,11 +132,41 @@ namespace liteclip
                 catch (Exception ex)
                 {
                     Console.WriteLine($"⚠️ Embedded files not available, using physical fallback: {ex.Message}");
-                    
-                    var physicalProvider = new PhysicalFileProvider(Path.Combine(AppContext.BaseDirectory, "wwwroot"));
-                    app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = physicalProvider });
-                    app.UseStaticFiles(new StaticFileOptions { FileProvider = physicalProvider });
-                    Console.WriteLine("✓ Using physical static files (fallback)");
+
+                    static string? FindWwwRoot()
+                    {
+                        var candidates = new[]
+                        {
+                            Path.Combine(AppContext.BaseDirectory, "wwwroot"),
+                            Environment.ProcessPath is null
+                                ? null
+                                : Path.Combine(Path.GetDirectoryName(Environment.ProcessPath)!, "wwwroot"),
+                        };
+
+                        foreach (var candidate in candidates.Where(c => !string.IsNullOrEmpty(c)))
+                        {
+                            if (Directory.Exists(candidate))
+                            {
+                                return candidate;
+                            }
+                        }
+
+                        return null;
+                    }
+
+                    var physicalRoot = FindWwwRoot();
+                    if (physicalRoot is not null)
+                    {
+                        var physicalProvider = new PhysicalFileProvider(physicalRoot);
+                        app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = physicalProvider });
+                        app.UseStaticFiles(new StaticFileOptions { FileProvider = physicalProvider });
+                        Console.WriteLine($"✓ Using physical static files (fallback) from {physicalRoot}");
+                    }
+                    else
+                    {
+                        Console.WriteLine("❌ Could not locate wwwroot next to the executable or extraction directory. UI will not load.");
+                        app.MapGet("/", () => Results.Problem("Static assets unavailable. Please reinstall LiteClip."));
+                    }
                 }
             }
             
@@ -146,11 +176,12 @@ namespace liteclip
 
             // --- Robust Server Startup and Shutdown Logic ---
 
-            var serverReadyTcs = new TaskCompletionSource<string>();
             var cts = new CancellationTokenSource();
+            var lifetime = app.Services.GetRequiredService<IHostApplicationLifetime>();
+            var serverReadyTcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
 
             // Register graceful shutdown handler for Ctrl+C and other termination signals
-            app.Lifetime.ApplicationStopping.Register(() =>
+            lifetime.ApplicationStopping.Register(() =>
             {
                 try
                 {
@@ -164,69 +195,6 @@ namespace liteclip
                 }
             });
 
-            app.Lifetime.ApplicationStarted.Register(() =>
-            {
-                try
-                {
-                    var urls = app.Urls;
-                    var url = urls.FirstOrDefault(u => u.StartsWith("http://"));
-
-                    if (url == null)
-                    {
-                        url = urls.FirstOrDefault()?.Replace("https://", "http://");
-                    }
-                    
-                    if (url == null)
-                    {
-                        Console.WriteLine($"\n⚠️ Warning: No URL configured. Application may not start correctly.");
-                        serverReadyTcs.TrySetException(new InvalidOperationException("No server URL found."));
-                        return;
-                    }
-                    
-                    serverReadyTcs.TrySetResult(url);
-                }
-                catch (Exception ex)
-                {
-                    serverReadyTcs.TrySetException(ex);
-                }
-            });
-
-            // NOTE: we start the HTTP server BEFORE creating the UI to ensure consistency
-            // This eliminates race conditions between file availability and server startup
-
-            // Now start the server in background and wait for it to bind
-            var serverTask = app.RunAsync(cts.Token);
-
-            // Wait for server to be ready before creating the window
-            string? serverUrl = null;
-            var serverReadyTask = serverReadyTcs.Task;
-            try
-            {
-                // Wait for the server to start up, but don't wait indefinitely.
-                var completed = await Task.WhenAny(serverReadyTask, Task.Delay(TimeSpan.FromSeconds(15)));
-                if (completed != serverReadyTask)
-                {
-                    Console.WriteLine("\n⚠️ Server start timed out after 15s. UI may not load properly.");
-                }
-
-                if (serverReadyTask.IsCompletedSuccessfully)
-                {
-                    serverUrl = serverReadyTask.Result;
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"\n❌ Failed to start server: {ex.Message}");
-                await serverTask; 
-                return; 
-            }
-
-            Console.WriteLine($"\n🎉 LiteClip - Fast Video Compression");
-            Console.WriteLine($"📅 Started at {DateTime.Now:O}");
-            Console.WriteLine($"📡 Server running at: {serverUrl}");
-            Console.WriteLine($"🪟 Creating native desktop window...\n");
-
-            // Create the native UI only after server is ready
             // Load user settings to honor StartMaximized preference
             var userSettingsStore = app.Services.GetRequiredService<UserSettingsStore>();
             var userSettings = await userSettingsStore.GetAsync();
@@ -255,36 +223,74 @@ namespace liteclip
             }
 
             window.RegisterWebMessageReceivedHandler((sender, message) =>
+            {
+                Console.WriteLine($"Message received from frontend: {message}");
+                if (message == "close-app")
                 {
-                    Console.WriteLine($"Message received from frontend: {message}");
-                    if (message == "close-app")
-                    {
-                        Console.WriteLine("Closing app due to 'close-app' message...");
-                        window.Close();
-                    }
-                });
+                    Console.WriteLine("Closing app due to 'close-app' message...");
+                    window.Close();
+                }
+            });
 
-            // Load the UI directly from the ASP.NET Core server
+            window.WindowClosing += (sender, e) =>
+            {
+                Console.WriteLine("\n👋 Window close requested. Stopping host...");
+                cts.Cancel();
+                lifetime.StopApplication();
+                return false;
+            };
+
+            lifetime.ApplicationStarted.Register(() =>
+            {
+                try
+                {
+                    var urls = app.Urls;
+                    var url = urls.FirstOrDefault(u => u.StartsWith("http://")) ??
+                              urls.FirstOrDefault()?.Replace("https://", "http://");
+
+                    if (url == null)
+                    {
+                        throw new InvalidOperationException("No server URL found.");
+                    }
+
+                    Console.WriteLine($"\n🎉 LiteClip - Fast Video Compression");
+                    Console.WriteLine($"📅 Started at {DateTime.Now:O}");
+                    Console.WriteLine($"📡 Server running at: {url}");
+                    Console.WriteLine("🪟 Loading native desktop window...\n");
+
+                    serverReadyTcs.TrySetResult(url);
+                    window.Load(url);
+
+                    if (!userSettings.StartMaximized)
+                    {
+                        window.SetSize(1200, 800);
+                        window.Center();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"\n❌ Failed to determine server URL: {ex.Message}");
+                    serverReadyTcs.TrySetException(ex);
+                    window.Load("about:blank");
+                }
+            });
+
+            // Start the HTTP server; Photino will load once ApplicationStarted fires.
+            var serverTask = app.RunAsync(cts.Token);
+
             try
             {
-                var urlToLoad = !string.IsNullOrWhiteSpace(serverUrl)
-                    ? serverUrl
-                    : "http://localhost:5000";
-
-                Console.WriteLine($"Loading UI in Photino from: {urlToLoad}");
-                window.Load(urlToLoad);
+                await serverReadyTcs.Task.WaitAsync(TimeSpan.FromSeconds(30));
+            }
+            catch (TimeoutException)
+            {
+                Console.WriteLine("\n⚠️ Server start timed out after 30s. Window will load once the host is ready.");
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Failed to load UI in Photino: {ex.Message}");
-                window.Load("about:blank");
-            }
-
-            // If the user didn't request maximized, use the default size and center.
-            if (!userSettings.StartMaximized)
-            {
-                window.SetSize(1200, 800);
-                window.Center();
+                Console.WriteLine($"\n❌ Failed to start server: {ex.Message}");
+                await serverTask;
+                return;
             }
 
             // This BLOCKS the [STAThread] (Main) until the window is closed.

@@ -7,124 +7,126 @@ import type { EncoderInfo } from '../types';
 
 const API_BASE = '/api';
 
+type JsonValue = Record<string, unknown> | string | null;
+
+async function parseErrorResponse(response: Response, fallbackMessage: string): Promise<string> {
+    try {
+        const text = await response.text();
+        if (!text) {
+            return fallbackMessage;
+        }
+
+        try {
+            const json = JSON.parse(text) as JsonValue;
+            if (typeof json === 'string') {
+                return json;
+            }
+
+            if (json && typeof json === 'object') {
+                const { error, detail, message } = json as Record<string, unknown>;
+                return (
+                    (typeof error === 'string' && error) ||
+                    (typeof detail === 'string' && detail) ||
+                    (typeof message === 'string' && message) ||
+                    text
+                );
+            }
+
+            return text;
+        } catch {
+            return text;
+        }
+    } catch {
+        return fallbackMessage;
+    }
+}
+
+async function fetchApi<T = void>(
+    path: string,
+    init: RequestInit = {},
+    expectJson: boolean = true,
+    fallbackMessage = 'Request failed'
+): Promise<T> {
+    const response = await fetch(`${API_BASE}${path}`, init);
+    if (!response.ok) {
+        const message = await parseErrorResponse(response, `${fallbackMessage} (${response.status})`);
+        throw new Error(message);
+    }
+    if (!expectJson) {
+        return undefined as T;
+    }
+    return response.json() as Promise<T>;
+}
+
 export async function getSettings(): Promise<UserSettingsPayload> {
-    const response = await fetch(`${API_BASE}/settings`);
-    if (!response.ok) throw new Error(`Failed to load settings: ${response.status}`);
-    return response.json();
+    return fetchApi<UserSettingsPayload>('/settings', undefined, true, 'Failed to load settings');
 }
 
 export async function saveSettings(settings: UserSettingsPayload): Promise<UserSettingsPayload> {
-    const response = await fetch(`${API_BASE}/settings`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(settings)
-    });
-    if (!response.ok) {
-        const text = await response.text();
-        throw new Error(text || 'Failed to save settings');
-    }
-    return response.json();
+    return fetchApi<UserSettingsPayload>(
+        '/settings',
+        {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(settings)
+        },
+        true,
+        'Failed to save settings'
+    );
 }
 
 export async function getFfmpegStatus(): Promise<FfmpegStatusResponse> {
-    const response = await fetch(`${API_BASE}/ffmpeg/status`);
-    if (!response.ok) throw new Error(`FFmpeg status request failed (${response.status})`);
-    return response.json();
+    return fetchApi<FfmpegStatusResponse>('/ffmpeg/status', undefined, true, 'FFmpeg status request failed');
 }
 
 export async function getFfmpegEncoders(verify = false): Promise<EncoderInfo[]> {
-    const response = await fetch(`${API_BASE}/ffmpeg/encoders${verify ? '?verify=true' : ''}`);
-    if (!response.ok) {
-        let message = `Failed to fetch encoders (${response.status})`;
-        try { message = (await response.text()) || message; } catch { }
-        throw new Error(message);
-    }
-    return response.json();
+    const query = verify ? '?verify=true' : '';
+    return fetchApi<EncoderInfo[]>(
+        `/ffmpeg/encoders${query}`,
+        undefined,
+        true,
+        'Failed to fetch encoders'
+    );
 }
 
 export async function retryFfmpeg(): Promise<void> {
-    const response = await fetch(`${API_BASE}/ffmpeg/retry`, { method: 'POST' });
-    if (!response.ok) {
-        const text = await response.text();
-        throw new Error(text || `Retry failed (${response.status})`);
-    }
+    await fetchApi('/ffmpeg/retry', { method: 'POST' }, false, 'Retry failed');
 }
 
 export async function startFfmpeg(): Promise<void> {
-    const response = await fetch(`${API_BASE}/ffmpeg/start`, { method: 'POST' });
-    if (!response.ok) {
-        const text = await response.text();
-        throw new Error(text || `Start failed (${response.status})`);
-    }
+    await fetchApi('/ffmpeg/start', { method: 'POST' }, false, 'Start failed');
 }
 
 export async function closeApp(): Promise<void> {
-    await fetch(`${API_BASE}/app/close`, { method: 'POST' });
+    await fetchApi('/app/close', { method: 'POST' }, false, 'Failed to close app');
 }
 
 export async function uploadVideo(formData: FormData, signal?: AbortSignal): Promise<{ jobId: string }> {
-    const response = await fetch(`${API_BASE}/compress`, {
-        method: 'POST',
-        body: formData,
-        signal
-    });
-    if (!response.ok) {
-        let errorMsg = `Server error (${response.status})`;
-        try {
-            const text = await response.text();
-            try {
-                const data = JSON.parse(text);
-                errorMsg = data.error || data.detail || errorMsg;
-            } catch {
-                errorMsg = text || errorMsg;
-            }
-        } catch {
-            // ignore
-        }
-        throw new Error(errorMsg);
-    }
-    return response.json();
+    return fetchApi<{ jobId: string }>(
+        '/compress',
+        {
+            method: 'POST',
+            body: formData,
+            signal
+        },
+        true,
+        'Failed to upload video'
+    );
 }
 
 export async function getJobStatus(jobId: string): Promise<CompressionStatusResponse> {
-    const response = await fetch(`${API_BASE}/status/${jobId}`);
-    if (!response.ok) {
-         let errorMessage = 'Unknown error';
-         try {
-             const text = await response.text();
-             try {
-                 const data = JSON.parse(text);
-                 errorMessage = data.error || errorMessage;
-             } catch {
-                 errorMessage = text || errorMessage;
-             }
-         } catch {
-             // ignore
-         }
-         throw new Error(errorMessage);
-    }
-    return response.json();
+    return fetchApi<CompressionStatusResponse>(
+        `/status/${jobId}`,
+        undefined,
+        true,
+        'Failed to fetch job status'
+    );
 }
 
 export async function cancelJob(jobId: string): Promise<void> {
-    const response = await fetch(`${API_BASE}/cancel/${jobId}`, { method: 'POST' });
-    if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || 'Unknown error');
-    }
+    await fetchApi(`/cancel/${jobId}`, { method: 'POST' }, false, 'Failed to cancel job');
 }
 
 export async function retryJob(jobId: string): Promise<void> {
-    const response = await fetch(`${API_BASE}/retry/${jobId}`, { method: 'POST' });
-    if (!response.ok) {
-        let errorMessage = 'Unable to retry job';
-        try {
-            const data = await response.json();
-            errorMessage = data.error || errorMessage;
-        } catch {
-             const text = await response.text();
-             errorMessage = text || errorMessage;
-        }
-        throw new Error(errorMessage);
-    }
+    await fetchApi(`/retry/${jobId}`, { method: 'POST' }, false, 'Unable to retry job');
 }
