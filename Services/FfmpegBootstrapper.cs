@@ -58,11 +58,7 @@ public class FfmpegBootstrapper
 
     public FfmpegBootstrapStatus GetStatus()
     {
-        if (_status.State == FfmpegBootstrapState.Idle)
-        {
-            TryFastResolveExistingFfmpeg();
-        }
-
+        // Don't do synchronous checks during startup - defer to EnsureReadyAsync
         return _status;
     }
 
