@@ -232,7 +232,8 @@ namespace liteclip
                 .SetDevToolsEnabled(true) // Enable in production for debugging
                 .SetContextMenuEnabled(true)
                 .SetTemporaryFilesPath(webView2Path) // Explicitly set the user data folder
-                .SetLogVerbosity(app.Environment.IsDevelopment() ? 4 : 0);
+                .SetLogVerbosity(app.Environment.IsDevelopment() ? 4 : 0)
+                .SetSize(0, 0); // Create window with zero size initially
 
             // Apply user preference: start maximized if requested
             try
@@ -249,6 +250,8 @@ namespace liteclip
                 // if so, gracefully ignore and fallback to a default size below.
             }
 
+            var windowShown = false;
+
             window.RegisterWebMessageReceivedHandler((sender, message) =>
             {
                 Console.WriteLine($"Message received from frontend: {message}");
@@ -256,6 +259,16 @@ namespace liteclip
                 {
                     Console.WriteLine("Closing app due to 'close-app' message...");
                     window.Close();
+                }
+                else if (message == "window-ready" && !windowShown)
+                {
+                    Console.WriteLine("Frontend ready, showing window...");
+                    windowShown = true;
+                    if (!userSettings.StartMaximized)
+                    {
+                        window.SetSize(1200, 800);
+                        window.Center();
+                    }
                 }
             });
 
@@ -282,11 +295,23 @@ namespace liteclip
 
             window.Load(serverUrl);
 
-            if (!userSettings.StartMaximized)
+            // Fallback: show window after 2 seconds if no message arrives
+            var fallbackTimer = new System.Timers.Timer(2000);
+            fallbackTimer.Elapsed += (sender, e) =>
             {
-                window.SetSize(1200, 800);
-                window.Center();
-            }
+                if (!windowShown)
+                {
+                    Console.WriteLine("Fallback timeout reached, showing window...");
+                    windowShown = true;
+                    if (!userSettings.StartMaximized)
+                    {
+                        window.SetSize(1200, 800);
+                        window.Center();
+                    }
+                    fallbackTimer.Stop();
+                }
+            };
+            fallbackTimer.Start();
 
             // This BLOCKS the [STAThread] (Main) until the window is closed.
             // This is the correct UI pattern.

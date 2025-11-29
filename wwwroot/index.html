@@ -2,124 +2,22 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/logo.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta property="og:image" content="/logo.svg" />
     <title>LiteClip</title>
 
-    <!-- Critical CSS for faster initial render -->
+    <!-- Critical CSS for instant dark background -->
     <style>
-      :root {
-        --font-mono: 'Consolas', 'Monaco', 'Courier New', monospace;
-        --bg-dark: #09090b;
-        --bg-darker: #0d0d10;
-        --bg-card: rgba(24, 24, 27, 0.6);
-        --bg-card-hover: rgba(24, 24, 27, 0.8);
-        --bg-overlay: rgba(9, 9, 11, 0.8);
-        --border: #27272a;
-        --border-hover: #3f3f46;
-        --text: #fafafa;
-        --text-dim: #a1a1aa;
-        --text-muted: #71717a;
-        --text-dark: #52525b;
-        --blur: blur(8px);
-      }
-
-      * {
-        font-family: var(--font-mono);
-        box-sizing: border-box;
-      }
-
-      html {
-        scroll-behavior: smooth;
-      }
-
-      body {
-        margin: 0;
-        padding: 0;
-        background: linear-gradient(180deg, var(--bg-dark) 0%, var(--bg-darker) 100%);
-        min-height: 100vh;
-        color: var(--text);
-        line-height: 1.5;
-        -webkit-font-smoothing: antialiased;
-        -moz-osx-font-smoothing: grayscale;
-      }
-
-      #app {
-        width: 100%;
-        min-height: 100vh;
-      }
-
-      /* Main Layout */
-      .app-layout {
-        display: flex;
-        flex-direction: column;
-        min-height: 100vh;
-      }
-
-      .app-header {
-        padding: 8px 16px;
-        border-bottom: 1px solid var(--border);
-        background: var(--bg-overlay);
-        backdrop-filter: blur(12px);
-        position: sticky;
-        top: 0;
-        z-index: 100;
-        display: flex;
-        align-items: center;
-        gap: 12px;
-      }
-
-      .app-header h1 {
-        margin: 0;
-        font-size: 18px;
-        font-weight: 600;
-        color: var(--text);
-        letter-spacing: -0.02em;
-        white-space: nowrap;
-        flex-shrink: 0;
-      }
-
-      .header-title {
-        display: flex;
-        align-items: center;
-        gap: 12px;
-      }
-
-      /* App logo in header */
-      .app-logo {
-        width: 36px;
-        height: 36px;
-        border-radius: 8px;
-        display: block;
-      }
-
-      .main-content {
-        flex: 1;
-        min-width: 0;
-        padding: 20px;
-        display: flex;
-        flex-direction: column;
-        gap: 16px;
-        align-items: center;
-        justify-content: center;
-        order: 1;
-      }
-
-      .content-card {
-        padding: 16px;
-        min-width: 0;
-        max-width: 900px;
-        width: 100%;
-        overflow-wrap: break-word;
-        word-break: break-word;
-      }
+      *{margin:0;padding:0;box-sizing:border-box;font-family:Consolas,Monaco,'Courier New',monospace}
+      html,body{background:#09090b;color:#fafafa;min-height:100vh;line-height:1.5;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
+      body{background:linear-gradient(180deg,#09090b 0%,#0d0d10 100%)}
+      #app{width:100%;min-height:100vh}
     </style>
-
+    
     <!-- Preload critical resources -->
-    <link rel="preload" href="/logo.svg" as="image" type="image/svg+xml" />
-    <link rel="preload" href="data:video/mp2t;base64,aW1wb3J0IHsgbW91bnQgfSBmcm9tICdzdmVsdGUnDQppbXBvcnQgJy4vYXBwLmNzcycNCmltcG9ydCBBcHAgZnJvbSAnLi9BcHAuc3ZlbHRlJw0KDQpmdW5jdGlvbiBtb3VudEFwcCgpIHsNCiAgY29uc3QgdGFyZ2V0ID0gZG9jdW1lbnQuZ2V0RWxlbWVudEJ5SWQoJ2FwcCcpOw0KICBpZiAoIXRhcmdldCkgew0KICAgIGNvbnNvbGUuZXJyb3IoJ0FwcCBtb3VudCB0YXJnZXQgI2FwcCBub3QgZm91bmQsIHJldHJ5aW5nLi4uJyk7DQogICAgc2V0VGltZW91dChtb3VudEFwcCwgNTApOw0KICAgIHJldHVybjsNCiAgfQ0KICANCiAgY29uc29sZS5sb2coJ01vdW50aW5nIFN2ZWx0ZSBhcHAuLi4nKTsNCiAgY29uc3QgYXBwID0gbW91bnQoQXBwLCB7IHRhcmdldCB9KTsNCiAgcmV0dXJuIGFwcDsNCn0NCg0KLy8gV2FpdCBmb3IgRE9NIHRvIGJlIHJlYWR5IGJlZm9yZSBtb3VudGluZw0KaWYgKGRvY3VtZW50LnJlYWR5U3RhdGUgPT09ICdsb2FkaW5nJykgew0KICBkb2N1bWVudC5hZGRFdmVudExpc3RlbmVyKCdET01Db250ZW50TG9hZGVkJywgbW91bnRBcHApOw0KfSBlbHNlIHsNCiAgbW91bnRBcHAoKTsNCn0NCg0KZXhwb3J0IGRlZmF1bHQgbW91bnRBcHAoKTsNCg==" as="script" type="module" />
-    <script type="module" crossorigin src="/assets/index.CdM15NHZ.js"></script>
+    <link rel="preload" href="data:video/mp2t;base64,aW1wb3J0IHsgbW91bnQgfSBmcm9tICdzdmVsdGUnDQppbXBvcnQgJy4vYXBwLmNzcycNCmltcG9ydCBBcHAgZnJvbSAnLi9BcHAuc3ZlbHRlJw0KDQpjb25zdCB0YXJnZXQgPSBkb2N1bWVudC5nZXRFbGVtZW50QnlJZCgnYXBwJyk7DQppZiAoIXRhcmdldCkgew0KICB0aHJvdyBuZXcgRXJyb3IoJ0FwcCBtb3VudCB0YXJnZXQgI2FwcCBub3QgZm91bmQnKTsNCn0NCg0KY29uc29sZS5sb2coJ01vdW50aW5nIFN2ZWx0ZSBhcHAuLi4nKTsNCm1vdW50KEFwcCwgeyB0YXJnZXQgfSk7DQoNCi8vIFNlbmQgbWVzc2FnZSB0byBDIyB0aGF0IHRoZSBhcHAgaXMgcmVhZHkgd2l0aCByZXRyeSBsb2dpYw0KZnVuY3Rpb24gc2VuZFdpbmRvd1JlYWR5KCkgew0KICB0cnkgew0KICAgIGlmICh0eXBlb2Ygd2luZG93ICE9PSAndW5kZWZpbmVkJyAmJiAod2luZG93IGFzIGFueSkuUGhvdGlubz8uc2VuZFdlYk1lc3NhZ2UpIHsNCiAgICAgIGNvbnNvbGUubG9nKCdTZW5kaW5nIHdpbmRvdy1yZWFkeSBtZXNzYWdlIHRvIEMjJyk7DQogICAgICAod2luZG93IGFzIGFueSkuUGhvdGluby5zZW5kV2ViTWVzc2FnZSgnd2luZG93LXJlYWR5Jyk7DQogICAgfSBlbHNlIHsNCiAgICAgIGNvbnNvbGUubG9nKCdQaG90aW5vIG5vdCByZWFkeSB5ZXQsIHJldHJ5aW5nLi4uJyk7DQogICAgICBzZXRUaW1lb3V0KHNlbmRXaW5kb3dSZWFkeSwgNTApOw0KICAgIH0NCiAgfSBjYXRjaCAoZXJyb3IpIHsNCiAgICBjb25zb2xlLmVycm9yKCdGYWlsZWQgdG8gc2VuZCB3aW5kb3ctcmVhZHkgbWVzc2FnZTonLCBlcnJvcik7DQogICAgc2V0VGltZW91dChzZW5kV2luZG93UmVhZHksIDEwMCk7DQogIH0NCn0NCg0Kc2VuZFdpbmRvd1JlYWR5KCk7DQo=" as="script" type="module" />
+    <link rel="icon" type="image/svg+xml" href="/logo.svg" />
+    <script type="module" crossorigin src="/assets/index.8nwpMfTt.js"></script>
     <link rel="modulepreload" crossorigin href="/assets/vendor.BynaFU-C.js">
     <link rel="stylesheet" crossorigin href="/assets/index.CookCjyV.css">
   </head>
