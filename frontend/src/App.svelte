@@ -7,7 +7,6 @@
     import Sidebar from './components/sidebar/Sidebar.svelte';
     import Header from './components/Header.svelte';
     import SettingsModal from './components/SettingsModal.svelte';
-    import VideoEditor from './VideoEditor.svelte';
     import { codecDetails, createDefaultOutputMetadata, FALLBACK_SETTINGS } from './lib/constants';
     import type {
         CodecKey,
@@ -77,6 +76,9 @@
     let codecHelperText = codecDetails.quality.helper;
     let showCancelButton = false;
     let compressionSkipped = false;
+    type VideoEditorComponentCtor = typeof import('./VideoEditor.svelte').default;
+    let VideoEditorComponent: VideoEditorComponentCtor | null = null;
+    let videoEditorModulePromise: Promise<void> | null = null;
     let showVideoEditor = false;
     let videoSegments: VideoSegment[] = [];
     let muteAudio = false;
@@ -115,7 +117,37 @@
         loadUserSettings();
         // Check FFmpeg status immediately to see if it's already ready
         checkInitialFfmpegStatus();
+        scheduleVideoEditorPrefetch();
     });
+
+    function scheduleVideoEditorPrefetch() {
+        if (typeof window === 'undefined') {
+            return;
+        }
+        const idle = (window as any).requestIdleCallback;
+        if (typeof idle === 'function') {
+            idle(() => prefetchVideoEditor());
+        } else {
+            window.setTimeout(prefetchVideoEditor, 300);
+        }
+    }
+
+    function prefetchVideoEditor(): Promise<void> | null {
+        if (videoEditorModulePromise) {
+            return videoEditorModulePromise;
+        }
+
+        videoEditorModulePromise = import('./VideoEditor.svelte')
+            .then((module) => {
+                VideoEditorComponent = module.default;
+            })
+            .catch((error) => {
+                console.warn('VideoEditor preload failed', error);
+                videoEditorModulePromise = null;
+            });
+
+        return videoEditorModulePromise;
+    }
 
     // Reactive derived values for slider
     $: effectiveMaxSizeNumeric = getEffectiveMaxSize(originalSizeMb, sourceDuration, videoSegments) || (originalSizeMb || 0);
@@ -199,6 +231,7 @@
         controlsVisible = true;
         metadataVisible = false;
         showVideoEditor = true;
+        prefetchVideoEditor();
 
         outputSizeSliderDisabled = true;
         outputSizeValue = '--';
@@ -1134,13 +1167,18 @@
 
             {#if showVideoEditor && selectedFile && !videoPreviewVisible && !progressVisible}
                 <div class="content-card">
-                    <VideoEditor
-                        videoFile={selectedFile}
-                        onSegmentsChange={handleSegmentsChange}
-                        onRemoveVideo={resetInterface}
-                        savedSegments={videoSegments}
-                        onMetadataLoaded={handleSourceMetadataLoaded}
-                    />
+                    {#if VideoEditorComponent}
+                        <svelte:component
+                            this={VideoEditorComponent}
+                            videoFile={selectedFile}
+                            onSegmentsChange={handleSegmentsChange}
+                            onRemoveVideo={resetInterface}
+                        />
+                    {:else}
+                        <div class="video-editor-placeholder">
+                            Initializing editor...
+                        </div>
+                    {/if}
                 </div>
             {/if}
 

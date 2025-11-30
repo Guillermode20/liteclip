@@ -62,6 +62,16 @@ public class FfmpegBootstrapper
         return _status;
     }
 
+    /// <summary>
+    /// Performs a quick synchronous check to see if FFmpeg already exists locally.
+    /// This can run during startup to ensure the UI immediately knows about a ready binary
+    /// without triggering downloads.
+    /// </summary>
+    public void PrimeExistingInstallation()
+    {
+        TryFastResolveExistingFfmpeg();
+    }
+
     public Task EnsureReadyAsync()
     {
         var existingTask = Volatile.Read(ref _ensureTask);

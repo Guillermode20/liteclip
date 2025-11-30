@@ -15,6 +15,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using System;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -92,6 +93,10 @@ namespace liteclip
             builder.Services.AddSingleton<FfmpegBootstrapper>();
 
             var app = builder.Build();
+
+            // Prime FFmpeg status immediately so the UI sees a ready binary without waiting for user input
+            var ffmpegBootstrapper = app.Services.GetRequiredService<FfmpegBootstrapper>();
+            ffmpegBootstrapper.PrimeExistingInstallation();
 
             // NOTE: Do NOT auto-start FFmpeg bootstrap here.
             // We will start it only after the user explicitly consents via /api/ffmpeg/start.
@@ -207,22 +212,8 @@ namespace liteclip
 
             // Prepare a safe WebView2 user data folder
             // This prevents "Window closed immediately" issues caused by locked files from previous zombie processes
-            string webView2Path = Path.Combine(Path.GetTempPath(), "LiteClip_WebView2");
-            try
-            {
-                if (Directory.Exists(webView2Path))
-                {
-                    Directory.Delete(webView2Path, true);
-                }
-                Directory.CreateDirectory(webView2Path);
-            }
-            catch
-            {
-                // If deletion fails, the folder is likely locked by a zombie process.
-                // Use a unique path to ensure the app can still start.
-                webView2Path = Path.Combine(Path.GetTempPath(), $"LiteClip_WebView2_{DateTime.Now.Ticks}");
-                Directory.CreateDirectory(webView2Path);
-            }
+            var webViewBasePath = Path.Combine(Path.GetTempPath(), "LiteClip_WebView2");
+            var webView2Path = PrepareWebViewUserDataFolder(webViewBasePath);
 
             var window = new PhotinoWindow()
                 .SetTitle("LiteClip - Fast Video Compression")
@@ -338,7 +329,51 @@ namespace liteclip
             Environment.Exit(0);
         }
 
-        // --- Helper Function ---
+        // --- Helper Functions ---
+        static string PrepareWebViewUserDataFolder(string basePath)
+        {
+            Directory.CreateDirectory(basePath);
+
+            var instanceFolder = Path.Combine(basePath, DateTime.UtcNow.ToString("yyyyMMddHHmmssfff", CultureInfo.InvariantCulture));
+            Directory.CreateDirectory(instanceFolder);
+
+            _ = Task.Run(() => CleanupOldWebViewProfiles(basePath, instanceFolder));
+
+            return instanceFolder;
+        }
+
+        static void CleanupOldWebViewProfiles(string basePath, string keepPath)
+        {
+            try
+            {
+                var threshold = DateTime.UtcNow - TimeSpan.FromDays(1);
+                foreach (var directory in Directory.GetDirectories(basePath))
+                {
+                    if (string.Equals(directory, keepPath, StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    try
+                    {
+                        var info = new DirectoryInfo(directory);
+                        if (info.CreationTimeUtc < threshold)
+                        {
+                            Directory.Delete(directory, true);
+                        }
+                    }
+                    catch
+                    {
+                        // Ignore cleanup errors; stale folders will be retried on future launches.
+                    }
+                }
+            }
+            catch
+            {
+                // Swallow all exceptions to avoid impacting startup.
+            }
+        }
+
         static string FormatTimeRemaining(int seconds)
         {
             if (seconds < 60)
