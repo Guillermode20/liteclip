@@ -62,6 +62,10 @@ export interface UpdateInfoPayload {
     releaseNotes?: string | null;
 }
 
+export interface VersionResponse {
+    version: string;
+}
+
 export interface UserSettingsPayload {
     defaultCodec: CodecKey;
     defaultResolution: ResolutionPreset;

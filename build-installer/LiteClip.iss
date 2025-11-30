@@ -2,7 +2,9 @@
 ; https://jrsoftware.org/ishelp/index.php?topic=setup
 
 #define MyAppName "LiteClip"
-#define MyAppVersion "1.0.0"
+#ifndef MyAppVersion
+#define MyAppVersion "0.1.0"
+#endif
 #define MyAppPublisher "LiteClip"
 #define MyAppURL "https://github.com/Guillermode20/smart-compressor"
 #define MyAppExeName "liteclip.exe"

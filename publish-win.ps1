@@ -11,8 +11,67 @@ param(
     [string]$Configuration = 'Release',
     [string]$OutputDir = 'publish-win',
     [switch]$IncludeFFmpeg,
-    [string]$FFmpegPath = ""
+    [string]$FFmpegPath = "",
+    [switch]$SkipPause
 )
+
+if ($env:CI -eq 'true') {
+    $SkipPause = $true
+}
+
+function Invoke-PauseIfNeeded {
+    param(
+        [string]$Message = "Press any key to exit..."
+    )
+
+    if ($SkipPause) {
+        return
+    }
+
+    Write-Host $Message -ForegroundColor Gray
+    try {
+        $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    } catch {
+        Read-Host "Press Enter to continue"
+    }
+}
+
+function Get-AppVersion {
+    $assemblyInfoPath = Join-Path (Join-Path $PSScriptRoot "Properties") "AssemblyInfo.cs"
+    if (-not (Test-Path $assemblyInfoPath)) {
+        return "0.0.0"
+    }
+
+    $match = Select-String -Path $assemblyInfoPath -Pattern 'AssemblyInformationalVersion\("(?<ver>[^\"]+)"\)' | Select-Object -First 1
+    if ($match) {
+        return $match.Matches[0].Groups['ver'].Value
+    }
+
+    return "0.0.0"
+}
+
+function Get-SafeVersionString {
+    param([string]$Version)
+
+    if ([string]::IsNullOrWhiteSpace($Version)) {
+        return "0.0.0"
+    }
+
+    $invalidChars = [System.IO.Path]::GetInvalidFileNameChars()
+    $safe = ($Version.ToCharArray() | ForEach-Object {
+            if ($invalidChars -contains $_) { '-' } else { $_ }
+        }) -join ''
+
+    if ([string]::IsNullOrWhiteSpace($safe)) {
+        return "0.0.0"
+    }
+
+    return $safe
+}
+
+$AppVersion = Get-AppVersion
+$SafeAppVersion = Get-SafeVersionString -Version $AppVersion
+Write-Host "Application version: $AppVersion" -ForegroundColor Cyan
 
 # Set error action preference to stop on errors
 $ErrorActionPreference = "Stop"
@@ -25,8 +84,7 @@ trap {
     Write-Host "========================================" -ForegroundColor Red
     Write-Host $_.Exception.Message -ForegroundColor Red
     Write-Host ""
-    Write-Host "Press any key to exit..." -ForegroundColor Gray
-    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    Invoke-PauseIfNeeded
     exit 1
 }
 
@@ -43,8 +101,7 @@ try {
 } catch {
     Write-Host "ERROR: .NET SDK not found. Please install .NET 10.0 SDK or later." -ForegroundColor Red
     Write-Host ""
-    Write-Host "Press any key to exit..." -ForegroundColor Gray
-    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    Invoke-PauseIfNeeded
     exit 1
 }
 
@@ -56,8 +113,7 @@ try {
 } catch {
     Write-Host "ERROR: Node.js not found. Please install Node.js to build the frontend." -ForegroundColor Red
     Write-Host ""
-    Write-Host "Press any key to exit..." -ForegroundColor Gray
-    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    Invoke-PauseIfNeeded
     exit 1
 }
 
@@ -114,8 +170,7 @@ try {
     Write-Host "ERROR: Frontend build failed: $_" -ForegroundColor Red
     Pop-Location
     Write-Host ""
-    Write-Host "Press any key to exit..." -ForegroundColor Gray
-    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    Invoke-PauseIfNeeded
     exit 1
 } finally {
     Pop-Location
@@ -130,8 +185,7 @@ if ($LASTEXITCODE -ne 0) {
     Write-Host ""
     Write-Host "ERROR: NuGet restore failed" -ForegroundColor Red
     Write-Host ""
-    Write-Host "Press any key to exit..." -ForegroundColor Gray
-    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    Invoke-PauseIfNeeded
     exit 1
 }
 
@@ -162,8 +216,7 @@ if ($LASTEXITCODE -ne 0) {
     Write-Host ""
     Write-Host "ERROR: .NET publish failed" -ForegroundColor Red
     Write-Host ""
-    Write-Host "Press any key to exit..." -ForegroundColor Gray
-    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    Invoke-PauseIfNeeded
     exit 1
 }
 
@@ -251,8 +304,7 @@ Write-Host "Created run.bat script" -ForegroundColor Green
 
 # Copy portable exe to dist directory with versioned name
 $DistDir = "dist"
-$Version = "1.0.0"
-$PortableName = "liteclip-$Version-portable-win-x64.exe"
+$PortableName = "liteclip-$SafeAppVersion-portable-win-x64.exe"
 
 Write-Host ""
 Write-Host "Copying portable executable to dist directory..." -ForegroundColor Yellow
@@ -298,10 +350,5 @@ Write-Host "========================================" -ForegroundColor Green
 Write-Host "Press any key to exit..." -ForegroundColor Yellow
 Write-Host "========================================" -ForegroundColor Green
 
-# Use Read-Host as fallback if RawUI.ReadKey doesn't work
-try {
-    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
-} catch {
-    Read-Host "Press Enter to exit"
-}
+Invoke-PauseIfNeeded "Press any key to exit..."
 

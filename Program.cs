@@ -81,6 +81,7 @@ namespace liteclip
             builder.Services.AddSingleton<IVideoEncodingPipeline, VideoEncodingPipeline>();
             builder.Services.AddSingleton<VideoCompressionService>();
             builder.Services.AddSingleton<IVideoCompressionService>(sp => sp.GetRequiredService<VideoCompressionService>());
+            builder.Services.AddSingleton<IAppVersionProvider, AppVersionProvider>();
 
             // Compression strategies and factory - now depend on encoder selection service
             builder.Services.AddSingleton<ICompressionStrategy>(sp => new H264Strategy(sp.GetRequiredService<IEncoderSelectionService>()));

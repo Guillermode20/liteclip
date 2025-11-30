@@ -1,10 +1,8 @@
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
-using liteclip.Models;
-using System.Reflection;
-using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
+using liteclip.Models;
 using Microsoft.Extensions.Logging;
 
 namespace liteclip.Services;
@@ -15,15 +13,20 @@ public sealed class UpdateCheckerService
 
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly ILogger<UpdateCheckerService> _logger;
+    private readonly IAppVersionProvider _versionProvider;
     private readonly SemaphoreSlim _cacheLock = new(1, 1);
 
     private UpdateInfo? _cachedInfo;
     private DateTime _cachedAt;
 
-    public UpdateCheckerService(IHttpClientFactory httpClientFactory, ILogger<UpdateCheckerService> logger)
+    public UpdateCheckerService(
+        IHttpClientFactory httpClientFactory,
+        ILogger<UpdateCheckerService> logger,
+        IAppVersionProvider versionProvider)
     {
         _httpClientFactory = httpClientFactory;
         _logger = logger;
+        _versionProvider = versionProvider;
     }
 
     public async Task<UpdateInfo> GetUpdateInfoAsync(bool forceRefresh = false, CancellationToken cancellationToken = default)
@@ -36,7 +39,7 @@ public sealed class UpdateCheckerService
                 return _cachedInfo;
             }
 
-            var currentVersion = ResolveCurrentVersion();
+            var currentVersion = _versionProvider.GetCurrentVersion();
             var release = await FetchLatestReleaseAsync(cancellationToken).ConfigureAwait(false);
 
             if (release is null)
@@ -64,7 +67,8 @@ public sealed class UpdateCheckerService
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Update check failed");
-            var fallback = new UpdateInfo(ResolveCurrentVersion(), ResolveCurrentVersion(), false, null, DateTime.UtcNow, null);
+            var version = _versionProvider.GetCurrentVersion();
+            var fallback = new UpdateInfo(version, version, false, null, DateTime.UtcNow, null);
             _cachedInfo = fallback;
             _cachedAt = DateTime.UtcNow;
             return fallback;
@@ -110,19 +114,6 @@ public sealed class UpdateCheckerService
             _logger.LogWarning(ex, "GitHub update check threw an exception");
             return null;
         }
-    }
-
-    private static string ResolveCurrentVersion()
-    {
-        var assembly = Assembly.GetExecutingAssembly();
-        var informational = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
-        if (!string.IsNullOrWhiteSpace(informational))
-        {
-            return NormalizeVersion(informational, informational);
-        }
-
-        var version = assembly.GetName().Version?.ToString();
-        return string.IsNullOrWhiteSpace(version) ? "0.0.0" : NormalizeVersion(version!, version!);
     }
 
     private static bool IsUpdateAvailable(string currentVersion, string latestVersion)

@@ -4,6 +4,7 @@
     const dispatch = createEventDispatcher();
     export let updateInfo: UpdateInfoPayload | null = null;
     export let showUpdateBanner = false;
+    export let appVersion: string | null = null;
     const openSettings = () => dispatch('openSettings');
     const dismiss = () => dispatch('dismissUpdate');
     function handleLogoError(e: Event) {
@@ -16,8 +17,8 @@
     <div class="header-title">
         <img class="app-logo" src="/logo.svg" alt="LiteClip logo" on:error={handleLogoError} />
         <h1>liteclip</h1>
-        {#if updateInfo}
-            <span class="version-chip">v{updateInfo.currentVersion}</span>
+        {#if appVersion ?? updateInfo?.currentVersion}
+            <span class="version-chip">v{appVersion ?? updateInfo?.currentVersion}</span>
         {/if}
     </div>
     <div class="header-actions">

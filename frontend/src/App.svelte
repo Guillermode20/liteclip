@@ -31,7 +31,8 @@
         uploadVideo,
         getJobStatus,
         cancelJob,
-        retryJob
+        retryJob,
+        getAppVersion
     } from './services/api';
 
     let selectedFile: File | null = null;
@@ -87,6 +88,7 @@
     let retrying = false;
     let updateInfo: UpdateInfoPayload | null = null;
     let showUpdateBanner = false;
+    let appVersion: string | null = null;
     let userSettings: UserSettingsPayload | null = null;
     let defaultTargetMb = 25;
     let showSettingsModal = false;
@@ -113,11 +115,35 @@
         cleanupVideoUrls();
     });
 
+    async function fetchAppVersion() {
+        try {
+            const payload = await getAppVersion();
+            if (payload?.version) {
+                appVersion = payload.version;
+                if (updateInfo === null) {
+                    updateInfo = {
+                        currentVersion: payload.version,
+                        latestVersion: payload.version,
+                        updateAvailable: false,
+                        downloadUrl: null,
+                        checkedAt: undefined,
+                        releaseNotes: null
+                    };
+                } else {
+                    updateInfo = { ...updateInfo, currentVersion: payload.version };
+                }
+            }
+        } catch (error) {
+            console.warn('Failed to fetch app version', error);
+        }
+    }
+
     onMount(() => {
         loadUserSettings();
         // Check FFmpeg status immediately to see if it's already ready
         checkInitialFfmpegStatus();
         scheduleVideoEditorPrefetch();
+        fetchAppVersion();
     });
 
     function scheduleVideoEditorPrefetch() {
@@ -1061,8 +1087,8 @@
         statusVisible = true;
     }
 
-    async function checkForUpdates(force = false) {
-        if (!force && !autoUpdateEnabled) {
+    async function checkForUpdates() {
+        if (!autoUpdateEnabled || hasCheckedUpdates) {
             return;
         }
 
@@ -1073,7 +1099,9 @@
                 return;
             }
             const payload: UpdateInfoPayload = await response.json();
-            updateInfo = payload;
+            const normalizedVersion = payload.currentVersion ?? appVersion ?? '0.0.0';
+            appVersion = normalizedVersion;
+            updateInfo = { ...payload, currentVersion: normalizedVersion };
             showUpdateBanner = payload.updateAvailable === true;
         } catch (error) {
             console.warn('Update check failed', error);

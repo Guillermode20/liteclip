@@ -10,6 +10,13 @@ public static class SystemEndpoints
 {
     public static IEndpointRouteBuilder MapSystemEndpoints(this IEndpointRouteBuilder endpoints)
     {
+        endpoints.MapGet("/api/version", (IAppVersionProvider versionProvider) =>
+            {
+                var version = versionProvider.GetCurrentVersion();
+                return Results.Ok(new { version });
+            })
+            .WithName("GetAppVersion");
+
         endpoints.MapGet("/api/update", async (UpdateCheckerService updateChecker, ILogger<Program> logger) =>
             {
                 try

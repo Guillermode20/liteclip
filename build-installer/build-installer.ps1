@@ -9,6 +9,25 @@ $ErrorActionPreference = "Stop"
 $ScriptDir = $PSScriptRoot
 $RootDir = Split-Path $ScriptDir -Parent
 
+function Get-AppVersion {
+    param([string]$ProjectRoot)
+
+    $assemblyInfoPath = Join-Path (Join-Path $ProjectRoot "Properties") "AssemblyInfo.cs"
+    if (-not (Test-Path $assemblyInfoPath)) {
+        return "0.0.0"
+    }
+
+    $match = Select-String -Path $assemblyInfoPath -Pattern 'AssemblyInformationalVersion\("(?<ver>[^\"]+)"\)' | Select-Object -First 1
+    if ($match) {
+        return $match.Matches[0].Groups['ver'].Value
+    }
+
+    return "0.0.0"
+}
+
+$AppVersion = Get-AppVersion -ProjectRoot $RootDir
+Write-Host "Building LiteClip installer for version $AppVersion" -ForegroundColor Cyan
+
 $PublishScript = Join-Path $RootDir "publish-win.ps1"
 $IssFile = Join-Path $ScriptDir "LiteClip.iss"
 
@@ -33,9 +52,9 @@ Push-Location $RootDir
 try {
     if ($IncludeFFmpeg) {
         Write-Host "Publishing with FFmpeg included. FFmpegPath = $FFmpegPath" -ForegroundColor Cyan
-        & $PublishScript -IncludeFFmpeg -FFmpegPath $FFmpegPath
+        & $PublishScript -IncludeFFmpeg -FFmpegPath $FFmpegPath -SkipPause
     } else {
-        & $PublishScript
+        & $PublishScript -SkipPause
     }
     if ($LASTEXITCODE -ne 0) { throw "Publish script failed" }
 } catch {
@@ -53,7 +72,7 @@ Copy-Item -Path (Join-Path $RootDir "logo.ico") -Destination (Join-Path $RootDir
 # 3. Compile the installer
 Write-Host "Compiling installer..." -ForegroundColor Cyan
 try {
-    & $InnoSetupPath $IssFile
+    & $InnoSetupPath "/DMyAppVersion=$AppVersion" $IssFile
     if ($LASTEXITCODE -ne 0) { throw "Inno Setup compilation failed" }
 } catch {
     Write-Host "ERROR: Failed to compile installer: $_" -ForegroundColor Red

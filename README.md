@@ -37,6 +37,16 @@ want to build liteclip from source? check out [build.md](build.md) for detailed 
 
 Note: when running in Debug (e.g. `dotnet run`), the application will show a console window for easier logging and troubleshooting. Release builds are configured as GUI-only (no console) to provide a native desktop experience.
 
+## release workflow
+
+1. update `Properties/AssemblyInfo.cs` with the new semantic version (e.g., `0.1.1`). this value is used by the app, installer, and GitHub release metadata.
+2. create a GitHub release (or run the workflow manually) which triggers `.github/workflows/build-installer.yml`.
+3. the workflow:
+   - builds the app + frontend
+   - runs `build-installer/build-installer.ps1` to generate `liteclip-setup.exe` and the portable exe in `dist/`
+   - uploads the `dist` folder as a workflow artifact and attaches any `dist/*.exe` files directly to the release
+4. publish the release notes (the in-app update checker will surface the new version automatically because it tracks GitHub releases).
+
 ## license
 
 this project is open source and available under the **mit license**.

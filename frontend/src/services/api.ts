@@ -1,7 +1,8 @@
 import type {
     CompressionStatusResponse,
     FfmpegStatusResponse,
-    UserSettingsPayload
+    UserSettingsPayload,
+    VersionResponse
 } from '../types';
 import type { EncoderInfo } from '../types';
 
@@ -60,6 +61,10 @@ async function fetchApi<T = void>(
 
 export async function getSettings(): Promise<UserSettingsPayload> {
     return fetchApi<UserSettingsPayload>('/settings', undefined, true, 'Failed to load settings');
+}
+
+export async function getAppVersion(): Promise<VersionResponse> {
+    return fetchApi<VersionResponse>('/version', undefined, true, 'Failed to load version');
 }
 
 export async function saveSettings(settings: UserSettingsPayload): Promise<UserSettingsPayload> {
