@@ -86,6 +86,8 @@
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <IncludeAllContentForSelfExtract>false</IncludeAllContentForSelfExtract>
+    <!-- Hide console window in Release builds for desktop application -->
+    <OutputType>WinExe</OutputType>
   </PropertyGroup>
 
   <!-- Preserve assemblies that use reflection (prevent trim issues) -->
