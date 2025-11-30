@@ -70,6 +70,7 @@ namespace liteclip
             builder.Services.AddSingleton<IProgressParser, FfmpegProgressParser>();
             builder.Services.AddSingleton<IFfmpegRunner, FfmpegProcessRunner>();
             builder.Services.AddSingleton<FfmpegProbeService>();
+            builder.Services.AddSingleton<VideoMetadataService>();
 
             // New encoder services
             builder.Services.AddSingleton<IFfmpegEncoderProbe, FfmpegEncoderProbe>();

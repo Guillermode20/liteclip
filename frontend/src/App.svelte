@@ -1201,6 +1201,7 @@
                             videoFile={selectedFile}
                             onSegmentsChange={handleSegmentsChange}
                             onRemoveVideo={resetInterface}
+                            onMetadataLoaded={handleSourceMetadataLoaded}
                         />
                     {:else}
                         <div class="video-editor-placeholder">

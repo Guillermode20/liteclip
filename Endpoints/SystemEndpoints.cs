@@ -1,4 +1,6 @@
+using System.IO;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.Logging;
 using liteclip;
@@ -127,6 +129,88 @@ public static class SystemEndpoints
                 return Results.Ok();
             })
             .WithName("CloseApp");
+
+        // Probe video metadata using ffprobe (more reliable than browser)
+        endpoints.MapPost("/api/probe-metadata", async (
+            IFormFile file,
+            VideoMetadataService metadataService,
+            FfmpegBootstrapper bootstrapper,
+            ILogger<Program> logger) =>
+            {
+                if (file == null || file.Length == 0)
+                {
+                    return Results.BadRequest(new { error = "No file uploaded" });
+                }
+
+                try
+                {
+                    await bootstrapper.EnsureReadyAsync();
+                }
+                catch (Exception ex)
+                {
+                    return Results.Problem(
+                        title: "FFmpeg is still preparing",
+                        detail: ex.Message,
+                        statusCode: 503
+                    );
+                }
+
+                // Save to temp file for probing
+                var tempDir = Path.Combine(Path.GetTempPath(), "liteclip", "probe");
+                Directory.CreateDirectory(tempDir);
+                var tempFile = Path.Combine(tempDir, $"{Guid.NewGuid()}{Path.GetExtension(file.FileName)}");
+
+                try
+                {
+                    await using (var stream = new FileStream(tempFile, FileMode.Create))
+                    {
+                        await file.CopyToAsync(stream);
+                    }
+
+                    var metadata = await metadataService.ProbeAsync(tempFile);
+
+                    if (metadata == null)
+                    {
+                        return Results.Problem(
+                            title: "Failed to extract metadata",
+                            detail: "Could not read video metadata. The file may be corrupted or in an unsupported format.",
+                            statusCode: 422
+                        );
+                    }
+
+                    return Results.Ok(new
+                    {
+                        width = metadata.Width,
+                        height = metadata.Height,
+                        duration = metadata.Duration,
+                        aspectRatio = metadata.AspectRatio,
+                        codec = metadata.Codec,
+                        frameRate = metadata.FrameRate,
+                        bitrate = metadata.Bitrate,
+                        pixelFormat = metadata.PixelFormat,
+                        hasAudio = metadata.HasAudio,
+                        audioCodec = metadata.AudioCodec,
+                        audioChannels = metadata.AudioChannels,
+                        audioSampleRate = metadata.AudioSampleRate
+                    });
+                }
+                catch (Exception ex)
+                {
+                    logger.LogError(ex, "Error probing video metadata");
+                    return Results.Problem(
+                        title: "Error probing metadata",
+                        detail: ex.Message,
+                        statusCode: 500
+                    );
+                }
+                finally
+                {
+                    // Cleanup temp file
+                    try { if (File.Exists(tempFile)) File.Delete(tempFile); } catch { }
+                }
+            })
+            .DisableAntiforgery()
+            .WithName("ProbeVideoMetadata");
 
         return endpoints;
     }

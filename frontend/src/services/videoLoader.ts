@@ -1,6 +1,6 @@
 /**
  * Video loading and metadata extraction service.
- * Provides a clean, promise-based API for loading videos and extracting metadata.
+ * Uses ffprobe backend for reliable metadata extraction with browser fallback.
  */
 
 export interface VideoMetadata {
@@ -8,24 +8,118 @@ export interface VideoMetadata {
     height: number;
     duration: number;
     aspectRatio: number;
+    codec?: string;
+    frameRate?: number;
+    bitrate?: number;
+    pixelFormat?: string;
+    hasAudio?: boolean;
+    audioCodec?: string;
+    audioChannels?: number;
+    audioSampleRate?: number;
 }
 
 export interface VideoLoadResult {
     objectUrl: string;
     metadata: VideoMetadata;
+    source: 'backend' | 'browser';
 }
 
 export interface VideoLoadError {
-    type: 'load' | 'metadata' | 'timeout' | 'aborted';
+    type: 'load' | 'metadata' | 'timeout' | 'aborted' | 'network';
     message: string;
 }
 
 const DEFAULT_TIMEOUT_MS = 30000;
+const BACKEND_TIMEOUT_MS = 30000;
+const BROWSER_TIMEOUT_MS = 5000; // Browser probe should be fast - file is local
+
+// API response type from backend
+interface BackendMetadataResponse {
+    width: number;
+    height: number;
+    duration: number;
+    aspectRatio: number;
+    codec?: string;
+    frameRate?: number;
+    bitrate?: number;
+    pixelFormat?: string;
+    hasAudio?: boolean;
+    audioCodec?: string;
+    audioChannels?: number;
+    audioSampleRate?: number;
+}
+
+/**
+ * Probes video metadata using the backend ffprobe service.
+ * This is more reliable than browser-based extraction for all video formats.
+ */
+async function probeWithBackend(
+    file: File,
+    signal?: AbortSignal
+): Promise<VideoMetadata | null> {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), BACKEND_TIMEOUT_MS);
+    
+    // Link external signal if provided
+    if (signal) {
+        signal.addEventListener('abort', () => controller.abort(), { once: true });
+    }
+
+    try {
+        const formData = new FormData();
+        formData.append('file', file);
+
+        const response = await fetch('/api/probe-metadata', {
+            method: 'POST',
+            body: formData,
+            signal: controller.signal
+        });
+
+        clearTimeout(timeoutId);
+
+        if (!response.ok) {
+            console.warn(`Backend probe failed with status ${response.status}`);
+            return null;
+        }
+
+        const data: BackendMetadataResponse = await response.json();
+        
+        // Validate response
+        if (!data.width || !data.height || !data.duration || 
+            data.width <= 0 || data.height <= 0 || data.duration <= 0) {
+            console.warn('Backend returned invalid metadata:', data);
+            return null;
+        }
+
+        return {
+            width: data.width,
+            height: data.height,
+            duration: data.duration,
+            aspectRatio: data.aspectRatio || data.width / data.height,
+            codec: data.codec,
+            frameRate: data.frameRate,
+            bitrate: data.bitrate,
+            pixelFormat: data.pixelFormat,
+            hasAudio: data.hasAudio,
+            audioCodec: data.audioCodec,
+            audioChannels: data.audioChannels,
+            audioSampleRate: data.audioSampleRate
+        };
+    } catch (err) {
+        clearTimeout(timeoutId);
+        if (err instanceof Error && err.name === 'AbortError') {
+            console.warn('Backend probe aborted or timed out');
+        } else {
+            console.warn('Backend probe error:', err);
+        }
+        return null;
+    }
+}
 
 /**
  * Extracts metadata from a video element that has loaded its metadata.
  */
-function extractMetadata(video: HTMLVideoElement): VideoMetadata | null {
+function extractBrowserMetadata(video: HTMLVideoElement): VideoMetadata | null {
     const duration = video.duration;
     const width = video.videoWidth;
     const height = video.videoHeight;
@@ -54,35 +148,30 @@ function createProbeVideo(): HTMLVideoElement {
     video.preload = 'metadata';
     video.muted = true;
     video.playsInline = true;
-    // Keep element off-screen but in DOM for reliable loading
     video.style.cssText = 'position:absolute;width:1px;height:1px;opacity:0;pointer-events:none;';
     return video;
 }
 
 /**
- * Loads a video file and extracts its metadata.
- * Returns a promise that resolves with the object URL and metadata,
- * or rejects with a VideoLoadError.
- * 
- * @param file - The video file to load
- * @param signal - Optional AbortSignal to cancel the operation
- * @param timeoutMs - Timeout in milliseconds (default: 30000)
+ * Probes video metadata using the browser's HTML5 video element.
+ * Fallback when backend is unavailable.
  */
-export function loadVideoFile(
-    file: File,
+function probeWithBrowser(
+    objectUrl: string,
     signal?: AbortSignal,
-    timeoutMs: number = DEFAULT_TIMEOUT_MS
-): Promise<VideoLoadResult> {
+    timeoutMs: number = BROWSER_TIMEOUT_MS
+): Promise<VideoMetadata> {
     return new Promise((resolve, reject) => {
         if (signal?.aborted) {
             reject({ type: 'aborted', message: 'Operation was aborted' } as VideoLoadError);
             return;
         }
 
-        const objectUrl = URL.createObjectURL(file);
         const video = createProbeVideo();
         let timeoutId: ReturnType<typeof setTimeout> | null = null;
         let settled = false;
+        let retryCount = 0;
+        const maxRetries = 2;
 
         const cleanup = () => {
             if (timeoutId) {
@@ -90,9 +179,10 @@ export function loadVideoFile(
                 timeoutId = null;
             }
             video.removeEventListener('loadedmetadata', onMetadataLoaded);
+            video.removeEventListener('loadeddata', onLoadedData);
+            video.removeEventListener('canplay', onCanPlay);
             video.removeEventListener('error', onError);
             signal?.removeEventListener('abort', onAbort);
-            // Remove from DOM if it was added
             if (video.parentNode) {
                 video.parentNode.removeChild(video);
             }
@@ -104,27 +194,47 @@ export function loadVideoFile(
             if (settled) return;
             settled = true;
             cleanup();
-            URL.revokeObjectURL(objectUrl);
             reject(error);
         };
 
-        const succeed = (result: VideoLoadResult) => {
+        const succeed = (metadata: VideoMetadata) => {
             if (settled) return;
             settled = true;
             cleanup();
-            resolve(result);
+            resolve(metadata);
+        };
+
+        const tryExtract = (): boolean => {
+            const metadata = extractBrowserMetadata(video);
+            if (metadata) {
+                succeed(metadata);
+                return true;
+            }
+            return false;
         };
 
         const onMetadataLoaded = () => {
-            const metadata = extractMetadata(video);
-            if (!metadata) {
+            // Sometimes loadedmetadata fires before dimensions are ready
+            // Wait a tick and try, or wait for loadeddata/canplay
+            setTimeout(() => {
+                if (!tryExtract() && retryCount < maxRetries) {
+                    retryCount++;
+                    // Dimensions not ready yet, wait for more data
+                }
+            }, 50);
+        };
+
+        const onLoadedData = () => {
+            tryExtract();
+        };
+
+        const onCanPlay = () => {
+            if (!tryExtract()) {
                 fail({
                     type: 'metadata',
                     message: 'Failed to extract valid metadata from video'
                 });
-                return;
             }
-            succeed({ objectUrl, metadata });
         };
 
         const onError = () => {
@@ -154,24 +264,92 @@ export function loadVideoFile(
         };
 
         const onTimeout = () => {
-            fail({
-                type: 'timeout',
-                message: `Video metadata extraction timed out after ${timeoutMs}ms`
-            });
+            // Last attempt before failing
+            if (!tryExtract()) {
+                fail({
+                    type: 'timeout',
+                    message: `Browser metadata extraction timed out after ${timeoutMs}ms`
+                });
+            }
         };
 
-        // Set up event listeners
+        // Set up event listeners - listen to multiple events for reliability
         video.addEventListener('loadedmetadata', onMetadataLoaded, { once: true });
+        video.addEventListener('loadeddata', onLoadedData, { once: true });
+        video.addEventListener('canplay', onCanPlay, { once: true });
         video.addEventListener('error', onError, { once: true });
         signal?.addEventListener('abort', onAbort, { once: true });
 
-        // Set up timeout
         timeoutId = setTimeout(onTimeout, timeoutMs);
 
-        // Start loading - add to DOM first for more reliable loading
+        // Add to DOM and start loading
         document.body.appendChild(video);
         video.src = objectUrl;
     });
+}
+
+/**
+ * Loads a video file and extracts its metadata.
+ * 
+ * Strategy (optimized for speed):
+ * 1. Try browser first (instant - no upload needed)
+ * 2. Fall back to backend ffprobe only if browser fails (e.g., unsupported codec)
+ * 
+ * @param file - The video file to load
+ * @param signal - Optional AbortSignal to cancel the operation
+ * @param timeoutMs - Total timeout in milliseconds (default: 60000)
+ */
+export async function loadVideoFile(
+    file: File,
+    signal?: AbortSignal,
+    timeoutMs: number = DEFAULT_TIMEOUT_MS
+): Promise<VideoLoadResult> {
+    if (signal?.aborted) {
+        throw { type: 'aborted', message: 'Operation was aborted' } as VideoLoadError;
+    }
+
+    // Create object URL for browser playback (always needed for preview)
+    const objectUrl = URL.createObjectURL(file);
+
+    try {
+        // Strategy 1: Try browser first (instant, no upload required)
+        console.log('Attempting browser metadata probe...');
+        try {
+            const browserMetadata = await probeWithBrowser(objectUrl, signal, BROWSER_TIMEOUT_MS);
+            console.log('Browser probe successful:', browserMetadata);
+            return {
+                objectUrl,
+                metadata: browserMetadata,
+                source: 'browser'
+            };
+        } catch (browserError) {
+            console.log('Browser probe failed:', browserError);
+            // Continue to backend fallback
+        }
+
+        // Strategy 2: Fall back to backend ffprobe (handles all formats but requires upload)
+        console.log('Falling back to backend ffprobe...');
+        const backendMetadata = await probeWithBackend(file, signal);
+        
+        if (backendMetadata) {
+            console.log('Backend probe successful:', backendMetadata);
+            return {
+                objectUrl,
+                metadata: backendMetadata,
+                source: 'backend'
+            };
+        }
+
+        // Both failed
+        throw { 
+            type: 'metadata', 
+            message: 'Failed to extract video metadata. The file may be corrupted or in an unsupported format.' 
+        } as VideoLoadError;
+    } catch (error) {
+        // Clean up object URL on failure
+        URL.revokeObjectURL(objectUrl);
+        throw error;
+    }
 }
 
 /**
@@ -182,7 +360,7 @@ export function getMetadataFromElement(video: HTMLVideoElement): VideoMetadata |
     if (video.readyState < HTMLMediaElement.HAVE_METADATA) {
         return null;
     }
-    return extractMetadata(video);
+    return extractBrowserMetadata(video);
 }
 
 /**
@@ -202,7 +380,7 @@ export function waitForMetadata(
 
         // If metadata is already loaded, extract and return immediately
         if (video.readyState >= HTMLMediaElement.HAVE_METADATA) {
-            const metadata = extractMetadata(video);
+            const metadata = extractBrowserMetadata(video);
             if (metadata) {
                 resolve(metadata);
                 return;
@@ -237,7 +415,7 @@ export function waitForMetadata(
         };
 
         const onMetadataLoaded = () => {
-            const metadata = extractMetadata(video);
+            const metadata = extractBrowserMetadata(video);
             if (!metadata) {
                 fail({
                     type: 'metadata',
