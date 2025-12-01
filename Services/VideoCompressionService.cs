@@ -212,7 +212,7 @@ public class VideoCompressionService : IVideoCompressionService
         }
 
         var targetSizePrefix = request.TargetSizeMb.HasValue
-            ? $"{Math.Round(request.TargetSizeMb.Value, MidpointRounding.AwayFromZero)}MB"
+            ? $"{request.TargetSizeMb.Value:F1}MB"
             : "auto";
         var outputFilename = $"{targetSizePrefix}_compressed_{safeStem}{codecConfig.FileExtension}";
         var outputPath = Path.Combine(_tempOutputPath, outputFilename);
@@ -858,6 +858,40 @@ public class VideoCompressionService : IVideoCompressionService
         if (job.OutputSizeBytes.HasValue)
         {
             var outputSizeMb = job.OutputSizeBytes.Value / (1024.0 * 1024.0);
+            
+            // Rename file to reflect actual size
+            try
+            {
+                var directory = Path.GetDirectoryName(job.OutputPath);
+                var oldFilename = Path.GetFileName(job.OutputPath);
+                
+                // Extract the parts we want to keep (everything after the first underscore)
+                // Expected format: "{TargetSize}MB_compressed_{SafeStem}{Extension}"
+                var parts = oldFilename.Split('_', 2);
+                if (parts.Length == 2 && directory != null)
+                {
+                    var suffix = parts[1];
+                    var newFilename = $"{outputSizeMb:F1}MB_{suffix}";
+                    var newPath = Path.Combine(directory, newFilename);
+
+                    if (File.Exists(job.OutputPath))
+                    {
+                        // Ensure we don't overwrite if something weird happens, though unlikely with UUIDs
+                        if (!File.Exists(newPath))
+                        {
+                            File.Move(job.OutputPath, newPath);
+                            job.OutputPath = newPath;
+                            job.OutputFilename = newFilename;
+                            _logger.LogInformation("Renamed output file to {NewFilename} to match actual size", newFilename);
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to rename output file to match actual size");
+            }
+
             _logger.LogInformation("Video compression completed for job {JobId} using {Codec}. Output size: {OutputSizeMb:F2} MB (Target: {TargetSizeMb} MB)",
                 job.JobId, job.Codec, outputSizeMb, job.TargetSizeMb?.ToString("F2") ?? "N/A");
         }
