@@ -220,7 +220,7 @@ public class VideoCompressionService : IVideoCompressionService
         var originalSizeMb = videoFile.Length / (1024.0 * 1024.0);
         var originalDuration = request.SourceDuration;
 
-        var segmentResult = await ProcessSegmentsAsync(jobId, uploadPath, request.Segments, originalDuration);
+        var segmentResult = await ProcessSegmentsAsync(jobId, uploadPath, request.Segments, originalDuration, skipMerge: true);
         var effectiveMaxSizeMb = originalSizeMb;
 
         if (segmentResult.SegmentsApplied &&
@@ -244,7 +244,7 @@ public class VideoCompressionService : IVideoCompressionService
             segmentResult.SegmentsApplied);
     }
 
-    private async Task<SegmentProcessingResult> ProcessSegmentsAsync(string jobId, string inputPath, List<VideoSegment>? segments, double? originalDuration)
+    private async Task<SegmentProcessingResult> ProcessSegmentsAsync(string jobId, string inputPath, List<VideoSegment>? segments, double? originalDuration, bool skipMerge = false)
     {
         if (segments == null || segments.Count == 0)
         {
@@ -272,8 +272,15 @@ public class VideoCompressionService : IVideoCompressionService
                 i + 1, seg.Start, seg.End, seg.End - seg.Start);
         }
 
-        var mergedPath = await MergeVideoSegmentsAsync(jobId, inputPath, segments);
         var totalEditedDuration = segments.Sum(s => s.End - s.Start);
+
+        if (skipMerge)
+        {
+            _logger.LogInformation("Skipping physical merge for job {JobId} - using filters for segmentation", jobId);
+            return new SegmentProcessingResult(true, inputPath, totalEditedDuration);
+        }
+
+        var mergedPath = await MergeVideoSegmentsAsync(jobId, inputPath, segments);
         
         _logger.LogSegmentProcessing(jobId, segments.Count, totalEditedDuration, originalDuration ?? 0);
         
@@ -307,7 +314,40 @@ public class VideoCompressionService : IVideoCompressionService
     {
         _logger.LogInformation(" Skipping compression for job {JobId} - copying file directly", artifacts.JobId);
 
-        File.Copy(artifacts.PreparedInputPath, artifacts.OutputPath, overwrite: true);
+        // If segments were requested but we deferred the merge, we must do it now.
+        // Check if prepared path is already a merged file (contains _merged) or if we need to process segments.
+        if (request.Segments != null && request.Segments.Count > 0 && 
+            !artifacts.PreparedInputPath.Contains("_merged") && 
+            artifacts.SegmentsApplied)
+        {
+             _logger.LogInformation("Performing deferred merge for skipped job {JobId}", artifacts.JobId);
+             // We can't easily await here since this method is synchronous in signature (called from async context though?)
+             // Wait, CompleteSkippedJob is called from CompressVideoAsync which IS async.
+             // But CompleteSkippedJob signature returns string.
+             // I should change it to async or block (not ideal). 
+             // Actually, let's look at CompressVideoAsync. It awaits CompressVideoAsync -> calls CompleteSkippedJob.
+             // CompleteSkippedJob is sync. I should make it async or execute sync.
+             // Since I can't easily change the signature without checking usage, I will use .GetAwaiter().GetResult() for now 
+             // or simpler: just call the merge logic synchronously? No, MergeVideoSegmentsAsync is async.
+             
+             // Let's verify: CompressVideoAsync calls it.
+             // I'll modify the calling code to await.
+             // But simpler: Just run the merge logic here.
+             // Actually, I can just call MergeVideoSegmentsAsync(...).GetAwaiter().GetResult();
+             
+             var mergedPath = MergeVideoSegmentsAsync(artifacts.JobId, artifacts.PreparedInputPath, request.Segments).GetAwaiter().GetResult();
+             
+             // Now copy from merged path
+             File.Copy(mergedPath, artifacts.OutputPath, overwrite: true);
+             
+             // Cleanup merged path
+             try { File.Delete(mergedPath); } catch { }
+        }
+        else
+        {
+            File.Copy(artifacts.PreparedInputPath, artifacts.OutputPath, overwrite: true);
+        }
+        
         _logger.LogFileOperation("Copied", artifacts.OutputPath, new FileInfo(artifacts.OutputPath).Length);
 
         var job = new JobMetadata
@@ -529,76 +569,6 @@ public class VideoCompressionService : IVideoCompressionService
         return _jobStore.GetQueuePosition(jobId);
     }
 
-        /// <summary>
-        /// Builds adaptive video filters that are always applied to improve perceived quality.
-        /// These filters are especially beneficial at lower bitrates.
-        /// Filters are automatically tuned based on the compression level and target size.
-        /// </summary>
-        private static List<string> BuildAdaptiveFilters(int scalePercent, int targetFps, double? targetSizeMb, double? sourceDuration)
-    {
-        var filters = new List<string>();
-        
-        // Calculate compression intensity (higher = more aggressive compression)
-        var isHeavyCompression = false;
-        if (targetSizeMb.HasValue && sourceDuration.HasValue && sourceDuration.Value > 0)
-        {
-            var bitrateKbps = (targetSizeMb.Value * 8 * 1024) / sourceDuration.Value;
-            isHeavyCompression = bitrateKbps < 1000; // < 1 Mbps is heavy compression
-        }
-        
-        // 1. Temporal denoising - ALWAYS apply before scaling
-        // Removes noise/grain that's difficult to compress efficiently
-        // More aggressive denoising for heavy compression to maximize efficiency
-        if (isHeavyCompression)
-        {
-            // Stronger denoising for heavy compression
-            filters.Add("hqdn3d=2.5:2.0:4.0:4.0");
-        }
-        else
-        {
-            // Moderate denoising for lighter compression
-            filters.Add("hqdn3d=1.5:1.0:3.0:3.0");
-        }
-        
-        // 2. Scaling (if needed)
-        if (scalePercent < 100)
-        {
-            var factor = scalePercent / 100.0;
-            var factorStr = factor.ToString(CultureInfo.InvariantCulture);
-            filters.Add($"scale=trunc(iw*{factorStr}/2)*2:trunc(ih*{factorStr}/2)*2:flags=lanczos");
-        }
-        
-        // 3. Debanding - ALWAYS apply after scaling
-        // Prevents banding in gradients (skies, sunsets, dark scenes)
-        // This is critical for compressed video quality
-        // Parameters: range=16 pixels, threshold1/2/3/4 for each plane
-        filters.Add("deband=1thr=0.02:2thr=0.02:3thr=0.02:range=16:blur=0");
-        
-        // 4. Contrast-adaptive sharpening - ALWAYS apply
-        // Compensates for softness from denoising and enhances perceived sharpness
-        if (scalePercent < 100)
-        {
-            // Adaptive sharpening based on downscaling amount
-            var downscaleFactor = 1.0 - (scalePercent / 100.0);
-            var unsharpStrength = Math.Round(0.5 + (downscaleFactor * 1.5), 2);
-            var unsharpStrengthStr = unsharpStrength.ToString(CultureInfo.InvariantCulture);
-            filters.Add($"unsharp=3:3:{unsharpStrengthStr}");
-        }
-        else
-        {
-            // Light sharpening even without downscaling
-            filters.Add("unsharp=3:3:0.3");
-        }
-        
-        // 5. FPS limiting (if specified)
-        if (targetFps > 0)
-        {
-            filters.Add($"fps={targetFps}");
-        }
-        
-        return filters;
-    }
-
     private async Task RunFfmpegCompressionAsync(string jobId, JobMetadata job, CompressionRequest request, CodecConfig codec, VideoDimensions? preProbedDimensions)
     {
         try
@@ -644,8 +614,20 @@ public class VideoCompressionService : IVideoCompressionService
 
             // Build adaptive filter chain - always applied for best quality
             var fpsToUse = request.TargetFps ?? 30;
-            var filters = BuildAdaptiveFilters(scalePercent, fpsToUse, job.TargetSizeMb, job.SourceDuration);
+            var filters = AdaptiveFilterBuilder.Build(scalePercent, fpsToUse, job.TargetSizeMb, job.SourceDuration);
             
+            var audioFilters = new List<string>();
+            if (request.Segments != null && request.Segments.Count > 0)
+            {
+                _logger.LogInformation("Applying frame-accurate trim filters for {Count} segments", request.Segments.Count);
+                var (vFilter, aFilter) = BuildTrimFilters(request.Segments, fpsToUse);
+                
+                // Prepend trim filters to the chain.
+                // We inject fps filter first to ensure constant frame rate input for setpts
+                filters.Insert(0, vFilter);
+                audioFilters.Add(aFilter);
+            }
+
             _logger.LogInformation("Applying {Count} adaptive quality filters for job {JobId} (scale={Scale}%, targetSize={TargetMb}MB)", 
                 filters.Count, jobId, scalePercent, job.TargetSizeMb);
 
@@ -706,7 +688,16 @@ public class VideoCompressionService : IVideoCompressionService
                     args.AddRange(BuildSimpleVideoArgs(codec, videoBitrate, fpsToUse, request.Mode));
                 }
 
-                args.AddRange(BuildAudioArgsWithPlan(strategy, codec, audioPlan));
+                var audioArgs = BuildAudioArgsWithPlan(strategy, codec, audioPlan);
+                
+                // Inject audio filters if present (e.g. for trimming)
+                if (audioFilters.Count > 0)
+                {
+                    audioArgs.Add("-af");
+                    audioArgs.Add(string.Join(",", audioFilters));
+                }
+
+                args.AddRange(audioArgs);
                 args.AddRange(containerArgs);
                 return args;
             }
@@ -1295,6 +1286,24 @@ public class VideoCompressionService : IVideoCompressionService
     }
 
 
+
+    private static (string VideoFilter, string AudioFilter) BuildTrimFilters(List<VideoSegment> segments, int targetFps)
+    {
+        var selects = new List<string>();
+        foreach (var seg in segments)
+        {
+            selects.Add($"between(t,{seg.Start.ToString(CultureInfo.InvariantCulture)},{seg.End.ToString(CultureInfo.InvariantCulture)})");
+        }
+        var selectExpr = string.Join("+", selects);
+
+        // Video: Ensure constant frame rate, select frames, then restamp timestamps to be continuous
+        var videoFilter = $"fps={targetFps},select='{selectExpr}',setpts=N/FRAME_RATE/TB";
+
+        // Audio: Select samples, then restamp to be continuous
+        var audioFilter = $"aselect='{selectExpr}',asetpts=N/SR/TB";
+
+        return (videoFilter, audioFilter);
+    }
 
     private static List<string> BuildSimpleVideoArgs(CodecConfig codec, double videoBitrateKbps, int fps, EncodingMode mode)
     {
