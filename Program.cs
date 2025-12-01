@@ -238,16 +238,32 @@ namespace liteclip
                 .SetTemporaryFilesPath(webView2Path)
                 .SetLogVerbosity(app.Environment.IsDevelopment() ? 4 : 0);
 
-            if (userSettings.StartMaximized)
+            // Start off-screen to prevent "White Flash" or black window during startup.
+            // The frontend sends "window-ready" when fully loaded.
+            window.SetLocation(new Point(-10000, -10000));
+
+            bool windowShown = false;
+            Point? storedLocation = null;
+            Action showWindow = () =>
             {
-                window.SetMaximized(true);
-                window.SetMinSize(854, 480);
-            }
-            else
-            {
-                window.SetSize(1200, 800);
-                window.Center();
-            }
+                if (windowShown) return;
+                windowShown = true;
+
+                if (userSettings.StartMaximized)
+                {
+                    window.SetMaximized(true);
+                    window.SetMinSize(854, 480);
+                }
+                else
+                {
+                    window.SetSize(1200, 800);
+                    window.Center();
+                }
+                if (storedLocation.HasValue)
+                {
+                    window.SetLocation(storedLocation.Value);
+                }
+            };
 
             // Handle window events
             window.RegisterWebMessageReceivedHandler((sender, message) =>
@@ -255,6 +271,15 @@ namespace liteclip
                 if (message == "close-app")
                 {
                     window.Close();
+                }
+                else if (message == "window-ready")
+                {
+                    showWindow();
+                }
+                else if (message.StartsWith("window-location:"))
+                {
+                    var location = message.Substring(16).Split(',');
+                    storedLocation = new Point(int.Parse(location[0]), int.Parse(location[1]));
                 }
             });
 
