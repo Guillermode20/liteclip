@@ -103,7 +103,11 @@ export async function startFfmpeg(): Promise<void> {
 }
 
 export async function closeApp(): Promise<void> {
-    await fetchApi('/app/close', { method: 'POST' }, false, 'Failed to close app');
+    if (window.external && typeof window.external.sendMessage === 'function') {
+        window.external.sendMessage('close-app');
+    } else {
+        await fetchApi('/app/close', { method: 'POST' }, false, 'Failed to close app');
+    }
 }
 
 export async function uploadVideo(formData: FormData, signal?: AbortSignal): Promise<{ jobId: string }> {
