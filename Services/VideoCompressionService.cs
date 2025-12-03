@@ -11,6 +11,10 @@ namespace liteclip.Services;
 
 public class VideoCompressionService : IVideoCompressionService
 {
+    // Compiled regex for x265 parameter sanitization - avoids repeated compilation in hot path
+    private static readonly Regex SubmeRegex = new(@"subme=(\d+)", RegexOptions.Compiled);
+    private static readonly Regex RdRegex = new(@"\brd=(\d+)\b", RegexOptions.Compiled);
+
     private readonly IJobStore _jobStore;
     private readonly SemaphoreSlim _concurrencyLimiter;
     private readonly Task? _startupCleanupTask;
@@ -1515,6 +1519,7 @@ public class VideoCompressionService : IVideoCompressionService
 
     // Attempts to sanitize libx265 parameters to avoid unsupported options on some builds.
     // Returns true if we actually changed anything.
+    // Uses pre-compiled static regex (SubmeRegex, RdRegex) for performance.
     private static bool SanitizeX265Params(List<string> args)
     {
         if (args == null) return false;
@@ -1526,42 +1531,29 @@ public class VideoCompressionService : IVideoCompressionService
             if (string.Equals(args[i], "-x265-params", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Count)
             {
                 var original = args[i + 1];
+                
                 // cap subme to 7 (some libx265 builds report max supported level <= 7)
-                var sanitized = Regex.Replace(original, @"subme=(\d+)", match =>
+                var sanitized = SubmeRegex.Replace(original, match =>
                 {
-                    try
+                    if (int.TryParse(match.Groups[1].Value, out var v))
                     {
-                        var v = int.Parse(match.Groups[1].Value);
                         var capped = Math.Min(v, 7);
-                        if (capped != v)
-                        {
-                            changed = true;
-                        }
+                        if (capped != v) changed = true;
                         return $"subme={capped}";
                     }
-                    catch
-                    {
-                        return match.Value;
-                    }
+                    return match.Value;
                 });
 
                 // Also cap 'rd' to a safe value in case it's too high for some encoders
-                sanitized = Regex.Replace(sanitized, @"\brd=(\d+)\b", match =>
+                sanitized = RdRegex.Replace(sanitized, match =>
                 {
-                    try
+                    if (int.TryParse(match.Groups[1].Value, out var v))
                     {
-                        var v = int.Parse(match.Groups[1].Value);
                         var capped = Math.Min(v, 6);
-                        if (capped != v)
-                        {
-                            changed = true;
-                        }
+                        if (capped != v) changed = true;
                         return $"rd={capped}";
                     }
-                    catch
-                    {
-                        return match.Value;
-                    }
+                    return match.Value;
                 });
 
                 if (sanitized != original)

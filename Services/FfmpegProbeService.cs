@@ -13,7 +13,7 @@ namespace liteclip.Services
     {
         private readonly FfmpegPathResolver _pathResolver;
         private readonly ILogger<FfmpegProbeService> _logger;
-        private readonly TimeSpan _cacheTtl = TimeSpan.FromMinutes(5);
+        private readonly TimeSpan _cacheTtl = TimeSpan.FromMinutes(30);
         private DateTime _lastRefreshUtc = DateTime.MinValue;
         private List<FfmpegEncoderInfo>? _cachedEncoders;
 

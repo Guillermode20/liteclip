@@ -306,25 +306,21 @@ public static class CompressionEndpoints
                         return Results.NotFound(new { error = "Compressed video file not found on disk" });
                     }
 
-                    try
-                    {
-                        var fileBytes = await File.ReadAllBytesAsync(job.OutputPath);
-                        var fileName = !string.IsNullOrWhiteSpace(job.OutputFilename) ? job.OutputFilename : $"compressed_{job.OriginalFilename}";
+                    var fileName = !string.IsNullOrWhiteSpace(job.OutputFilename) ? job.OutputFilename : $"compressed_{job.OriginalFilename}";
+                    var fileInfo = new FileInfo(job.OutputPath);
+                    logger.LogFileOperation("Streaming", job.OutputPath, fileInfo.Length);
 
-                        logger.LogFileOperation("Serving", job.OutputPath, fileBytes.Length);
+                    // Stream the file instead of loading into memory - prevents OOM on large files
+                    var stream = new FileStream(
+                        job.OutputPath,
+                        FileMode.Open,
+                        FileAccess.Read,
+                        FileShare.Read,
+                        bufferSize: 81920,
+                        useAsync: true);
 
-                        var mimeType = !string.IsNullOrWhiteSpace(job.OutputMimeType) ? job.OutputMimeType : "video/mp4";
-                        return Results.File(fileBytes, mimeType, fileName);
-                    }
-                    catch (Exception ex)
-                    {
-                        logger.LogError(ex, "Error reading file for job: {JobId}", jobId);
-                        return Results.Problem(
-                            title: "Error reading compressed video",
-                            detail: ex.Message,
-                            statusCode: 500
-                        );
-                    }
+                    var mimeType = !string.IsNullOrWhiteSpace(job.OutputMimeType) ? job.OutputMimeType : "video/mp4";
+                    return Results.File(stream, mimeType, fileName, enableRangeProcessing: true);
                 }
 
                 logger.LogWarning("Unexpected job status: {JobId}, Status: {Status}", jobId, job.Status);
