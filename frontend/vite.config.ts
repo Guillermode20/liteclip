@@ -31,10 +31,8 @@ export default defineConfig({
         chunkFileNames: 'assets/[name].[hash].js',
         assetFileNames: 'assets/[name].[hash].[ext]',
         manualChunks: (id) => {
+          // Consolidate all node_modules into a single vendor chunk
           if (id.includes('node_modules')) {
-            if (id.includes('svelte')) {
-              return 'vendor';
-            }
             return 'vendor';
           }
         }

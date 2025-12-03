@@ -67,9 +67,6 @@
     let outputSizeValue = '--';
     let outputSizeDetails = '';
     let outputSizeSliderValue = 100;
-    let sliderStepValue = 1;
-    let effectiveMaxSizeNumeric: number = 0;
-    let sliderMaxRounded: number = 100;
     let codecSelectValue: CodecKey = 'quality';
     let codecHelperText = codecDetails.quality.helper;
     let showCancelButton = false;
@@ -161,10 +158,15 @@
         return videoEditorModulePromise;
     }
 
-    // Reactive derived values for slider
-    $: effectiveMaxSizeNumeric = getEffectiveMaxSize(originalSizeMb, sourceDuration, videoSegments) || (originalSizeMb || 0);
-    $: sliderMaxRounded = Math.max(1, Math.round(effectiveMaxSizeNumeric));
-    $: sliderStepValue = effectiveMaxSizeNumeric < 10 ? 0.1 : 1;
+    // Consolidated reactive derived values for slider - single derivation reduces re-render cascades
+    $: sliderConfig = (() => {
+        const effectiveMax = getEffectiveMaxSize(originalSizeMb, sourceDuration, videoSegments) || (originalSizeMb || 0);
+        return {
+            effectiveMaxSizeNumeric: effectiveMax,
+            sliderMaxRounded: Math.max(1, Math.round(effectiveMax)),
+            sliderStepValue: effectiveMax < 10 ? 0.1 : 1
+        };
+    })();
 
     /** Cleans up all video-related object URLs to prevent memory leaks */
     function cleanupVideoUrls() {
@@ -1029,25 +1031,23 @@
         videoSegments = [];
     }
 
-    $: finalBitrateLabel =
-        outputMetadata.videoBitrateKbps > 0 ? `${Math.round(outputMetadata.videoBitrateKbps)} kbps` : '--';
-
-    $: finalDurationLabel = formatDurationLabel(outputMetadata.finalDuration);
-
-    $: resolutionPercent =
-        sourceVideoWidth && sourceVideoHeight && outputMetadata.finalWidth > 0
+    // Consolidated output labels - single derivation reduces re-render cascades
+    $: outputLabels = (() => {
+        const resPct = sourceVideoWidth && sourceVideoHeight && outputMetadata.finalWidth > 0
             ? Math.round((outputMetadata.finalWidth / sourceVideoWidth) * 100)
             : null;
-
-    $: finalResolutionLabel =
-        outputMetadata.finalWidth > 0 && outputMetadata.finalHeight > 0
-            ? `${outputMetadata.finalWidth}×${outputMetadata.finalHeight}${
-                  resolutionPercent ? ` (${resolutionPercent}%)` : ''
-              }`
-            : '--';
-
-    $: encodingTimeLabel =
-        outputMetadata.encodingTime > 0 ? formatTimeRemaining(outputMetadata.encodingTime) : '--';
+        
+        return {
+            finalBitrateLabel: outputMetadata.videoBitrateKbps > 0 
+                ? `${Math.round(outputMetadata.videoBitrateKbps)} kbps` : '--',
+            finalDurationLabel: formatDurationLabel(outputMetadata.finalDuration),
+            finalResolutionLabel: outputMetadata.finalWidth > 0 && outputMetadata.finalHeight > 0
+                ? `${outputMetadata.finalWidth}×${outputMetadata.finalHeight}${resPct ? ` (${resPct}%)` : ''}`
+                : '--',
+            encodingTimeLabel: outputMetadata.encodingTime > 0 
+                ? formatTimeRemaining(outputMetadata.encodingTime) : '--'
+        };
+    })();
 </script>
 
 <div class="app-layout">
@@ -1106,10 +1106,10 @@
                     downloadMimeType={downloadMimeType || 'video/mp4'}
                     {outputMetadata}
                     {originalSizeMb}
-                    {finalBitrateLabel}
-                    {finalResolutionLabel}
-                    {finalDurationLabel}
-                    encodingTimeLabel={encodingTimeLabel}
+                    finalBitrateLabel={outputLabels.finalBitrateLabel}
+                    finalResolutionLabel={outputLabels.finalResolutionLabel}
+                    finalDurationLabel={outputLabels.finalDurationLabel}
+                    encodingTimeLabel={outputLabels.encodingTimeLabel}
                     downloadDisabled={!downloadVisible}
                     on:metadata={handleCompressedMetadata}
                     on:download={handleDownload}
@@ -1127,8 +1127,8 @@
                 {outputSizeDetails}
                 {outputSizeSliderValue}
                 {outputSizeSliderDisabled}
-                sliderMax={sliderMaxRounded}
-                sliderStep={sliderStepValue}
+                sliderMax={sliderConfig.sliderMaxRounded}
+                sliderStep={sliderConfig.sliderStepValue}
                 codecSelectValue={codecSelectValue}
                 codecHelperText={codecHelperText}
                 uploadBtnDisabled={uploadBtnDisabled}

@@ -25,6 +25,7 @@
     let lastVideoUpdateTime: number = 0;
     let animationFrameId: number | null = null;
     let videoSeekTimeout: ReturnType<typeof setTimeout> | null = null;
+    let timeUpdateRafId: number | null = null;
     const VIDEO_UPDATE_INTERVAL_MS = 100; // Reduced to 100ms for better responsiveness
     
     // Visual scrubber position for smooth updates
@@ -122,6 +123,10 @@
         if (animationFrameId) {
             cancelAnimationFrame(animationFrameId);
             animationFrameId = null;
+        }
+        if (timeUpdateRafId) {
+            cancelAnimationFrame(timeUpdateRafId);
+            timeUpdateRafId = null;
         }
         if (videoSeekTimeout) {
             clearTimeout(videoSeekTimeout);
@@ -272,11 +277,19 @@
 
     function handleTimeUpdate() {
         if (!videoElement) return;
-        // Update currentTime from video, but keep visualScrubTime in sync during drag
-        currentTime = videoElement.currentTime;
-        if (isDragging) {
-            visualScrubTime = currentTime;
-        }
+        
+        // Throttle updates using requestAnimationFrame to avoid excessive re-renders
+        if (timeUpdateRafId) return;
+        
+        timeUpdateRafId = requestAnimationFrame(() => {
+            if (videoElement) {
+                currentTime = videoElement.currentTime;
+                if (isDragging) {
+                    visualScrubTime = currentTime;
+                }
+            }
+            timeUpdateRafId = null;
+        });
     }
 
     function handlePlayPause() {
@@ -843,6 +856,8 @@
         cursor: pointer;
         overflow: hidden;
         user-select: none;
+        /* Layout containment for isolated repaints during scrubbing */
+        contain: layout style;
     }
 
     .timeline-container.dragging {
@@ -857,6 +872,9 @@
         background: #fafafa;
         pointer-events: none;
         z-index: 10;
+        /* GPU-accelerated positioning for smooth scrubbing */
+        will-change: left;
+        transform: translateZ(0);
     }
 
     .timeline-segment {

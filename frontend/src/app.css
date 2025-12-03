@@ -58,6 +58,8 @@ body {
     display: flex;
     align-items: center;
     gap: 12px;
+    /* Layout containment - header size is independent of content */
+    contain: layout style;
 }
 
 .app-header h1 {
@@ -187,6 +189,8 @@ body {
     flex-shrink: 0;
     order: 2;
     box-shadow: -4px 0 24px rgba(0, 0, 0, 0.3);
+    /* Containment - sidebar changes don't affect main content layout */
+    contain: layout style;
 }
 
 @media (min-width: 769px) {
@@ -249,6 +253,8 @@ body {
     align-items: center;
     justify-content: center;
     order: 1;
+    /* Containment - main content changes don't affect sidebar */
+    contain: layout style;
 }
 
 @media (min-width: 769px) {
@@ -815,12 +821,16 @@ select::-ms-expand {
     width: 0%;
     transition: width 0.3s ease;
     border-radius: 2px;
+    /* GPU acceleration hint for width transitions */
+    will-change: width;
 }
 
 .progress-fill.compressing {
     background: linear-gradient(90deg, var(--text) 0%, var(--text-dim) 50%, var(--text) 100%);
     background-size: 200% 100%;
     animation: pulse 2s ease-in-out infinite;
+    /* GPU acceleration for animation */
+    will-change: background-position;
 }
 
 .progress-text {
@@ -886,6 +896,8 @@ select::-ms-expand {
     height: 100%;
     background: linear-gradient(90deg, #fafafa 0%, #c4b5fd 50%, #fafafa 100%);
     background-size: 200% 100%;
+    /* GPU acceleration for animation */
+    will-change: width, background-position;
     animation: pulse 2.2s ease-in-out infinite;
     transition: width 0.3s ease;
 }
@@ -959,6 +971,8 @@ select::-ms-expand {
     width: 100%;
     border-radius: 4px;
     overflow: hidden;
+    /* Avoid size containment so height follows video content */
+    contain: layout paint style;
     border: 1px solid var(--border);
     background-color: var(--bg-dark);
     margin-bottom: 16px;
