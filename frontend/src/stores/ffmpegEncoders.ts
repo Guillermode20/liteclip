@@ -1,50 +1,57 @@
 import { writable } from 'svelte/store';
-import type { EncoderInfo } from '../types';
-import { getFfmpegEncoders } from '../services/api';
 
-interface EncodersStoreState {
-    encoders: EncoderInfo[];
-    loading: boolean;
-    error: string | null;
-    lastUpdated: number | null;
+interface Encoder {
+    name: string;
+    type: 'video' | 'audio';
+    isHardware: boolean;
+    codec: string;
 }
 
-const TTL_MS = 5 * 60 * 1000; // 5 minutes
+interface FfmpegEncodersState {
+    encoders: Encoder[];
+    loading: boolean;
+    error: string | null;
+}
 
-function createEncodersStore() {
-    const { subscribe, set, update } = writable<EncodersStoreState>({
+function createFfmpegEncodersStore() {
+    const { subscribe, set, update } = writable<FfmpegEncodersState>({
         encoders: [],
         loading: false,
-        error: null,
-        lastUpdated: null
+        error: null
     });
 
-    async function load(force = false, verify = false) {
-        let shouldLoad = force;
-        update(state => {
-            if (state.lastUpdated === null) shouldLoad = true;
-            if (!force && state.lastUpdated) {
-                const age = Date.now() - state.lastUpdated;
-                if (age > TTL_MS) shouldLoad = true;
-            }
-            return { ...state, loading: shouldLoad };
-        });
-
-        if (!shouldLoad) return;
-
+    async function fetchEncoders(forceRefresh = false) {
+        update(state => ({ ...state, loading: true, error: null }));
+        
         try {
-            const enc = await getFfmpegEncoders(verify);
-            set({ encoders: enc, loading: false, error: null, lastUpdated: Date.now() });
-        } catch (err) {
-            set({ encoders: [], loading: false, error: (err as Error).message || 'Failed to load encoders', lastUpdated: Date.now() });
+            const url = forceRefresh ? '/api/encoders?refresh=true' : '/api/encoders';
+            const response = await fetch(url);
+            if (!response.ok) {
+                throw new Error(`Failed to load encoders: ${response.status}`);
+            }
+            const data = await response.json();
+            set({
+                encoders: data.encoders || [],
+                loading: false,
+                error: null
+            });
+        } catch (error) {
+            set({
+                encoders: [],
+                loading: false,
+                error: (error as Error).message
+            });
         }
     }
 
-    function refresh(verify = false) {
-        return load(true, verify);
-    }
-
-    return { subscribe, load, refresh };
+    return {
+        subscribe,
+        load: () => fetchEncoders(false),
+        refresh: (forceRefresh = false) => fetchEncoders(forceRefresh),
+        reset: () => {
+            set({ encoders: [], loading: false, error: null });
+        }
+    };
 }
 
-export const ffmpegEncodersStore = createEncodersStore();
+export const ffmpegEncodersStore = createFfmpegEncodersStore();

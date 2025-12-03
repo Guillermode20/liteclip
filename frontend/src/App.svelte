@@ -1,5 +1,7 @@
 <script lang="ts">
     import { onDestroy, onMount } from 'svelte';
+    
+    // Components
     import UploadArea from './components/UploadArea.svelte';
     import ProgressCard from './components/ProgressCard.svelte';
     import StatusCard from './components/StatusCard.svelte';
@@ -8,7 +10,15 @@
     import Header from './components/Header.svelte';
     import SettingsModal from './components/SettingsModal.svelte';
     import FfmpegOverlay from './components/FfmpegOverlay.svelte';
+    
+    // Utils & Constants
     import { codecDetails, createDefaultOutputMetadata, FALLBACK_SETTINGS } from './lib/constants';
+    import { formatFileSize, formatDurationLabel, formatTimeRemaining } from './utils/format';
+    import { calculateOptimalResolution, getEffectiveDuration, getEffectiveMaxSize } from './utils/video';
+    import { getForcedScalePercent } from './utils/resolution';
+    import { getSettings, saveSettings, uploadVideo, getJobStatus, cancelJob, retryJob, getAppVersion } from './services/api';
+    
+    // Types
     import type {
         CodecKey,
         CompressionStatusResponse,
@@ -17,148 +27,103 @@
         StatusMessageType,
         UpdateInfoPayload,
         UserSettingsPayload,
-        VideoSegment,
-        FfmpegStatusResponse
+        VideoSegment
     } from './types';
-    import { formatFileSize, formatDurationLabel, formatTimeRemaining } from './utils/format';
-    import { calculateOptimalResolution, getEffectiveDuration, getEffectiveMaxSize } from './utils/video';
-    import {
-        getSettings,
-        saveSettings,
-        uploadVideo,
-        getJobStatus,
-        cancelJob,
-        retryJob,
-        getAppVersion
-    } from './services/api';
 
+    // ============================================================================
+    // State: File & Video Source
+    // ============================================================================
     let selectedFile: File | null = null;
-    let jobId: string | null = null;
-    let statusCheckInterval: number | null = null;
-    let downloadFileName: string | null = null;
-    let downloadMimeType: string | null = null;
-    let objectUrl: string | null = null;
     let sourceVideoWidth: number | null = null;
     let sourceVideoHeight: number | null = null;
     let sourceDuration: number | null = null;
     let originalSizeMb: number | null = null;
-    
-    // Memory management and abort controllers
+    let videoSegments: VideoSegment[] = [];
+
+    // ============================================================================
+    // State: Job & Processing
+    // ============================================================================
+    let jobId: string | null = null;
+    let fileSequenceId: number = 0;
+    let statusCheckInterval: number | null = null;
     let uploadAbortController: AbortController | null = null;
     let previewAbortController: AbortController | null = null;
-    let fileSequenceId: number = 0;
+    let isCompressing = false;
+    let progressPercent = 0;
+    let showCancelButton = false;
+    let canRetry = false;
+    let retrying = false;
+    let compressionSkipped = false;
 
-    let fileInfo = '';
+    // ============================================================================
+    // State: UI Visibility
+    // ============================================================================
+    let controlsVisible = false;
     let metadataVisible = false;
     let metadataContent = '';
-    let controlsVisible = false;
     let statusVisible = false;
+    let progressVisible = false;
+    let videoPreviewVisible = false;
+    let downloadVisible = false;
+    let showVideoEditor = false;
+
+    // ============================================================================
+    // State: Status & Messages
+    // ============================================================================
     let statusMessage = '';
     let statusType: StatusMessageType = 'processing';
-    let progressVisible = false;
-    let progressPercent = 0;
-    let isCompressing = false;
-    let downloadVisible = false;
-    let videoPreviewVisible = false;
+    let fileInfo = '';
+
+    // ============================================================================
+    // State: Output & Download
+    // ============================================================================
+    let objectUrl: string | null = null;
     let videoPreviewUrl: string | null = null;
-    let uploadBtnDisabled = true;
-    let uploadBtnText = 'Process Video';
+    let downloadFileName: string | null = null;
+    let downloadMimeType: string | null = null;
+    let outputMetadata: OutputMetadata = createDefaultOutputMetadata();
+
+    // ============================================================================
+    // State: Compression Settings
+    // ============================================================================
+    let outputSizeSliderValue = 100;
     let outputSizeSliderDisabled = true;
     let outputSizeValue = '--';
     let outputSizeDetails = '';
-    let outputSizeSliderValue = 100;
     let codecSelectValue: CodecKey = 'quality';
     let codecHelperText = codecDetails.quality.helper;
-    let showCancelButton = false;
-    let compressionSkipped = false;
-    type VideoEditorComponentCtor = typeof import('./VideoEditor.svelte').default;
-    let VideoEditorComponent: VideoEditorComponentCtor | null = null;
-    let videoEditorModulePromise: Promise<void> | null = null;
-    let showVideoEditor = false;
-    let videoSegments: VideoSegment[] = [];
     let muteAudio = false;
     let resolutionPreset: ResolutionPreset = 'auto';
-    let canRetry = false;
-    let retrying = false;
-    let updateInfo: UpdateInfoPayload | null = null;
-    let showUpdateBanner = false;
-    let appVersion: string | null = null;
+    let uploadBtnDisabled = true;
+    let uploadBtnText = 'Process Video';
+
+    // ============================================================================
+    // State: User Settings & Updates
+    // ============================================================================
     let userSettings: UserSettingsPayload | null = null;
     let defaultTargetMb = 25;
     let showSettingsModal = false;
     let autoUpdateEnabled = true;
     let hasCheckedUpdates = false;
+    let updateInfo: UpdateInfoPayload | null = null;
+    let showUpdateBanner = false;
+    let appVersion: string | null = null;
 
+    // ============================================================================
+    // State: Video Editor (lazy loaded)
+    // ============================================================================
+    type VideoEditorComponentCtor = typeof import('./VideoEditor.svelte').default;
+    let VideoEditorComponent: VideoEditorComponentCtor | null = null;
+    let videoEditorModulePromise: Promise<void> | null = null;
 
+    // ============================================================================
+    // Constants
+    // ============================================================================
+    const STATUS_POLL_INTERVAL_MS = 500;
 
-    let outputMetadata: OutputMetadata = createDefaultOutputMetadata();
-
-    onDestroy(() => {
-        if (statusCheckInterval) {
-            clearInterval(statusCheckInterval);
-        }
-        cleanupVideoUrls();
-    });
-
-    async function fetchAppVersion() {
-        try {
-            const payload = await getAppVersion();
-            if (payload?.version) {
-                appVersion = payload.version;
-                if (updateInfo === null) {
-                    updateInfo = {
-                        currentVersion: payload.version,
-                        latestVersion: payload.version,
-                        updateAvailable: false,
-                        downloadUrl: null,
-                        checkedAt: undefined,
-                        releaseNotes: null
-                    };
-                } else {
-                    updateInfo = { ...updateInfo, currentVersion: payload.version };
-                }
-            }
-        } catch (error) {
-            console.warn('Failed to fetch app version', error);
-        }
-    }
-
-    onMount(() => {
-        loadUserSettings();
-        scheduleVideoEditorPrefetch();
-        fetchAppVersion();
-    });
-
-    function scheduleVideoEditorPrefetch() {
-        if (typeof window === 'undefined') {
-            return;
-        }
-        const idle = (window as any).requestIdleCallback;
-        if (typeof idle === 'function') {
-            idle(() => prefetchVideoEditor());
-        } else {
-            window.setTimeout(prefetchVideoEditor, 300);
-        }
-    }
-
-    function prefetchVideoEditor(): Promise<void> | null {
-        if (videoEditorModulePromise) {
-            return videoEditorModulePromise;
-        }
-
-        videoEditorModulePromise = import('./VideoEditor.svelte')
-            .then((module) => {
-                VideoEditorComponent = module.default;
-            })
-            .catch((error) => {
-                console.warn('VideoEditor preload failed', error);
-                videoEditorModulePromise = null;
-            });
-
-        return videoEditorModulePromise;
-    }
-
-    // Consolidated reactive derived values for slider - single derivation reduces re-render cascades
+    // ============================================================================
+    // Derived Values
+    // ============================================================================
     $: sliderConfig = (() => {
         const effectiveMax = getEffectiveMaxSize(originalSizeMb, sourceDuration, videoSegments) || (originalSizeMb || 0);
         return {
@@ -168,43 +133,128 @@
         };
     })();
 
-    /** Cleans up all video-related object URLs to prevent memory leaks */
-    function cleanupVideoUrls() {
-        if (objectUrl) {
-            URL.revokeObjectURL(objectUrl);
-            objectUrl = null;
-        }
-        if (videoPreviewUrl) {
-            URL.revokeObjectURL(videoPreviewUrl);
-            videoPreviewUrl = null;
-        }
-    }
-    
-    /** Cancels all pending async operations to prevent race conditions */
-    function cancelPendingOperations() {
-        if (uploadAbortController) {
-            uploadAbortController.abort();
-            uploadAbortController = null;
-        }
-        if (previewAbortController) {
-            previewAbortController.abort();
-            previewAbortController = null;
+    $: outputLabels = (() => {
+        const resPct = sourceVideoWidth && sourceVideoHeight && outputMetadata.finalWidth > 0
+            ? Math.round((outputMetadata.finalWidth / sourceVideoWidth) * 100)
+            : null;
+        
+        return {
+            finalBitrateLabel: outputMetadata.videoBitrateKbps > 0 
+                ? `${Math.round(outputMetadata.videoBitrateKbps)} kbps` : '--',
+            finalDurationLabel: formatDurationLabel(outputMetadata.finalDuration),
+            finalResolutionLabel: outputMetadata.finalWidth > 0 && outputMetadata.finalHeight > 0
+                ? `${outputMetadata.finalWidth}×${outputMetadata.finalHeight}${resPct ? ` (${resPct}%)` : ''}`
+                : '--',
+            encodingTimeLabel: outputMetadata.encodingTime > 0 
+                ? formatTimeRemaining(outputMetadata.encodingTime) : '--'
+        };
+    })();
+
+    // ============================================================================
+    // Lifecycle
+    // ============================================================================
+    onMount(() => {
+        loadUserSettings();
+        scheduleVideoEditorPrefetch();
+        fetchAppVersion();
+    });
+
+    onDestroy(() => {
+        stopStatusPolling();
+        cleanupVideoUrls();
+    });
+
+    // ============================================================================
+    // Video Editor Prefetching
+    // ============================================================================
+    function scheduleVideoEditorPrefetch() {
+        if (typeof window === 'undefined') return;
+        const idle = (window as any).requestIdleCallback;
+        if (typeof idle === 'function') {
+            idle(() => prefetchVideoEditor());
+        } else {
+            window.setTimeout(prefetchVideoEditor, 300);
         }
     }
 
-    /** Cancels any active job and cleans up its resources */
+    function prefetchVideoEditor(): Promise<void> | null {
+        if (videoEditorModulePromise) return videoEditorModulePromise;
+
+        videoEditorModulePromise = import('./VideoEditor.svelte')
+            .then((module) => { VideoEditorComponent = module.default; })
+            .catch((error) => {
+                console.warn('VideoEditor preload failed', error);
+                videoEditorModulePromise = null;
+            });
+
+        return videoEditorModulePromise;
+    }
+
+    // ============================================================================
+    // URL & Resource Cleanup
+    // ============================================================================
+    function cleanupVideoUrls() {
+        if (objectUrl) { URL.revokeObjectURL(objectUrl); objectUrl = null; }
+        if (videoPreviewUrl) { URL.revokeObjectURL(videoPreviewUrl); videoPreviewUrl = null; }
+    }
+    
+    function cancelPendingOperations() {
+        if (uploadAbortController) { uploadAbortController.abort(); uploadAbortController = null; }
+        if (previewAbortController) { previewAbortController.abort(); previewAbortController = null; }
+    }
+
+    // ============================================================================
+    // Status Polling
+    // ============================================================================
+    function stopStatusPolling() {
+        if (statusCheckInterval) { clearInterval(statusCheckInterval); statusCheckInterval = null; }
+    }
+
+    function startStatusPolling(sequenceId: number) {
+        if (typeof window === 'undefined') return;
+        stopStatusPolling();
+        statusCheckInterval = window.setInterval(() => checkStatus(sequenceId), STATUS_POLL_INTERVAL_MS);
+    }
+
+    function isStaleSequence(sequenceId: number): boolean {
+        return sequenceId !== fileSequenceId;
+    }
+
+    // ============================================================================
+    // Helper Functions
+    // ============================================================================
+    function getSafeEffectiveMaxSize(): number {
+        const effectiveMax = getEffectiveMaxSize(originalSizeMb, sourceDuration, videoSegments);
+        return effectiveMax && effectiveMax > 0 ? effectiveMax : originalSizeMb || 0;
+    }
+
+    function clampTargetSize(value: number): number {
+        const maxSize = getSafeEffectiveMaxSize();
+        return (!maxSize || maxSize <= 0) ? value : Math.min(value, maxSize);
+    }
+
+    function getLocalForcedScalePercent(): number | null {
+        return getForcedScalePercent(sourceVideoHeight, resolutionPreset);
+    }
+
+    function showStatus(message: string, type: StatusMessageType) {
+        statusMessage = message;
+        statusType = type;
+        statusVisible = true;
+    }
+
+    function updateCodecHelper() {
+        codecHelperText = codecDetails[codecSelectValue]?.helper ?? '';
+    }
+
+    // ============================================================================
+    // Job Management
+    // ============================================================================
     async function cancelActiveJob() {
         if (jobId && isCompressing) {
-            try {
-                await cancelJob(jobId);
-            } catch (e) {
-                // Ignore cancel errors for cleanup
-            }
+            try { await cancelJob(jobId); } catch (e) { /* ignore */ }
         }
-        if (statusCheckInterval) {
-            clearInterval(statusCheckInterval);
-            statusCheckInterval = null;
-        }
+        stopStatusPolling();
         cancelPendingOperations();
         jobId = null;
         isCompressing = false;
@@ -213,525 +263,9 @@
         progressPercent = 0;
     }
 
-    async function handleFileSelect(file: File) {
-        if (!file.type.startsWith('video/')) {
-            alert('Please select a video file');
-            return;
-        }
-
-        // Increment sequence ID to track this file operation
-        const currentSequenceId = ++fileSequenceId;
-
-        // Cancel any existing job and clean up before accepting new file
-        await cancelActiveJob();
-        cleanupVideoUrls();
-
-        // Reset output-related state
-        videoPreviewVisible = false;
-        downloadVisible = false;
-        downloadFileName = null;
-        downloadMimeType = null;
-        outputMetadata = createDefaultOutputMetadata();
-        compressionSkipped = false;
-        canRetry = false;
-        statusVisible = false;
-
-        videoSegments = [];
-        selectedFile = file;
-        originalSizeMb = file.size / (1024 * 1024);
-        fileInfo = `Selected: ${file.name} (${formatFileSize(file.size)})`;
-        uploadBtnDisabled = false;
-        uploadBtnText = 'Process Video';
-        controlsVisible = true;
-        metadataVisible = false;
-        showVideoEditor = true;
-        prefetchVideoEditor();
-
-        outputSizeSliderDisabled = true;
-        outputSizeValue = '--';
-        outputSizeDetails = 'Reading video metadata...';
-
-        updateCodecHelper();
-        
-        // Early return if a newer file has been selected during this operation
-        if (currentSequenceId !== fileSequenceId) {
-            console.log('File selection superseded by newer operation');
-            return;
-        }
-    }
-
-    function handleSourceMetadataLoaded(payload: { width: number; height: number; duration: number }) {
-        if (!selectedFile) {
-            return;
-        }
-
-        sourceVideoWidth = payload.width || null;
-        sourceVideoHeight = payload.height || null;
-        const duration = Number.isFinite(payload.duration) ? payload.duration : null;
-        sourceDuration = duration;
-        const kbps = duration ? Math.round((selectedFile.size * 8) / duration / 1000) : null;
-        const dimsText =
-                sourceVideoWidth && sourceVideoHeight
-                    ? `${sourceVideoWidth}×${sourceVideoHeight}`
-                    : 'Unknown';
-        const durationText = duration ? `${duration.toFixed(2)}s` : 'Unknown';
-        const bitrateText = kbps ? `${kbps} kbps (approx)` : 'Unknown';
-        metadataContent = `
-            <div><strong>file_size</strong>: ${formatFileSize(selectedFile.size)}</div>
-            <div><strong>type</strong>: ${selectedFile.type || 'unknown'}</div>
-            <div><strong>duration</strong>: ${durationText}</div>
-            <div><strong>resolution</strong>: ${dimsText}</div>
-            <div><strong>bitrate</strong>: ${bitrateText}</div>
-        `;
-        metadataVisible = true;
-
-        const safeOriginalMb = originalSizeMb || 0;
-        const initialMb = Math.min(safeOriginalMb, defaultTargetMb);
-        outputSizeSliderValue = initialMb > 0 ? initialMb : defaultTargetMb;
-        outputSizeSliderDisabled = false;
-        updateOutputSizeDisplay();
-    }
-
-    function updateCodecHelper() {
-        codecHelperText = codecDetails[codecSelectValue]?.helper ?? '';
-    }
-
-    function handleSegmentsChange(segments: VideoSegment[]) {
-        videoSegments = segments;
-        updateOutputSizeDisplay();
-    }
-
-    function handleSliderChange(value: number) {
-        if (outputSizeSliderDisabled) return;
-        const effectiveMax = getEffectiveMaxSize(originalSizeMb, sourceDuration, videoSegments) || (originalSizeMb || 0);
-        if (effectiveMax && value > effectiveMax) {
-            outputSizeSliderValue = effectiveMax;
-        } else {
-            outputSizeSliderValue = value;
-        }
-        updateOutputSizeDisplay();
-    }
-
-    function handleCodecChange(value: string) {
-        codecSelectValue = value as CodecKey;
-        updateCodecHelper();
-        updateOutputSizeDisplay();
-    }
-
-    function handleResolutionChange(value: string) {
-        resolutionPreset = value as ResolutionPreset;
-        updateOutputSizeDisplay();
-    }
-
-    function handleMuteToggle(value: boolean) {
-        muteAudio = value;
-    }
-
-    function parseResolutionHeight(preset: ResolutionPreset): number | null {
-        switch (preset) {
-            case '1080p':
-                return 1080;
-            case '720p':
-                return 720;
-            case '480p':
-                return 480;
-            case '360p':
-                return 360;
-            default:
-                return null;
-        }
-    }
-
-    function getForcedScalePercent(): number | null {
-        if (!sourceVideoHeight || resolutionPreset === 'auto') {
-            return null;
-        }
-
-        if (resolutionPreset === 'source') {
-            return 100;
-        }
-
-        const targetHeight = parseResolutionHeight(resolutionPreset);
-        if (!targetHeight || targetHeight <= 0) {
-            return null;
-        }
-
-        if (sourceVideoHeight <= targetHeight) {
-            return 100;
-        }
-
-        const percent = Math.round((targetHeight / sourceVideoHeight) * 100);
-        return Math.max(10, Math.min(100, percent));
-    }
-
-    function clampPercentValue(value: number | null | undefined) {
-        if (typeof value !== 'number' || !Number.isFinite(value)) {
-            return 100;
-        }
-        return Math.min(100, Math.max(1, value));
-    }
-
-    async function loadUserSettings() {
-        let fetched: UserSettingsPayload | null = null;
-        try {
-            fetched = await getSettings();
-        } catch (error) {
-            console.warn('Settings fetch failed', error);
-        } finally {
-            userSettings = fetched ?? { ...FALLBACK_SETTINGS };
-            applyUserSettings(userSettings);
-        }
-    }
-
-
-
-    // logo error handling moved to Header component
-
-    function applyUserSettings(settings: UserSettingsPayload | null) {
-        const effective = settings ?? FALLBACK_SETTINGS;
-        codecSelectValue = effective.defaultCodec;
-        updateCodecHelper();
-        resolutionPreset = effective.defaultResolution;
-        muteAudio = effective.defaultMuteAudio;
-        defaultTargetMb = effective.defaultTargetSizeMb;
-        autoUpdateEnabled = effective.checkForUpdatesOnLaunch;
-
-        // Apply app scale
-        const scale = effective.appScale ?? 1.0;
-        document.documentElement.style.setProperty('--app-scale', String(scale));
-        document.documentElement.style.fontSize = `${16 * scale}px`;
-
-        if (!selectedFile) {
-            outputSizeSliderValue = defaultTargetMb;
-        }
-
-        if (autoUpdateEnabled && !hasCheckedUpdates) {
-            checkForUpdates();
-        }
-
-        if (!autoUpdateEnabled) {
-            showUpdateBanner = false;
-        }
-    }
-
-    async function handleSettingsSave(event: CustomEvent<UserSettingsPayload>) {
-        const payload = event.detail;
-        try {
-            const saved = await saveSettings(payload);
-            userSettings = saved;
-            applyUserSettings(saved);
-            showSettingsModal = false;
-            showStatus('Settings saved', 'success');
-            setTimeout(() => {
-                statusVisible = false;
-            }, 2000);
-        } catch (error) {
-            console.error('Save settings failed:', error);
-            showStatus('Failed to save settings: ' + (error as Error).message, 'error');
-        }
-    }
-
-    function handlePresetClick(targetPercent: string) {
-        if (outputSizeSliderDisabled) return;
-        const effectiveMax = getEffectiveMaxSize(originalSizeMb, sourceDuration, videoSegments) || (originalSizeMb || 0);
-        if (!effectiveMax || effectiveMax <= 0) return;
-        const percent = parseFloat(targetPercent);
-        outputSizeSliderValue = (effectiveMax * percent) / 100;
-        updateOutputSizeDisplay();
-    }
-
-    function updateOutputSizeDisplay() {
-        if (!originalSizeMb || !Number.isFinite(originalSizeMb)) {
-            outputSizeValue = '--';
-            outputSizeDetails = '';
-            return;
-        }
-
-        let targetSizeMb = parseFloat(outputSizeSliderValue.toString());
-        const effectiveMaxSize = getEffectiveMaxSize(originalSizeMb, sourceDuration, videoSegments);
-        
-        // Respect effective max size computed from edited segments - clamp user value
-        if (effectiveMaxSize > 0 && targetSizeMb > effectiveMaxSize) {
-            targetSizeMb = effectiveMaxSize;
-            outputSizeSliderValue = effectiveMaxSize;
-        }
-        
-        const displayValue = targetSizeMb >= 10 ? targetSizeMb.toFixed(0) : targetSizeMb.toFixed(1);
-        outputSizeValue = `${displayValue} MB`;
-
-        if (videoSegments.length > 0 && effectiveMaxSize !== originalSizeMb) {
-            // Round to nearest whole megabyte for display
-            outputSizeValue += ` (max: ${Math.round(effectiveMaxSize)} MB)`;
-        }
-
-        if (!sourceDuration || !sourceVideoWidth || !sourceVideoHeight) {
-            outputSizeDetails = 'Waiting for video metadata...';
-            return;
-        }
-
-        const effectiveDuration = getEffectiveDuration(videoSegments, sourceDuration) ?? sourceDuration;
-
-        if (targetSizeMb >= effectiveMaxSize) {
-            outputSizeDetails =
-                videoSegments.length > 0 && effectiveDuration !== sourceDuration
-                    ? 'Will cut video segments only (no compression)'
-                    : 'No compression (original quality preserved)';
-            return;
-        }
-
-        const targetBitsTotal = targetSizeMb * 1024 * 1024 * 8 * 0.9;
-        const targetBitrateKbps = targetBitsTotal / effectiveDuration / 1000;
-        const forcedScale = getForcedScalePercent();
-        const recommendedScale = forcedScale ?? calculateOptimalResolution(
-            targetSizeMb,
-            effectiveDuration,
-            sourceVideoWidth,
-            sourceVideoHeight
-        );
-        const appliedScale = Math.max(10, Math.min(100, recommendedScale));
-        const targetW = Math.floor(((sourceVideoWidth * appliedScale) / 100) / 2) * 2;
-        const targetH = Math.floor(((sourceVideoHeight * appliedScale) / 100) / 2) * 2;
-
-        let details = `Target bitrate: ~${Math.round(targetBitrateKbps)} kbps`;
-
-        if (appliedScale < 100) {
-            details += ` · Resolution: ${targetW}×${targetH} (${appliedScale}%)`;
-        } else {
-            details += ` · Resolution: ${sourceVideoWidth}×${sourceVideoHeight} (original)`;
-        }
-
-        if (videoSegments.length > 0 && effectiveDuration !== sourceDuration) {
-            details += ` · Duration: ${effectiveDuration.toFixed(1)}s (edited)`;
-        }
-
-        outputSizeDetails = details;
-    }
-
-    async function handleUpload(event: MouseEvent) {
-        event.stopPropagation();
-        if (!selectedFile || !sourceDuration || !sourceVideoWidth || !sourceVideoHeight) {
-            showStatus('Video metadata missing. Please re-select the file.', 'error');
-            return;
-        }
-
-        // Cancel any previous upload operations
-        if (uploadAbortController) {
-            uploadAbortController.abort();
-        }
-        uploadAbortController = new AbortController();
-        const currentSequenceId = fileSequenceId;
-
-        uploadBtnDisabled = true;
-        uploadBtnText = 'Uploading...';
-        progressVisible = true;
-        progressPercent = 10;
-        canRetry = false;
-
-        const formData = new FormData();
-        formData.append('file', selectedFile);
-        formData.append('codec', codecSelectValue);
-
-        const targetSizeMb = parseFloat(outputSizeSliderValue.toString());
-        const forcedScalePercent = getForcedScalePercent();
-        const shouldForceResolution = forcedScalePercent !== null;
-        const effectiveMaxSize = getEffectiveMaxSize(originalSizeMb, sourceDuration, videoSegments);
-        
-        formData.append('targetSizeMb', targetSizeMb.toFixed(2));
-        const shouldSkipCompression = targetSizeMb >= effectiveMaxSize && !shouldForceResolution && !muteAudio;
-        formData.append('skipCompression', shouldSkipCompression ? 'true' : 'false');
-        formData.append('qualityMode', codecSelectValue === 'quality' ? 'true' : 'false');
-        formData.append('muteAudio', muteAudio ? 'true' : 'false');
-
-        const effectiveDuration = getEffectiveDuration(videoSegments, sourceDuration) ?? sourceDuration;
-
-        if (shouldForceResolution && forcedScalePercent !== null) {
-            formData.append('scalePercent', forcedScalePercent.toString());
-        } else if (targetSizeMb < effectiveMaxSize) {
-            const calculatedScalePercent = calculateOptimalResolution(
-                targetSizeMb,
-                effectiveDuration,
-                sourceVideoWidth,
-                sourceVideoHeight
-            );
-
-            if (Number.isFinite(calculatedScalePercent)) {
-                formData.append('scalePercent', calculatedScalePercent.toString());
-            }
-        } else {
-            formData.append('scalePercent', '100');
-        }
-
-        formData.append('sourceDuration', sourceDuration.toFixed(3));
-        formData.append('sourceWidth', sourceVideoWidth.toString());
-        formData.append('sourceHeight', sourceVideoHeight.toString());
-        formData.append('originalSizeBytes', selectedFile.size.toString());
-
-        if (videoSegments.length > 0) {
-            formData.append('segments', JSON.stringify(videoSegments));
-        }
-
-        try {
-            const result = await uploadVideo(formData, uploadAbortController.signal);
-            
-            // Check if this operation is still valid
-            if (currentSequenceId !== fileSequenceId) {
-                console.log('Upload completed but superseded by newer file selection');
-                return;
-            }
-            
-            jobId = result.jobId;
-
-            progressPercent = 100;
-            isCompressing = true;
-            showStatus('Video uploaded successfully. Processing...', 'processing');
-
-            statusCheckInterval = window.setInterval(() => checkStatus(currentSequenceId), 2000);
-        } catch (error) {
-            // Don't show error if operation was aborted due to new file selection
-            if (error instanceof Error && error.name === 'AbortError') {
-                console.log('Upload aborted due to new file selection');
-                return;
-            }
-            
-            console.error('Upload failed:', error);
-            let errorMessage = (error as Error).message;
-
-            if (errorMessage.includes('NetworkError') || errorMessage.includes('Failed to fetch')) {
-                errorMessage =
-                    'Network error: File may be too large or server is unreachable. Please try a smaller file or check your connection.';
-            } else if (errorMessage.includes('413')) {
-                errorMessage = 'File is too large. The server cannot accept files this big.';
-            }
-
-            showStatus('Upload failed: ' + errorMessage, 'error');
-            uploadBtnDisabled = false;
-            uploadBtnText = 'Process Video';
-            progressVisible = false;
-        } finally {
-            uploadAbortController = null;
-        }
-    }
-
-    async function checkStatus(sequenceId: number = fileSequenceId) {
-        if (!jobId || sequenceId !== fileSequenceId) {
-            // This status check is for an outdated operation
-            if (statusCheckInterval) {
-                clearInterval(statusCheckInterval);
-                statusCheckInterval = null;
-            }
-            return;
-        }
-        
-        try {
-            const result = await getJobStatus(jobId);
-            
-            // Double-check sequence ID after async operation
-            if (sequenceId !== fileSequenceId) {
-                return;
-            }
-            
-                if (result.status === 'queued') {
-                    showCancelButton = true;
-                    canRetry = false;
-                    const queueMsg =
-                        result.queuePosition && result.queuePosition > 0
-                            ? `Queued for processing (position ${result.queuePosition})...`
-                            : 'Queued for processing...';
-                    showStatus(queueMsg, 'processing');
-                } else if (result.status === 'processing') {
-                    showCancelButton = true;
-                    canRetry = false;
-                    const progressPercentValue = Math.max(10, Math.min(95, result.progress || 0));
-                    progressPercent = progressPercentValue;
-
-                    if (result.estimatedSecondsRemaining && result.estimatedSecondsRemaining > 0) {
-                        showStatus(
-                            `Processing video... ${progressPercentValue.toFixed(1)}% (ETA: ${formatTimeRemaining(
-                                result.estimatedSecondsRemaining
-                            )})`,
-                            'processing'
-                        );
-                    } else {
-                        showStatus(`Processing video... ${progressPercentValue.toFixed(1)}%`, 'processing');
-                    }
-
-                    outputMetadata = {
-                        ...outputMetadata,
-                        codec: result.codec || outputMetadata.codec,
-                        encoderName: result.encoderName ?? outputMetadata.encoderName,
-                        encoderIsHardware:
-                            result.encoderIsHardware ?? outputMetadata.encoderIsHardware
-                    };
-                } else if (result.status === 'completed') {
-                    if (statusCheckInterval) {
-                        clearInterval(statusCheckInterval);
-                        statusCheckInterval = null;
-                    }
-                    
-                    // Final sequence check before updating UI
-                    if (sequenceId !== fileSequenceId) {
-                        return;
-                    }
-                    
-                    progressPercent = 100;
-                    isCompressing = false;
-                    showCancelButton = false;
-                    downloadFileName = result.outputFilename || `compressed_${selectedFile?.name ?? jobId}`;
-                    downloadMimeType = result.outputMimeType || 'video/mp4';
-
-                    calculateOutputMetadata(result);
-                    await loadVideoPreview(sequenceId);
-
-                    showStatus('Processing complete! Preview and download your video.', 'success');
-                    videoPreviewVisible = true;
-                    downloadVisible = true;
-                    progressVisible = false;
-                    canRetry = false;
-                } else if (result.status === 'cancelled') {
-                    if (statusCheckInterval) {
-                        clearInterval(statusCheckInterval);
-                        statusCheckInterval = null;
-                    }
-                    isCompressing = false;
-                    showCancelButton = false;
-                    showStatus('Processing was cancelled.', 'error');
-                    uploadBtnDisabled = false;
-                    uploadBtnText = 'Process Video';
-                    progressVisible = false;
-                    canRetry = false;
-                } else if (result.status === 'failed') {
-                    if (statusCheckInterval) {
-                        clearInterval(statusCheckInterval);
-                        statusCheckInterval = null;
-                    }
-                    isCompressing = false;
-                    showCancelButton = false;
-                    showStatus('Processing failed: ' + (result.message || 'Unknown error'), 'error');
-                    uploadBtnDisabled = false;
-                    uploadBtnText = 'Process Video';
-                    progressVisible = false;
-                    canRetry = true;
-                }
-        } catch (error) {
-            console.error('Status check failed:', error);
-            if (statusCheckInterval) {
-                clearInterval(statusCheckInterval);
-                statusCheckInterval = null;
-            }
-            isCompressing = false;
-            showStatus('Failed to check status: ' + (error as Error).message, 'error');
-            uploadBtnDisabled = false;
-            uploadBtnText = 'Process Video';
-            progressVisible = false;
-        }
-    }
-
     async function handleCancelJob() {
         if (!jobId) return;
-
-        if (!confirm('Are you sure you want to cancel this compression job?')) {
-            return;
-        }
+        if (!confirm('Are you sure you want to cancel this compression job?')) return;
 
         try {
             await cancelJob(jobId);
@@ -755,11 +289,7 @@
 
         try {
             await retryJob(jobId);
-
-            if (statusCheckInterval) {
-                clearInterval(statusCheckInterval);
-            }
-            statusCheckInterval = window.setInterval(checkStatus, 2000);
+            startStatusPolling(fileSequenceId);
         } catch (error) {
             console.error('Retry failed:', error);
             canRetry = true;
@@ -772,18 +302,355 @@
         }
     }
 
+    // ============================================================================
+    // File Selection & Metadata
+    // ============================================================================
+    async function handleFileSelect(file: File) {
+        if (!file.type.startsWith('video/')) {
+            alert('Please select a video file');
+            return;
+        }
+
+        const currentSequenceId = ++fileSequenceId;
+        await cancelActiveJob();
+        cleanupVideoUrls();
+
+        // Reset state
+        videoPreviewVisible = false;
+        downloadVisible = false;
+        downloadFileName = null;
+        downloadMimeType = null;
+        outputMetadata = createDefaultOutputMetadata();
+        compressionSkipped = false;
+        canRetry = false;
+        statusVisible = false;
+        videoSegments = [];
+
+        // Set new file
+        selectedFile = file;
+        originalSizeMb = file.size / (1024 * 1024);
+        fileInfo = `Selected: ${file.name} (${formatFileSize(file.size)})`;
+        uploadBtnDisabled = false;
+        uploadBtnText = 'Process Video';
+        controlsVisible = true;
+        metadataVisible = false;
+        showVideoEditor = true;
+        prefetchVideoEditor();
+
+        outputSizeSliderDisabled = true;
+        outputSizeValue = '--';
+        outputSizeDetails = 'Reading video metadata...';
+        updateCodecHelper();
+        
+        if (currentSequenceId !== fileSequenceId) {
+            console.log('File selection superseded by newer operation');
+        }
+    }
+
+    function handleSourceMetadataLoaded(payload: { width: number; height: number; duration: number }) {
+        if (!selectedFile) return;
+
+        sourceVideoWidth = payload.width || null;
+        sourceVideoHeight = payload.height || null;
+        const duration = Number.isFinite(payload.duration) ? payload.duration : null;
+        sourceDuration = duration;
+        
+        const kbps = duration ? Math.round((selectedFile.size * 8) / duration / 1000) : null;
+        const dimsText = sourceVideoWidth && sourceVideoHeight ? `${sourceVideoWidth}×${sourceVideoHeight}` : 'Unknown';
+        const durationText = duration ? `${duration.toFixed(2)}s` : 'Unknown';
+        const bitrateText = kbps ? `${kbps} kbps (approx)` : 'Unknown';
+        
+        metadataContent = `
+            <div><strong>file_size</strong>: ${formatFileSize(selectedFile.size)}</div>
+            <div><strong>type</strong>: ${selectedFile.type || 'unknown'}</div>
+            <div><strong>duration</strong>: ${durationText}</div>
+            <div><strong>resolution</strong>: ${dimsText}</div>
+            <div><strong>bitrate</strong>: ${bitrateText}</div>
+        `;
+        metadataVisible = true;
+
+        const safeOriginalMb = originalSizeMb || 0;
+        const initialMb = Math.min(safeOriginalMb, defaultTargetMb);
+        outputSizeSliderValue = initialMb > 0 ? initialMb : defaultTargetMb;
+        outputSizeSliderDisabled = false;
+        updateOutputSizeDisplay();
+    }
+
+    // ============================================================================
+    // Settings Handlers
+    // ============================================================================
+    function handleSegmentsChange(segments: VideoSegment[]) {
+        videoSegments = segments;
+        updateOutputSizeDisplay();
+    }
+
+    function handleSliderChange(value: number) {
+        if (outputSizeSliderDisabled) return;
+        outputSizeSliderValue = clampTargetSize(value);
+        updateOutputSizeDisplay();
+    }
+
+    function handleCodecChange(value: string) {
+        codecSelectValue = value as CodecKey;
+        updateCodecHelper();
+        updateOutputSizeDisplay();
+    }
+
+    function handleResolutionChange(value: string) {
+        resolutionPreset = value as ResolutionPreset;
+        updateOutputSizeDisplay();
+    }
+
+    function handleMuteToggle(value: boolean) {
+        muteAudio = value;
+    }
+
+    function handlePresetClick(targetPercent: string) {
+        if (outputSizeSliderDisabled) return;
+        const maxSize = getSafeEffectiveMaxSize();
+        if (!maxSize || maxSize <= 0) return;
+        const percent = parseFloat(targetPercent);
+        outputSizeSliderValue = clampTargetSize((maxSize * percent) / 100);
+        updateOutputSizeDisplay();
+    }
+
+    // ============================================================================
+    // Output Size Display
+    // ============================================================================
+    function updateOutputSizeDisplay() {
+        if (!originalSizeMb || !Number.isFinite(originalSizeMb)) {
+            outputSizeValue = '--';
+            outputSizeDetails = '';
+            return;
+        }
+
+        let targetSizeMb = parseFloat(outputSizeSliderValue.toString());
+        const effectiveMaxSize = getSafeEffectiveMaxSize();
+        
+        if (effectiveMaxSize > 0 && targetSizeMb > effectiveMaxSize) {
+            targetSizeMb = effectiveMaxSize;
+            outputSizeSliderValue = effectiveMaxSize;
+        }
+        
+        const displayValue = targetSizeMb >= 10 ? targetSizeMb.toFixed(0) : targetSizeMb.toFixed(1);
+        outputSizeValue = `${displayValue} MB`;
+
+        if (videoSegments.length > 0 && effectiveMaxSize !== originalSizeMb) {
+            outputSizeValue += ` (max: ${Math.round(effectiveMaxSize)} MB)`;
+        }
+
+        if (!sourceDuration || !sourceVideoWidth || !sourceVideoHeight) {
+            outputSizeDetails = 'Waiting for video metadata...';
+            return;
+        }
+
+        const effectiveDuration = getEffectiveDuration(videoSegments, sourceDuration) ?? sourceDuration;
+
+        if (targetSizeMb >= effectiveMaxSize) {
+            outputSizeDetails = videoSegments.length > 0 && effectiveDuration !== sourceDuration
+                ? 'Will cut video segments only (no compression)'
+                : 'No compression (original quality preserved)';
+            return;
+        }
+
+        const targetBitsTotal = targetSizeMb * 1024 * 1024 * 8 * 0.9;
+        const targetBitrateKbps = targetBitsTotal / effectiveDuration / 1000;
+        const forcedScale = getLocalForcedScalePercent();
+        const recommendedScale = forcedScale ?? calculateOptimalResolution(targetSizeMb, effectiveDuration, sourceVideoWidth, sourceVideoHeight);
+        const appliedScale = Math.max(10, Math.min(100, recommendedScale));
+        const targetW = Math.floor(((sourceVideoWidth * appliedScale) / 100) / 2) * 2;
+        const targetH = Math.floor(((sourceVideoHeight * appliedScale) / 100) / 2) * 2;
+
+        let details = `Target bitrate: ~${Math.round(targetBitrateKbps)} kbps`;
+        details += appliedScale < 100 
+            ? ` · Resolution: ${targetW}×${targetH} (${appliedScale}%)`
+            : ` · Resolution: ${sourceVideoWidth}×${sourceVideoHeight} (original)`;
+
+        if (videoSegments.length > 0 && effectiveDuration !== sourceDuration) {
+            details += ` · Duration: ${effectiveDuration.toFixed(1)}s (edited)`;
+        }
+
+        outputSizeDetails = details;
+    }
+
+    // ============================================================================
+    // Upload & Compression
+    // ============================================================================
+    async function handleUpload(event: MouseEvent) {
+        event.stopPropagation();
+        if (!selectedFile || !sourceDuration || !sourceVideoWidth || !sourceVideoHeight) {
+            showStatus('Video metadata missing. Please re-select the file.', 'error');
+            return;
+        }
+
+        if (uploadAbortController) uploadAbortController.abort();
+        uploadAbortController = new AbortController();
+        const currentSequenceId = fileSequenceId;
+
+        uploadBtnDisabled = true;
+        uploadBtnText = 'Uploading...';
+        progressVisible = true;
+        progressPercent = 10;
+        canRetry = false;
+
+        const formData = new FormData();
+        formData.append('file', selectedFile);
+        formData.append('codec', codecSelectValue);
+
+        const targetSizeMb = parseFloat(outputSizeSliderValue.toString());
+        const forcedScalePercent = getLocalForcedScalePercent();
+        const shouldForceResolution = forcedScalePercent !== null;
+        const effectiveMaxSize = getSafeEffectiveMaxSize();
+        const effectiveDuration = getEffectiveDuration(videoSegments, sourceDuration) ?? sourceDuration;
+        
+        formData.append('targetSizeMb', targetSizeMb.toFixed(2));
+        formData.append('skipCompression', (targetSizeMb >= effectiveMaxSize && !shouldForceResolution && !muteAudio) ? 'true' : 'false');
+        formData.append('qualityMode', codecSelectValue === 'quality' ? 'true' : 'false');
+        formData.append('muteAudio', muteAudio ? 'true' : 'false');
+
+        if (shouldForceResolution && forcedScalePercent !== null) {
+            formData.append('scalePercent', forcedScalePercent.toString());
+        } else if (targetSizeMb < effectiveMaxSize) {
+            const calculatedScale = calculateOptimalResolution(targetSizeMb, effectiveDuration, sourceVideoWidth, sourceVideoHeight);
+            if (Number.isFinite(calculatedScale)) formData.append('scalePercent', calculatedScale.toString());
+        } else {
+            formData.append('scalePercent', '100');
+        }
+
+        formData.append('sourceDuration', sourceDuration.toFixed(3));
+        formData.append('sourceWidth', sourceVideoWidth.toString());
+        formData.append('sourceHeight', sourceVideoHeight.toString());
+        formData.append('originalSizeBytes', selectedFile.size.toString());
+
+        if (videoSegments.length > 0) {
+            formData.append('segments', JSON.stringify(videoSegments));
+        }
+
+        try {
+            const result = await uploadVideo(formData, uploadAbortController.signal);
+            if (currentSequenceId !== fileSequenceId) return;
+            
+            jobId = result.jobId;
+            progressPercent = 100;
+            isCompressing = true;
+            showStatus('Video uploaded successfully. Processing...', 'processing');
+            startStatusPolling(currentSequenceId);
+        } catch (error) {
+            if (error instanceof Error && error.name === 'AbortError') return;
+            
+            console.error('Upload failed:', error);
+            let errorMessage = (error as Error).message;
+            if (errorMessage.includes('NetworkError') || errorMessage.includes('Failed to fetch')) {
+                errorMessage = 'Network error: File may be too large or server is unreachable.';
+            } else if (errorMessage.includes('413')) {
+                errorMessage = 'File is too large. The server cannot accept files this big.';
+            }
+
+            showStatus('Upload failed: ' + errorMessage, 'error');
+            uploadBtnDisabled = false;
+            uploadBtnText = 'Process Video';
+            progressVisible = false;
+        } finally {
+            uploadAbortController = null;
+        }
+    }
+
+    // ============================================================================
+    // Status Checking
+    // ============================================================================
+    async function checkStatus(sequenceId: number) {
+        if (!jobId || isStaleSequence(sequenceId)) {
+            stopStatusPolling();
+            return;
+        }
+        
+        try {
+            const result = await getJobStatus(jobId);
+            if (isStaleSequence(sequenceId)) return;
+            
+            if (result.status === 'queued') {
+                showCancelButton = true;
+                canRetry = false;
+                const queueMsg = result.queuePosition && result.queuePosition > 0
+                    ? `Queued for processing (position ${result.queuePosition})...`
+                    : 'Queued for processing...';
+                showStatus(queueMsg, 'processing');
+            } else if (result.status === 'processing') {
+                showCancelButton = true;
+                canRetry = false;
+                const progressPercentValue = Math.max(10, Math.min(95, result.progress || 0));
+                progressPercent = progressPercentValue;
+
+                const statusText = result.estimatedSecondsRemaining && result.estimatedSecondsRemaining > 0
+                    ? `Processing video... ${progressPercentValue.toFixed(1)}% (ETA: ${formatTimeRemaining(result.estimatedSecondsRemaining)})`
+                    : `Processing video... ${progressPercentValue.toFixed(1)}%`;
+                showStatus(statusText, 'processing');
+
+                outputMetadata = {
+                    ...outputMetadata,
+                    codec: result.codec || outputMetadata.codec,
+                    encoderName: result.encoderName ?? outputMetadata.encoderName,
+                    encoderIsHardware: result.encoderIsHardware ?? outputMetadata.encoderIsHardware
+                };
+            } else if (result.status === 'completed') {
+                stopStatusPolling();
+                if (isStaleSequence(sequenceId)) return;
+                
+                progressPercent = 100;
+                isCompressing = false;
+                showCancelButton = false;
+                downloadFileName = result.outputFilename || `compressed_${selectedFile?.name ?? jobId}`;
+                downloadMimeType = result.outputMimeType || 'video/mp4';
+
+                calculateOutputMetadata(result);
+                await loadVideoPreview(sequenceId);
+
+                showStatus('Processing complete! Preview and download your video.', 'success');
+                videoPreviewVisible = true;
+                downloadVisible = true;
+                progressVisible = false;
+                canRetry = false;
+            } else if (result.status === 'cancelled') {
+                stopStatusPolling();
+                isCompressing = false;
+                showCancelButton = false;
+                showStatus('Processing was cancelled.', 'error');
+                uploadBtnDisabled = false;
+                uploadBtnText = 'Process Video';
+                progressVisible = false;
+                canRetry = false;
+            } else if (result.status === 'failed') {
+                stopStatusPolling();
+                isCompressing = false;
+                showCancelButton = false;
+                showStatus('Processing failed: ' + (result.message || 'Unknown error'), 'error');
+                uploadBtnDisabled = false;
+                uploadBtnText = 'Process Video';
+                progressVisible = false;
+                canRetry = true;
+            }
+        } catch (error) {
+            console.error('Status check failed:', error);
+            stopStatusPolling();
+            isCompressing = false;
+            showStatus('Failed to check status: ' + (error as Error).message, 'error');
+            uploadBtnDisabled = false;
+            uploadBtnText = 'Process Video';
+            progressVisible = false;
+        }
+    }
+
+    // ============================================================================
+    // Output Metadata Calculation
+    // ============================================================================
     function calculateOutputMetadata(result: CompressionStatusResponse) {
         if (!originalSizeMb || !sourceDuration) return;
 
         const effectiveDuration = getEffectiveDuration(videoSegments, sourceDuration) ?? sourceDuration;
         const effectiveMaxSize = getEffectiveMaxSize(originalSizeMb, sourceDuration, videoSegments);
 
-        const actualOutputBytes =
-            typeof result.outputSizeBytes === 'number' &&
-            Number.isFinite(result.outputSizeBytes) &&
-            result.outputSizeBytes > 0
-                ? result.outputSizeBytes
-                : null;
+        const actualOutputBytes = typeof result.outputSizeBytes === 'number' && Number.isFinite(result.outputSizeBytes) && result.outputSizeBytes > 0
+            ? result.outputSizeBytes : null;
 
         let estimatedOutputBytes = 0;
         let outputSizeMb = 0;
@@ -830,15 +697,54 @@
         };
     }
 
-    function handleClearResult() {
-        // Cancel any pending operations
-        cancelPendingOperations();
-        
-        // Only clean up the preview URL, keep objectUrl for the source video
-        if (videoPreviewUrl) {
-            URL.revokeObjectURL(videoPreviewUrl);
-            videoPreviewUrl = null;
+    // ============================================================================
+    // Video Preview Loading
+    // ============================================================================
+    async function loadVideoPreview(sequenceId: number) {
+        if (!jobId || sequenceId !== fileSequenceId) return;
+
+        if (previewAbortController) previewAbortController.abort();
+        previewAbortController = new AbortController();
+
+        try {
+            const response = await fetch(`/api/download/${jobId}`, { signal: previewAbortController.signal });
+            if (sequenceId !== fileSequenceId) return;
+            
+            if (response.ok) {
+                const blob = await response.blob();
+                if (sequenceId !== fileSequenceId) return;
+                
+                if (videoPreviewUrl) URL.revokeObjectURL(videoPreviewUrl);
+                videoPreviewUrl = URL.createObjectURL(blob);
+
+                const actualSizeMb = blob.size / (1024 * 1024);
+                const effectiveMaxSize = getEffectiveMaxSize(originalSizeMb, sourceDuration, videoSegments);
+                const compressionRatio = compressionSkipped ? 0 : effectiveMaxSize > 0 ? (1 - actualSizeMb / effectiveMaxSize) * 100 : 0;
+                
+                outputMetadata = {
+                    ...outputMetadata,
+                    outputSizeBytes: blob.size,
+                    outputSizeMb: actualSizeMb,
+                    compressionRatio,
+                    finalDuration: 0,
+                    finalWidth: 0,
+                    finalHeight: 0
+                };
+            }
+        } catch (error) {
+            if (error instanceof Error && error.name === 'AbortError') return;
+            console.warn('Failed to load video preview:', error);
+        } finally {
+            previewAbortController = null;
         }
+    }
+
+    // ============================================================================
+    // Result Handlers
+    // ============================================================================
+    function handleClearResult() {
+        cancelPendingOperations();
+        if (videoPreviewUrl) { URL.revokeObjectURL(videoPreviewUrl); videoPreviewUrl = null; }
 
         jobId = null;
         downloadFileName = null;
@@ -851,88 +757,19 @@
         isCompressing = false;
         showCancelButton = false;
         canRetry = false;
-
         outputMetadata = createDefaultOutputMetadata();
         compressionSkipped = false;
-
         uploadBtnDisabled = false;
         uploadBtnText = 'Process Video';
 
         showStatus('Result cleared. You can adjust settings and compress again.', 'success');
-        setTimeout(() => {
-            statusVisible = false;
-        }, 3000);
+        setTimeout(() => { statusVisible = false; }, 3000);
     }
 
-    async function loadVideoPreview(sequenceId: number = fileSequenceId) {
-        if (!jobId || sequenceId !== fileSequenceId) return;
-
-        // Cancel any previous preview loading
-        if (previewAbortController) {
-            previewAbortController.abort();
-        }
-        previewAbortController = new AbortController();
-
-        try {
-            const response = await fetch(`/api/download/${jobId}`, {
-                signal: previewAbortController.signal
-            });
-            
-            // Check if operation is still valid
-            if (sequenceId !== fileSequenceId) {
-                return;
-            }
-            
-            if (response.ok) {
-                const blob = await response.blob();
-                
-                // Final check before updating UI
-                if (sequenceId !== fileSequenceId) {
-                    return;
-                }
-                
-                if (videoPreviewUrl) {
-                    URL.revokeObjectURL(videoPreviewUrl);
-                }
-                videoPreviewUrl = URL.createObjectURL(blob);
-
-                const actualSizeMb = blob.size / (1024 * 1024);
-                const effectiveMaxSize = getEffectiveMaxSize(originalSizeMb, sourceDuration, videoSegments);
-                const compressionRatio = compressionSkipped
-                    ? 0
-                    : effectiveMaxSize > 0
-                        ? (1 - actualSizeMb / effectiveMaxSize) * 100
-                        : 0;
-                outputMetadata = {
-                    ...outputMetadata,
-                    outputSizeBytes: blob.size,
-                    outputSizeMb: actualSizeMb,
-                    compressionRatio,
-                    finalDuration: 0,
-                    finalWidth: 0,
-                    finalHeight: 0
-                };
-            } else {
-                console.warn('Failed to load video preview');
-            }
-        } catch (error) {
-            if (error instanceof Error && error.name === 'AbortError') {
-                console.log('Preview loading aborted due to new file selection');
-                return;
-            }
-            console.warn('Failed to load video preview:', error);
-        } finally {
-            previewAbortController = null;
-        }
-    }
-
-    function handleCompressedMetadata(
-        event: CustomEvent<{ duration: number | null; width: number; height: number }>
-    ) {
+    function handleCompressedMetadata(event: CustomEvent<{ duration: number | null; width: number; height: number }>) {
         const { duration, width, height } = event.detail;
         const sizeBytes = outputMetadata.outputSizeBytes;
-        const bitrateKbps =
-            duration && sizeBytes ? Math.round((sizeBytes * 8) / duration / 1000) : outputMetadata.videoBitrateKbps;
+        const bitrateKbps = duration && sizeBytes ? Math.round((sizeBytes * 8) / duration / 1000) : outputMetadata.videoBitrateKbps;
 
         outputMetadata = {
             ...outputMetadata,
@@ -949,52 +786,18 @@
         const link = document.createElement('a');
         link.href = `/api/download/${jobId}`;
         link.download = downloadFileName || `compressed_${selectedFile?.name ?? jobId}`;
-        if (downloadMimeType) {
-            link.type = downloadMimeType;
-        }
+        if (downloadMimeType) link.type = downloadMimeType;
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
-
         resetInterface();
     }
 
-    function showStatus(message: string, type: StatusMessageType) {
-        statusMessage = message;
-        statusType = type;
-        statusVisible = true;
-    }
-
-    async function checkForUpdates() {
-        if (!autoUpdateEnabled || hasCheckedUpdates) {
-            return;
-        }
-
-        hasCheckedUpdates = true;
-        try {
-            const response = await fetch('/api/update');
-            if (!response.ok) {
-                return;
-            }
-            const payload: UpdateInfoPayload = await response.json();
-            const normalizedVersion = payload.currentVersion ?? appVersion ?? '0.0.0';
-            appVersion = normalizedVersion;
-            updateInfo = { ...payload, currentVersion: normalizedVersion };
-            showUpdateBanner = payload.updateAvailable === true;
-        } catch (error) {
-            console.warn('Update check failed', error);
-        }
-    }
-
-    function dismissUpdateBanner() {
-        showUpdateBanner = false;
-    }
-
+    // ============================================================================
+    // Interface Reset
+    // ============================================================================
     function resetInterface() {
-        if (statusCheckInterval) {
-            clearInterval(statusCheckInterval);
-            statusCheckInterval = null;
-        }
+        stopStatusPolling();
         selectedFile = null;
         jobId = null;
         fileInfo = '';
@@ -1031,23 +834,100 @@
         videoSegments = [];
     }
 
-    // Consolidated output labels - single derivation reduces re-render cascades
-    $: outputLabels = (() => {
-        const resPct = sourceVideoWidth && sourceVideoHeight && outputMetadata.finalWidth > 0
-            ? Math.round((outputMetadata.finalWidth / sourceVideoWidth) * 100)
-            : null;
-        
-        return {
-            finalBitrateLabel: outputMetadata.videoBitrateKbps > 0 
-                ? `${Math.round(outputMetadata.videoBitrateKbps)} kbps` : '--',
-            finalDurationLabel: formatDurationLabel(outputMetadata.finalDuration),
-            finalResolutionLabel: outputMetadata.finalWidth > 0 && outputMetadata.finalHeight > 0
-                ? `${outputMetadata.finalWidth}×${outputMetadata.finalHeight}${resPct ? ` (${resPct}%)` : ''}`
-                : '--',
-            encodingTimeLabel: outputMetadata.encodingTime > 0 
-                ? formatTimeRemaining(outputMetadata.encodingTime) : '--'
-        };
-    })();
+    // ============================================================================
+    // User Settings
+    // ============================================================================
+    async function loadUserSettings() {
+        let fetched: UserSettingsPayload | null = null;
+        try {
+            fetched = await getSettings();
+        } catch (error) {
+            console.warn('Settings fetch failed', error);
+        } finally {
+            userSettings = fetched ?? { ...FALLBACK_SETTINGS };
+            applyUserSettings(userSettings);
+        }
+    }
+
+    function applyUserSettings(settings: UserSettingsPayload | null) {
+        const effective = settings ?? FALLBACK_SETTINGS;
+        codecSelectValue = effective.defaultCodec;
+        updateCodecHelper();
+        resolutionPreset = effective.defaultResolution;
+        muteAudio = effective.defaultMuteAudio;
+        defaultTargetMb = effective.defaultTargetSizeMb;
+        autoUpdateEnabled = effective.checkForUpdatesOnLaunch;
+
+        const scale = effective.appScale ?? 1.0;
+        document.documentElement.style.setProperty('--app-scale', String(scale));
+        document.documentElement.style.fontSize = `${16 * scale}px`;
+
+        if (!selectedFile) outputSizeSliderValue = defaultTargetMb;
+        if (autoUpdateEnabled && !hasCheckedUpdates) checkForUpdates();
+        if (!autoUpdateEnabled) showUpdateBanner = false;
+    }
+
+    async function handleSettingsSave(event: CustomEvent<UserSettingsPayload>) {
+        const payload = event.detail;
+        try {
+            const saved = await saveSettings(payload);
+            userSettings = saved;
+            applyUserSettings(saved);
+            showSettingsModal = false;
+            showStatus('Settings saved', 'success');
+            setTimeout(() => { statusVisible = false; }, 2000);
+        } catch (error) {
+            console.error('Save settings failed:', error);
+            showStatus('Failed to save settings: ' + (error as Error).message, 'error');
+        }
+    }
+
+    // ============================================================================
+    // App Version & Updates
+    // ============================================================================
+    async function fetchAppVersion() {
+        try {
+            const payload = await getAppVersion();
+            if (payload?.version) {
+                appVersion = payload.version;
+                if (updateInfo === null) {
+                    updateInfo = {
+                        currentVersion: payload.version,
+                        latestVersion: payload.version,
+                        updateAvailable: false,
+                        downloadUrl: null,
+                        checkedAt: undefined,
+                        releaseNotes: null
+                    };
+                } else {
+                    updateInfo = { ...updateInfo, currentVersion: payload.version };
+                }
+            }
+        } catch (error) {
+            console.warn('Failed to fetch app version', error);
+        }
+    }
+
+    async function checkForUpdates() {
+        if (!autoUpdateEnabled || hasCheckedUpdates) return;
+
+        hasCheckedUpdates = true;
+        try {
+            const response = await fetch('/api/update');
+            if (!response.ok) return;
+            const payload: UpdateInfoPayload = await response.json();
+            const normalizedVersion = payload.currentVersion ?? appVersion ?? '0.0.0';
+            appVersion = normalizedVersion;
+            updateInfo = { ...payload, currentVersion: normalizedVersion };
+            showUpdateBanner = payload.updateAvailable === true;
+        } catch (error) {
+            console.warn('Update check failed', error);
+        }
+    }
+
+    function dismissUpdateBanner() {
+        showUpdateBanner = false;
+    }
 </script>
 
 <div class="app-layout">
@@ -1156,4 +1036,3 @@
     on:close={() => (showSettingsModal = false)}
     on:save={handleSettingsSave}
 />
-
