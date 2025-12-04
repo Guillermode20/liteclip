@@ -48,6 +48,17 @@ public sealed class VideoMetadataService
     /// </summary>
     public async Task<VideoMetadataResult?> ProbeAsync(string filePath, CancellationToken cancellationToken = default)
     {
+        return await ProbeAsync(filePath, fullMetadata: true, cancellationToken);
+    }
+    
+    /// <summary>
+    /// Probes video metadata using ffprobe with multiple fallback strategies for reliability.
+    /// </summary>
+    /// <param name="filePath">Path to the video file</param>
+    /// <param name="fullMetadata">If false, only probes essential fields (width, height, duration) for faster results</param>
+    /// <param name="cancellationToken">Cancellation token</param>
+    public async Task<VideoMetadataResult?> ProbeAsync(string filePath, bool fullMetadata, CancellationToken cancellationToken = default)
+    {
         if (string.IsNullOrWhiteSpace(filePath) || !System.IO.File.Exists(filePath))
         {
             _logger.LogWarning("Cannot probe metadata: file does not exist at {Path}", filePath);
@@ -61,7 +72,7 @@ public sealed class VideoMetadataService
             return null;
         }
 
-        // Strategy 1: JSON output (most reliable, structured data)
+        // Strategy 1: JSON output with targeted fields (most reliable, structured data)
         var result = await ProbeWithJsonAsync(ffprobePath, filePath, cancellationToken);
         if (result != null)
         {
@@ -69,7 +80,7 @@ public sealed class VideoMetadataService
             return result;
         }
 
-        // Strategy 2: CSV output for dimensions + separate duration probe
+        // Strategy 2: CSV output - fast path for essential fields only
         result = await ProbeWithCsvFallbackAsync(ffprobePath, filePath, cancellationToken);
         if (result != null)
         {
@@ -77,7 +88,7 @@ public sealed class VideoMetadataService
             return result;
         }
 
-        // Strategy 3: Parse raw ffprobe output
+        // Strategy 3: Parse raw ffprobe output (last resort)
         result = await ProbeWithRawOutputAsync(ffprobePath, filePath, cancellationToken);
         if (result != null)
         {
@@ -93,8 +104,12 @@ public sealed class VideoMetadataService
     {
         try
         {
-            // Use JSON output for structured parsing
-            var args = $"-v quiet -print_format json -show_format -show_streams \"{filePath}\"";
+            // Use JSON output with targeted show_entries to minimize parsing overhead
+            // Only request the specific fields we need instead of full stream/format dumps
+            var args = $"-v quiet -print_format json " +
+                       $"-show_entries format=duration,bit_rate " +
+                       $"-show_entries stream=codec_type,codec_name,width,height,r_frame_rate,avg_frame_rate,duration,pix_fmt,channels,sample_rate " +
+                       $"\"{filePath}\"";
             var (exitCode, stdout, _) = await RunFfprobeAsync(ffprobePath, args, ct);
 
             if (exitCode != 0 || string.IsNullOrWhiteSpace(stdout))

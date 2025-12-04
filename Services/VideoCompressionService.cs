@@ -175,15 +175,20 @@ public class VideoCompressionService : IVideoCompressionService
 
         if (skipCompression)
         {
-            return CompleteSkippedJob(artifacts, codecConfig, normalizedRequest);
+            return await CompleteSkippedJobAsync(artifacts, codecConfig, normalizedRequest);
         }
 
         EnsureQueueCapacity();
 
-        // ALWAYS enable two-pass encoding for best quality and bitrate accuracy.
+        // Detect hardware encoder upfront to avoid building two-pass plans unnecessarily
+        var cachedEncoderInfo = _encoderSelectionService.GetCachedEncoderInfo(codecConfig.Key);
+        var isHardwareEncoder = cachedEncoderInfo.IsHardware;
+        
+        // Enable two-pass encoding for software encoders only (hardware encoders use internal rate control)
         var effectiveDurationSeconds = normalizedRequest.SourceDuration;
-        var enableTwoPass = ShouldUseTwoPass(normalizedRequest.TargetSizeMb, artifacts.EffectiveMaxSizeMb, effectiveDurationSeconds);
-        _logger.LogInformation("Selected {Mode} encoding for job {JobId} (duration={Duration:F1}s, targetSizeMb={TargetSizeMb}, effectiveMaxSizeMb={EffectiveMaxSizeMb})", enableTwoPass ? "two-pass" : "single-pass", jobId, effectiveDurationSeconds ?? 0, normalizedRequest.TargetSizeMb, artifacts.EffectiveMaxSizeMb);
+        var enableTwoPass = ShouldUseTwoPass(normalizedRequest.TargetSizeMb, artifacts.EffectiveMaxSizeMb, effectiveDurationSeconds, isHardwareEncoder);
+        _logger.LogInformation("Selected {Mode} encoding for job {JobId} (encoder={Encoder}, hardware={IsHardware}, duration={Duration:F1}s)", 
+            enableTwoPass ? "two-pass" : "single-pass", jobId, cachedEncoderInfo.EncoderName, isHardwareEncoder, effectiveDurationSeconds ?? 0);
 
         var requestSnapshot = CloneRequest(normalizedRequest);
         var compressionJob = BuildQueuedJob(artifacts, requestSnapshot, codecConfig, computedTargetKbps, computedVideoKbps, enableTwoPass);
@@ -314,7 +319,7 @@ public class VideoCompressionService : IVideoCompressionService
         return false;
     }
 
-    private string CompleteSkippedJob(JobPreparationArtifacts artifacts, CodecConfig codecConfig, CompressionRequest request)
+    private async Task<string> CompleteSkippedJobAsync(JobPreparationArtifacts artifacts, CodecConfig codecConfig, CompressionRequest request)
     {
         _logger.LogInformation(" Skipping compression for job {JobId} - copying file directly", artifacts.JobId);
 
@@ -325,21 +330,8 @@ public class VideoCompressionService : IVideoCompressionService
             artifacts.SegmentsApplied)
         {
              _logger.LogInformation("Performing deferred merge for skipped job {JobId}", artifacts.JobId);
-             // We can't easily await here since this method is synchronous in signature (called from async context though?)
-             // Wait, CompleteSkippedJob is called from CompressVideoAsync which IS async.
-             // But CompleteSkippedJob signature returns string.
-             // I should change it to async or block (not ideal). 
-             // Actually, let's look at CompressVideoAsync. It awaits CompressVideoAsync -> calls CompleteSkippedJob.
-             // CompleteSkippedJob is sync. I should make it async or execute sync.
-             // Since I can't easily change the signature without checking usage, I will use .GetAwaiter().GetResult() for now 
-             // or simpler: just call the merge logic synchronously? No, MergeVideoSegmentsAsync is async.
              
-             // Let's verify: CompressVideoAsync calls it.
-             // I'll modify the calling code to await.
-             // But simpler: Just run the merge logic here.
-             // Actually, I can just call MergeVideoSegmentsAsync(...).GetAwaiter().GetResult();
-             
-             var mergedPath = MergeVideoSegmentsAsync(artifacts.JobId, artifacts.PreparedInputPath, request.Segments).GetAwaiter().GetResult();
+             var mergedPath = await MergeVideoSegmentsAsync(artifacts.JobId, artifacts.PreparedInputPath, request.Segments);
              
              // Now copy from merged path
              File.Copy(mergedPath, artifacts.OutputPath, overwrite: true);
@@ -1461,8 +1453,14 @@ public class VideoCompressionService : IVideoCompressionService
         return Array.Empty<string>();
     }
 
-    private static bool ShouldUseTwoPass(double? targetSizeMb, double effectiveMaxSizeMb, double? durationSeconds)
+    private static bool ShouldUseTwoPass(double? targetSizeMb, double effectiveMaxSizeMb, double? durationSeconds, bool isHardwareEncoder)
     {
+        // Hardware encoders use internal rate control - two-pass is redundant or fails
+        if (isHardwareEncoder)
+        {
+            return false;
+        }
+        
         if (!durationSeconds.HasValue || durationSeconds.Value <= 0)
         {
             return true;

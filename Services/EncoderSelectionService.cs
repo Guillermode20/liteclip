@@ -1,13 +1,24 @@
 namespace liteclip.Services;
 
 /// <summary>
+/// Cached encoder information including hardware flag.
+/// </summary>
+public sealed record CachedEncoderInfo(string EncoderName, bool IsHardware);
+
+/// <summary>
 /// Implementation of encoder selection service with hardware encoder preference policy.
-/// Policy order: NVENC → QSV → VideoToolbox → AMF → VAAPI → software
+/// Policy order: NVENC → QSV → VideoToolbox → AMF → VAAPI → software.
+/// Caches encoder selection at startup to avoid repeated probing per job.
 /// </summary>
 public sealed class EncoderSelectionService : IEncoderSelectionService
 {
     private readonly IFfmpegEncoderProbe _encoderProbe;
     private readonly ILogger<EncoderSelectionService> _logger;
+    
+    // Cached encoder info per codec - populated lazily on first access
+    private readonly object _cacheLock = new();
+    private CachedEncoderInfo? _cachedH264Encoder;
+    private CachedEncoderInfo? _cachedH265Encoder;
 
     // Hardware encoder preference order by codec (Windows-only: NVENC, QSV, AMF)
     private static readonly string[] H264_ENCODER_PREFERENCE = new[]
@@ -33,27 +44,82 @@ public sealed class EncoderSelectionService : IEncoderSelectionService
         _logger = logger;
     }
 
-    public string GetBestH264Encoder()
+    /// <summary>
+    /// Gets cached encoder info for H.264, probing only once.
+    /// </summary>
+    public CachedEncoderInfo GetCachedH264EncoderInfo()
     {
-        return GetBestEncoder("h264");
+        if (_cachedH264Encoder != null)
+            return _cachedH264Encoder;
+            
+        lock (_cacheLock)
+        {
+            if (_cachedH264Encoder != null)
+                return _cachedH264Encoder;
+                
+            var encoder = _encoderProbe.GetBestEncoder("h264", H264_ENCODER_PREFERENCE, H264_FALLBACK);
+            var isHardware = IsHardwareEncoderInternal(encoder);
+            _cachedH264Encoder = new CachedEncoderInfo(encoder, isHardware);
+            _logger.LogInformation("Cached H.264 encoder: {Encoder} (hardware: {IsHardware})", encoder, isHardware);
+            return _cachedH264Encoder;
+        }
     }
-
-    public string GetBestH265Encoder()
+    
+    /// <summary>
+    /// Gets cached encoder info for H.265, probing only once.
+    /// </summary>
+    public CachedEncoderInfo GetCachedH265EncoderInfo()
     {
-        return GetBestEncoder("h265");
+        if (_cachedH265Encoder != null)
+            return _cachedH265Encoder;
+            
+        lock (_cacheLock)
+        {
+            if (_cachedH265Encoder != null)
+                return _cachedH265Encoder;
+                
+            var encoder = _encoderProbe.GetBestEncoder("h265", H265_ENCODER_PREFERENCE, H265_FALLBACK);
+            var isHardware = IsHardwareEncoderInternal(encoder);
+            _cachedH265Encoder = new CachedEncoderInfo(encoder, isHardware);
+            _logger.LogInformation("Cached H.265 encoder: {Encoder} (hardware: {IsHardware})", encoder, isHardware);
+            return _cachedH265Encoder;
+        }
     }
-
-    public string GetBestEncoder(string codecKey)
+    
+    /// <summary>
+    /// Gets cached encoder info for a specific codec key.
+    /// </summary>
+    public CachedEncoderInfo GetCachedEncoderInfo(string codecKey)
     {
         return codecKey.ToLowerInvariant() switch
         {
-            "h264" => _encoderProbe.GetBestEncoder("h264", H264_ENCODER_PREFERENCE, H264_FALLBACK),
-            "h265" or "hevc" => _encoderProbe.GetBestEncoder("h265", H265_ENCODER_PREFERENCE, H265_FALLBACK),
+            "h264" => GetCachedH264EncoderInfo(),
+            "h265" or "hevc" => GetCachedH265EncoderInfo(),
             _ => throw new ArgumentException($"Unsupported codec key: {codecKey}", nameof(codecKey))
         };
     }
 
+    public string GetBestH264Encoder()
+    {
+        return GetCachedH264EncoderInfo().EncoderName;
+    }
+
+    public string GetBestH265Encoder()
+    {
+        return GetCachedH265EncoderInfo().EncoderName;
+    }
+
+    public string GetBestEncoder(string codecKey)
+    {
+        return GetCachedEncoderInfo(codecKey).EncoderName;
+    }
+
     public bool IsHardwareEncoder(string encoderName)
+    {
+        return IsHardwareEncoderInternal(encoderName);
+    }
+    
+    private static bool IsHardwareEncoderInternal(string encoderName)
     {
         if (string.IsNullOrWhiteSpace(encoderName))
             return false;

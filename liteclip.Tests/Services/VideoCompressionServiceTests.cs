@@ -78,5 +78,11 @@ public class VideoCompressionServiceTests
             _ => throw new ArgumentException($"Unsupported codec: {codecKey}")
         };
         public bool IsHardwareEncoder(string encoderName) => false;
+        public CachedEncoderInfo GetCachedEncoderInfo(string codecKey) => codecKey.ToLowerInvariant() switch
+        {
+            "h264" => new CachedEncoderInfo("libx264", false),
+            "h265" or "hevc" => new CachedEncoderInfo("libx265", false),
+            _ => throw new ArgumentException($"Unsupported codec: {codecKey}")
+        };
     }
 }

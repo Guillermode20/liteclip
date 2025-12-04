@@ -8,8 +8,8 @@
     import OutputPanel from './components/OutputPanel.svelte';
     import Sidebar from './components/sidebar/Sidebar.svelte';
     import Header from './components/Header.svelte';
-    import SettingsModal from './components/SettingsModal.svelte';
     import FfmpegOverlay from './components/FfmpegOverlay.svelte';
+    // SettingsModal is lazy-loaded below to reduce initial bundle size
     
     // Utils & Constants
     import { codecDetails, createDefaultOutputMetadata, FALLBACK_SETTINGS } from './lib/constants';
@@ -117,6 +117,13 @@
     let videoEditorModulePromise: Promise<void> | null = null;
 
     // ============================================================================
+    // State: Settings Modal (lazy loaded)
+    // ============================================================================
+    type SettingsModalComponentCtor = typeof import('./components/SettingsModal.svelte').default;
+    let SettingsModalComponent: SettingsModalComponentCtor | null = null;
+    let settingsModalModulePromise: Promise<void> | null = null;
+
+    // ============================================================================
     // Constants
     // ============================================================================
     const STATUS_POLL_INTERVAL_MS = 500;
@@ -183,11 +190,32 @@
         videoEditorModulePromise = import('./VideoEditor.svelte')
             .then((module) => { VideoEditorComponent = module.default; })
             .catch((error) => {
-                console.warn('VideoEditor preload failed', error);
+                if (import.meta.env.DEV) console.warn('VideoEditor preload failed', error);
                 videoEditorModulePromise = null;
             });
 
         return videoEditorModulePromise;
+    }
+
+    // ============================================================================
+    // Settings Modal Lazy Loading
+    // ============================================================================
+    function loadSettingsModal(): Promise<void> {
+        if (settingsModalModulePromise) return settingsModalModulePromise;
+
+        settingsModalModulePromise = import('./components/SettingsModal.svelte')
+            .then((module) => { SettingsModalComponent = module.default; })
+            .catch((error) => {
+                if (import.meta.env.DEV) console.warn('SettingsModal load failed', error);
+                settingsModalModulePromise = null;
+            });
+
+        return settingsModalModulePromise;
+    }
+    
+    async function openSettingsModal() {
+        await loadSettingsModal();
+        showSettingsModal = true;
     }
 
     // ============================================================================
@@ -343,7 +371,7 @@
         updateCodecHelper();
         
         if (currentSequenceId !== fileSequenceId) {
-            console.log('File selection superseded by newer operation');
+            if (import.meta.env.DEV) console.log('File selection superseded by newer operation');
         }
     }
 
@@ -934,7 +962,7 @@
     <Header
         updateInfo={updateInfo}
         showUpdateBanner={showUpdateBanner}
-        on:openSettings={() => (showSettingsModal = true)}
+        on:openSettings={openSettingsModal}
         on:dismissUpdate={dismissUpdateBanner}
     />
 
@@ -1030,9 +1058,12 @@
 
 <FfmpegOverlay />
 
-<SettingsModal
-    open={showSettingsModal}
-    settings={userSettings}
-    on:close={() => (showSettingsModal = false)}
-    on:save={handleSettingsSave}
-/>
+{#if SettingsModalComponent}
+    <svelte:component
+        this={SettingsModalComponent}
+        open={showSettingsModal}
+        settings={userSettings}
+        on:close={() => (showSettingsModal = false)}
+        on:save={handleSettingsSave}
+    />
+{/if}

@@ -78,7 +78,7 @@ async function probeWithBackend(
         clearTimeout(timeoutId);
 
         if (!response.ok) {
-            console.warn(`Backend probe failed with status ${response.status}`);
+            if (import.meta.env.DEV) console.warn(`Backend probe failed with status ${response.status}`);
             return null;
         }
 
@@ -87,7 +87,7 @@ async function probeWithBackend(
         // Validate response
         if (!data.width || !data.height || !data.duration || 
             data.width <= 0 || data.height <= 0 || data.duration <= 0) {
-            console.warn('Backend returned invalid metadata:', data);
+            if (import.meta.env.DEV) console.warn('Backend returned invalid metadata:', data);
             return null;
         }
 
@@ -107,10 +107,12 @@ async function probeWithBackend(
         };
     } catch (err) {
         clearTimeout(timeoutId);
-        if (err instanceof Error && err.name === 'AbortError') {
-            console.warn('Backend probe aborted or timed out');
-        } else {
-            console.warn('Backend probe error:', err);
+        if (import.meta.env.DEV) {
+            if (err instanceof Error && err.name === 'AbortError') {
+                console.warn('Backend probe aborted or timed out');
+            } else {
+                console.warn('Backend probe error:', err);
+            }
         }
         return null;
     }
@@ -313,26 +315,26 @@ export async function loadVideoFile(
 
     try {
         // Strategy 1: Try browser first (instant, no upload required)
-        console.log('Attempting browser metadata probe...');
+        if (import.meta.env.DEV) console.log('Attempting browser metadata probe...');
         try {
             const browserMetadata = await probeWithBrowser(objectUrl, signal, BROWSER_TIMEOUT_MS);
-            console.log('Browser probe successful:', browserMetadata);
+            if (import.meta.env.DEV) console.log('Browser probe successful:', browserMetadata);
             return {
                 objectUrl,
                 metadata: browserMetadata,
                 source: 'browser'
             };
         } catch (browserError) {
-            console.log('Browser probe failed:', browserError);
+            if (import.meta.env.DEV) console.log('Browser probe failed:', browserError);
             // Continue to backend fallback
         }
 
         // Strategy 2: Fall back to backend ffprobe (handles all formats but requires upload)
-        console.log('Falling back to backend ffprobe...');
+        if (import.meta.env.DEV) console.log('Falling back to backend ffprobe...');
         const backendMetadata = await probeWithBackend(file, signal);
         
         if (backendMetadata) {
-            console.log('Backend probe successful:', backendMetadata);
+            if (import.meta.env.DEV) console.log('Backend probe successful:', backendMetadata);
             return {
                 objectUrl,
                 metadata: backendMetadata,

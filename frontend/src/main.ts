@@ -7,7 +7,7 @@ if (!target) {
   throw new Error('App mount target #app not found');
 }
 
-console.log('Mounting Svelte app...');
+if (import.meta.env.DEV) console.log('Mounting Svelte app...');
 mount(App, { target });
 
 function sendNativeMessage(message: string): boolean {
@@ -31,7 +31,7 @@ function sendNativeMessage(message: string): boolean {
       return true;
     }
   } catch (error) {
-    console.error('Sending native message failed:', error);
+    if (import.meta.env.DEV) console.error('Sending native message failed:', error);
   }
 
   return false;
@@ -40,12 +40,12 @@ function sendNativeMessage(message: string): boolean {
 // Send message to C# that the app is ready with retry logic
 function sendWindowReady(attempt = 0) {
   if (sendNativeMessage('window-ready')) {
-    console.log('Sent window-ready message to host');
+    if (import.meta.env.DEV) console.log('Sent window-ready message to host');
     return;
   }
 
   const nextDelay = Math.min(500, 50 + attempt * 25);
-  console.log(`Native host not ready yet (attempt ${attempt + 1}). Retrying in ${nextDelay}ms...`);
+  if (import.meta.env.DEV) console.log(`Native host not ready yet (attempt ${attempt + 1}). Retrying in ${nextDelay}ms...`);
   setTimeout(() => sendWindowReady(attempt + 1), nextDelay);
 }
 
