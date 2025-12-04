@@ -260,7 +260,7 @@ public sealed class VideoEncodingPipeline : IVideoEncodingPipeline
     {
         try
         {
-            foreach (var file in Directory.GetFiles(tempOutputPath, $"{jobId}_ffmpeg2pass*"))
+            foreach (var file in Directory.EnumerateFiles(tempOutputPath, $"{jobId}_ffmpeg2pass*"))
             {
                 File.Delete(file);
             }

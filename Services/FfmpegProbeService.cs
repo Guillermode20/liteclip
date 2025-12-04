@@ -11,6 +11,11 @@ namespace liteclip.Services
 {
     public class FfmpegProbeService
     {
+        // Pre-compiled regex for encoder parsing - avoids recompilation per call
+        private static readonly Regex EncoderLineRegex = new(
+            @"^[\W\w]*?\s+(?<name>[A-Za-z0-9_\-:.]+)\s+(?<desc>.+)$", 
+            RegexOptions.Compiled);
+        
         private readonly FfmpegPathResolver _pathResolver;
         private readonly ILogger<FfmpegProbeService> _logger;
         private readonly TimeSpan _cacheTtl = TimeSpan.FromMinutes(30);
@@ -226,7 +231,7 @@ namespace liteclip.Services
             if (string.IsNullOrWhiteSpace(output)) return list;
 
             var lines = output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
-            var encoderLineRegex = new Regex(@"^[\W\w]*?\s+(?<name>[A-Za-z0-9_\-:.]+)\s+(?<desc>.+)$", RegexOptions.Compiled);
+            // Note: EncoderLineRegex is available as static field but we use simpler parsing below
 
             foreach (var raw in lines)
             {

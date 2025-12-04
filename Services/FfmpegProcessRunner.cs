@@ -74,6 +74,8 @@ public class FfmpegProcessRunner : IFfmpegRunner
         onProcessStarted?.Invoke(process);
 
         var errorBuilder = new StringBuilder();
+        // Cap the stderr buffer to avoid unbounded memory growth for very verbose ffmpeg runs
+        const int MaxErrorBufferLength = 64 * 1024; // 64 KB
         var startTime = DateTime.UtcNow;
         var lastProgressUpdate = startTime;
 
@@ -85,6 +87,13 @@ public class FfmpegProcessRunner : IFfmpegRunner
             }
 
             errorBuilder.AppendLine(e.Data);
+            // If the buffer grew too large, trim the start to keep only the most recent content.
+            if (errorBuilder.Length > MaxErrorBufferLength)
+            {
+                var toRemove = errorBuilder.Length - MaxErrorBufferLength;
+                // Remove from the start, keeping the most recent logs
+                errorBuilder.Remove(0, toRemove);
+            }
 
             var line = e.Data.Trim();
             if (!line.StartsWith("frame=", StringComparison.OrdinalIgnoreCase) &&

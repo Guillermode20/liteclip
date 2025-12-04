@@ -12,8 +12,10 @@ public class FfmpegPathResolver : IFfmpegPathResolver
     private readonly IConfiguration _configuration;
     private readonly bool _allowSystemPath;
     private readonly string _ffmpegExecutableName;
+    private readonly string _ffprobeExecutableName;
     private readonly string? _bundledPathOverride;
     private string? _cachedFfmpegPath;
+    private string? _cachedFfprobePath;
 
     public FfmpegPathResolver(ILogger<FfmpegPathResolver> logger, IConfiguration configuration)
     {
@@ -22,6 +24,7 @@ public class FfmpegPathResolver : IFfmpegPathResolver
         _allowSystemPath = bool.TryParse(_configuration["FFmpeg:AllowSystemPath"], out var allowSystemPath) && allowSystemPath;
         _bundledPathOverride = _configuration["FFmpeg:BundledPath"];
         _ffmpegExecutableName = GetFfmpegExecutableName();
+        _ffprobeExecutableName = GetFfprobeExecutableName();
     }
 
     public string GetFfmpegPath()
@@ -85,6 +88,54 @@ public class FfmpegPathResolver : IFfmpegPathResolver
     private static string GetFfmpegExecutableName()
     {
         return RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "ffmpeg.exe" : "ffmpeg";
+    }
+
+    private static string GetFfprobeExecutableName()
+    {
+        return RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "ffprobe.exe" : "ffprobe";
+    }
+
+    /// <summary>
+    /// Returns the cached ffprobe path, deriving it from the ffmpeg path location.
+    /// </summary>
+    public string? ResolveFfprobePath()
+    {
+        if (!string.IsNullOrWhiteSpace(_cachedFfprobePath) && File.Exists(_cachedFfprobePath))
+        {
+            return _cachedFfprobePath;
+        }
+
+        var ffmpegPath = ResolveFfmpegPath();
+        if (string.IsNullOrWhiteSpace(ffmpegPath))
+        {
+            return null;
+        }
+
+        var directory = Path.GetDirectoryName(ffmpegPath);
+        if (string.IsNullOrEmpty(directory))
+        {
+            return null;
+        }
+
+        var probePath = Path.Combine(directory, _ffprobeExecutableName);
+        if (File.Exists(probePath))
+        {
+            _cachedFfprobePath = probePath;
+            return probePath;
+        }
+
+        // Fallback: try to find in PATH if not next to ffmpeg
+        if (_allowSystemPath)
+        {
+            var systemFfprobe = FindInSystemPath(_ffprobeExecutableName);
+            if (!string.IsNullOrWhiteSpace(systemFfprobe))
+            {
+                _cachedFfprobePath = systemFfprobe;
+                return systemFfprobe;
+            }
+        }
+
+        return null;
     }
 
     private static string? NormalizePath(string? path)

@@ -292,11 +292,12 @@ public sealed class DefaultCompressionPlanner : ICompressionPlanner
 
     private static int CalculateOptimalScale(int width, int height, double videoKbps, int fps, string codec)
     {
-        double targetBpp = codec.ToLowerInvariant() switch
+        double targetBpp = codec switch
         {
-            "h265" or "hevc" => 0.065,
-            "vp9" => 0.07,
-            "av1" => 0.055,
+            var c when c.Equals("h265", StringComparison.OrdinalIgnoreCase) => 0.065,
+            var c when c.Equals("hevc", StringComparison.OrdinalIgnoreCase) => 0.065,
+            var c when c.Equals("vp9", StringComparison.OrdinalIgnoreCase) => 0.07,
+            var c when c.Equals("av1", StringComparison.OrdinalIgnoreCase) => 0.055,
             _ => 0.095
         };
 

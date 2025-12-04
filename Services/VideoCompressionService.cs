@@ -87,14 +87,14 @@ public class VideoCompressionService : IVideoCompressionService
             _logger.LogInformation("Cleaning up temporary files from previous sessions...");
             if (Directory.Exists(_tempUploadPath))
             {
-                foreach (var file in Directory.GetFiles(_tempUploadPath))
+                foreach (var file in Directory.EnumerateFiles(_tempUploadPath))
                 {
                     try { File.Delete(file); } catch { }
                 }
             }
             if (Directory.Exists(_tempOutputPath))
             {
-                foreach (var file in Directory.GetFiles(_tempOutputPath))
+                foreach (var file in Directory.EnumerateFiles(_tempOutputPath))
                 {
                     try { File.Delete(file); } catch { }
                 }
@@ -1111,7 +1111,7 @@ public class VideoCompressionService : IVideoCompressionService
     {
         try
         {
-            foreach (var file in Directory.GetFiles(_tempOutputPath, $"{jobId}_ffmpeg2pass*"))
+            foreach (var file in Directory.EnumerateFiles(_tempOutputPath, $"{jobId}_ffmpeg2pass*"))
             {
                 File.Delete(file);
             }
@@ -1832,6 +1832,14 @@ public class VideoCompressionService : IVideoCompressionService
 
     private string GetFfprobePath()
     {
+        // Use cached path from resolver
+        var cachedPath = _ffmpegResolver.ResolveFfprobePath();
+        if (!string.IsNullOrWhiteSpace(cachedPath))
+        {
+            return cachedPath;
+        }
+        
+        // Fallback to deriving from ffmpeg path
         var ffmpegPath = _ffmpegResolver.GetFfmpegPath();
         var directory = Path.GetDirectoryName(ffmpegPath);
         var extension = Path.GetExtension(ffmpegPath);

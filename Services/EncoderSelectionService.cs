@@ -16,7 +16,9 @@ public sealed class EncoderSelectionService : IEncoderSelectionService
     private readonly ILogger<EncoderSelectionService> _logger;
     
     // Cached encoder info per codec - populated lazily on first access
-    private readonly object _cacheLock = new();
+    // Use separate locks to avoid contention between H264 and H265 lookups
+    private readonly object _h264CacheLock = new();
+    private readonly object _h265CacheLock = new();
     private CachedEncoderInfo? _cachedH264Encoder;
     private CachedEncoderInfo? _cachedH265Encoder;
 
@@ -52,7 +54,7 @@ public sealed class EncoderSelectionService : IEncoderSelectionService
         if (_cachedH264Encoder != null)
             return _cachedH264Encoder;
             
-        lock (_cacheLock)
+        lock (_h264CacheLock)
         {
             if (_cachedH264Encoder != null)
                 return _cachedH264Encoder;
@@ -73,7 +75,7 @@ public sealed class EncoderSelectionService : IEncoderSelectionService
         if (_cachedH265Encoder != null)
             return _cachedH265Encoder;
             
-        lock (_cacheLock)
+        lock (_h265CacheLock)
         {
             if (_cachedH265Encoder != null)
                 return _cachedH265Encoder;

@@ -372,6 +372,12 @@ public sealed class VideoMetadataService
 
     private string? GetFfprobePath()
     {
+        // Use cached path from resolver first
+        var cachedPath = _pathResolver.ResolveFfprobePath();
+        if (!string.IsNullOrWhiteSpace(cachedPath))
+            return cachedPath;
+        
+        // Fallback to deriving from ffmpeg path
         var ffmpegPath = _pathResolver.ResolveFfmpegPath();
         if (string.IsNullOrWhiteSpace(ffmpegPath))
             return null;

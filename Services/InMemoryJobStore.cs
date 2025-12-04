@@ -8,6 +8,10 @@ public sealed class InMemoryJobStore : IJobStore
 {
     private readonly ConcurrentDictionary<string, JobMetadata> _jobs = new();
     private readonly ConcurrentQueue<string> _queue = new();
+    
+    // Cache queue position lookups - invalidated on enqueue
+    private readonly object _queueLock = new();
+    private List<string>? _queueSnapshot;
 
     public void AddOrUpdate(JobMetadata job)
     {
@@ -30,6 +34,11 @@ public sealed class InMemoryJobStore : IJobStore
     {
         var success = _jobs.TryRemove(jobId, out var removed);
         job = removed;
+        // Invalidate cache when job is removed
+        if (success)
+        {
+            lock (_queueLock) { _queueSnapshot = null; }
+        }
         return success;
     }
 
@@ -41,6 +50,8 @@ public sealed class InMemoryJobStore : IJobStore
     public void Enqueue(string jobId)
     {
         _queue.Enqueue(jobId);
+        // Invalidate cache when new job is enqueued
+        lock (_queueLock) { _queueSnapshot = null; }
     }
 
     public int GetQueuePosition(string jobId)
@@ -50,8 +61,15 @@ public sealed class InMemoryJobStore : IJobStore
             return 0;
         }
 
+        // Use cached snapshot or create new one
+        List<string> snapshot;
+        lock (_queueLock)
+        {
+            snapshot = _queueSnapshot ??= _queue.ToList();
+        }
+
         var position = 1;
-        foreach (var queuedJobId in _queue)
+        foreach (var queuedJobId in snapshot)
         {
             if (queuedJobId == jobId)
             {

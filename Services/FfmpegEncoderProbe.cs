@@ -1,5 +1,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Linq;
+using System.Threading.Tasks;
 
 namespace liteclip.Services;
 
@@ -47,9 +49,33 @@ public sealed class FfmpegEncoderProbe : IFfmpegEncoderProbe
             return fallbackEncoder ?? string.Empty;
         }
 
+        // Check cache first for all encoders
         foreach (var encoder in preferredEncoders)
         {
-            if (IsEncoderAvailable(encoder))
+            if (_encoderCache.TryGetValue(encoder, out var cached) && cached)
+            {
+                _logger.LogInformation("Selected cached encoder {Encoder} for codec {CodecKey}", encoder, codecKey);
+                return encoder;
+            }
+        }
+
+        // Parallel probe all preferred encoders that aren't cached yet
+        var uncachedEncoders = preferredEncoders.Where(e => !_encoderCache.ContainsKey(e)).ToArray();
+        if (uncachedEncoders.Length > 0)
+        {
+            // Probe in parallel with a degree of parallelism matching encoder count (typically 2-4)
+            Parallel.ForEach(uncachedEncoders, new ParallelOptions { MaxDegreeOfParallelism = Math.Min(4, uncachedEncoders.Length) }, encoder =>
+            {
+                var available = TestEncoderAvailability(encoder);
+                _encoderCache.TryAdd(encoder, available);
+                _logger.LogDebug("Probed encoder {EncoderName} availability: {Available}", encoder, available);
+            });
+        }
+
+        // Now check in preference order
+        foreach (var encoder in preferredEncoders)
+        {
+            if (_encoderCache.TryGetValue(encoder, out var available) && available)
             {
                 _logger.LogInformation("Selected encoder {Encoder} for codec {CodecKey}", encoder, codecKey);
                 return encoder;
@@ -106,7 +132,14 @@ public sealed class FfmpegEncoderProbe : IFfmpegEncoderProbe
 
                 // Read stderr (some encoders print diagnostics there)
                 var error = process.StandardError.ReadToEnd();
-                process.WaitForExit();
+                
+                // Use timeout to prevent indefinite hangs on stalled processes
+                if (!process.WaitForExit(5000))
+                {
+                    try { process.Kill(entireProcessTree: true); } catch { }
+                    _logger.LogWarning("Encoder test for {EncoderName} timed out", encoderName);
+                    continue;
+                }
 
                 // If exit code is zero, the encoder initialized successfully
                 if (process.ExitCode == 0)

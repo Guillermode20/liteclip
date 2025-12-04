@@ -118,7 +118,7 @@ public static class AdaptiveFilterBuilder
     /// </summary>
     public static List<string> Build(int scalePercent, int targetFps, double? targetSizeMb, double? sourceDuration, FilterOptions options)
     {
-        var filters = new List<string>();
+        var filters = new List<string>(5); // Pre-allocate for typical filter count
 
         var intensity = DetermineIntensity(targetSizeMb, sourceDuration);
 
@@ -132,14 +132,14 @@ public static class AdaptiveFilterBuilder
                 _ => (1.0, 0.8, 2.2, 2.2)
             };
 
-            filters.Add($"hqdn3d={lumSpat.ToString(CultureInfo.InvariantCulture)}:{chromaSpat.ToString(CultureInfo.InvariantCulture)}:{lumTemp.ToString(CultureInfo.InvariantCulture)}:{chromaTemp.ToString(CultureInfo.InvariantCulture)}");
+            filters.Add(string.Create(CultureInfo.InvariantCulture, $"hqdn3d={lumSpat}:{chromaSpat}:{lumTemp}:{chromaTemp}"));
         }
 
         // 2. Scaling (if needed)
         if (options.EnableScaling && scalePercent < 100)
         {
             var scaleFactor = Math.Clamp(scalePercent, 10, 100) / 100.0;
-            filters.Add($"scale=trunc(iw*{scaleFactor.ToString(CultureInfo.InvariantCulture)}/2)*2:trunc(ih*{scaleFactor.ToString(CultureInfo.InvariantCulture)}/2)*2");
+            filters.Add(string.Create(CultureInfo.InvariantCulture, $"scale=trunc(iw*{scaleFactor}/2)*2:trunc(ih*{scaleFactor}/2)*2"));
         }
 
         // 3. Debanding - apply after scaling (CPU-intensive, skip for high bitrate)
@@ -152,8 +152,7 @@ public static class AdaptiveFilterBuilder
                 _ => 0.015
             };
             var debandRange = intensity == CompressionIntensity.Heavy ? 18 : 14;
-            var thresholdStr = debandThreshold.ToString(CultureInfo.InvariantCulture);
-            filters.Add($"deband=1thr={thresholdStr}:2thr={thresholdStr}:3thr={thresholdStr}:range={debandRange}:blur=0");
+            filters.Add(string.Create(CultureInfo.InvariantCulture, $"deband=1thr={debandThreshold}:2thr={debandThreshold}:3thr={debandThreshold}:range={debandRange}:blur=0"));
         }
 
         // 4. Contrast-adaptive sharpening
@@ -164,7 +163,7 @@ public static class AdaptiveFilterBuilder
                 var downscaleFactor = 1.0 - (scalePercent / 100.0);
                 var baseStrength = intensity == CompressionIntensity.Heavy ? 0.45 : 0.35;
                 var unsharpStrength = Math.Round(baseStrength + (downscaleFactor * 1.5), 2);
-                filters.Add($"unsharp=3:3:{unsharpStrength.ToString(CultureInfo.InvariantCulture)}");
+                filters.Add(string.Create(CultureInfo.InvariantCulture, $"unsharp=3:3:{unsharpStrength}"));
             }
             else
             {
@@ -174,14 +173,14 @@ public static class AdaptiveFilterBuilder
                     CompressionIntensity.Moderate => 0.32,
                     _ => 0.25
                 };
-                filters.Add($"unsharp=3:3:{defaultStrength.ToString(CultureInfo.InvariantCulture)}");
+                filters.Add(string.Create(CultureInfo.InvariantCulture, $"unsharp=3:3:{defaultStrength}"));
             }
         }
 
         // 5. FPS limiting (if specified)
         if (options.EnableFpsLimit && targetFps > 0)
         {
-            filters.Add($"fps={targetFps}");
+            filters.Add(string.Create(CultureInfo.InvariantCulture, $"fps={targetFps}"));
         }
 
         return filters;

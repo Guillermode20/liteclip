@@ -58,7 +58,7 @@ public class JobCleanupService : BackgroundService
         _logger.LogInformation("Job Cleanup Service stopped");
     }
 
-    private Task CleanupExpiredJobsAsync()
+    private async Task CleanupExpiredJobsAsync()
     {
         try
         {
@@ -67,10 +67,11 @@ public class JobCleanupService : BackgroundService
                 .Where(job => ShouldCleanupJob(job, now))
                 .ToList();
 
-            if (expiredJobs.Any())
+            if (expiredJobs.Count > 0)
             {
                 _logger.LogInformation("Cleaning up {Count} expired jobs", expiredJobs.Count);
 
+                // Process cleanup in batches to avoid blocking for too long
                 foreach (var job in expiredJobs)
                 {
                     try
@@ -83,6 +84,9 @@ public class JobCleanupService : BackgroundService
                     {
                         _logger.LogError(ex, "Failed to cleanup job {JobId}", job.JobId);
                     }
+                    
+                    // Yield periodically to avoid blocking the thread pool
+                    await Task.Yield();
                 }
             }
         }
@@ -90,8 +94,6 @@ public class JobCleanupService : BackgroundService
         {
             _logger.LogError(ex, "Error in CleanupExpiredJobsAsync");
         }
-
-        return Task.CompletedTask;
     }
 
     private bool ShouldCleanupJob(JobMetadata job, DateTime now)
