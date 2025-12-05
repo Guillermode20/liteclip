@@ -44,7 +44,7 @@ public sealed class FfmpegEncoderProbe : IFfmpegEncoderProbe
     {
         if (string.IsNullOrWhiteSpace(codecKey) || preferredEncoders == null || preferredEncoders.Length == 0)
         {
-            _logger.LogWarning("Invalid parameters for GetBestEncoder: codecKey={CodecKey}, preferredEncoders={PreferredEncoders}", 
+            _logger.LogWarning("Invalid parameters for GetBestEncoder: codecKey={CodecKey}, preferredEncoders={PreferredEncoders}",
                 codecKey, preferredEncoders?.Length ?? 0);
             return fallbackEncoder ?? string.Empty;
         }
@@ -82,7 +82,7 @@ public sealed class FfmpegEncoderProbe : IFfmpegEncoderProbe
             }
         }
 
-        _logger.LogInformation("No hardware encoders available for {CodecKey}, using fallback {FallbackEncoder}", 
+        _logger.LogInformation("No hardware encoders available for {CodecKey}, using fallback {FallbackEncoder}",
             codecKey, fallbackEncoder);
         return fallbackEncoder;
     }
@@ -132,7 +132,7 @@ public sealed class FfmpegEncoderProbe : IFfmpegEncoderProbe
 
                 // Read stderr (some encoders print diagnostics there)
                 var error = process.StandardError.ReadToEnd();
-                
+
                 // Use timeout to prevent indefinite hangs on stalled processes
                 if (!process.WaitForExit(5000))
                 {

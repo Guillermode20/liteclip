@@ -39,7 +39,7 @@ public abstract class BaseCompressionStrategy : ICompressionStrategy
     {
         var targetBitrate = Math.Max(100, Math.Round(videoBitrateKbps));
         var encoder = GetBestEncoder();
-        
+
         // Use the centralized config
         var config = EncodingModeConfigs.Get(CodecKey, encoder, mode);
 
@@ -51,7 +51,7 @@ public abstract class BaseCompressionStrategy : ICompressionStrategy
         var maxRate = Math.Round(targetBitrate * maxRateMultiplier);
         var minRate = Math.Round(targetBitrate * minRateMultiplier);
         var buffer = Math.Round(targetBitrate * bufferMultiplier);
-        
+
         var args = new List<string>
         {
             "-c:v", encoder,
@@ -124,7 +124,7 @@ public abstract class BaseCompressionStrategy : ICompressionStrategy
         // If we are using a hardware encoder, we should not return standard pass flags.
         var encoder = GetBestEncoder();
         var isHardware = _encoderSelectionService.IsHardwareEncoder(encoder);
-        
+
         if (isHardware)
         {
             return Enumerable.Empty<string>();

@@ -16,7 +16,7 @@ public class AdaptiveFilterBuilderTests
         Assert.Equal("unsharp=3:3:0.25", filters[0]);
         Assert.Equal("fps=30", filters[1]);
     }
-    
+
     [Fact]
     public void Build_LowBitrate_AppliesAllFilters()
     {
@@ -42,7 +42,7 @@ public class AdaptiveFilterBuilderTests
         Assert.Equal("unsharp=3:3:0.9", filters[3]);
         Assert.Equal("fps=24", filters[4]);
     }
-    
+
     [Fact]
     public void Build_WithExplicitFilterOptions_RespectsOptions()
     {
@@ -55,7 +55,7 @@ public class AdaptiveFilterBuilderTests
             EnableScaling = true,
             EnableFpsLimit = false
         };
-        
+
         var filters = AdaptiveFilterBuilder.Build(scalePercent: 80, targetFps: 30, targetSizeMb: 10, sourceDuration: 60, options);
 
         Assert.Equal(3, filters.Count);

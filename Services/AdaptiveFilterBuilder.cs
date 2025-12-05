@@ -9,19 +9,19 @@ public sealed class FilterOptions
 {
     /// <summary>Apply HQDN3D temporal denoising (CPU-intensive).</summary>
     public bool EnableDenoising { get; init; } = true;
-    
+
     /// <summary>Apply debanding filter (CPU-intensive).</summary>
     public bool EnableDebanding { get; init; } = true;
-    
+
     /// <summary>Apply unsharp/sharpening filter.</summary>
     public bool EnableSharpening { get; init; } = true;
-    
+
     /// <summary>Apply scaling filter when scalePercent &lt; 100.</summary>
     public bool EnableScaling { get; init; } = true;
-    
+
     /// <summary>Apply FPS limiting filter.</summary>
     public bool EnableFpsLimit { get; init; } = true;
-    
+
     /// <summary>
     /// Creates filter options appropriate for the given compression scenario.
     /// Skips expensive filters when bitrate budget is high.
@@ -40,7 +40,7 @@ public sealed class FilterOptions
                 EnableFpsLimit = false
             };
         }
-        
+
         // Calculate bitrate to determine if we need expensive filters
         if (!targetSizeMb.HasValue || !sourceDuration.HasValue || sourceDuration.Value <= 0)
         {
@@ -54,9 +54,9 @@ public sealed class FilterOptions
                 EnableFpsLimit = true
             };
         }
-        
+
         var bitrateKbps = (targetSizeMb.Value * 8 * 1024) / sourceDuration.Value;
-        
+
         // High bitrate (>3000 kbps) - skip expensive denoising/debanding
         if (bitrateKbps > 3000)
         {
@@ -69,7 +69,7 @@ public sealed class FilterOptions
                 EnableFpsLimit = true
             };
         }
-        
+
         // Medium-high bitrate (>2000 kbps) - skip denoising but keep debanding
         if (bitrateKbps > 2000)
         {
@@ -82,7 +82,7 @@ public sealed class FilterOptions
                 EnableFpsLimit = true
             };
         }
-        
+
         // Low bitrate - enable all filters for best quality
         return new FilterOptions
         {
@@ -112,7 +112,7 @@ public static class AdaptiveFilterBuilder
         var options = FilterOptions.ForCompression(targetSizeMb, sourceDuration);
         return Build(scalePercent, targetFps, targetSizeMb, sourceDuration, options);
     }
-    
+
     /// <summary>
     /// Builds the filter chain with configurable filter options.
     /// </summary>

@@ -14,7 +14,7 @@ public sealed class EncoderSelectionService : IEncoderSelectionService
 {
     private readonly IFfmpegEncoderProbe _encoderProbe;
     private readonly ILogger<EncoderSelectionService> _logger;
-    
+
     // Cached encoder info per codec - populated lazily on first access
     // Use separate locks to avoid contention between H264 and H265 lookups
     private readonly object _h264CacheLock = new();
@@ -53,12 +53,12 @@ public sealed class EncoderSelectionService : IEncoderSelectionService
     {
         if (_cachedH264Encoder != null)
             return _cachedH264Encoder;
-            
+
         lock (_h264CacheLock)
         {
             if (_cachedH264Encoder != null)
                 return _cachedH264Encoder;
-                
+
             var encoder = _encoderProbe.GetBestEncoder("h264", H264_ENCODER_PREFERENCE, H264_FALLBACK);
             var isHardware = IsHardwareEncoderInternal(encoder);
             _cachedH264Encoder = new CachedEncoderInfo(encoder, isHardware);
@@ -66,7 +66,7 @@ public sealed class EncoderSelectionService : IEncoderSelectionService
             return _cachedH264Encoder;
         }
     }
-    
+
     /// <summary>
     /// Gets cached encoder info for H.265, probing only once.
     /// </summary>
@@ -74,12 +74,12 @@ public sealed class EncoderSelectionService : IEncoderSelectionService
     {
         if (_cachedH265Encoder != null)
             return _cachedH265Encoder;
-            
+
         lock (_h265CacheLock)
         {
             if (_cachedH265Encoder != null)
                 return _cachedH265Encoder;
-                
+
             var encoder = _encoderProbe.GetBestEncoder("h265", H265_ENCODER_PREFERENCE, H265_FALLBACK);
             var isHardware = IsHardwareEncoderInternal(encoder);
             _cachedH265Encoder = new CachedEncoderInfo(encoder, isHardware);
@@ -87,7 +87,7 @@ public sealed class EncoderSelectionService : IEncoderSelectionService
             return _cachedH265Encoder;
         }
     }
-    
+
     /// <summary>
     /// Gets cached encoder info for a specific codec key.
     /// </summary>
@@ -120,15 +120,15 @@ public sealed class EncoderSelectionService : IEncoderSelectionService
     {
         return IsHardwareEncoderInternal(encoderName);
     }
-    
+
     private static bool IsHardwareEncoderInternal(string encoderName)
     {
         if (string.IsNullOrWhiteSpace(encoderName))
             return false;
 
         var encoderLower = encoderName.ToLowerInvariant();
-        return encoderLower.Contains("nvenc") || 
-               encoderLower.Contains("qsv") || 
+        return encoderLower.Contains("nvenc") ||
+               encoderLower.Contains("qsv") ||
                encoderLower.Contains("amf");
     }
 }

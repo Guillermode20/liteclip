@@ -50,7 +50,7 @@ public sealed class VideoMetadataService
     {
         return await ProbeAsync(filePath, fullMetadata: true, cancellationToken);
     }
-    
+
     /// <summary>
     /// Probes video metadata using ffprobe with multiple fallback strategies for reliability.
     /// </summary>
@@ -376,7 +376,7 @@ public sealed class VideoMetadataService
         var cachedPath = _pathResolver.ResolveFfprobePath();
         if (!string.IsNullOrWhiteSpace(cachedPath))
             return cachedPath;
-        
+
         // Fallback to deriving from ffmpeg path
         var ffmpegPath = _pathResolver.ResolveFfmpegPath();
         if (string.IsNullOrWhiteSpace(ffmpegPath))

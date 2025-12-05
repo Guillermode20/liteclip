@@ -225,7 +225,7 @@ public class FfmpegPathResolver : IFfmpegPathResolver
         }
 
         var paths = pathEnv.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries);
-        
+
         foreach (var path in paths)
         {
             try

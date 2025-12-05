@@ -8,7 +8,7 @@ public sealed class InMemoryJobStore : IJobStore
 {
     private readonly ConcurrentDictionary<string, JobMetadata> _jobs = new();
     private readonly ConcurrentQueue<string> _queue = new();
-    
+
     // Cache queue position lookups - invalidated on enqueue
     private readonly object _queueLock = new();
     private List<string>? _queueSnapshot;

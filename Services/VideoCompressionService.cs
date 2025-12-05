@@ -40,23 +40,23 @@ public class VideoCompressionService : IVideoCompressionService
         _jobStore = jobStore;
         _encoderSelectionService = encoderSelectionService;
         _encodingPipeline = encodingPipeline;
-        
+
         // Use AppData for temp directories to avoid permission issues in Program Files
         var appDataDirectory = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         var baseDir = Path.Combine(appDataDirectory, "LiteClip");
-        
+
         _tempUploadPath = configuration["TempPaths:Uploads"] ?? Path.Combine(baseDir, "temp", "uploads");
 
         if (!Path.IsPathRooted(_tempUploadPath))
         {
-          _tempUploadPath = Path.Combine(baseDir, _tempUploadPath.TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+            _tempUploadPath = Path.Combine(baseDir, _tempUploadPath.TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
         }
 
         _tempOutputPath = configuration["TempPaths:Outputs"] ?? Path.Combine(baseDir, "temp", "outputs");
 
         if (!Path.IsPathRooted(_tempOutputPath))
         {
-          _tempOutputPath = Path.Combine(baseDir, _tempOutputPath.TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+            _tempOutputPath = Path.Combine(baseDir, _tempOutputPath.TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
         }
 
         if (!int.TryParse(configuration["Compression:MaxConcurrentJobs"], out var maxConcurrent))
@@ -109,18 +109,18 @@ public class VideoCompressionService : IVideoCompressionService
     public async Task<string> CompressVideoAsync(IFormFile videoFile, CompressionRequest request)
     {
         var jobId = Guid.NewGuid().ToString();
-        
+
         // Log job header and request details
         _logger.LogJobHeader("RECEIVED", jobId, videoFile.FileName);
 
         var normalizedRequest = _planner.NormalizeRequest(request);
-        _logger.LogCompressionRequest(jobId, 
+        _logger.LogCompressionRequest(jobId,
             normalizedRequest.Mode.ToString(),
-            normalizedRequest.TargetSizeMb, 
+            normalizedRequest.TargetSizeMb,
             normalizedRequest.SourceDuration,
             normalizedRequest.Segments?.Count);
         _logger.LogInformation("🎛️  Normalized codec: {Mode} → {Codec}", normalizedRequest.Mode, normalizedRequest.Codec);
-        
+
         var codecConfig = GetCodecConfig(normalizedRequest.Codec);
         var artifacts = await PrepareJobArtifactsAsync(jobId, videoFile, normalizedRequest, codecConfig);
 
@@ -183,11 +183,11 @@ public class VideoCompressionService : IVideoCompressionService
         // Detect hardware encoder upfront to avoid building two-pass plans unnecessarily
         var cachedEncoderInfo = _encoderSelectionService.GetCachedEncoderInfo(codecConfig.Key);
         var isHardwareEncoder = cachedEncoderInfo.IsHardware;
-        
+
         // Enable two-pass encoding for software encoders only (hardware encoders use internal rate control)
         var effectiveDurationSeconds = normalizedRequest.SourceDuration;
         var enableTwoPass = ShouldUseTwoPass(normalizedRequest.TargetSizeMb, artifacts.EffectiveMaxSizeMb, effectiveDurationSeconds, isHardwareEncoder);
-        _logger.LogInformation("Selected {Mode} encoding for job {JobId} (encoder={Encoder}, hardware={IsHardware}, duration={Duration:F1}s)", 
+        _logger.LogInformation("Selected {Mode} encoding for job {JobId} (encoder={Encoder}, hardware={IsHardware}, duration={Duration:F1}s)",
             enableTwoPass ? "two-pass" : "single-pass", jobId, cachedEncoderInfo.EncoderName, isHardwareEncoder, effectiveDurationSeconds ?? 0);
 
         var requestSnapshot = CloneRequest(normalizedRequest);
@@ -273,7 +273,7 @@ public class VideoCompressionService : IVideoCompressionService
         }
 
         _logger.LogSection("SEGMENT PROCESSING");
-        
+
         for (int i = 0; i < segments.Count; i++)
         {
             var seg = segments[i];
@@ -290,9 +290,9 @@ public class VideoCompressionService : IVideoCompressionService
         }
 
         var mergedPath = await MergeVideoSegmentsAsync(jobId, inputPath, segments);
-        
+
         _logger.LogSegmentProcessing(jobId, segments.Count, totalEditedDuration, originalDuration ?? 0);
-        
+
         return new SegmentProcessingResult(true, mergedPath, totalEditedDuration);
     }
 
@@ -325,25 +325,25 @@ public class VideoCompressionService : IVideoCompressionService
 
         // If segments were requested but we deferred the merge, we must do it now.
         // Check if prepared path is already a merged file (contains _merged) or if we need to process segments.
-        if (request.Segments != null && request.Segments.Count > 0 && 
-            !artifacts.PreparedInputPath.Contains("_merged") && 
+        if (request.Segments != null && request.Segments.Count > 0 &&
+            !artifacts.PreparedInputPath.Contains("_merged") &&
             artifacts.SegmentsApplied)
         {
-             _logger.LogInformation("Performing deferred merge for skipped job {JobId}", artifacts.JobId);
-             
-             var mergedPath = await MergeVideoSegmentsAsync(artifacts.JobId, artifacts.PreparedInputPath, request.Segments);
-             
-             // Now copy from merged path
-             File.Copy(mergedPath, artifacts.OutputPath, overwrite: true);
-             
-             // Cleanup merged path
-             try { File.Delete(mergedPath); } catch { }
+            _logger.LogInformation("Performing deferred merge for skipped job {JobId}", artifacts.JobId);
+
+            var mergedPath = await MergeVideoSegmentsAsync(artifacts.JobId, artifacts.PreparedInputPath, request.Segments);
+
+            // Now copy from merged path
+            File.Copy(mergedPath, artifacts.OutputPath, overwrite: true);
+
+            // Cleanup merged path
+            try { File.Delete(mergedPath); } catch { }
         }
         else
         {
             File.Copy(artifacts.PreparedInputPath, artifacts.OutputPath, overwrite: true);
         }
-        
+
         _logger.LogFileOperation("Copied", artifacts.OutputPath, new FileInfo(artifacts.OutputPath).Length);
 
         var job = new JobMetadata
@@ -431,7 +431,7 @@ public class VideoCompressionService : IVideoCompressionService
             // Update status from queued to processing
             job.Status = "processing";
             job.StartedAt = DateTime.UtcNow;
-            _logger.LogInformation("Starting compression for job {JobId} (waited {WaitTime:F1}s in queue)", 
+            _logger.LogInformation("Starting compression for job {JobId} (waited {WaitTime:F1}s in queue)",
                 jobId, (job.StartedAt.Value - job.CreatedAt).TotalSeconds);
 
             await RunFfmpegCompressionAsync(jobId, job, request, codecConfig, preProbedDimensions);
@@ -455,7 +455,7 @@ public class VideoCompressionService : IVideoCompressionService
         }
 
         job.Status = "cancelled";
-        
+
         // Properly terminate the FFmpeg process
         if (job.Process != null)
         {
@@ -488,7 +488,7 @@ public class VideoCompressionService : IVideoCompressionService
                 }
             }
         }
-        
+
         _logger.LogInformation("Job {JobId} cancelled", jobId);
         return true;
     }
@@ -570,8 +570,8 @@ public class VideoCompressionService : IVideoCompressionService
         try
         {
             // Always use bitrate-based encoding (required by frontend)
-            if (!job.TargetSizeMb.HasValue || 
-                !job.SourceDuration.HasValue || 
+            if (!job.TargetSizeMb.HasValue ||
+                !job.SourceDuration.HasValue ||
                 job.SourceDuration.Value <= 0 ||
                 !job.VideoBitrateKbps.HasValue)
             {
@@ -611,20 +611,20 @@ public class VideoCompressionService : IVideoCompressionService
             // Build adaptive filter chain - always applied for best quality
             var fpsToUse = request.TargetFps ?? 30;
             var filters = AdaptiveFilterBuilder.Build(scalePercent, fpsToUse, job.TargetSizeMb, job.SourceDuration);
-            
+
             var audioFilters = new List<string>();
             if (request.Segments != null && request.Segments.Count > 0)
             {
                 _logger.LogInformation("Applying frame-accurate trim filters for {Count} segments", request.Segments.Count);
                 var (vFilter, aFilter) = BuildTrimFilters(request.Segments, fpsToUse);
-                
+
                 // Prepend trim filters to the chain.
                 // We inject fps filter first to ensure constant frame rate input for setpts
                 filters.Insert(0, vFilter);
                 audioFilters.Add(aFilter);
             }
 
-            _logger.LogInformation("Applying {Count} adaptive quality filters for job {JobId} (scale={Scale}%, targetSize={TargetMb}MB)", 
+            _logger.LogInformation("Applying {Count} adaptive quality filters for job {JobId} (scale={Scale}%, targetSize={TargetMb}MB)",
                 filters.Count, jobId, scalePercent, job.TargetSizeMb);
 
             // Get a registered compression strategy if available; fall back to legacy builders.
@@ -685,7 +685,7 @@ public class VideoCompressionService : IVideoCompressionService
                 }
 
                 var audioArgs = BuildAudioArgsWithPlan(strategy, codec, audioPlan);
-                
+
                 // Inject audio filters if present (e.g. for trimming)
                 if (audioFilters.Count > 0)
                 {
@@ -791,7 +791,7 @@ public class VideoCompressionService : IVideoCompressionService
         finally
         {
             job.CompletedAt = DateTime.UtcNow;
-            
+
             // Ensure process is properly disposed
             if (job.Process != null)
             {
@@ -819,7 +819,7 @@ public class VideoCompressionService : IVideoCompressionService
                     }
                 }
             }
-            
+
             job.Process = null;
         }
     }
@@ -854,13 +854,13 @@ public class VideoCompressionService : IVideoCompressionService
         if (job.OutputSizeBytes.HasValue)
         {
             var outputSizeMb = job.OutputSizeBytes.Value / (1024.0 * 1024.0);
-            
+
             // Rename file to reflect actual size
             try
             {
                 var directory = Path.GetDirectoryName(job.OutputPath);
                 var oldFilename = Path.GetFileName(job.OutputPath);
-                
+
                 // Extract the parts we want to keep (everything after the first underscore)
                 // Expected format: "{TargetSize}MB_compressed_{SafeStem}{Extension}"
                 var parts = oldFilename.Split('_', 2);
@@ -983,7 +983,7 @@ public class VideoCompressionService : IVideoCompressionService
             // If x265-specific params might be the root cause, try safer x265 params (cap 'subme' and similar)
             var sanitizedBase = new List<string>(baseArguments);
             var sanitized = SanitizeX265Params(sanitizedBase);
-                if (sanitized)
+            if (sanitized)
             {
                 _logger.LogWarning("Pass 1 failed for job {JobId} — trying sanitized x265 parameters", jobId);
                 pass1Args = new List<string>(sanitizedBase);
@@ -1013,7 +1013,7 @@ public class VideoCompressionService : IVideoCompressionService
             if (!success)
             {
                 var simplified = TryRemoveX265Params(sanitizedBase = new List<string>(baseArguments));
-                    if (simplified)
+                if (simplified)
                 {
                     _logger.LogWarning("Pass 1 failed for job {JobId} — retrying after removing x265 params", jobId);
                     pass1Args = new List<string>(sanitizedBase);
@@ -1187,7 +1187,7 @@ public class VideoCompressionService : IVideoCompressionService
         {
             // Ensure process is terminated first
             TerminateJobProcess(job);
-            
+
             try
             {
                 if (File.Exists(job.InputPath))
@@ -1214,7 +1214,7 @@ public class VideoCompressionService : IVideoCompressionService
     public void CancelAllJobs()
     {
         _logger.LogInformation("Cancelling all active jobs...");
-        
+
         var jobsSnapshot = _jobStore.GetAll().ToList();
         foreach (var job in jobsSnapshot)
         {
@@ -1225,7 +1225,7 @@ public class VideoCompressionService : IVideoCompressionService
                 _logger.LogInformation("Cancelled job {JobId}", job.JobId);
             }
         }
-        
+
         _logger.LogInformation("All active jobs have been cancelled");
     }
 
@@ -1242,7 +1242,7 @@ public class VideoCompressionService : IVideoCompressionService
                 {
                     _logger.LogDebug("Terminating FFmpeg process for job {JobId}", job.JobId);
                     job.Process.Kill(entireProcessTree: true);
-                    
+
                     // Wait for process to terminate with a reasonable timeout
                     if (!job.Process.WaitForExit(5000))
                     {
@@ -1338,7 +1338,7 @@ public class VideoCompressionService : IVideoCompressionService
     private static List<string> BuildSimpleVideoArgs(CodecConfig codec, double videoBitrateKbps, int fps, EncodingMode mode)
     {
         var targetBitrate = Math.Max(100, Math.Round(videoBitrateKbps));
-        
+
         // Strict adherence to target size
         var maxRate = Math.Round(targetBitrate * 1.0);
         var buffer = Math.Round(targetBitrate * 1.0);
@@ -1460,7 +1460,7 @@ public class VideoCompressionService : IVideoCompressionService
         {
             return false;
         }
-        
+
         if (!durationSeconds.HasValue || durationSeconds.Value <= 0)
         {
             return true;
@@ -1529,7 +1529,7 @@ public class VideoCompressionService : IVideoCompressionService
             if (string.Equals(args[i], "-x265-params", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Count)
             {
                 var original = args[i + 1];
-                
+
                 // cap subme to 7 (some libx265 builds report max supported level <= 7)
                 var sanitized = SubmeRegex.Replace(original, match =>
                 {
@@ -1596,7 +1596,7 @@ public class VideoCompressionService : IVideoCompressionService
     {
         var segmentFiles = new List<string>();
         var mergedOutputPath = Path.Combine(_tempOutputPath, $"{jobId}_merged.mp4");
-        
+
         try
         {
             // Prepare segment extraction plan and run a single ffmpeg process to extract all segments via stream copy
@@ -1642,7 +1642,7 @@ public class VideoCompressionService : IVideoCompressionService
                     throw new InvalidOperationException($"Failed to extract segments: ffmpeg exited with code {extractionProcess.ExitCode}. Error: {extractionStdErr}");
                 }
             }
-            
+
             // Create concat demuxer file with proper Windows path handling
             var concatFilePath = Path.Combine(_tempOutputPath, $"{jobId}_concat.txt");
             var concatContent = new StringBuilder();
@@ -1654,10 +1654,10 @@ public class VideoCompressionService : IVideoCompressionService
                 concatContent.AppendLine($"file '{normalizedPath}'");
             }
             await File.WriteAllTextAsync(concatFilePath, concatContent.ToString());
-            
+
             _logger.LogInformation("Created concat file at {Path} with {Count} segments", concatFilePath, segmentFiles.Count);
             _logger.LogInformation("Concat file contents:\n{Contents}", await File.ReadAllTextAsync(concatFilePath));
-            
+
             // Verify all segment files exist before merging
             foreach (var segFile in segmentFiles)
             {
@@ -1668,7 +1668,7 @@ public class VideoCompressionService : IVideoCompressionService
                 }
                 _logger.LogInformation("Verified segment exists: {Path} ({Size} bytes)", segFile, new FileInfo(segFile).Length);
             }
-            
+
             // Merge segments using concat demuxer with stream copy
             var mergeArguments = new List<string>
             {
@@ -1679,19 +1679,19 @@ public class VideoCompressionService : IVideoCompressionService
                 "-c", "copy",
                 mergedOutputPath
             };
-            
+
             var mergeProcessStartInfo = BuildFfmpegProcessStartInfo(mergeArguments);
             var mergeCommand = FormatFfmpegCommand(mergeProcessStartInfo.FileName, mergeArguments);
 
             _logger.LogInformation("Merging {Count} segments into single file using command: {Command}", segmentFiles.Count, mergeCommand);
-            
+
             using var mergeProcess = new Process { StartInfo = mergeProcessStartInfo };
             mergeProcess.Start();
-            
+
             var mergeStdOutput = await mergeProcess.StandardOutput.ReadToEndAsync();
             var mergeErrorOutput = await mergeProcess.StandardError.ReadToEndAsync();
             await mergeProcess.WaitForExitAsync();
-            
+
             if (mergeProcess.ExitCode != 0)
             {
                 _logger.LogError("Failed to merge segments. Exit code: {ExitCode}", mergeProcess.ExitCode);
@@ -1699,9 +1699,9 @@ public class VideoCompressionService : IVideoCompressionService
                 _logger.LogError("FFmpeg stderr: {StdErr}", mergeErrorOutput);
                 throw new InvalidOperationException($"Failed to merge segments: ffmpeg exited with code {mergeProcess.ExitCode}. Error: {mergeErrorOutput}");
             }
-            
+
             _logger.LogInformation("Segments merged successfully to {Path}", mergedOutputPath);
-            
+
             // Clean up segment files and concat file
             foreach (var segmentFile in segmentFiles)
             {
@@ -1717,7 +1717,7 @@ public class VideoCompressionService : IVideoCompressionService
                     _logger.LogWarning(ex, "Failed to delete segment file {Path}", segmentFile);
                 }
             }
-            
+
             try
             {
                 if (File.Exists(concatFilePath))
@@ -1729,14 +1729,14 @@ public class VideoCompressionService : IVideoCompressionService
             {
                 _logger.LogWarning(ex, "Failed to delete concat file {Path}", concatFilePath);
             }
-            
+
             return mergedOutputPath;
         }
         catch (Exception ex)
         {
             // Clean up on error
             _logger.LogError(ex, "Error during segment merging");
-            
+
             foreach (var segmentFile in segmentFiles)
             {
                 try
@@ -1751,7 +1751,7 @@ public class VideoCompressionService : IVideoCompressionService
                     // Ignore cleanup errors
                 }
             }
-            
+
             throw;
         }
     }
@@ -1838,15 +1838,15 @@ public class VideoCompressionService : IVideoCompressionService
         {
             return cachedPath;
         }
-        
+
         // Fallback to deriving from ffmpeg path
         var ffmpegPath = _ffmpegResolver.GetFfmpegPath();
         var directory = Path.GetDirectoryName(ffmpegPath);
         var extension = Path.GetExtension(ffmpegPath);
         var ffprobeName = "ffprobe" + extension;
-        
+
         if (string.IsNullOrEmpty(directory)) return ffprobeName;
-        
+
         var probePath = Path.Combine(directory, ffprobeName);
         if (File.Exists(probePath)) return probePath;
 
@@ -1870,7 +1870,7 @@ public class VideoCompressionService : IVideoCompressionService
 
             using var process = new Process { StartInfo = startInfo };
             process.Start();
-            
+
             var output = await process.StandardOutput.ReadToEndAsync();
             await process.WaitForExitAsync();
 
@@ -1897,7 +1897,7 @@ public class VideoCompressionService : IVideoCompressionService
         // H.264 needs ~0.1 bpp for complex scenes, 0.05 for simple
         // H.265/VP9 are ~30-40% more efficient
         // AV1 is ~50% more efficient
-        
+
         double targetBpp = codec.ToLowerInvariant() switch
         {
             "h265" or "hevc" => 0.065,
@@ -1921,7 +1921,7 @@ public class VideoCompressionService : IVideoCompressionService
         // new_pixels = scale^2 * old_pixels
         // scale = sqrt(new_pixels / old_pixels)
         var scale = Math.Sqrt(maxPixels / pixels);
-        
+
         // Convert to percentage and round down to nearest 5%
         var percent = (int)(scale * 100);
 
@@ -1973,9 +1973,9 @@ public class JobMetadata
     public DateTime? CompletedAt { get; set; }
     public int? EstimatedSecondsRemaining { get; set; }
     public Process? Process { get; set; }
-        // Encoder metadata
-        public string? EncoderName { get; set; }
-        public bool? EncoderIsHardware { get; set; }
-        public CompressionRequest? RequestSnapshot { get; set; }
+    // Encoder metadata
+    public string? EncoderName { get; set; }
+    public bool? EncoderIsHardware { get; set; }
+    public CompressionRequest? RequestSnapshot { get; set; }
 }
 

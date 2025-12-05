@@ -18,7 +18,7 @@ public class JobCleanupService : BackgroundService
         _logger = logger;
         _compressionService = compressionService;
         _configuration = configuration;
-        
+
         if (!int.TryParse(configuration["Compression:CleanupIntervalMinutes"], out var cleanupMinutes))
         {
             cleanupMinutes = 5;
@@ -77,14 +77,14 @@ public class JobCleanupService : BackgroundService
                     try
                     {
                         _compressionService.CleanupJob(job.JobId);
-                        _logger.LogDebug("Cleaned up job {JobId} (Status: {Status}, Age: {Age:F1}m)", 
+                        _logger.LogDebug("Cleaned up job {JobId} (Status: {Status}, Age: {Age:F1}m)",
                             job.JobId, job.Status, (now - job.CreatedAt).TotalMinutes);
                     }
                     catch (Exception ex)
                     {
                         _logger.LogError(ex, "Failed to cleanup job {JobId}", job.JobId);
                     }
-                    
+
                     // Yield periodically to avoid blocking the thread pool
                     await Task.Yield();
                 }

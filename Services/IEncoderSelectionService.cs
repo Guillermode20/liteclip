@@ -31,7 +31,7 @@ public interface IEncoderSelectionService
     /// <param name="encoderName">The encoder name to check</param>
     /// <returns>True if it's a hardware encoder, false for software encoders</returns>
     bool IsHardwareEncoder(string encoderName);
-    
+
     /// <summary>
     /// Gets cached encoder info (name + hardware flag) for a specific codec key.
     /// This avoids repeated probing per job.

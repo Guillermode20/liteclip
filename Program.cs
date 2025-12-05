@@ -31,7 +31,7 @@ namespace liteclip
             // NOTE: Main MUST stay synchronous and on the STA thread.
             // Photino/WebView2 require their message pump (WaitForClose)
             // to run on this original STA thread.
-            
+
             var builder = WebApplication.CreateBuilder(args);
 
             ConfigureServices(builder);
@@ -47,11 +47,11 @@ namespace liteclip
             // Start the server
             // Use port 0 to let the OS assign a free port, avoiding conflicts
             app.Urls.Add("http://127.0.0.1:0");
-            
+
             var cts = new CancellationTokenSource();
-            
+
             // Start the server synchronously to ensure it's ready before the window loads
-            try 
+            try
             {
                 app.StartAsync(cts.Token).GetAwaiter().GetResult();
             }
@@ -66,7 +66,7 @@ namespace liteclip
             var server = app.Services.GetRequiredService<Microsoft.AspNetCore.Hosting.Server.IServer>();
             var serverAddresses = server.Features.Get<IServerAddressesFeature>();
             var serverUrl = serverAddresses?.Addresses.FirstOrDefault() ?? "http://localhost:5000";
-            
+
             Console.WriteLine($"\n🎉 LiteClip - Fast Video Compression");
             Console.WriteLine($"📅 Started at {DateTime.Now:O}");
             Console.WriteLine($"📡 Server running at: {serverUrl}");
@@ -290,7 +290,7 @@ namespace liteclip
             };
 
             window.Load(serverUrl);
-            
+
             return window;
         }
 

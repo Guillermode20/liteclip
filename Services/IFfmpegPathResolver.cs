@@ -10,7 +10,7 @@ public interface IFfmpegPathResolver
     /// Returns a full path to an ffmpeg executable, or null if none found.
     /// </summary>
     string? ResolveFfmpegPath();
-    
+
     /// <summary>
     /// Returns a full path to an ffprobe executable, or null if none found.
     /// </summary>

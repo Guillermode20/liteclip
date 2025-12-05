@@ -9,7 +9,7 @@ public static class LoggingHelpers
 {
     private const string Separator = "────────────────────────────────────────";
     private const string SubSeparator = "───────────────────";
-    
+
     /// <summary>
     /// Logs a job lifecycle header with clear visual separation
     /// </summary>
@@ -87,12 +87,12 @@ public static class LoggingHelpers
     {
         var icon = success ? "✅" : "❌";
         logger.LogInformation($"{icon} JOB {status.ToUpper()} [{jobId[..8]}]");
-        
+
         if (outputSizeMb.HasValue)
         {
             logger.LogInformation($"   Output Size: {outputSizeMb:F2} MB");
         }
-        
+
         if (compressionSkipped.HasValue)
         {
             logger.LogInformation($"   Compression Skipped: {compressionSkipped.Value}");
@@ -139,7 +139,7 @@ public static class LoggingHelpers
             "Processing" => "⚙️",
             _ => "📁"
         };
-        
+
         var message = $"{icon} {operation}: {Path.GetFileName(filePath)}";
         if (fileSize.HasValue)
         {

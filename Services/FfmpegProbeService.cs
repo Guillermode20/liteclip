@@ -13,9 +13,9 @@ namespace liteclip.Services
     {
         // Pre-compiled regex for encoder parsing - avoids recompilation per call
         private static readonly Regex EncoderLineRegex = new(
-            @"^[\W\w]*?\s+(?<name>[A-Za-z0-9_\-:.]+)\s+(?<desc>.+)$", 
+            @"^[\W\w]*?\s+(?<name>[A-Za-z0-9_\-:.]+)\s+(?<desc>.+)$",
             RegexOptions.Compiled);
-        
+
         private readonly FfmpegPathResolver _pathResolver;
         private readonly ILogger<FfmpegProbeService> _logger;
         private readonly TimeSpan _cacheTtl = TimeSpan.FromMinutes(30);
@@ -271,14 +271,14 @@ namespace liteclip.Services
             }
 
             // Remove duplicates and sort by name to make predictable
-                var result = list
-                .GroupBy(e => e.Name)
-                .Select(g => g.First())
-                    .OrderBy(e => e.IsHardware ? 0 : 1) // hardware first
-                .ThenBy(e => e.Name)
-                .ToList();
-                // Filter to only the encoders used by the app for a minimal UI
-                result = result.Where(e => _allowedEncoders.Contains(e.Name, StringComparer.OrdinalIgnoreCase)).ToList();
+            var result = list
+            .GroupBy(e => e.Name)
+            .Select(g => g.First())
+                .OrderBy(e => e.IsHardware ? 0 : 1) // hardware first
+            .ThenBy(e => e.Name)
+            .ToList();
+            // Filter to only the encoders used by the app for a minimal UI
+            result = result.Where(e => _allowedEncoders.Contains(e.Name, StringComparer.OrdinalIgnoreCase)).ToList();
 
             return result;
         }
