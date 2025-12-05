@@ -37,9 +37,7 @@ public class VideoCompressionServiceTests
         var jobStore = new InMemoryJobStore();
 
         var ffmpegRunner = new NoopFfmpegRunner();
-        var pipelineLogger = new NullLogger<VideoEncodingPipeline>();
-        var encodingPipeline = new VideoEncodingPipeline(ffmpegRunner, pipelineLogger);
-        var service = new VideoCompressionService(config, logger, ffmpegResolver, ffmpegRunner, strategyFactory, planner, jobStore, encoderSelectionService, encodingPipeline);
+        var service = new VideoCompressionService(config, logger, ffmpegResolver, ffmpegRunner, strategyFactory, planner, jobStore, encoderSelectionService);
 
         Assert.NotNull(service);
         Assert.True(Directory.Exists(Path.Combine(tempRoot, "uploads")));
@@ -66,23 +64,23 @@ public class VideoCompressionServiceTests
         }
     }
 
-    // Mock implementation for testing
-    private class MockEncoderSelectionService : IEncoderSelectionService
+    // Mock implementation for testing - extends concrete class
+    private class MockEncoderSelectionService : EncoderSelectionService
     {
-        public string GetBestH264Encoder() => "libx264";
-        public string GetBestH265Encoder() => "libx265";
-        public string GetBestEncoder(string codecKey) => codecKey.ToLowerInvariant() switch
+        public MockEncoderSelectionService() : base(new MockEncoderProbe(), NullLogger<EncoderSelectionService>.Instance) { }
+        
+        private class MockEncoderProbe : FfmpegEncoderProbe
         {
-            "h264" => "libx264",
-            "h265" or "hevc" => "libx265",
-            _ => throw new ArgumentException($"Unsupported codec: {codecKey}")
-        };
-        public bool IsHardwareEncoder(string encoderName) => false;
-        public CachedEncoderInfo GetCachedEncoderInfo(string codecKey) => codecKey.ToLowerInvariant() switch
-        {
-            "h264" => new CachedEncoderInfo("libx264", false),
-            "h265" or "hevc" => new CachedEncoderInfo("libx265", false),
-            _ => throw new ArgumentException($"Unsupported codec: {codecKey}")
-        };
+            public MockEncoderProbe() : base(new MockPathResolver(), NullLogger<FfmpegEncoderProbe>.Instance) { }
+            
+            public override bool IsEncoderAvailable(string encoderName) => false;
+            public override string GetBestEncoder(string codecKey, string[] preferredEncoders, string fallbackEncoder) => fallbackEncoder;
+            
+            private class MockPathResolver : IFfmpegPathResolver
+            {
+                public string? ResolveFfmpegPath() => "/usr/bin/ffmpeg";
+                public string? ResolveFfprobePath() => "/usr/bin/ffprobe";
+            }
+        }
     }
 }

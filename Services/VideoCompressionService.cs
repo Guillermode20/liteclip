@@ -9,13 +9,13 @@ using System.Text.RegularExpressions;
 
 namespace liteclip.Services;
 
-public class VideoCompressionService : IVideoCompressionService
+public class VideoCompressionService
 {
     // Compiled regex for x265 parameter sanitization - avoids repeated compilation in hot path
     private static readonly Regex SubmeRegex = new(@"subme=(\d+)", RegexOptions.Compiled);
     private static readonly Regex RdRegex = new(@"\brd=(\d+)\b", RegexOptions.Compiled);
 
-    private readonly IJobStore _jobStore;
+    private readonly InMemoryJobStore _jobStore;
     private readonly SemaphoreSlim _concurrencyLimiter;
     private readonly Task? _startupCleanupTask;
     private readonly string _tempUploadPath;
@@ -24,13 +24,12 @@ public class VideoCompressionService : IVideoCompressionService
     private readonly FfmpegPathResolver _ffmpegResolver;
     private readonly IFfmpegRunner _ffmpegRunner;
     private readonly ICompressionStrategyFactory _strategyFactory;
-    private readonly ICompressionPlanner _planner;
-    private readonly IEncoderSelectionService _encoderSelectionService;
+    private readonly DefaultCompressionPlanner _planner;
+    private readonly EncoderSelectionService _encoderSelectionService;
     private readonly int _maxConcurrentJobs;
     private readonly int _maxQueueSize;
-    private readonly IVideoEncodingPipeline _encodingPipeline;
 
-    public VideoCompressionService(IConfiguration configuration, ILogger<VideoCompressionService> logger, FfmpegPathResolver ffmpegResolver, IFfmpegRunner ffmpegRunner, ICompressionStrategyFactory strategyFactory, ICompressionPlanner planner, IJobStore jobStore, IEncoderSelectionService encoderSelectionService, IVideoEncodingPipeline encodingPipeline)
+    public VideoCompressionService(IConfiguration configuration, ILogger<VideoCompressionService> logger, FfmpegPathResolver ffmpegResolver, IFfmpegRunner ffmpegRunner, ICompressionStrategyFactory strategyFactory, DefaultCompressionPlanner planner, InMemoryJobStore jobStore, EncoderSelectionService encoderSelectionService)
     {
         _logger = logger;
         _ffmpegResolver = ffmpegResolver;
@@ -39,7 +38,6 @@ public class VideoCompressionService : IVideoCompressionService
         _planner = planner;
         _jobStore = jobStore;
         _encoderSelectionService = encoderSelectionService;
-        _encodingPipeline = encodingPipeline;
 
         // Use AppData for temp directories to avoid permission issues in Program Files
         var appDataDirectory = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
@@ -645,7 +643,7 @@ public class VideoCompressionService : IVideoCompressionService
                 {
                     var encoderName = strategy.VideoCodec;
                     job.EncoderName = encoderName;
-                    job.EncoderIsHardware = _encoderSelectionService.IsHardwareEncoder(encoderName);
+                    job.EncoderIsHardware = EncoderSelectionService.IsHardwareEncoder(encoderName);
                 }
                 catch
                 {
@@ -657,7 +655,7 @@ public class VideoCompressionService : IVideoCompressionService
                 try
                 {
                     job.EncoderName = codec.VideoCodec;
-                    job.EncoderIsHardware = _encoderSelectionService.IsHardwareEncoder(job.EncoderName);
+                    job.EncoderIsHardware = EncoderSelectionService.IsHardwareEncoder(job.EncoderName);
                 }
                 catch
                 {
@@ -826,7 +824,39 @@ public class VideoCompressionService : IVideoCompressionService
 
     private async Task<bool> RunSinglePassEncodingAsync(string jobId, JobMetadata job, List<string> arguments, double? totalDuration)
     {
-        return await _encodingPipeline.RunSinglePassEncodingAsync(jobId, job, arguments, totalDuration);
+        var result = await _ffmpegRunner.RunAsync(
+            jobId,
+            arguments,
+            totalDuration,
+            1,
+            1,
+            update =>
+            {
+                if (update.Percent.HasValue)
+                    job.Progress = Math.Clamp(update.Percent.Value, 0, 100);
+                if (update.EstimatedSecondsRemaining.HasValue)
+                    job.EstimatedSecondsRemaining = update.EstimatedSecondsRemaining.Value;
+            },
+            process => job.Process = process);
+
+        if (job.Status == "cancelled")
+        {
+            _logger.LogInformation("Job {JobId} was cancelled", jobId);
+            return false;
+        }
+
+        if (result.ExitCode == 0)
+        {
+            if (File.Exists(job.OutputPath))
+                job.OutputSizeBytes = new FileInfo(job.OutputPath).Length;
+            return true;
+        }
+
+        job.Status = "failed";
+        job.ErrorMessage = result.StandardError;
+        _logger.LogError("Video compression failed for job {JobId}. Exit code {ExitCode}. Error: {Error}",
+            jobId, result.ExitCode, result.StandardError);
+        return false;
     }
 
     private void FinalizeSuccessfulJob(JobMetadata job, CodecConfig codec)

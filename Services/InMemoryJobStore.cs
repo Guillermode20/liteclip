@@ -4,7 +4,7 @@ using System.Linq;
 
 namespace liteclip.Services;
 
-public sealed class InMemoryJobStore : IJobStore
+public sealed class InMemoryJobStore
 {
     private readonly ConcurrentDictionary<string, JobMetadata> _jobs = new();
     private readonly ConcurrentQueue<string> _queue = new();

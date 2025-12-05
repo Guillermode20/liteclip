@@ -8,7 +8,7 @@ namespace liteclip.Services;
 /// <summary>
 /// Implementation of FFmpeg encoder probing service with caching.
 /// </summary>
-public sealed class FfmpegEncoderProbe : IFfmpegEncoderProbe
+public class FfmpegEncoderProbe
 {
     private readonly ConcurrentDictionary<string, bool> _encoderCache = new();
     private readonly IFfmpegPathResolver _pathResolver;
@@ -20,7 +20,7 @@ public sealed class FfmpegEncoderProbe : IFfmpegEncoderProbe
         _logger = logger;
     }
 
-    public bool IsEncoderAvailable(string encoderName)
+    public virtual bool IsEncoderAvailable(string encoderName)
     {
         if (string.IsNullOrWhiteSpace(encoderName))
         {
@@ -40,7 +40,7 @@ public sealed class FfmpegEncoderProbe : IFfmpegEncoderProbe
         return available;
     }
 
-    public string GetBestEncoder(string codecKey, string[] preferredEncoders, string fallbackEncoder)
+    public virtual string GetBestEncoder(string codecKey, string[] preferredEncoders, string fallbackEncoder)
     {
         if (string.IsNullOrWhiteSpace(codecKey) || preferredEncoders == null || preferredEncoders.Length == 0)
         {

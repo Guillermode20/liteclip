@@ -126,19 +126,17 @@ namespace liteclip
             builder.Services.AddSingleton<FfmpegProbeService>();
             builder.Services.AddSingleton<VideoMetadataService>();
 
-            builder.Services.AddSingleton<IFfmpegEncoderProbe, FfmpegEncoderProbe>();
-            builder.Services.AddSingleton<IEncoderSelectionService, EncoderSelectionService>();
+            builder.Services.AddSingleton<FfmpegEncoderProbe>();
+            builder.Services.AddSingleton<EncoderSelectionService>();
 
-            builder.Services.AddSingleton<ICompressionPlanner, DefaultCompressionPlanner>();
-            builder.Services.AddSingleton<IJobStore, InMemoryJobStore>();
+            builder.Services.AddSingleton<DefaultCompressionPlanner>();
+            builder.Services.AddSingleton<InMemoryJobStore>();
 
-            builder.Services.AddSingleton<IVideoEncodingPipeline, VideoEncodingPipeline>();
             builder.Services.AddSingleton<VideoCompressionService>();
-            builder.Services.AddSingleton<IVideoCompressionService>(sp => sp.GetRequiredService<VideoCompressionService>());
             builder.Services.AddSingleton<IAppVersionProvider, AppVersionProvider>();
 
-            builder.Services.AddSingleton<ICompressionStrategy>(sp => new H264Strategy(sp.GetRequiredService<IEncoderSelectionService>()));
-            builder.Services.AddSingleton<ICompressionStrategy>(sp => new H265Strategy(sp.GetRequiredService<IEncoderSelectionService>()));
+            builder.Services.AddSingleton<ICompressionStrategy>(sp => new H264Strategy(sp.GetRequiredService<EncoderSelectionService>()));
+            builder.Services.AddSingleton<ICompressionStrategy>(sp => new H265Strategy(sp.GetRequiredService<EncoderSelectionService>()));
             builder.Services.AddSingleton<ICompressionStrategyFactory, CompressionStrategyFactory>();
 
             builder.Services.AddHostedService<JobCleanupService>();

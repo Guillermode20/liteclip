@@ -11,10 +11,10 @@ namespace liteclip.CompressionStrategies;
 /// </summary>
 public abstract class BaseCompressionStrategy : ICompressionStrategy
 {
-    private readonly IEncoderSelectionService _encoderSelectionService;
+    private readonly EncoderSelectionService _encoderSelectionService;
     private string? _cachedEncoder;
 
-    protected BaseCompressionStrategy(IEncoderSelectionService encoderSelectionService)
+    protected BaseCompressionStrategy(EncoderSelectionService encoderSelectionService)
     {
         _encoderSelectionService = encoderSelectionService ?? throw new ArgumentNullException(nameof(encoderSelectionService));
     }
@@ -123,7 +123,7 @@ public abstract class BaseCompressionStrategy : ICompressionStrategy
         // They use internal rate control or specific flags (like -multipass qres for NVENC).
         // If we are using a hardware encoder, we should not return standard pass flags.
         var encoder = GetBestEncoder();
-        var isHardware = _encoderSelectionService.IsHardwareEncoder(encoder);
+        var isHardware = EncoderSelectionService.IsHardwareEncoder(encoder);
 
         if (isHardware)
         {

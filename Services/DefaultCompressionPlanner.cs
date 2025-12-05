@@ -7,7 +7,12 @@ using liteclip.Models;
 
 namespace liteclip.Services;
 
-public sealed class DefaultCompressionPlanner : ICompressionPlanner
+/// <summary>
+/// Context for codec-specific planning decisions.
+/// </summary>
+public sealed record CodecPlanningContext(string CodecKey, string FileExtension, int AudioBitrateKbps);
+
+public sealed class DefaultCompressionPlanner
 {
     public CompressionRequest NormalizeRequest(CompressionRequest request)
     {

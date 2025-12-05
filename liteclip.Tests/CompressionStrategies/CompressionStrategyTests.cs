@@ -63,23 +63,34 @@ public class CompressionStrategyTests
         Assert.True(h265.AudioBitrateKbps > 0);
     }
 
-    // Mock implementation for testing
-    private class MockEncoderSelectionService : IEncoderSelectionService
+    // Mock implementation for testing - inherits from concrete class
+    private class MockEncoderSelectionService : EncoderSelectionService
     {
-        public string GetBestH264Encoder() => "libx264";
-        public string GetBestH265Encoder() => "libx265";
-        public string GetBestEncoder(string codecKey) => codecKey.ToLowerInvariant() switch
+        public MockEncoderSelectionService() : base(new MockEncoderProbe(), new MockLogger()) { }
+        
+        private class MockEncoderProbe : FfmpegEncoderProbe
         {
-            "h264" => "libx264",
-            "h265" or "hevc" => "libx265",
-            _ => throw new ArgumentException($"Unsupported codec: {codecKey}")
-        };
-        public bool IsHardwareEncoder(string encoderName) => false;
-        public CachedEncoderInfo GetCachedEncoderInfo(string codecKey) => codecKey.ToLowerInvariant() switch
+            public MockEncoderProbe() : base(new MockPathResolver(), new MockProbeLogger()) { }
+            
+            private class MockPathResolver : IFfmpegPathResolver
+            {
+                public string? ResolveFfmpegPath() => "/usr/bin/ffmpeg";
+                public string? ResolveFfprobePath() => "/usr/bin/ffprobe";
+            }
+            
+            private class MockProbeLogger : Microsoft.Extensions.Logging.ILogger<FfmpegEncoderProbe>
+            {
+                public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+                public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => false;
+                public void Log<TState>(Microsoft.Extensions.Logging.LogLevel logLevel, Microsoft.Extensions.Logging.EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) { }
+            }
+        }
+        
+        private class MockLogger : Microsoft.Extensions.Logging.ILogger<EncoderSelectionService>
         {
-            "h264" => new CachedEncoderInfo("libx264", false),
-            "h265" or "hevc" => new CachedEncoderInfo("libx265", false),
-            _ => throw new ArgumentException($"Unsupported codec: {codecKey}")
-        };
+            public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+            public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => false;
+            public void Log<TState>(Microsoft.Extensions.Logging.LogLevel logLevel, Microsoft.Extensions.Logging.EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) { }
+        }
     }
 }

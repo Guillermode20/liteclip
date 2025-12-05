@@ -9,27 +9,27 @@ namespace liteclip.Tests.Services;
 public class EncoderSelectionServiceTests
 {
     [Fact]
-    public void GetBestH264Encoder_PrefersHardwareWhenAvailable()
+    public void GetBestEncoder_PrefersHardwareWhenAvailable()
     {
         var available = new[] { "h264_qsv", "libx264" };
         var probe = new FakeFfmpegEncoderProbe(available);
         var logger = new NullLogger<EncoderSelectionService>();
         var service = new EncoderSelectionService(probe, logger);
 
-        var best = service.GetBestH264Encoder();
+        var best = service.GetBestEncoder("h264");
 
         Assert.Equal("h264_qsv", best);
     }
 
     [Fact]
-    public void GetBestH264Encoder_FallsBackToSoftware_WhenNoHardwareAvailable()
+    public void GetBestEncoder_FallsBackToSoftware_WhenNoHardwareAvailable()
     {
         var available = Array.Empty<string>();
         var probe = new FakeFfmpegEncoderProbe(available);
         var logger = new NullLogger<EncoderSelectionService>();
         var service = new EncoderSelectionService(probe, logger);
 
-        var best = service.GetBestH264Encoder();
+        var best = service.GetBestEncoder("h264");
 
         Assert.Equal("libx264", best);
     }
@@ -47,21 +47,22 @@ public class EncoderSelectionServiceTests
         var logger = new NullLogger<EncoderSelectionService>();
         var service = new EncoderSelectionService(probe, logger);
 
-        var isHardware = service.IsHardwareEncoder(encoderName ?? string.Empty);
+        var isHardware = EncoderSelectionService.IsHardwareEncoder(encoderName ?? string.Empty);
 
         Assert.Equal(expected, isHardware);
     }
 
-    private sealed class FakeFfmpegEncoderProbe : IFfmpegEncoderProbe
+    private sealed class FakeFfmpegEncoderProbe : FfmpegEncoderProbe
     {
         private readonly HashSet<string> _available;
 
-        public FakeFfmpegEncoderProbe(IEnumerable<string> availableEncoders)
+        public FakeFfmpegEncoderProbe(IEnumerable<string> availableEncoders) 
+            : base(new FakePathResolver(), NullLogger<FfmpegEncoderProbe>.Instance)
         {
             _available = new HashSet<string>(availableEncoders, StringComparer.OrdinalIgnoreCase);
         }
 
-        public bool IsEncoderAvailable(string encoderName)
+        public override bool IsEncoderAvailable(string encoderName)
         {
             if (string.IsNullOrWhiteSpace(encoderName))
             {
@@ -71,7 +72,7 @@ public class EncoderSelectionServiceTests
             return _available.Contains(encoderName);
         }
 
-        public string GetBestEncoder(string codecKey, string[] preferredEncoders, string fallbackEncoder)
+        public override string GetBestEncoder(string codecKey, string[] preferredEncoders, string fallbackEncoder)
         {
             foreach (var encoder in preferredEncoders)
             {
@@ -83,10 +84,11 @@ public class EncoderSelectionServiceTests
 
             return fallbackEncoder;
         }
-
-        public void ClearCache()
+        
+        private sealed class FakePathResolver : IFfmpegPathResolver
         {
-            // No-op for fake implementation
+            public string? ResolveFfmpegPath() => "/usr/bin/ffmpeg";
+            public string? ResolveFfprobePath() => "/usr/bin/ffprobe";
         }
     }
 }

@@ -12,7 +12,7 @@ public class H265Strategy : BaseCompressionStrategy
     public override string AudioCodec => "aac";
     public override int AudioBitrateKbps => 128;
 
-    public H265Strategy(IEncoderSelectionService encoderSelectionService) : base(encoderSelectionService)
+    public H265Strategy(EncoderSelectionService encoderSelectionService) : base(encoderSelectionService)
     {
     }
 }
