@@ -76,6 +76,22 @@ public class VideoCompressionService
         // Schedule temp cleanup to run in background to avoid blocking the DI constructor during host startup.
         // Store the Task so tests or other code can wait for completion if necessary.
         _startupCleanupTask = Task.Run(() => CleanStartupTempFiles());
+
+        // Warm up encoder selection in the background so the first large job doesnt
+        // pay the full cost of probing hardware encoders.
+        Task.Run(() =>
+        {
+            try
+            {
+                // Probe commonly used codecs; results are cached in EncoderSelectionService.
+                _ = _encoderSelectionService.GetCachedH264EncoderInfo();
+                _ = _encoderSelectionService.GetCachedH265EncoderInfo();
+            }
+            catch
+            {
+                // Best-effort warmup only; ignore failures.
+            }
+        });
     }
 
     private void CleanStartupTempFiles()
@@ -429,8 +445,10 @@ public class VideoCompressionService
             // Update status from queued to processing
             job.Status = "processing";
             job.StartedAt = DateTime.UtcNow;
-            _logger.LogInformation("Starting compression for job {JobId} (waited {WaitTime:F1}s in queue)",
-                jobId, (job.StartedAt.Value - job.CreatedAt).TotalSeconds);
+            _logger.LogInformation("Job {JobId} entered processing at {StartedAt:O} (waited {WaitTime:F1}s in queue)",
+                jobId,
+                job.StartedAt.Value,
+                (job.StartedAt.Value - job.CreatedAt).TotalSeconds);
 
             await RunFfmpegCompressionAsync(jobId, job, request, codecConfig, preProbedDimensions);
         }
@@ -611,15 +629,28 @@ public class VideoCompressionService
             var filters = AdaptiveFilterBuilder.Build(scalePercent, fpsToUse, job.TargetSizeMb, job.SourceDuration);
 
             var audioFilters = new List<string>();
+            double? seekStart = null;
+            double? seekDuration = null;
+
             if (request.Segments != null && request.Segments.Count > 0)
             {
-                _logger.LogInformation("Applying frame-accurate trim filters for {Count} segments", request.Segments.Count);
-                var (vFilter, aFilter) = BuildTrimFilters(request.Segments, fpsToUse);
+                if (request.Segments.Count == 1)
+                {
+                    _logger.LogInformation("Optimizing single segment trim using input seeking for job {JobId}", jobId);
+                    var seg = request.Segments[0];
+                    seekStart = seg.Start;
+                    seekDuration = seg.End - seg.Start;
+                }
+                else
+                {
+                    _logger.LogInformation("Applying frame-accurate trim filters for {Count} segments", request.Segments.Count);
+                    var (vFilter, aFilter) = BuildTrimFilters(request.Segments, fpsToUse);
 
-                // Prepend trim filters to the chain.
-                // We inject fps filter first to ensure constant frame rate input for setpts
-                filters.Insert(0, vFilter);
-                audioFilters.Add(aFilter);
+                    // Prepend trim filters to the chain.
+                    // We inject fps filter first to ensure constant frame rate input for setpts
+                    filters.Insert(0, vFilter);
+                    audioFilters.Add(aFilter);
+                }
             }
 
             _logger.LogInformation("Applying {Count} adaptive quality filters for job {JobId} (scale={Scale}%, targetSize={TargetMb}MB)",
@@ -667,7 +698,25 @@ public class VideoCompressionService
 
             List<string> BuildArguments(double videoBitrate, AudioPlan audioPlan)
             {
-                var args = new List<string> { "-y", "-i", job.InputPath };
+                // Enable machine-readable progress output so we can surface
+                // progress updates earlier and more reliably to the UI.
+                var args = new List<string> { "-y", "-progress", "pipe:2", "-nostats" };
+
+                if (seekStart.HasValue)
+                {
+                    args.Add("-ss");
+                    args.Add(seekStart.Value.ToString(CultureInfo.InvariantCulture));
+                }
+
+                if (seekDuration.HasValue)
+                {
+                    args.Add("-t");
+                    args.Add(seekDuration.Value.ToString(CultureInfo.InvariantCulture));
+                }
+
+                args.Add("-i");
+                args.Add(job.InputPath);
+
                 if (filters.Count > 0)
                 {
                     args.AddRange(new[] { "-vf", string.Join(",", filters) });
@@ -789,41 +838,13 @@ public class VideoCompressionService
         finally
         {
             job.CompletedAt = DateTime.UtcNow;
-
-            // Ensure process is properly disposed
-            if (job.Process != null)
-            {
-                try
-                {
-                    if (!job.Process.HasExited)
-                    {
-                        job.Process.Kill(entireProcessTree: true);
-                        job.Process.WaitForExit(3000);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Error disposing process for job {JobId}", jobId);
-                }
-                finally
-                {
-                    try
-                    {
-                        job.Process.Dispose();
-                    }
-                    catch
-                    {
-                        // Ignore disposal errors
-                    }
-                }
-            }
-
-            job.Process = null;
         }
     }
 
     private async Task<bool> RunSinglePassEncodingAsync(string jobId, JobMetadata job, List<string> arguments, double? totalDuration)
     {
+        _logger.LogInformation("Starting FFmpeg single-pass encode for job {JobId} at {Timestamp:O}", jobId, DateTime.UtcNow);
+
         var result = await _ffmpegRunner.RunAsync(
             jobId,
             arguments,

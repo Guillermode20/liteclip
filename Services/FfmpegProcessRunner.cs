@@ -154,6 +154,22 @@ public class FfmpegProcessRunner : IFfmpegRunner
         try
         {
             process.Start();
+
+            // Emit an initial progress update as soon as the FFmpeg process starts,
+            // so the job visibly transitions from "starting" to "running" even
+            // before the first time-based progress line is parsed.
+            if (onProgress != null)
+            {
+                try
+                {
+                    onProgress(new FfmpegProgressUpdate(0, 0, null));
+                }
+                catch
+                {
+                    // Ignore progress callback errors
+                }
+            }
+
             process.BeginOutputReadLine();
             process.BeginErrorReadLine();
 

@@ -136,8 +136,6 @@ public static class CompressionEndpoints
         // GET endpoint to check job status
         endpoints.MapGet("/api/status/{jobId}", (string jobId, VideoCompressionService compressionService, ILogger<Program> logger) =>
             {
-                logger.LogApiRequest("GET", $"/api/status/{jobId}", "Job status check");
-
                 if (string.IsNullOrWhiteSpace(jobId))
                 {
                     return Results.BadRequest(new { error = "Job ID is required" });

@@ -133,8 +133,9 @@ public class FfmpegEncoderProbe
                 // Read stderr (some encoders print diagnostics there)
                 var error = process.StandardError.ReadToEnd();
 
-                // Use timeout to prevent indefinite hangs on stalled processes
-                if (!process.WaitForExit(5000))
+                // Use a short timeout to prevent hangs on stalled drivers while keeping
+                // the overall encoder probing latency low.
+                if (!process.WaitForExit(2000))
                 {
                     try { process.Kill(entireProcessTree: true); } catch { }
                     _logger.LogWarning("Encoder test for {EncoderName} timed out", encoderName);

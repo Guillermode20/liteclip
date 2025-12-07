@@ -11,7 +11,10 @@ public interface IProgressParser
 
 public class FfmpegProgressParser : IProgressParser
 {
+    // Support both classic ffmpeg stderr stats (time=HH:MM:SS.xx) and
+    // the -progress protocol (out_time=HH:MM:SS.xx).
     private static readonly Regex TimeRegex = new(@"time=(\d{2}):(\d{2}):(\d{2}(?:\.\d+)?)", RegexOptions.Compiled);
+    private static readonly Regex OutTimeRegex = new(@"out_time=(\d{2}):(\d{2}):(\d{2}(?:\.\d+)?)", RegexOptions.Compiled);
 
     public FfmpegProgressUpdate? TryParse(string line, double? totalDuration)
     {
@@ -22,7 +25,13 @@ public class FfmpegProgressParser : IProgressParser
 
         try
         {
+            // Prefer classic time= first, then fall back to out_time=
             var match = TimeRegex.Match(line);
+            if (!match.Success)
+            {
+                match = OutTimeRegex.Match(line);
+            }
+
             if (!match.Success)
             {
                 return null;
