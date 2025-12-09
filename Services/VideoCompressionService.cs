@@ -620,6 +620,9 @@ public class VideoCompressionService
             job.ScalePercent = scalePercent;
 
             var videoBitrateKbps = job.VideoBitrateKbps.Value;
+            // Audio plan is independent from the per-attempt video bitrate and does not change across retries.
+            // Compute it once to avoid recomputing during two-pass/feedback loops.
+            var audioPlan = CalculateAudioPlan(job, codec);
 
             job.TargetSizeMb = Math.Round(job.TargetSizeMb.Value, 2);
             job.VideoBitrateKbps = videoBitrateKbps;
@@ -768,7 +771,6 @@ public class VideoCompressionService
                 {
                     attempts++;
                     job.VideoBitrateKbps = currentVideoKbps;
-                    var audioPlan = CalculateAudioPlan(job, codec);
                     job.TargetBitrateKbps = Math.Round(currentVideoKbps + audioPlan.BitrateKbps, 2);
 
                     var baseArgs = BuildArguments(currentVideoKbps, audioPlan);
@@ -805,7 +807,6 @@ public class VideoCompressionService
                 {
                     attempts++;
                     job.VideoBitrateKbps = currentVideoKbps;
-                    var audioPlan = CalculateAudioPlan(job, codec);
                     job.TargetBitrateKbps = Math.Round(currentVideoKbps + audioPlan.BitrateKbps, 2);
 
                     var attemptArgs = BuildArguments(currentVideoKbps, audioPlan);
