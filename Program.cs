@@ -40,38 +40,46 @@ namespace liteclip
 
             ConfigurePipeline(app);
 
-            // Initialize services that need early setup
-            var ffmpegBootstrapper = app.Services.GetRequiredService<FfmpegBootstrapper>();
-            ffmpegBootstrapper.PrimeExistingInstallation();
-
-            // Start the server
             // Use port 0 to let the OS assign a free port, avoiding conflicts
             app.Urls.Add("http://127.0.0.1:0");
 
             var cts = new CancellationTokenSource();
 
-            // Start the server synchronously to ensure it's ready before the window loads
+            // Start FFmpeg initialization in background thread
+            var ffmpegTask = Task.Run(async () =>
+            {
+                try
+                {
+                    var ffmpegBootstrapper = app.Services.GetRequiredService<FfmpegBootstrapper>();
+                    await Task.Run(() => ffmpegBootstrapper.PrimeExistingInstallation());
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Warning: FFmpeg initialization failed: {ex.Message}");
+                }
+            });
+
+            // Start the server and get the actual port
+            string serverUrl;
             try
             {
                 app.StartAsync(cts.Token).GetAwaiter().GetResult();
+                
+                var server = app.Services.GetRequiredService<Microsoft.AspNetCore.Hosting.Server.IServer>();
+                var serverAddresses = server.Features.Get<IServerAddressesFeature>();
+                serverUrl = serverAddresses?.Addresses.FirstOrDefault() ?? "http://localhost:5000";
+
+                Console.WriteLine($"\n🎉 LiteClip - Fast Video Compression");
+                Console.WriteLine($"📅 Started at {DateTime.Now:O}");
+                Console.WriteLine($"📡 Server running at: {serverUrl}");
             }
             catch (Exception ex)
             {
-                // If startup fails, show a native message box if possible or just crash
                 Console.WriteLine($"FATAL: Server failed to start: {ex}");
                 return;
             }
 
-            // Get the actual assigned port
-            var server = app.Services.GetRequiredService<Microsoft.AspNetCore.Hosting.Server.IServer>();
-            var serverAddresses = server.Features.Get<IServerAddressesFeature>();
-            var serverUrl = serverAddresses?.Addresses.FirstOrDefault() ?? "http://localhost:5000";
-
-            Console.WriteLine($"\n🎉 LiteClip - Fast Video Compression");
-            Console.WriteLine($"📅 Started at {DateTime.Now:O}");
-            Console.WriteLine($"📡 Server running at: {serverUrl}");
-
-            // Create and launch the window
+            // Create and launch the window with the actual server URL
             var window = CreatePhotinoWindow(app, serverUrl, cts);
 
             // This BLOCKS the [STAThread] (Main) until the window is closed.
@@ -223,8 +231,9 @@ namespace liteclip
             var webViewBasePath = Path.Combine(Path.GetTempPath(), "LiteClip_WebView2");
             var webView2Path = PrepareWebViewUserDataFolder(webViewBasePath);
 
+            // Load user settings asynchronously
             var userSettingsStore = app.Services.GetRequiredService<UserSettingsStore>();
-            var userSettings = userSettingsStore.GetAsync().GetAwaiter().GetResult();
+            var userSettingsTask = userSettingsStore.GetAsync();
 
             var window = new PhotinoWindow()
                 .SetTitle("LiteClip - Fast Video Compression")
@@ -242,10 +251,13 @@ namespace liteclip
 
             bool windowShown = false;
             Point? storedLocation = null;
-            Action showWindow = () =>
+            Func<Task> showWindow = async () =>
             {
                 if (windowShown) return;
                 windowShown = true;
+
+                // Wait for user settings to load
+                var userSettings = await userSettingsTask;
 
                 if (userSettings.StartMaximized)
                 {
@@ -272,7 +284,7 @@ namespace liteclip
                 }
                 else if (message == "window-ready")
                 {
-                    showWindow();
+                    _ = showWindow();
                 }
                 else if (message.StartsWith("window-location:"))
                 {
@@ -295,28 +307,12 @@ namespace liteclip
         static string PrepareWebViewUserDataFolder(string basePath)
         {
             Directory.CreateDirectory(basePath);
-            var instanceFolder = Path.Combine(basePath, DateTime.UtcNow.ToString("yyyyMMddHHmmssfff", CultureInfo.InvariantCulture));
-            Directory.CreateDirectory(instanceFolder);
-            _ = Task.Run(() => CleanupOldWebViewProfiles(basePath, instanceFolder));
-            return instanceFolder;
-        }
-
-        static void CleanupOldWebViewProfiles(string basePath, string keepPath)
-        {
-            try
-            {
-                var threshold = DateTime.UtcNow - TimeSpan.FromDays(1);
-                foreach (var directory in Directory.GetDirectories(basePath))
-                {
-                    if (string.Equals(directory, keepPath, StringComparison.OrdinalIgnoreCase)) continue;
-                    try
-                    {
-                        if (new DirectoryInfo(directory).CreationTimeUtc < threshold) Directory.Delete(directory, true);
-                    }
-                    catch { }
-                }
-            }
-            catch { }
+            
+            // Reuse the same profile instead of creating new ones
+            var persistentProfilePath = Path.Combine(basePath, "PersistentProfile");
+            Directory.CreateDirectory(persistentProfilePath);
+            
+            return persistentProfilePath;
         }
     }
 }
