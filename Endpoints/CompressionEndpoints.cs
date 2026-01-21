@@ -141,6 +141,69 @@ public static class CompressionEndpoints
             .WithName("CompressVideo")
             .DisableAntiforgery();
 
+        // POST endpoint to detect black bars for cropping
+        endpoints.MapPost("/api/detect-crop", async (
+                [FromForm] IFormFile file,
+                [FromForm] double? startTime,
+                CropDetectionService cropService,
+                FfmpegBootstrapper ffmpegBootstrapper,
+                ILogger<Program> logger) =>
+            {
+                if (file == null || file.Length == 0)
+                {
+                    return Results.BadRequest(new { error = "No file uploaded" });
+                }
+
+                try
+                {
+                    await ffmpegBootstrapper.EnsureReadyAsync();
+                }
+                catch (Exception ex)
+                {
+                    return Results.Problem(
+                        title: "FFmpeg is still preparing",
+                        detail: ex.Message,
+                        statusCode: 503
+                    );
+                }
+
+                // Create a temporary file to run crop detection on
+                var tempPath = Path.Combine(Path.GetTempPath(), $"cropdetect_{Guid.NewGuid()}{Path.GetExtension(file.FileName)}");
+                try
+                {
+                    await using (var stream = new FileStream(tempPath, FileMode.Create))
+                    {
+                        await file.CopyToAsync(stream);
+                    }
+
+                    var result = await cropService.DetectAsync(tempPath, startTime ?? 0);
+                    if (result == null)
+                    {
+                        return Results.NotFound(new { error = "Could not detect black bars" });
+                    }
+
+                    return Results.Ok(result);
+                }
+                catch (Exception ex)
+                {
+                    logger.LogError(ex, "Error during crop detection");
+                    return Results.Problem(detail: ex.Message, statusCode: 500);
+                }
+                finally
+                {
+                    try
+                    {
+                        if (File.Exists(tempPath)) File.Delete(tempPath);
+                    }
+                    catch
+                    {
+                        // Ignore cleanup errors
+                    }
+                }
+            })
+            .WithName("DetectCrop")
+            .DisableAntiforgery();
+
         // GET endpoint to check job status
         endpoints.MapGet("/api/status/{jobId}", (string jobId, VideoCompressionService compressionService, ILogger<Program> logger) =>
             {

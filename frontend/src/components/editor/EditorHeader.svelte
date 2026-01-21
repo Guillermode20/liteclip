@@ -4,10 +4,12 @@
     export let totalDuration: number = 0;
     export let segmentCount: number = 0;
     export let isCropActive: boolean = false;
+    export let isDetecting: boolean = false;
 
     const dispatch = createEventDispatcher<{ 
         remove: void;
         toggleCrop: void;
+        detectCrop: void;
     }>();
 
     function formatTime(seconds: number): string {
@@ -42,6 +44,23 @@
             </svg>
             <span>{isCropActive ? 'done' : 'crop'}</span>
         </button>
+
+        {#if isCropActive}
+        <button
+            type="button"
+            class="editor-detect-btn"
+            on:click={() => dispatch('detectCrop')}
+            disabled={isDetecting}
+            title="Auto-detect black bars"
+        >
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10"></circle>
+                <line x1="12" y1="8" x2="12" y2="12"></line>
+                <line x1="12" y1="16" x2="12.01" y2="16"></line>
+            </svg>
+            <span>{isDetecting ? 'detecting...' : 'auto-detect'}</span>
+        </button>
+        {/if}
 
         <button
             type="button"
@@ -95,6 +114,30 @@
         background: #3b82f6;
         border-color: #60a5fa;
         color: white;
+    }
+
+    .editor-detect-btn {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        background: #27272a;
+        color: #e4e4e7;
+        border: 1px solid #3f3f46;
+        padding: 0.4rem 0.8rem;
+        border-radius: 4px;
+        font-size: 0.8rem;
+        cursor: pointer;
+        transition: all 0.2s ease;
+    }
+
+    .editor-detect-btn:hover:not(:disabled) {
+        background: #3f3f46;
+        border-color: #52525b;
+    }
+
+    .editor-detect-btn:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
     }
 
     .editor-header-text {

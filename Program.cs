@@ -133,6 +133,7 @@ namespace liteclip
             builder.Services.AddSingleton<IFfmpegRunner, FfmpegProcessRunner>();
             builder.Services.AddSingleton<FfmpegProbeService>();
             builder.Services.AddSingleton<VideoMetadataService>();
+            builder.Services.AddSingleton<CropDetectionService>();
 
             builder.Services.AddSingleton<FfmpegEncoderProbe>();
             builder.Services.AddSingleton<EncoderSelectionService>();

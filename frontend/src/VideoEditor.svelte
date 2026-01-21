@@ -35,10 +35,12 @@
     let isLoading: boolean = false;
     let loadError: string | null = null;
     let videoAspectRatio = 16 / 9;
+    let videoMetadata: VideoMetadata | null = null;
     
     // Crop state
     let crop = { x: 0, y: 0, width: 100, height: 100 };
     let isCropActive = false;
+    let isDetecting = false;
 
     // Drag state
     let isDragging: boolean = false;
@@ -193,6 +195,7 @@
     }
     
     function applyMetadata(metadata: VideoMetadata) {
+        videoMetadata = metadata;
         duration = metadata.duration;
         videoAspectRatio = metadata.aspectRatio;
         currentTime = 0;
@@ -352,6 +355,40 @@
         onCropChange(crop);
     }
 
+    async function handleDetectCrop() {
+        if (!videoFile || !videoMetadata || isDetecting) return;
+        
+        isDetecting = true;
+        try {
+            const formData = new FormData();
+            formData.append('file', videoFile);
+            formData.append('startTime', currentTime.toString());
+            
+            const response = await fetch('/api/detect-crop', {
+                method: 'POST',
+                body: formData
+            });
+            
+            if (!response.ok) throw new Error('Detection failed');
+            
+            const result = await response.json() as { x: number; y: number; width: number; height: number };
+            
+            // Convert pixels to percentages
+            crop = {
+                x: (result.x / videoMetadata.width) * 100,
+                y: (result.y / videoMetadata.height) * 100,
+                width: (result.width / videoMetadata.width) * 100,
+                height: (result.height / videoMetadata.height) * 100
+            };
+            
+            notifyCropChange();
+        } catch (error) {
+            console.error('Crop detection failed:', error);
+        } finally {
+            isDetecting = false;
+        }
+    }
+
     // ============================================================================
     // Keyboard Shortcuts
     // ============================================================================
@@ -383,8 +420,16 @@
         {totalDuration}
         segmentCount={segments.length}
         {isCropActive}
+        {isDetecting}
         on:remove={() => onRemoveVideo?.()}
-        on:toggleCrop={() => isCropActive = !isCropActive}
+        on:toggleCrop={() => {
+            isCropActive = !isCropActive;
+            if (!isCropActive) {
+                crop = { x: 0, y: 0, width: 100, height: 100 };
+                notifyCropChange();
+            }
+        }}
+        on:detectCrop={handleDetectCrop}
     />
 
     <VideoPreview
