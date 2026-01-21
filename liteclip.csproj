@@ -51,17 +51,10 @@
     <Content Include="wwwroot\**\*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
-  <!-- 
-    Frontend auto-build: Build Svelte/Vite UI before .NET build/publish.
-    Skips during design-time builds and if frontend folder is missing.
+  <!--
+    Frontend build is handled by the publish scripts (e.g. publish-win.ps1).
+    Avoid invoking npm during normal `dotnet run`/Debug for fast startup.
   -->
-  <Target Name="BuildFrontend" BeforeTargets="Build;Publish;Run" Condition="Exists('frontend/package.json') and '$(DesignTimeBuild)' != 'true'">
-    <Message Importance="high" Text="Building frontend (Vite) -&gt; wwwroot ..." />
-    <!-- Install dependencies only if node_modules missing -->
-    <Exec Command="npm install" WorkingDirectory="frontend" Condition="!Exists('frontend/node_modules')" />
-    <!-- Build always to ensure wwwroot is up-to-date -->
-    <Exec Command="npm run build" WorkingDirectory="frontend" />
-  </Target>
 
   <!-- Speed-focused Debug settings -->
   <PropertyGroup Condition="'$(Configuration)'=='Debug'">

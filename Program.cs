@@ -40,8 +40,13 @@ namespace liteclip
 
             ConfigurePipeline(app);
 
-            // Use port 0 to let the OS assign a free port, avoiding conflicts
-            app.Urls.Add("http://127.0.0.1:0");
+            // Keep Development URL configuration in launchSettings/environment.
+            // In non-Development, prefer a loopback-only ephemeral port.
+            if (!app.Environment.IsDevelopment() && string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("ASPNETCORE_URLS")))
+            {
+                app.Urls.Clear();
+                app.Urls.Add("http://127.0.0.1:0");
+            }
 
             var cts = new CancellationTokenSource();
 
@@ -80,7 +85,8 @@ namespace liteclip
             }
 
             // Create and launch the window with the actual server URL
-            var window = CreatePhotinoWindow(app, serverUrl, cts);
+            var uiUrl = GetUiUrl(app, serverUrl);
+            var window = CreatePhotinoWindow(app, uiUrl, cts);
 
             // This BLOCKS the [STAThread] (Main) until the window is closed.
             window.WaitForClose();
@@ -104,6 +110,52 @@ namespace liteclip
 
             Console.WriteLine("Server stopped. Exiting.");
             Environment.Exit(0);
+        }
+
+        private static string GetUiUrl(WebApplication app, string serverUrl)
+        {
+            // In Development we typically use the Vite dev server for fast UI iteration.
+            // Override with LITECLIP_UI_URL if needed.
+            if (app.Environment.IsDevelopment())
+            {
+                var overrideUrl = Environment.GetEnvironmentVariable("LITECLIP_UI_URL");
+                if (!string.IsNullOrWhiteSpace(overrideUrl))
+                {
+                    return overrideUrl;
+                }
+
+                const string viteUrl = "http://localhost:5173";
+                if (IsUrlReachable(viteUrl))
+                {
+                    return viteUrl;
+                }
+
+                Console.WriteLine("\n⚠️  Vite dev server not reachable at http://localhost:5173");
+                Console.WriteLine("   To use the fast dev UI, run: cd frontend; npm install; npm run dev");
+                Console.WriteLine("   Falling back to backend-served static files.\n");
+                return serverUrl;
+            }
+
+            return serverUrl;
+        }
+
+        private static bool IsUrlReachable(string url)
+        {
+            try
+            {
+                using var client = new HttpClient
+                {
+                    Timeout = TimeSpan.FromMilliseconds(300)
+                };
+
+                using var request = new HttpRequestMessage(HttpMethod.Head, url);
+                using var response = client.Send(request);
+                return (int)response.StatusCode >= 200 && (int)response.StatusCode < 500;
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         private static void ConfigureServices(WebApplicationBuilder builder)
@@ -226,55 +278,58 @@ namespace liteclip
             return candidates.FirstOrDefault(c => !string.IsNullOrEmpty(c) && Directory.Exists(c));
         }
 
-        private static PhotinoWindow CreatePhotinoWindow(WebApplication app, string serverUrl, CancellationTokenSource cts)
+        private static PhotinoWindow CreatePhotinoWindow(WebApplication app, string uiUrl, CancellationTokenSource cts)
         {
             // Prepare WebView2 user data folder to prevent locking issues
             var webViewBasePath = Path.Combine(Path.GetTempPath(), "LiteClip_WebView2");
             var webView2Path = PrepareWebViewUserDataFolder(webViewBasePath);
 
-            // Load user settings asynchronously
+            // Load user settings (best-effort)
             var userSettingsStore = app.Services.GetRequiredService<UserSettingsStore>();
-            var userSettingsTask = userSettingsStore.GetAsync();
+            UserSettings? userSettings = null;
+            try
+            {
+                userSettings = userSettingsStore.GetAsync().GetAwaiter().GetResult();
+            }
+            catch
+            {
+                // Ignore settings failures during startup; use defaults.
+            }
 
             var window = new PhotinoWindow()
                 .SetTitle("LiteClip - Fast Video Compression")
                 .SetUseOsDefaultSize(false)
                 .SetUseOsDefaultLocation(false)
                 .SetResizable(true)
-                .SetDevToolsEnabled(true) // Keep enabled for now, useful for troubleshooting
+                .SetDevToolsEnabled(app.Environment.IsDevelopment())
                 .SetContextMenuEnabled(true)
                 .SetTemporaryFilesPath(webView2Path)
                 .SetLogVerbosity(app.Environment.IsDevelopment() ? 4 : 0);
 
-            // Start off-screen to prevent "White Flash" or black window during startup.
-            // The frontend sends "window-ready" when fully loaded.
-            window.SetLocation(new Point(-10000, -10000));
+            // Start hidden to avoid the common WebView white-flash/flicker.
+            // We'll show/unminimize only after the frontend signals readiness.
+            window.SetMinimized(true);
 
-            bool windowShown = false;
-            Point? storedLocation = null;
-            Func<Task> showWindow = async () =>
+            var shown = false;
+            void ShowOnce()
             {
-                if (windowShown) return;
-                windowShown = true;
+                if (shown) return;
+                shown = true;
 
-                // Wait for user settings to load
-                var userSettings = await userSettingsTask;
-
-                if (userSettings.StartMaximized)
+                // Apply final size/state right before showing to reduce flashes caused by early resizes.
+                if (userSettings?.StartMaximized == true)
                 {
-                    window.SetMaximized(true);
                     window.SetMinSize(854, 480);
+                    window.SetMaximized(true);
                 }
                 else
                 {
                     window.SetSize(1200, 800);
                     window.Center();
                 }
-                if (storedLocation.HasValue)
-                {
-                    window.SetLocation(storedLocation.Value);
-                }
-            };
+
+                window.SetMinimized(false);
+            }
 
             // Handle window events
             window.RegisterWebMessageReceivedHandler((sender, message) =>
@@ -285,12 +340,7 @@ namespace liteclip
                 }
                 else if (message == "window-ready")
                 {
-                    _ = showWindow();
-                }
-                else if (message.StartsWith("window-location:"))
-                {
-                    var location = message.Substring(16).Split(',');
-                    storedLocation = new Point(int.Parse(location[0]), int.Parse(location[1]));
+                    ShowOnce();
                 }
             });
 
@@ -300,7 +350,20 @@ namespace liteclip
                 return false; // Allow close
             };
 
-            window.Load(serverUrl);
+            window.Load(uiUrl);
+
+            // If the frontend never sends window-ready (e.g., Vite down / JS error),
+            // show the window anyway after a short delay so users aren't stuck.
+            _ = Task.Run(async () =>
+            {
+                var delayMs = app.Environment.IsDevelopment() ? 5000 : 15000;
+                await Task.Delay(delayMs);
+                if (!shown)
+                {
+                    Console.WriteLine($"\n⚠️  Frontend did not signal window-ready within {delayMs}ms; showing window anyway.");
+                }
+                ShowOnce();
+            });
 
             return window;
         }

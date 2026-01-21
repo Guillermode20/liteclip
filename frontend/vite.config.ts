@@ -48,6 +48,8 @@ export default defineConfig({
     target: 'es2020' // Target modern browsers for smaller bundle size
   },
   server: {
+    port: 5173,
+    strictPort: true,
     proxy: {
       '/api': {
         target: 'http://localhost:5025',

@@ -49,4 +49,9 @@ function sendWindowReady(attempt = 0) {
   setTimeout(() => sendWindowReady(attempt + 1), nextDelay);
 }
 
-sendWindowReady();
+// Signal readiness after initial paint to avoid showing a white/blank WebView.
+(async () => {
+  await new Promise<void>(r => requestAnimationFrame(() => r()));
+  await new Promise<void>(r => requestAnimationFrame(() => r()));
+  sendWindowReady();
+})();
