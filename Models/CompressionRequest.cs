@@ -20,6 +20,11 @@ public class CompressionRequest
     public List<VideoSegment>? Segments { get; set; }
     public bool UseQualityMode { get; set; }
 
+    public int? CropX { get; set; }
+    public int? CropY { get; set; }
+    public int? CropWidth { get; set; }
+    public int? CropHeight { get; set; }
+
     /// <summary>
     /// Unified logical encoding mode derived from the quality flag.
     /// This is not supplied directly by the client; it is normalized on the server.

@@ -184,7 +184,7 @@ public static class LoggingHelpers
         {
             formattedMessage += $"\n   Context: {context}";
         }
-        logger.LogWarning(formattedMessage);
+        logger.LogWarning("{FormattedMessage}", formattedMessage);
     }
 
     /// <summary>
@@ -197,6 +197,6 @@ public static class LoggingHelpers
         {
             message += $"\n   Context: {context}";
         }
-        logger.LogError(exception, message);
+        logger.LogError(exception, "{FormattedMessage}", message);
     }
 }

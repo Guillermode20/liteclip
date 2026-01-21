@@ -317,6 +317,12 @@ public class VideoCompressionService
             return false;
         }
 
+        // If we need to crop or scale, we must run the compression pipeline
+        if (request.CropWidth.HasValue || (request.ScalePercent.HasValue && request.ScalePercent < 100))
+        {
+            return false;
+        }
+
         if (request.SkipCompression)
         {
             _logger.LogInformation(" Skip compression flag set for job {JobId} - user requested no compression", jobId);
@@ -410,6 +416,10 @@ public class VideoCompressionService
             Codec = codecConfig.Key,
             ScalePercent = requestSnapshot.ScalePercent,
             TargetSizeMb = requestSnapshot.TargetSizeMb,
+            CropX = requestSnapshot.CropX,
+            CropY = requestSnapshot.CropY,
+            CropWidth = requestSnapshot.CropWidth,
+            CropHeight = requestSnapshot.CropHeight,
             TargetBitrateKbps = computedTargetKbps,
             VideoBitrateKbps = computedVideoKbps,
             SourceDuration = requestSnapshot.SourceDuration,
@@ -629,7 +639,15 @@ public class VideoCompressionService
 
             // Build adaptive filter chain - always applied for best quality
             var fpsToUse = request.TargetFps ?? 30;
-            var filters = AdaptiveFilterBuilder.Build(scalePercent, fpsToUse, job.TargetSizeMb, job.SourceDuration);
+            var filters = AdaptiveFilterBuilder.Build(
+                scalePercent, 
+                fpsToUse, 
+                job.TargetSizeMb, 
+                job.SourceDuration,
+                job.CropX,
+                job.CropY,
+                job.CropWidth,
+                job.CropHeight);
 
             var audioFilters = new List<string>();
             double? seekStart = null;
@@ -1825,6 +1843,10 @@ public class VideoCompressionService
                 End = segment.End
             }).ToList(),
             UseQualityMode = source.UseQualityMode,
+            CropX = source.CropX,
+            CropY = source.CropY,
+            CropWidth = source.CropWidth,
+            CropHeight = source.CropHeight,
             Mode = source.Mode
         };
     }
@@ -2013,6 +2035,12 @@ public class JobMetadata
     public string Codec { get; set; } = "h264";
     public int? ScalePercent { get; set; }
     public double? TargetSizeMb { get; set; }
+
+    public int? CropX { get; set; }
+    public int? CropY { get; set; }
+    public int? CropWidth { get; set; }
+    public int? CropHeight { get; set; }
+
     public double? TargetBitrateKbps { get; set; }
     public double? VideoBitrateKbps { get; set; }
     public double? SourceDuration { get; set; }

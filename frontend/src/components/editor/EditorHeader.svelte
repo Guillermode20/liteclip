@@ -3,8 +3,12 @@
 
     export let totalDuration: number = 0;
     export let segmentCount: number = 0;
+    export let isCropActive: boolean = false;
 
-    const dispatch = createEventDispatcher<{ remove: void }>();
+    const dispatch = createEventDispatcher<{ 
+        remove: void;
+        toggleCrop: void;
+    }>();
 
     function formatTime(seconds: number): string {
         const mins = Math.floor(seconds / 60);
@@ -24,19 +28,35 @@
         </div>
     </div>
 
-    <button
-        type="button"
-        class="editor-remove-btn"
-        on:click={() => dispatch('remove')}
-        aria-label="Remove video"
-    >
-        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="12" cy="12" r="10"></circle>
-            <line x1="15" y1="9" x2="9" y2="15"></line>
-            <line x1="9" y1="9" x2="15" y2="15"></line>
-        </svg>
-        <span>remove video</span>
-    </button>
+    <div class="editor-header-actions">
+        <button
+            type="button"
+            class="editor-crop-btn"
+            class:active={isCropActive}
+            on:click={() => dispatch('toggleCrop')}
+            title={isCropActive ? "Apply crop" : "Crop video"}
+        >
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M6.13 1L6 16a2 2 0 0 0 2 2h15"></path>
+                <path d="M1 6.13L16 6a2 2 0 0 1 2 2v15"></path>
+            </svg>
+            <span>{isCropActive ? 'done' : 'crop'}</span>
+        </button>
+
+        <button
+            type="button"
+            class="editor-remove-btn"
+            on:click={() => dispatch('remove')}
+            aria-label="Remove video"
+        >
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10"></circle>
+                <line x1="15" y1="9" x2="9" y2="15"></line>
+                <line x1="9" y1="9" x2="15" y2="15"></line>
+            </svg>
+            <span>remove video</span>
+        </button>
+    </div>
 </div>
 
 <style>
@@ -45,6 +65,36 @@
         justify-content: space-between;
         align-items: center;
         margin-bottom: 1rem;
+    }
+
+    .editor-header-actions {
+        display: flex;
+        gap: 0.5rem;
+    }
+
+    .editor-crop-btn {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        background: #27272a;
+        color: #e4e4e7;
+        border: 1px solid #3f3f46;
+        padding: 0.4rem 0.8rem;
+        border-radius: 4px;
+        font-size: 0.8rem;
+        cursor: pointer;
+        transition: all 0.2s ease;
+    }
+
+    .editor-crop-btn:hover {
+        background: #3f3f46;
+        border-color: #52525b;
+    }
+
+    .editor-crop-btn.active {
+        background: #3b82f6;
+        border-color: #60a5fa;
+        color: white;
     }
 
     .editor-header-text {

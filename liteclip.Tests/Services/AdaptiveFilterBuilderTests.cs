@@ -65,4 +65,38 @@ public class AdaptiveFilterBuilderTests
         Assert.DoesNotContain(filters, f => f.StartsWith("deband="));
         Assert.DoesNotContain(filters, f => f.StartsWith("fps="));
     }
+
+    [Fact]
+    public void Build_WithCrop_AppliesCropFilterFirst()
+    {
+        var filters = AdaptiveFilterBuilder.Build(
+            scalePercent: 100, 
+            targetFps: 30, 
+            targetSizeMb: 200, 
+            sourceDuration: 60,
+            cropX: 10,
+            cropY: 20,
+            cropWidth: 100,
+            cropHeight: 200);
+
+        Assert.Equal(3, filters.Count);
+        Assert.Equal("crop=100:200:10:20", filters[0]);
+    }
+
+    [Fact]
+    public void Build_WithOddCrop_EnsuresEvenDimensions()
+    {
+        var filters = AdaptiveFilterBuilder.Build(
+            scalePercent: 100, 
+            targetFps: 30, 
+            targetSizeMb: 200, 
+            sourceDuration: 60,
+            cropX: 10,
+            cropY: 20,
+            cropWidth: 101,
+            cropHeight: 203);
+
+        Assert.Equal(3, filters.Count);
+        Assert.Equal("crop=100:202:10:20", filters[0]);
+    }
 }

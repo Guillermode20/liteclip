@@ -1,6 +1,7 @@
 <script lang="ts">
     import { createEventDispatcher } from 'svelte';
     import VideoControls from './VideoControls.svelte';
+    import CropOverlay from './CropOverlay.svelte';
 
     export let videoElement: HTMLVideoElement | null = null;
     export let videoAspectRatio: number = 16 / 9;
@@ -11,6 +12,10 @@
     export let isDragging: boolean = false;
     export let visualScrubberPosition: number = 0;
 
+    // Crop props
+    export let crop = { x: 0, y: 0, width: 100, height: 100 };
+    export let isCropActive = false;
+
     const dispatch = createEventDispatcher<{
         loadedmetadata: void;
         timeupdate: void;
@@ -19,6 +24,7 @@
         playPause: void;
         cut: void;
         reset: void;
+        cropChange: { x: number; y: number; width: number; height: number };
     }>();
 </script>
 
@@ -33,6 +39,12 @@
             on:pause={() => dispatch('pause')}
             class="editor-video"
         ></video>
+
+        <CropOverlay
+            {crop}
+            isActive={isCropActive}
+            on:change={(e) => dispatch('cropChange', e.detail)}
+        />
     </div>
     
     <VideoControls

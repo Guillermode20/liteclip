@@ -49,4 +49,9 @@ public class CompressionJob
 
     /// <summary>Optional source duration in seconds (when provided).</summary>
     public double? SourceDuration { get; set; }
+
+    public int? CropX { get; set; }
+    public int? CropY { get; set; }
+    public int? CropWidth { get; set; }
+    public int? CropHeight { get; set; }
 }

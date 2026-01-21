@@ -21,6 +21,7 @@
     export let onRemoveVideo: (() => void) | null = null;
     export let savedSegments: VideoSegment[] = [];
     export let onMetadataLoaded: ((payload: { width: number; height: number; duration: number }) => void) | null = null;
+    export let onCropChange: (crop: { x: number; y: number; width: number; height: number } | null) => void;
 
     // ============================================================================
     // State
@@ -35,6 +36,10 @@
     let loadError: string | null = null;
     let videoAspectRatio = 16 / 9;
     
+    // Crop state
+    let crop = { x: 0, y: 0, width: 100, height: 100 };
+    let isCropActive = false;
+
     // Drag state
     let isDragging: boolean = false;
     let wasPlayingBeforeDrag: boolean = false;
@@ -343,6 +348,10 @@
         onSegmentsChange(toVideoSegments(segments));
     }
 
+    function notifyCropChange() {
+        onCropChange(crop);
+    }
+
     // ============================================================================
     // Keyboard Shortcuts
     // ============================================================================
@@ -373,7 +382,9 @@
     <EditorHeader
         {totalDuration}
         segmentCount={segments.length}
+        {isCropActive}
         on:remove={() => onRemoveVideo?.()}
+        on:toggleCrop={() => isCropActive = !isCropActive}
     />
 
     <VideoPreview
@@ -385,6 +396,8 @@
         {duration}
         {isDragging}
         {visualScrubberPosition}
+        {crop}
+        {isCropActive}
         on:loadedmetadata={handleLoadedMetadata}
         on:timeupdate={handleTimeUpdate}
         on:play={() => isPlaying = true}
@@ -392,6 +405,10 @@
         on:playPause={handlePlayPause}
         on:cut={cutAtCurrentTime}
         on:reset={resetSegments}
+        on:cropChange={(e) => {
+            crop = e.detail;
+            notifyCropChange();
+        }}
     />
 
     <Timeline

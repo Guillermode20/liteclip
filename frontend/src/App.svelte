@@ -39,6 +39,7 @@
     let sourceDuration: number | null = null;
     let originalSizeMb: number | null = null;
     let videoSegments: VideoSegment[] = [];
+    let videoCrop: { x: number; y: number; width: number; height: number } | null = null;
 
     // ============================================================================
     // State: Job & Processing
@@ -353,8 +354,7 @@
         canRetry = false;
         statusVisible = false;
         videoSegments = [];
-
-        // Set new file
+          videoCrop = null;
         selectedFile = file;
         originalSizeMb = file.size / (1024 * 1024);
         fileInfo = `Selected: ${file.name} (${formatFileSize(file.size)})`;
@@ -410,6 +410,10 @@
     function handleSegmentsChange(segments: VideoSegment[]) {
         videoSegments = segments;
         updateOutputSizeDisplay();
+    }
+
+    function handleCropChange(crop: { x: number; y: number; width: number; height: number } | null) {
+        videoCrop = crop;
     }
 
     function handleSliderChange(value: number) {
@@ -552,6 +556,18 @@
 
         if (videoSegments.length > 0) {
             formData.append('segments', JSON.stringify(videoSegments));
+        }
+
+        if (videoCrop && sourceVideoWidth && sourceVideoHeight) {
+            const cropX = Math.round((videoCrop.x / 100) * sourceVideoWidth);
+            const cropY = Math.round((videoCrop.y / 100) * sourceVideoHeight);
+            const cropW = Math.round((videoCrop.width / 100) * sourceVideoWidth);
+            const cropH = Math.round((videoCrop.height / 100) * sourceVideoHeight);
+            
+            formData.append('cropX', cropX.toString());
+            formData.append('cropY', cropY.toString());
+            formData.append('cropWidth', cropW.toString());
+            formData.append('cropHeight', cropH.toString());
         }
 
         try {
@@ -984,6 +1000,7 @@
                             this={VideoEditorComponent}
                             videoFile={selectedFile}
                             onSegmentsChange={handleSegmentsChange}
+                            onCropChange={handleCropChange}
                             onRemoveVideo={resetInterface}
                             onMetadataLoaded={handleSourceMetadataLoaded}
                         />

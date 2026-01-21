@@ -107,20 +107,46 @@ public static class AdaptiveFilterBuilder
     /// <summary>
     /// Builds the filter chain with all filters enabled (legacy behavior).
     /// </summary>
-    public static List<string> Build(int scalePercent, int targetFps, double? targetSizeMb, double? sourceDuration)
+    public static List<string> Build(
+        int scalePercent, 
+        int targetFps, 
+        double? targetSizeMb, 
+        double? sourceDuration,
+        int? cropX = null,
+        int? cropY = null,
+        int? cropWidth = null,
+        int? cropHeight = null)
     {
         var options = FilterOptions.ForCompression(targetSizeMb, sourceDuration);
-        return Build(scalePercent, targetFps, targetSizeMb, sourceDuration, options);
+        return Build(scalePercent, targetFps, targetSizeMb, sourceDuration, options, cropX, cropY, cropWidth, cropHeight);
     }
 
     /// <summary>
     /// Builds the filter chain with configurable filter options.
     /// </summary>
-    public static List<string> Build(int scalePercent, int targetFps, double? targetSizeMb, double? sourceDuration, FilterOptions options)
+    public static List<string> Build(
+        int scalePercent, 
+        int targetFps, 
+        double? targetSizeMb, 
+        double? sourceDuration, 
+        FilterOptions options,
+        int? cropX = null,
+        int? cropY = null,
+        int? cropWidth = null,
+        int? cropHeight = null)
     {
-        var filters = new List<string>(5); // Pre-allocate for typical filter count
+        var filters = new List<string>(6); // Pre-allocate for typical filter count
 
         var intensity = DetermineIntensity(targetSizeMb, sourceDuration);
+
+        // 0. Cropping - apply first before any other transformations
+        if (cropWidth.HasValue && cropHeight.HasValue && cropX.HasValue && cropY.HasValue)
+        {
+            // Ensure width and height are even for compatibility with most encoders
+            var w = (cropWidth.Value / 2) * 2;
+            var h = (cropHeight.Value / 2) * 2;
+            filters.Add(string.Create(CultureInfo.InvariantCulture, $"crop={Math.Max(2, w)}:{Math.Max(2, h)}:{cropX.Value}:{cropY.Value}"));
+        }
 
         // 1. Temporal denoising - apply before scaling (CPU-intensive, skip for high bitrate)
         if (options.EnableDenoising)

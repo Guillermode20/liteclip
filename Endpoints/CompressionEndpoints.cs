@@ -27,6 +27,10 @@ public static class CompressionEndpoints
                 [FromForm] bool? skipCompression,
                 [FromForm] bool? qualityMode,
                 [FromForm] bool? muteAudio,
+                [FromForm] int? cropX,
+                [FromForm] int? cropY,
+                [FromForm] int? cropWidth,
+                [FromForm] int? cropHeight,
 
                 VideoCompressionService compressionService,
                 IConfiguration configuration,
@@ -94,7 +98,11 @@ public static class CompressionEndpoints
                         MuteAudio = muteAudio ?? false,
                         SourceDuration = sourceDuration,
                         Segments = videoSegments,
-                        UseQualityMode = qualityMode ?? false
+                        UseQualityMode = qualityMode ?? false,
+                        CropX = cropX,
+                        CropY = cropY,
+                        CropWidth = cropWidth,
+                        CropHeight = cropHeight
                     };
 
                     var jobId = await compressionService.CompressVideoAsync(file, compressionRequest);

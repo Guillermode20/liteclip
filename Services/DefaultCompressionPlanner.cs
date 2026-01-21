@@ -35,6 +35,10 @@ public sealed class DefaultCompressionPlanner
             SkipCompression = request.SkipCompression,
             MuteAudio = request.MuteAudio,
             UseQualityMode = request.UseQualityMode,
+            CropX = request.CropX,
+            CropY = request.CropY,
+            CropWidth = request.CropWidth,
+            CropHeight = request.CropHeight,
             Mode = mode
         };
 
