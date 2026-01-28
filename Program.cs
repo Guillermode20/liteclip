@@ -17,6 +17,7 @@ using System;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Hosting.Server.Features;
@@ -48,15 +49,46 @@ namespace liteclip
                 app.Urls.Add("http://127.0.0.1:0");
             }
 
-            var cts = new CancellationTokenSource();
+            var shutdownCts = new CancellationTokenSource();
+            var serverReadyTcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
 
-            // Start FFmpeg initialization in background thread
-            var ffmpegTask = Task.Run(async () =>
+            app.Lifetime.ApplicationStarted.Register(() =>
+            {
+                try
+                {
+                    var serverUrl = ResolveServerUrl(app);
+                    Console.WriteLine($"\n🎉 LiteClip - Fast Video Compression");
+                    Console.WriteLine($"📅 Started at {DateTime.Now:O}");
+                    Console.WriteLine($"📡 Server running at: {serverUrl}");
+
+                    serverReadyTcs.TrySetResult(serverUrl);
+                }
+                catch (Exception ex)
+                {
+                    serverReadyTcs.TrySetException(ex);
+                }
+            });
+
+            var hostTask = app.RunAsync(shutdownCts.Token);
+
+            hostTask.ContinueWith(t =>
+            {
+                var hostException = t.Exception?.GetBaseException() ?? new InvalidOperationException("Host terminated unexpectedly.");
+                if (!serverReadyTcs.Task.IsCompleted)
+                {
+                    serverReadyTcs.TrySetException(hostException);
+                }
+
+                Console.WriteLine($"FATAL: Server encountered an error: {hostException}");
+            }, TaskContinuationOptions.OnlyOnFaulted);
+
+            // Kick FFmpeg bootstrapper so status endpoints immediately know if binaries already exist.
+            _ = Task.Run(() =>
             {
                 try
                 {
                     var ffmpegBootstrapper = app.Services.GetRequiredService<FfmpegBootstrapper>();
-                    await Task.Run(() => ffmpegBootstrapper.PrimeExistingInstallation());
+                    ffmpegBootstrapper.PrimeExistingInstallation();
                 }
                 catch (Exception ex)
                 {
@@ -64,29 +96,30 @@ namespace liteclip
                 }
             });
 
-            // Start the server and get the actual port
             string serverUrl;
             try
             {
-                app.StartAsync(cts.Token).GetAwaiter().GetResult();
-                
-                var server = app.Services.GetRequiredService<Microsoft.AspNetCore.Hosting.Server.IServer>();
-                var serverAddresses = server.Features.Get<IServerAddressesFeature>();
-                serverUrl = serverAddresses?.Addresses.FirstOrDefault() ?? "http://localhost:5000";
-
-                Console.WriteLine($"\n🎉 LiteClip - Fast Video Compression");
-                Console.WriteLine($"📅 Started at {DateTime.Now:O}");
-                Console.WriteLine($"📡 Server running at: {serverUrl}");
+                serverUrl = serverReadyTcs.Task.GetAwaiter().GetResult();
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"FATAL: Server failed to start: {ex}");
+                shutdownCts.Cancel();
+
+                try
+                {
+                    hostTask.GetAwaiter().GetResult();
+                }
+                catch
+                {
+                    // Already logged by continuation above.
+                }
+
                 return;
             }
 
-            // Create and launch the window with the actual server URL
             var uiUrl = GetUiUrl(app, serverUrl);
-            var window = CreatePhotinoWindow(app, uiUrl, cts);
+            var window = CreatePhotinoWindow(app, uiUrl);
 
             // This BLOCKS the [STAThread] (Main) until the window is closed.
             window.WaitForClose();
@@ -105,8 +138,16 @@ namespace liteclip
                 Console.WriteLine($"Warning: Failed to cancel jobs during shutdown: {ex.Message}");
             }
 
-            cts.Cancel();
-            app.StopAsync(cts.Token).GetAwaiter().GetResult();
+            shutdownCts.Cancel();
+
+            try
+            {
+                hostTask.GetAwaiter().GetResult();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Warning: Server shutdown encountered an error: {ex.Message}");
+            }
 
             Console.WriteLine("Server stopped. Exiting.");
             Environment.Exit(0);
@@ -278,7 +319,7 @@ namespace liteclip
             return candidates.FirstOrDefault(c => !string.IsNullOrEmpty(c) && Directory.Exists(c));
         }
 
-        private static PhotinoWindow CreatePhotinoWindow(WebApplication app, string uiUrl, CancellationTokenSource cts)
+        private static PhotinoWindow CreatePhotinoWindow(WebApplication app, string uiUrl)
         {
             // Prepare WebView2 user data folder to prevent locking issues
             var webViewBasePath = Path.Combine(Path.GetTempPath(), "LiteClip_WebView2");
@@ -300,34 +341,50 @@ namespace liteclip
                 .SetTitle("LiteClip - Fast Video Compression")
                 .SetUseOsDefaultSize(false)
                 .SetUseOsDefaultLocation(false)
+                .SetLocation(new Point(-10000, -10000))
                 .SetResizable(true)
                 .SetDevToolsEnabled(app.Environment.IsDevelopment())
                 .SetContextMenuEnabled(true)
                 .SetTemporaryFilesPath(webView2Path)
                 .SetLogVerbosity(app.Environment.IsDevelopment() ? 4 : 0);
 
-            // Set minimum size
             window.SetMinSize(854, 480);
+            window.SetSize(1200, 800);
 
-            // Set size and center based on user settings
-            if (userSettings?.StartMaximized == true)
+            var windowShown = 0;
+
+            void RevealWindow()
             {
-                window.SetMaximized(true);
-            }
-            else
-            {
-                window.SetSize(1200, 800);
-                window.Center();
+                if (Interlocked.Exchange(ref windowShown, 1) == 1)
+                {
+                    return;
+                }
+
+                if (userSettings?.StartMaximized == true)
+                {
+                    window.SetMaximized(true);
+                }
+                else
+                {
+                    window.Center();
+                }
+
             }
 
-            // Handle window events
             window.RegisterWebMessageReceivedHandler((sender, message) =>
             {
                 if (message == "close-app")
                 {
                     window.Close();
                 }
+                else if (message == "window-ready")
+                {
+                    RevealWindow();
+                }
             });
+
+            // Fallback in case the frontend never sends the window-ready event.
+            _ = Task.Delay(TimeSpan.FromSeconds(5)).ContinueWith(_ => RevealWindow(), TaskScheduler.Default);
 
             window.WindowClosing += (sender, e) =>
             {
@@ -343,12 +400,60 @@ namespace liteclip
         static string PrepareWebViewUserDataFolder(string basePath)
         {
             Directory.CreateDirectory(basePath);
-            
-            // Reuse the same profile instead of creating new ones
-            var persistentProfilePath = Path.Combine(basePath, "PersistentProfile");
-            Directory.CreateDirectory(persistentProfilePath);
-            
-            return persistentProfilePath;
+            CleanupOldWebViewProfiles(basePath);
+
+            var primaryProfilePath = Path.Combine(basePath, "Current");
+
+            try
+            {
+                if (Directory.Exists(primaryProfilePath))
+                {
+                    Directory.Delete(primaryProfilePath, true);
+                }
+
+                Directory.CreateDirectory(primaryProfilePath);
+                return primaryProfilePath;
+            }
+            catch
+            {
+                var fallbackPath = Path.Combine(basePath, $"Profile_{DateTimeOffset.UtcNow:yyyyMMdd_HHmmssfff}");
+                Directory.CreateDirectory(fallbackPath);
+                return fallbackPath;
+            }
+        }
+
+        static void CleanupOldWebViewProfiles(string basePath)
+        {
+            try
+            {
+                var cutoff = DateTimeOffset.UtcNow - TimeSpan.FromDays(1);
+                foreach (var directory in Directory.GetDirectories(basePath))
+                {
+                    try
+                    {
+                        var info = new DirectoryInfo(directory);
+                        if (info.LastWriteTimeUtc < cutoff)
+                        {
+                            info.Delete(true);
+                        }
+                    }
+                    catch
+                    {
+                        // Ignore profile cleanup errors; they'll be retried next launch.
+                    }
+                }
+            }
+            catch
+            {
+                // Swallow top-level cleanup errors to avoid blocking startup.
+            }
+        }
+
+        private static string ResolveServerUrl(WebApplication app)
+        {
+            var server = app.Services.GetRequiredService<Microsoft.AspNetCore.Hosting.Server.IServer>();
+            var serverAddresses = server.Features.Get<IServerAddressesFeature>();
+            return serverAddresses?.Addresses.FirstOrDefault() ?? "http://localhost:5000";
         }
     }
 }
