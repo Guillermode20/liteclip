@@ -306,29 +306,18 @@ namespace liteclip
                 .SetTemporaryFilesPath(webView2Path)
                 .SetLogVerbosity(app.Environment.IsDevelopment() ? 4 : 0);
 
-            // Start hidden to avoid the common WebView white-flash/flicker.
-            // We'll show/unminimize only after the frontend signals readiness.
-            window.SetMinimized(true);
+            // Set minimum size
+            window.SetMinSize(854, 480);
 
-            var shown = false;
-            void ShowOnce()
+            // Set size and center based on user settings
+            if (userSettings?.StartMaximized == true)
             {
-                if (shown) return;
-                shown = true;
-
-                // Apply final size/state right before showing to reduce flashes caused by early resizes.
-                if (userSettings?.StartMaximized == true)
-                {
-                    window.SetMinSize(854, 480);
-                    window.SetMaximized(true);
-                }
-                else
-                {
-                    window.SetSize(1200, 800);
-                    window.Center();
-                }
-
-                window.SetMinimized(false);
+                window.SetMaximized(true);
+            }
+            else
+            {
+                window.SetSize(1200, 800);
+                window.Center();
             }
 
             // Handle window events
@@ -337,10 +326,6 @@ namespace liteclip
                 if (message == "close-app")
                 {
                     window.Close();
-                }
-                else if (message == "window-ready")
-                {
-                    ShowOnce();
                 }
             });
 
@@ -351,19 +336,6 @@ namespace liteclip
             };
 
             window.Load(uiUrl);
-
-            // If the frontend never sends window-ready (e.g., Vite down / JS error),
-            // show the window anyway after a short delay so users aren't stuck.
-            _ = Task.Run(async () =>
-            {
-                var delayMs = app.Environment.IsDevelopment() ? 5000 : 15000;
-                await Task.Delay(delayMs);
-                if (!shown)
-                {
-                    Console.WriteLine($"\n⚠️  Frontend did not signal window-ready within {delayMs}ms; showing window anyway.");
-                }
-                ShowOnce();
-            });
 
             return window;
         }
