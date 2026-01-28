@@ -184,20 +184,37 @@ public static class AdaptiveFilterBuilder
         // 4. Contrast-adaptive sharpening
         if (options.EnableSharpening)
         {
-            if (scalePercent < 100)
+            // At very low bitrates, sharpening can introduce ringing and wastes bits.
+            // Prefer mild sharpening only when it compensates for downscaling.
+            if (intensity == CompressionIntensity.Heavy)
+            {
+                if (scalePercent < 100)
+                {
+                    var downscaleFactor = 1.0 - (scalePercent / 100.0);
+                    var unsharpStrength = Math.Round(0.18 + (downscaleFactor * 0.55), 2);
+                    // Cap to avoid halos.
+                    unsharpStrength = Math.Min(unsharpStrength, 0.45);
+                    filters.Add(string.Create(CultureInfo.InvariantCulture, $"unsharp=3:3:{unsharpStrength}"));
+                }
+                else
+                {
+                    // No sharpening at heavy compression without downscaling.
+                }
+            }
+            else if (scalePercent < 100)
             {
                 var downscaleFactor = 1.0 - (scalePercent / 100.0);
-                var baseStrength = intensity == CompressionIntensity.Heavy ? 0.45 : 0.35;
-                var unsharpStrength = Math.Round(baseStrength + (downscaleFactor * 1.5), 2);
+                var baseStrength = intensity == CompressionIntensity.Moderate ? 0.28 : 0.22;
+                var unsharpStrength = Math.Round(baseStrength + (downscaleFactor * 0.75), 2);
+                unsharpStrength = Math.Min(unsharpStrength, 0.60);
                 filters.Add(string.Create(CultureInfo.InvariantCulture, $"unsharp=3:3:{unsharpStrength}"));
             }
             else
             {
                 var defaultStrength = intensity switch
                 {
-                    CompressionIntensity.Heavy => 0.4,
-                    CompressionIntensity.Moderate => 0.32,
-                    _ => 0.25
+                    CompressionIntensity.Moderate => 0.22,
+                    _ => 0.18
                 };
                 filters.Add(string.Create(CultureInfo.InvariantCulture, $"unsharp=3:3:{defaultStrength}"));
             }

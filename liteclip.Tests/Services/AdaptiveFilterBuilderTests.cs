@@ -13,7 +13,7 @@ public class AdaptiveFilterBuilderTests
 
         // Only sharpening and fps filters should be applied for high bitrate
         Assert.Equal(2, filters.Count);
-        Assert.Equal("unsharp=3:3:0.25", filters[0]);
+        Assert.Equal("unsharp=3:3:0.18", filters[0]);
         Assert.Equal("fps=30", filters[1]);
     }
 
@@ -23,11 +23,11 @@ public class AdaptiveFilterBuilderTests
         // Low bitrate scenario - should apply all filters including denoising and debanding
         var filters = AdaptiveFilterBuilder.Build(scalePercent: 100, targetFps: 30, targetSizeMb: 5, sourceDuration: 60);
 
-        Assert.Equal(4, filters.Count);
+        // Heavy compression: denoise + deband, and no sharpening unless downscaling.
+        Assert.Equal(3, filters.Count);
         Assert.Equal("hqdn3d=2.8:2.3:4.5:4.5", filters[0]); // Heavy compression denoising
         Assert.Equal("deband=1thr=0.035:2thr=0.035:3thr=0.035:range=18:blur=0", filters[1]); // Heavy debanding
-        Assert.Equal("unsharp=3:3:0.4", filters[2]);
-        Assert.Equal("fps=30", filters[3]);
+        Assert.Equal("fps=30", filters[2]);
     }
 
     [Fact]
@@ -39,7 +39,7 @@ public class AdaptiveFilterBuilderTests
         Assert.Equal("hqdn3d=2.8:2.3:4.5:4.5", filters[0]);
         Assert.Equal("scale=trunc(iw*0.7/2)*2:trunc(ih*0.7/2)*2", filters[1]);
         Assert.Equal("deband=1thr=0.035:2thr=0.035:3thr=0.035:range=18:blur=0", filters[2]);
-        Assert.Equal("unsharp=3:3:0.9", filters[3]);
+        Assert.Equal("unsharp=3:3:0.34", filters[3]);
         Assert.Equal("fps=24", filters[4]);
     }
 

@@ -606,8 +606,13 @@ public class VideoCompressionService
 
             // Apply scaling
             int scalePercent = Math.Clamp(request.ScalePercent ?? 100, 10, 100);
+            job.ScalePercent = scalePercent;
 
-            // Ensure we never scale to an output height below 480px (unless source is smaller)
+            var videoBitrateKbps = job.VideoBitrateKbps.Value;
+            var fpsToUse = request.TargetFps ?? 30;
+
+            // Ensure we never scale to an output height below a bitrate-aware minimum
+            // (unless the source is smaller). A hard 480p floor harms quality at tiny targets.
             try
             {
                 var srcDims = preProbedDimensions;
@@ -616,20 +621,23 @@ public class VideoCompressionService
                     srcDims = await ProbeVideoDimensionsAsync(job.InputPath);
                 }
 
-                if (srcDims != null && srcDims.Height >= 480)
+                if (srcDims != null)
                 {
-                    var minPercent = (int)Math.Ceiling(480.0 * 100 / srcDims.Height);
-                    if (minPercent > 100) minPercent = 100;
-                    scalePercent = Math.Max(scalePercent, minPercent);
+                    var minOutputHeight = DetermineMinOutputHeight(videoBitrateKbps, fpsToUse, codec.Key);
+                    if (srcDims.Height >= minOutputHeight)
+                    {
+                        var minPercent = (int)Math.Ceiling(minOutputHeight * 100.0 / srcDims.Height);
+                        if (minPercent > 100) minPercent = 100;
+                        scalePercent = Math.Max(scalePercent, minPercent);
+                        job.ScalePercent = scalePercent;
+                    }
                 }
             }
             catch
             {
                 // If probing fails, fall back to previous scalePercent; don't crash
             }
-            job.ScalePercent = scalePercent;
 
-            var videoBitrateKbps = job.VideoBitrateKbps.Value;
             // Audio plan is independent from the per-attempt video bitrate and does not change across retries.
             // Compute it once to avoid recomputing during two-pass/feedback loops.
             var audioPlan = CalculateAudioPlan(job, codec);
@@ -638,7 +646,6 @@ public class VideoCompressionService
             job.VideoBitrateKbps = videoBitrateKbps;
 
             // Build adaptive filter chain - always applied for best quality
-            var fpsToUse = request.TargetFps ?? 30;
             var filters = AdaptiveFilterBuilder.Build(
                 scalePercent, 
                 fpsToUse, 
@@ -1421,16 +1428,16 @@ public class VideoCompressionService
         switch (codec.Key)
         {
             case "h265":
-                args.AddRange(new[] { "-c:v", codec.VideoCodec, "-preset", preset, "-pix_fmt", "yuv420p", "-tag:v", "hvc1", "-g", (fps * 2).ToString(), "-sc_threshold", "0", "-bf", "4", "-refs", "5", "-x265-params", "vbv-bufsize=" + buffer + ":vbv-maxrate=" + maxRate + ":aq-mode=3:aq-strength=1.0:psy-rd=2.0:rc-lookahead=60" });
+                args.AddRange(new[] { "-c:v", codec.VideoCodec, "-preset", preset, "-pix_fmt", "yuv420p", "-tag:v", "hvc1", "-g", (fps * 2).ToString(), "-bf", "4", "-refs", "5", "-x265-params", "vbv-bufsize=" + buffer + ":vbv-maxrate=" + maxRate + ":aq-mode=3:aq-strength=1.0:psy-rd=2.0:rc-lookahead=60" });
                 break;
             case "vp9":
-                args.AddRange(new[] { "-c:v", codec.VideoCodec, "-deadline", "good", "-cpu-used", "1", "-row-mt", "1", "-tile-columns", "1", "-g", (fps * 2).ToString(), "-sc_threshold", "0" });
+                args.AddRange(new[] { "-c:v", codec.VideoCodec, "-deadline", "good", "-cpu-used", "1", "-row-mt", "1", "-tile-columns", "1", "-g", (fps * 2).ToString() });
                 break;
             case "av1":
-                args.AddRange(new[] { "-c:v", codec.VideoCodec, "-cpu-used", "0", "-row-mt", "1", "-g", (fps * 2).ToString(), "-sc_threshold", "0" });
+                args.AddRange(new[] { "-c:v", codec.VideoCodec, "-cpu-used", "0", "-row-mt", "1", "-g", (fps * 2).ToString() });
                 break;
             default:
-                args.AddRange(new[] { "-c:v", codec.VideoCodec, "-preset", preset, "-pix_fmt", "yuv420p", "-g", (fps * 2).ToString(), "-sc_threshold", "0", "-bf", "4", "-refs", "5" });
+                args.AddRange(new[] { "-c:v", codec.VideoCodec, "-preset", preset, "-pix_fmt", "yuv420p", "-g", (fps * 2).ToString(), "-bf", "4", "-refs", "5" });
                 break;
         }
 
@@ -1474,12 +1481,31 @@ public class VideoCompressionService
         }
 
         var totalKbps = (job.TargetSizeMb.Value * 8 * 1024) / job.SourceDuration.Value;
-        var residualKbps = Math.Max(32, totalKbps - job.VideoBitrateKbps.Value);
-        var planned = Math.Clamp(residualKbps * 0.85, 48, defaultBitrate);
+
+        // Residual after planned video bitrate; keep a small floor to avoid negative.
+        var residualKbps = Math.Max(24, totalKbps - job.VideoBitrateKbps.Value);
+
+        // Base plan: take a conservative portion of residual.
+        var planned = residualKbps * 0.80;
+
+        // Cap audio more aggressively for very small budgets to preserve video quality.
+        var cap = totalKbps switch
+        {
+            < 220 => 40,
+            < 320 => 56,
+            < 450 => 72,
+            < 650 => 96,
+            _ => defaultBitrate
+        };
+
+        planned = Math.Min(planned, cap);
+        planned = Math.Clamp(planned, 32, defaultBitrate);
+
+        // Mono at low audio bitrates.
         var channels = planned <= 80 ? 1 : 2;
         if (channels == 1)
         {
-            planned = Math.Min(planned, 72);
+            planned = Math.Min(planned, 64);
         }
 
         return new AudioPlan((int)Math.Round(planned, MidpointRounding.AwayFromZero), channels);
@@ -1999,16 +2025,13 @@ public class VideoCompressionService
         // Convert to percentage and round down to nearest 5%
         var percent = (int)(scale * 100);
 
-        // If the source height is at least 480p, do not allow scaling
-        // that reduces the output height below 480 pixels. This prevents
-        // extremely small outputs that the UI or users don't expect.
-        var minOutputHeight = 480;
+        // At very low bitrate budgets, a hard 480p floor produces worse quality.
+        // Use a bitrate-aware minimum height to preserve perceptual quality.
+        var minOutputHeight = DetermineMinOutputHeight(videoKbps, fps, codec);
         if (height >= minOutputHeight)
         {
             var minPercent = (int)Math.Ceiling(minOutputHeight * 100.0 / height);
             if (minPercent > 100) minPercent = 100;
-            // Round up to nearest 5% to keep UI increments consistent and
-            // ensure we don't round down below the minimum height.
             var minPercentRounded = ((minPercent + 4) / 5) * 5;
             percent = Math.Max(percent, minPercentRounded);
         }
@@ -2016,6 +2039,27 @@ public class VideoCompressionService
         // Don't go below 25% or above 100%
         var finalPercent = Math.Clamp(((percent + 4) / 5) * 5, 25, 100);
         return finalPercent;
+    }
+
+    private static int DetermineMinOutputHeight(double videoKbps, int fps, string codec)
+    {
+        var normalizedCodec = codec?.ToLowerInvariant() ?? "h264";
+        var isHevc = normalizedCodec is "h265" or "hevc";
+
+        // Floors tuned for perceptual quality at low bitrate; allow smaller outputs
+        // when bitrate is extremely constrained.
+        if (isHevc)
+        {
+            if (videoKbps >= 900) return 480;
+            if (videoKbps >= 500) return 360;
+            if (videoKbps >= 250) return 240;
+            return 144;
+        }
+
+        if (videoKbps >= 1200) return 480;
+        if (videoKbps >= 700) return 360;
+        if (videoKbps >= 350) return 240;
+        return 144;
     }
 
     private sealed record VideoDimensions(int Width, int Height);

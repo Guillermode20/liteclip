@@ -61,10 +61,9 @@ public sealed class DefaultCompressionPlanner
         {
             normalized.TargetFps = Math.Clamp(normalized.TargetFps.Value, 1, 240);
         }
-        else
-        {
-            normalized.TargetFps = 30;
-        }
+
+        // If TargetFps is not provided, treat it as "auto" and let the planner
+        // choose an appropriate FPS based on the size/duration budget.
 
         return normalized;
     }
@@ -90,6 +89,22 @@ public sealed class DefaultCompressionPlanner
                 totalKbps = bitratePlan.Value.TotalKbps;
                 videoKbps = bitratePlan.Value.VideoKbps;
 
+                // If the user did not specify FPS, choose one automatically.
+                // Reducing FPS can be a better tradeoff than crushing resolution at low bitrates.
+                if (!normalizedRequest.TargetFps.HasValue &&
+                    videoKbps.HasValue &&
+                    sourceWidth.HasValue &&
+                    sourceHeight.HasValue)
+                {
+                    normalizedRequest.TargetFps = ChooseAutoFps(
+                        sourceWidth.Value,
+                        sourceHeight.Value,
+                        videoKbps.Value,
+                        normalizedRequest.Codec);
+                }
+
+                var fpsForScale = normalizedRequest.TargetFps ?? 30;
+
                 if (videoKbps.HasValue &&
                     sourceWidth.HasValue &&
                     sourceHeight.HasValue &&
@@ -99,7 +114,7 @@ public sealed class DefaultCompressionPlanner
                         sourceWidth.Value,
                         sourceHeight.Value,
                         videoKbps.Value,
-                        normalizedRequest.TargetFps ?? 30,
+                        fpsForScale,
                         normalizedRequest.Codec);
 
                     var currentScale = normalizedRequest.ScalePercent ?? 100;
@@ -137,8 +152,41 @@ public sealed class DefaultCompressionPlanner
                 End = segment.End
             }).ToList(),
             UseQualityMode = source.UseQualityMode,
+            CropX = source.CropX,
+            CropY = source.CropY,
+            CropWidth = source.CropWidth,
+            CropHeight = source.CropHeight,
             Mode = source.Mode
         };
+    }
+
+    private static int ChooseAutoFps(int width, int height, double videoKbps, string codec)
+    {
+        // Prefer higher FPS when we can keep most of the source resolution.
+        // If bitrate is tight, lowering FPS often preserves more detail than scaling down.
+        var candidates = new[] { 30, 24, 20, 15 };
+
+        var bestFps = 30;
+        var bestScale = 0;
+
+        foreach (var fps in candidates)
+        {
+            var scale = CalculateOptimalScale(width, height, videoKbps, fps, codec);
+
+            // If we can keep >= 70% scale, prefer the highest FPS that meets that.
+            if (scale >= 70)
+            {
+                return fps;
+            }
+
+            if (scale > bestScale)
+            {
+                bestScale = scale;
+                bestFps = fps;
+            }
+        }
+
+        return bestFps;
     }
 
     private static EncodingMode DeriveEncodingMode(bool useQualityMode)
@@ -256,10 +304,38 @@ public sealed class DefaultCompressionPlanner
         var payloadBits = payloadBudgetMb * 1024 * 1024 * 8;
         var totalKbps = payloadBits / durationSeconds / 1000d;
 
-        var audioBudgetKbps = request.MuteAudio ? 0 : codecContext.AudioBitrateKbps * 0.9;
+        // Audio must be budget-aware at tiny target sizes; using a fixed 192k default
+        // can starve video and cause severe artifacts.
+        var audioBudgetKbps = request.MuteAudio ? 0 : DetermineAudioBudgetKbps(totalKbps, codecContext.AudioBitrateKbps);
         var videoKbps = Math.Max(80, totalKbps - audioBudgetKbps);
 
         return (Math.Round(totalKbps, 2), Math.Round(videoKbps, 2));
+    }
+
+    private static double DetermineAudioBudgetKbps(double totalKbps, int defaultAudioKbps)
+    {
+        if (totalKbps <= 0)
+        {
+            return Math.Max(32, Math.Min(defaultAudioKbps, 96));
+        }
+
+        // Tiered caps: preserve video first when the overall budget is small.
+        // Values are conservative for AAC-in-MP4 compatibility.
+        var cap = totalKbps switch
+        {
+            < 220 => 40,
+            < 320 => 56,
+            < 450 => 72,
+            < 650 => 96,
+            _ => defaultAudioKbps * 0.9
+        };
+
+        // Also limit audio to a fraction of the total budget.
+        var shareCap = totalKbps < 600 ? totalKbps * 0.25 : totalKbps * 0.18;
+
+        var budget = Math.Min(cap, shareCap);
+        budget = Math.Clamp(budget, 32, defaultAudioKbps * 0.9);
+        return budget;
     }
 
     private static double CalculateReserveBudget(double targetSizeMb, double durationSeconds, CodecPlanningContext codecContext)
@@ -321,7 +397,10 @@ public sealed class DefaultCompressionPlanner
 
         var percent = (int)(scale * 100);
 
-        var minOutputHeight = 480;
+        // At very low bitrate budgets, enforcing a hard 480p floor produces worse quality
+        // than allowing smaller outputs (Discord-style size targets, long clips, etc).
+        // Use a bitrate-aware minimum height to preserve perceptual quality.
+        var minOutputHeight = DetermineMinOutputHeight(videoKbps, fps, codec);
         if (height >= minOutputHeight)
         {
             var minPercent = (int)Math.Ceiling(minOutputHeight * 100.0 / height);
@@ -332,5 +411,28 @@ public sealed class DefaultCompressionPlanner
 
         var finalPercent = Math.Clamp(((percent + 4) / 5) * 5, 25, 100);
         return finalPercent;
+    }
+
+    private static int DetermineMinOutputHeight(double videoKbps, int fps, string codec)
+    {
+        // Conservative floors to keep outputs reasonable, but allow smaller than 480p
+        // when bitrate is extremely constrained.
+        // Thresholds are video-bitrate based (after audio budget).
+        var normalizedCodec = codec?.ToLowerInvariant() ?? "h264";
+        var isHevc = normalizedCodec is "h265" or "hevc";
+
+        // Slightly more optimistic for HEVC vs H.264.
+        if (isHevc)
+        {
+            if (videoKbps >= 900) return 480;
+            if (videoKbps >= 500) return 360;
+            if (videoKbps >= 250) return 240;
+            return 144;
+        }
+
+        if (videoKbps >= 1200) return 480;
+        if (videoKbps >= 700) return 360;
+        if (videoKbps >= 350) return 240;
+        return 144;
     }
 }
