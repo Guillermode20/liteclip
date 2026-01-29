@@ -16,10 +16,11 @@ public sealed class DefaultCompressionPlanner
 {
     public CompressionRequest NormalizeRequest(CompressionRequest request)
     {
-        var mode = DeriveEncodingMode(request.UseQualityMode);
+        var mode = DeriveEncodingMode(request.QualityMode);
 
         var codec = mode switch
         {
+            EncodingMode.Ultra => "h265",
             EncodingMode.Quality => "h265",
             _ => "h264"
         };
@@ -152,6 +153,7 @@ public sealed class DefaultCompressionPlanner
                 End = segment.End
             }).ToList(),
             UseQualityMode = source.UseQualityMode,
+            QualityMode = source.QualityMode,
             CropX = source.CropX,
             CropY = source.CropY,
             CropWidth = source.CropWidth,
@@ -189,9 +191,15 @@ public sealed class DefaultCompressionPlanner
         return bestFps;
     }
 
-    private static EncodingMode DeriveEncodingMode(bool useQualityMode)
+    private static EncodingMode DeriveEncodingMode(string? qualityMode)
     {
-        if (useQualityMode)
+        if (string.Equals(qualityMode, "ultra", StringComparison.OrdinalIgnoreCase))
+        {
+            return EncodingMode.Ultra;
+        }
+
+        if (string.Equals(qualityMode, "high", StringComparison.OrdinalIgnoreCase) || 
+            string.Equals(qualityMode, "quality", StringComparison.OrdinalIgnoreCase))
         {
             return EncodingMode.Quality;
         }

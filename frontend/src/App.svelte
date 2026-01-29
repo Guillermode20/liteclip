@@ -537,7 +537,7 @@
         
         formData.append('targetSizeMb', targetSizeMb.toFixed(2));
         formData.append('skipCompression', (targetSizeMb >= effectiveMaxSize && !shouldForceResolution && !muteAudio) ? 'true' : 'false');
-        formData.append('qualityMode', codecSelectValue === 'quality' ? 'true' : 'false');
+        formData.append('qualityMode', codecSelectValue);
         formData.append('muteAudio', muteAudio ? 'true' : 'false');
 
         if (shouldForceResolution && forcedScalePercent !== null) {

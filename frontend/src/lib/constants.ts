@@ -9,7 +9,10 @@ export const codecDetails: CodecDetailsMap = {
         helper: 'H.265 optimized for quality and file size. Better compression with good encoding speed.',
         container: 'mp4'
     },
-    // NOTE: A more aggressive encoding mode was removed from the frontend UI due to performance and compatibility concerns.
+    ultra: {
+        helper: 'Extreme H.265 software encoding. Slowest but achieves highest possible quality for the target size.',
+        container: 'mp4'
+    },
 };
 
 export const FALLBACK_SETTINGS: UserSettingsPayload = {

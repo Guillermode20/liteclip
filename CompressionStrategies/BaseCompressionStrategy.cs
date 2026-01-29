@@ -40,6 +40,12 @@ public abstract class BaseCompressionStrategy : ICompressionStrategy
         var targetBitrate = Math.Max(100, Math.Round(videoBitrateKbps));
         var encoder = GetBestEncoder();
 
+        // Ultra mode ALWAYS uses software encoding (libx265 for H.265, libx264 for H.264)
+        if (mode == EncodingMode.Ultra)
+        {
+            encoder = CodecKey.Equals("h265", StringComparison.OrdinalIgnoreCase) ? "libx265" : "libx264";
+        }
+
         // Use the centralized config
         var config = EncodingModeConfigs.Get(CodecKey, encoder, mode);
 

@@ -19,6 +19,7 @@ public class CompressionRequest
     public double? SourceDuration { get; set; }
     public List<VideoSegment>? Segments { get; set; }
     public bool UseQualityMode { get; set; }
+    public string? QualityMode { get; set; }
 
     public int? CropX { get; set; }
     public int? CropY { get; set; }

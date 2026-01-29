@@ -13,7 +13,8 @@ namespace liteclip.CompressionStrategies;
 public enum EncodingMode
 {
     Fast,
-    Quality
+    Quality,
+    Ultra
 }
 
 /// <summary>
@@ -70,9 +71,9 @@ public static class EncodingModeConfigs
             BufferMultiplier: 1.60,
             VideoArgs: new[]
             {
-                "-preset", "fast",
+                "-preset", "faster",
                 "-pix_fmt", "yuv420p",
-                "-g", "60",
+                "-g", "120",
                 "-bf", "2",
                 "-refs", "2",
                 "-x264-params",
@@ -92,11 +93,32 @@ public static class EncodingModeConfigs
             {
                 "-preset", "slow",
                 "-pix_fmt", "yuv420p",
-                "-g", "60",
+                "-g", "120",
                 "-bf", "3",
                 "-refs", "4",
                 "-x264-params",
                 "aq-mode=3:aq-strength=1.0:rc_lookahead=50:psy=1:psy-rd=1.0:me=umh:subme=8:ref=4:mbtree=1"
+            }
+        ),
+
+        new EncodingModeConfig(
+            CodecKey: "h264",
+            EncoderKey: "libx264",
+            Mode: EncodingMode.Ultra,
+            DisplayName: "H.264 Ultra Quality",
+            Description: "Software H.264 with veryslow preset and high-fidelity tuning for maximum detail retention.",
+            MaxRateMultiplier: 1.30,
+            MinRateMultiplier: 1.0,
+            BufferMultiplier: 3.00,
+            VideoArgs: new[]
+            {
+                "-preset", "veryslow",
+                "-pix_fmt", "yuv420p",
+                "-g", "240",
+                "-bf", "8",
+                "-refs", "16",
+                "-x264-params",
+                "aq-mode=3:aq-strength=1.1:rc_lookahead=60:psy=1:psy-rd=1.0,0.15:me=tesa:subme=11:merange=24:mbtree=1:trellis=2"
             }
         ),
 
@@ -274,10 +296,10 @@ public static class EncodingModeConfigs
             BufferMultiplier: 2.00,
             VideoArgs: new[]
             {
-                "-preset", "fast",
+                "-preset", "faster",
                 "-pix_fmt", "yuv420p",
                 "-tag:v", "hvc1",
-                "-g", "60",
+                "-g", "120",
                 "-bf", "3",
                 "-refs", "3",
                 "-x265-params",
@@ -298,11 +320,33 @@ public static class EncodingModeConfigs
                 "-preset", "slower",
                 "-pix_fmt", "yuv420p",
                 "-tag:v", "hvc1",
-                "-g", "60",
+                "-g", "120",
                 "-bf", "4",
                 "-refs", "5",
                 "-x265-params",
                 "vbv-bufsize={buffer}:vbv-maxrate={maxrate}:aq-mode=3:aq-strength=1.4:psy-rd=2.5:psy-rdoq=1.5:rc-lookahead=80:me=star:subme=7:rd=6:ref=6:sao=1:deblock=-1,-1:rdoq-level=2:ctu=32:tu-intra-depth=3:tu-inter-depth=3"
+            }
+        ),
+
+        new EncodingModeConfig(
+            CodecKey: "h265",
+            EncoderKey: "libx265",
+            Mode: EncodingMode.Ultra,
+            DisplayName: "H.265 Ultra Quality",
+            Description: "Software H.265 with placebo preset and extreme perceptual tuning for maximum efficiency.",
+            MaxRateMultiplier: 1.50,
+            MinRateMultiplier: 1.0,
+            BufferMultiplier: 4.00,
+            VideoArgs: new[]
+            {
+                "-preset", "placebo",
+                "-pix_fmt", "yuv420p",
+                "-tag:v", "hvc1",
+                "-g", "240",
+                "-bf", "8",
+                "-refs", "8",
+                "-x265-params",
+                "vbv-bufsize={buffer}:vbv-maxrate={maxrate}:aq-mode=3:aq-strength=1.5:psy-rd=3.0:psy-rdoq=2.0:rc-lookahead=100:me=star:subme=7:rd=6:ref=6:sao=0:deblock=-2,-2:rdoq-level=2:ctu=64:tu-intra-depth=4:tu-inter-depth=4:limit-modes=1"
             }
         ),
 
@@ -357,6 +401,32 @@ public static class EncodingModeConfigs
             }
         ),
 
+        new EncodingModeConfig(
+            CodecKey: "h265",
+            EncoderKey: "hevc_nvenc",
+            Mode: EncodingMode.Ultra,
+            DisplayName: "H.265 NVENC Ultra",
+            Description: "NVENC HEVC maximum quality preset with full lookahead.",
+            MaxRateMultiplier: 1.0,
+            MinRateMultiplier: 1.0,
+            BufferMultiplier: 1.0,
+            VideoArgs: new[]
+            {
+                "-pix_fmt", "yuv420p",
+                "-preset", "p7",
+                "-rc", "vbr",
+                "-spatial-aq", "1",
+                "-temporal-aq", "1",
+                "-rc-lookahead", "48",
+                "-g", "240",
+                "-bf", "8",
+                "-b_ref_mode", "middle",
+                "-multipass", "full",
+                "-tier", "high",
+                "-tag:v", "hvc1"
+            }
+        ),
+
         // --- H.265 / QuickSync ---
         new EncodingModeConfig(
             CodecKey: "h265",
@@ -394,6 +464,28 @@ public static class EncodingModeConfigs
                 "-adaptive_b", "1",
                 "-g", "60",
                 "-bf", "4",
+                "-tag:v", "hvc1"
+            }
+        ),
+
+        new EncodingModeConfig(
+            CodecKey: "h265",
+            EncoderKey: "hevc_qsv",
+            Mode: EncodingMode.Ultra,
+            DisplayName: "H.265 QSV Ultra",
+            Description: "QuickSync HEVC with maximum quality settings and deep lookahead.",
+            MaxRateMultiplier: 1.0,
+            MinRateMultiplier: 1.0,
+            BufferMultiplier: 1.0,
+            VideoArgs: new[]
+            {
+                "-preset", "veryslow",
+                "-look_ahead", "1",
+                "-look_ahead_depth", "100",
+                "-adaptive_i", "1",
+                "-adaptive_b", "1",
+                "-g", "240",
+                "-bf", "8",
                 "-tag:v", "hvc1"
             }
         ),
@@ -449,6 +541,32 @@ public static class EncodingModeConfigs
             }
         ),
 
+        new EncodingModeConfig(
+            CodecKey: "h265",
+            EncoderKey: "hevc_amf",
+            Mode: EncodingMode.Ultra,
+            DisplayName: "H.265 AMF Ultra",
+            Description: "AMD AMF HEVC maximum quality with strong AQ and full lookahead.",
+            MaxRateMultiplier: 1.0,
+            MinRateMultiplier: 1.0,
+            BufferMultiplier: 1.0,
+            VideoArgs: new[]
+            {
+                "-quality", "quality",
+                "-rc", "vbr_peak",
+                "-qmin", "15",
+                "-qmax", "51",
+                "-tag:v", "hvc1",
+                "-g", "240",
+                "-bf", "8",
+                "-rc-lookahead", "80",
+                "-temporal-aq", "2",
+                "-spatial-aq", "2",
+                "-profile:v", "main",
+                "-no-scenecut", "1"
+            }
+        ),
+
         // --- H.265 / Wildcard ---
         new EncodingModeConfig(
             CodecKey: "h265",
@@ -480,6 +598,22 @@ public static class EncodingModeConfigs
                 "-pix_fmt", "yuv420p",
                 "-tag:v", "hvc1",
                 "-g", "60"
+            }
+        ),
+        new EncodingModeConfig(
+            CodecKey: "h265",
+            EncoderKey: "*",
+            Mode: EncodingMode.Ultra,
+            DisplayName: "H.265 Generic Ultra",
+            Description: "Generic H.265 ultra quality settings for unknown encoders.",
+            MaxRateMultiplier: 1.0,
+            MinRateMultiplier: 1.0,
+            BufferMultiplier: 1.0,
+            VideoArgs: new[]
+            {
+                "-pix_fmt", "yuv420p",
+                "-tag:v", "hvc1",
+                "-g", "240"
             }
         )
     };

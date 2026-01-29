@@ -1,6 +1,6 @@
 export type StatusMessageType = 'processing' | 'success' | 'error';
 
-export type CodecKey = 'fast' | 'quality';
+export type CodecKey = 'fast' | 'quality' | 'ultra';
 export type ResolutionPreset = 'auto' | 'source' | '1080p' | '720p' | '480p' | '360p';
 
 export interface VideoSegment {
