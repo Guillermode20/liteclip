@@ -26,12 +26,21 @@ enum StartResult {
 }
 
 /// The main GUI application — Medal-style compact overlay.
+/// 
+/// This struct manages the egui state, UI panels, and communication with 
+/// the background [`Recorder`] via shared state and message passing.
 pub struct LiteClipApp {
+    /// Shared pointer to the recorder backend.
     pub recorder: Arc<Mutex<Recorder>>,
+    /// Current status message shown in the UI.
     pub status_message: String,
+    /// Countdown timer for the status message visibility.
     pub status_timer: f64,
+    /// Whether a save operation is currently in progress.
     pub save_in_progress: bool,
+    /// Whether a start operation is currently in progress.
     pub start_in_progress: bool,
+    
     panel: Panel,
     /// Tracks pending hotkey change so we can signal main to re-register.
     pub pending_hotkey: Option<HotkeyPreset>,
@@ -45,6 +54,10 @@ pub struct LiteClipApp {
 }
 
 impl LiteClipApp {
+    /// Create a new LiteClipApp instance.
+    /// 
+    /// # Arguments
+    /// * `recorder` - The shared recorder backend.
     pub fn new(recorder: Arc<Mutex<Recorder>>) -> Self {
         let (cached_state, cached_ffmpeg_found, cached_last_saved_path, cached_hotkey_label) = {
             let rec = recorder.lock().unwrap();
@@ -143,6 +156,8 @@ impl LiteClipApp {
     }
 
     /// Trigger an auto-save clip (no dialog — saves to ~/Videos/LiteClip/).
+    /// 
+    /// This spawns a background thread to handle segment concatenation.
     pub fn trigger_save(&mut self) {
         if self.save_in_progress {
             warn!("Save already in progress — ignoring duplicate trigger");

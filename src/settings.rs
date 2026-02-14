@@ -3,9 +3,13 @@ use std::path::PathBuf;
 /// Quality preset controlling CRF and encoder preset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Quality {
+    /// Faster encoding, lower quality, smaller file size.
     Low,
+    /// Balanced settings for most users.
     Medium,
+    /// Good visual quality, larger file size.
     High,
+    /// Highest visual quality, very large file size.
     Ultra,
 }
 
@@ -55,10 +59,15 @@ impl Quality {
 /// Video encoder preset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoEncoder {
+    /// Automatically choose the best available hardware encoder.
     Auto,
+    /// Software-based H.264 encoding (CPU bound).
     Libx264,
+    /// NVIDIA hardware-accelerated H.264 encoding.
     H264Nvenc,
+    /// Intel hardware-accelerated H.264 encoding (Quick Sync).
     H264Qsv,
+    /// AMD hardware-accelerated H.264 encoding (Advanced Media Framework).
     H264Amf,
 }
 
@@ -120,8 +129,11 @@ impl VideoEncoder {
 /// Framerate preset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Framerate {
+    /// 15 frames per second.
     Fps15,
+    /// 30 frames per second.
     Fps30,
+    /// 60 frames per second.
     Fps60,
 }
 
@@ -150,9 +162,13 @@ impl Framerate {
 /// Resolution preset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Resolution {
+    /// Use the native resolution of the display.
     Native,
+    /// 1920x1080 resolution.
     Res1080p,
+    /// 1280x720 resolution.
     Res720p,
+    /// 854x480 resolution.
     Res480p,
 }
 
@@ -189,10 +205,15 @@ impl Resolution {
 /// Hotkey preset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HotkeyPreset {
+    /// F8 key.
     F8,
+    /// F9 key.
     F9,
+    /// F10 key.
     F10,
+    /// Ctrl+Shift+S key combination.
     CtrlShiftS,
+    /// Alt+F9 key combination.
     AltF9,
 }
 
@@ -221,21 +242,12 @@ impl HotkeyPreset {
 /// All app settings.
 #[derive(Debug, Clone)]
 pub struct Settings {
+    /// Encoding quality level.
     pub quality: Quality,
+    /// Preferred video encoder.
     pub video_encoder: VideoEncoder,
+    /// Target framerate for the recording.
     pub framerate: Framerate,
-    pub resolution: Resolution,
-    pub buffer_seconds: u64,
-    pub capture_audio: bool,
-    pub audio_device: Option<String>,
-    pub output_dir: PathBuf,
-    pub hotkey: HotkeyPreset,
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        let output_dir = dirs::video_dir()
-            .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")))
             .join("LiteClip");
 
         Self {

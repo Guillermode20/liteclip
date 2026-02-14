@@ -8,27 +8,42 @@ use tempfile::TempDir;
 
 use crate::settings::{Settings, VideoEncoder};
 
+/// The input method used for screen capture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScreenCaptureInput {
+    /// Desktop Duplication API (high performance, Windows 8+)
     DdaGrab,
+    /// GDI-based grab (compatibility fallback)
     GdiGrab,
 }
 
 /// Current state of the recorder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecorderState {
+    /// Not recording
     Idle,
+    /// Actively recording to rolling segments
     Recording,
+    /// Currently concatenating segments into a final clip
     Saving,
 }
 
 /// Manages the FFmpeg subprocess and segment-based replay buffer.
+/// 
+/// The recorder uses FFmpeg to capture screen and audio into 10-second rolling segments.
+/// When a clip is saved, these segments are concatenated using FFmpeg's concat muxer.
 pub struct Recorder {
+    /// The current operational state of the recorder.
     pub state: RecorderState,
+    /// User settings for quality, resolution, etc.
     pub settings: Settings,
+    /// Whether FFmpeg was found on the system PATH.
     pub ffmpeg_found: bool,
+    /// Path to the last successfully saved clip.
     pub last_saved_path: Option<PathBuf>,
+    /// List of detected audio input devices.
     pub audio_devices: Vec<String>,
+    /// List of available hardware/software video encoders.
     pub video_encoders: Vec<VideoEncoder>,
     screen_capture_input: ScreenCaptureInput,
 
@@ -103,6 +118,12 @@ impl Recorder {
     }
 
     /// Start recording the desktop into rolling segments.
+    /// 
+    /// This launches an FFmpeg subprocess. It will attempt to use hardware encoders
+    /// if available and falls back to software (libx264) if they fail.
+    /// 
+    /// # Errors
+    /// Returns an error if FFmpeg is not found, if already recording, or if FFmpeg fails to start.
     pub fn start(&mut self) -> Result<(), String> {
         if !self.ffmpeg_found {
             error!("Cannot start: FFmpeg not found on PATH");
@@ -365,6 +386,9 @@ impl Recorder {
     }
 
     /// Stop recording and terminate the FFmpeg process.
+    /// 
+    /// This sends a 'q' signal to FFmpeg for a graceful shutdown, ensuring
+    /// the last segment is properly closed.
     pub fn stop(&mut self) {
         info!("Stopping recording (elapsed: {}s)", self.elapsed_seconds());
         if let Some(mut child) = self.child.take() {
@@ -375,7 +399,11 @@ impl Recorder {
     }
 
     /// Auto-save the current replay buffer to the configured output directory.
-    /// Returns the path to the saved clip.
+    /// 
+    /// Generates a filename based on the current timestamp.
+    /// 
+    /// # Returns
+    /// The path to the saved clip file.
     pub fn save_clip_auto(&mut self) -> Result<PathBuf, String> {
         let output_path = self.auto_output_path();
         info!("Auto-saving clip to: {}", output_path.display());

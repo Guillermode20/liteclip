@@ -1,3 +1,8 @@
+//! LiteClip Recorder
+//! 
+//! A lightweight screen recording application with a rolling replay buffer, 
+//! similar to Medal.tv or ShadowPlay. Built with Rust, eframe (egui), and FFmpeg.
+
 mod gui;
 mod recorder;
 mod settings;
@@ -14,46 +19,8 @@ use gui::LiteClipApp;
 use recorder::Recorder;
 use settings::HotkeyPreset;
 
-fn init_logging() {
-    use simplelog::*;
-    use std::fs;
-
-    // Place log file in the output directory (~/Videos/LiteClip/)
-    let log_dir = dirs::video_dir()
-        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(".")))
-        .join("LiteClip");
-    let _ = fs::create_dir_all(&log_dir);
-    let log_path = log_dir.join("liteclip.log");
-
-    let config = ConfigBuilder::new()
-        .set_time_format_rfc3339()
-        .set_target_level(LevelFilter::Off)
-        .set_thread_level(LevelFilter::Off)
-        .build();
-
-    let mut loggers: Vec<Box<dyn SharedLogger>> = Vec::new();
-
-    // File logger (always attempt)
-    if let Ok(file) = fs::File::create(&log_path) {
-        loggers.push(WriteLogger::new(LevelFilter::Debug, config.clone(), file));
-    }
-
-    // Terminal logger (for dev builds)
-    loggers.push(TermLogger::new(
-        LevelFilter::Info,
-        config,
-        TerminalMode::Mixed,
-        ColorChoice::Auto,
-    ));
-
-    if CombinedLogger::init(loggers).is_err() {
-        eprintln!("[LiteClip] Warning: Failed to initialize logger");
-    }
-
-    info!("=== LiteClip started ===");
-    info!("Log file: {}", log_path.display());
-}
-
+/// Main entry point for the LiteClip application.
+/// Initializes logging, shared state, hotkey manager, and starts the eframe GUI loop.
 fn main() -> eframe::Result<()> {
     init_logging();
 
@@ -104,13 +71,19 @@ fn main() -> eframe::Result<()> {
 /// Wraps the LiteClipApp to also poll for global hotkey events
 /// and handle dynamic hotkey re-registration.
 struct HotkeyWrapper {
+    /// The actual LiteClip GUI application
     app: LiteClipApp,
+    /// Manager for global hotkeys
     hotkey_manager: GlobalHotKeyManager,
+    /// The currently registered hotkey configuration
     current_hotkey: HotKey,
+    /// The unique ID of the currently registered hotkey
     current_hotkey_id: u32,
 }
 
 impl eframe::App for HotkeyWrapper {
+    /// Updates the application state every frame.
+    /// Polls for hotkey events and delegates UI rendering to [`LiteClipApp`].
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         // Check for hotkey events
         while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
@@ -150,7 +123,52 @@ impl eframe::App for HotkeyWrapper {
     }
 }
 
-/// Create a HotKey from a HotkeyPreset.
+/// Initializes the logging system using `simplelog`.
+/// Logs are written to both the terminal and a file in the user's video directory.
+fn init_logging() {
+    use simplelog::*;
+    use std::fs;
+
+    // Place log file in the output directory (~/Videos/LiteClip/)
+    let log_dir = dirs::video_dir()
+        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(".")))
+        .join("LiteClip");
+    let _ = fs::create_dir_all(&log_dir);
+    let log_path = log_dir.join("liteclip.log");
+
+    let config = ConfigBuilder::new()
+        .set_time_format_rfc3339()
+        .set_target_level(LevelFilter::Off)
+        .set_thread_level(LevelFilter::Off)
+        .build();
+
+    let mut loggers: Vec<Box<dyn SharedLogger>> = Vec::new();
+
+    // File logger (always attempt)
+    if let Ok(file) = fs::File::create(&log_path) {
+        loggers.push(WriteLogger::new(LevelFilter::Debug, config.clone(), file));
+    }
+
+    // Terminal logger (for dev builds)
+    loggers.push(TermLogger::new(
+        LevelFilter::Info,
+        config,
+        TerminalMode::Mixed,
+        ColorChoice::Auto,
+    ));
+
+    if CombinedLogger::init(loggers).is_err() {
+        eprintln!("[LiteClip] Warning: Failed to initialize logger");
+    }
+
+    info!("=== LiteClip started ===");
+    info!("Log file: {}", log_path.display());
+}
+
+/// Converts a [`HotkeyPreset`] into a concrete [`HotKey`] instance.
+/// 
+/// # Arguments
+/// * `preset` - The preset configuration chosen by the user.
 fn create_hotkey(preset: HotkeyPreset) -> HotKey {
     match preset {
         HotkeyPreset::F8 => HotKey::new(None, Code::F8),
@@ -162,3 +180,4 @@ fn create_hotkey(preset: HotkeyPreset) -> HotKey {
         HotkeyPreset::AltF9 => HotKey::new(Some(Modifiers::ALT), Code::F9),
     }
 }
+
