@@ -7,13 +7,56 @@ use global_hotkey::{
     hotkey::{Code, HotKey, Modifiers},
     GlobalHotKeyEvent, GlobalHotKeyManager,
 };
+use log::{error, info, warn};
 use std::sync::{Arc, Mutex};
 
 use gui::LiteClipApp;
 use recorder::Recorder;
 use settings::HotkeyPreset;
 
+fn init_logging() {
+    use simplelog::*;
+    use std::fs;
+
+    // Place log file in the output directory (~/Videos/LiteClip/)
+    let log_dir = dirs::video_dir()
+        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(".")))
+        .join("LiteClip");
+    let _ = fs::create_dir_all(&log_dir);
+    let log_path = log_dir.join("liteclip.log");
+
+    let config = ConfigBuilder::new()
+        .set_time_format_rfc3339()
+        .set_target_level(LevelFilter::Off)
+        .set_thread_level(LevelFilter::Off)
+        .build();
+
+    let mut loggers: Vec<Box<dyn SharedLogger>> = Vec::new();
+
+    // File logger (always attempt)
+    if let Ok(file) = fs::File::create(&log_path) {
+        loggers.push(WriteLogger::new(LevelFilter::Debug, config.clone(), file));
+    }
+
+    // Terminal logger (for dev builds)
+    loggers.push(TermLogger::new(
+        LevelFilter::Info,
+        config,
+        TerminalMode::Mixed,
+        ColorChoice::Auto,
+    ));
+
+    if CombinedLogger::init(loggers).is_err() {
+        eprintln!("[LiteClip] Warning: Failed to initialize logger");
+    }
+
+    info!("=== LiteClip started ===");
+    info!("Log file: {}", log_path.display());
+}
+
 fn main() -> eframe::Result<()> {
+    init_logging();
+
     // --- Shared recorder state ---
     let recorder = Arc::new(Mutex::new(Recorder::new()));
 
@@ -28,6 +71,8 @@ fn main() -> eframe::Result<()> {
         .register(current_hotkey)
         .expect("Failed to register hotkey");
     let current_hotkey_id = current_hotkey.id();
+
+    info!("Initial hotkey registered: {}", initial_hotkey.label());
 
     let recorder_for_app = recorder.clone();
 
@@ -70,6 +115,7 @@ impl eframe::App for HotkeyWrapper {
         // Check for hotkey events
         while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
             if event.id == self.current_hotkey_id {
+                info!("Global hotkey triggered — saving clip");
                 self.app.trigger_save();
             }
         }
@@ -83,12 +129,14 @@ impl eframe::App for HotkeyWrapper {
             let new_hotkey = create_hotkey(new_preset);
             match self.hotkey_manager.register(new_hotkey) {
                 Ok(()) => {
+                    info!("Hotkey changed to {}", new_preset.label());
                     self.current_hotkey = new_hotkey;
                     self.current_hotkey_id = new_hotkey.id();
                     self.app.status_message = format!("Hotkey changed to {}", new_preset.label());
                     self.app.status_timer = 3.0;
                 }
                 Err(e) => {
+                    error!("Failed to register hotkey {}: {}", new_preset.label(), e);
                     // Re-register old hotkey on failure
                     let _ = self.hotkey_manager.register(self.current_hotkey);
                     self.app.status_message = format!("Hotkey error: {}", e);

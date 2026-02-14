@@ -24,5 +24,5 @@
 - [ ] Monitor/region selection (multi-monitor)
 - [ ] Notification toast on save
 - [ ] Auto-start with Windows
-- [ ] Custom encoder selection (NVENC, AMF, QSV)
+- [x] Custom encoder selection (NVENC, AMF, QSV)
 - [ ] Clip editor / trimmer

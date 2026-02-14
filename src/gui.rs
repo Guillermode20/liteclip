@@ -1,11 +1,12 @@
 use eframe::egui;
+use log::{debug, error, info, warn};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::recorder::{Recorder, RecorderState};
-use crate::settings::{Framerate, HotkeyPreset, Quality, Resolution};
+use crate::settings::{Framerate, HotkeyPreset, Quality, Resolution, VideoEncoder};
 
 /// Which panel is visible in the GUI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,39 +20,136 @@ enum SaveResult {
     Error(String),
 }
 
+enum StartResult {
+    Success,
+    Error(String),
+}
+
 /// The main GUI application — Medal-style compact overlay.
 pub struct LiteClipApp {
     pub recorder: Arc<Mutex<Recorder>>,
     pub status_message: String,
     pub status_timer: f64,
     pub save_in_progress: bool,
+    pub start_in_progress: bool,
     panel: Panel,
     /// Tracks pending hotkey change so we can signal main to re-register.
     pub pending_hotkey: Option<HotkeyPreset>,
     save_result_rx: Option<Receiver<SaveResult>>,
+    start_result_rx: Option<Receiver<StartResult>>,
     visuals_initialized: bool,
+    cached_state: RecorderState,
+    cached_ffmpeg_found: bool,
+    cached_last_saved_path: Option<PathBuf>,
+    cached_hotkey_label: String,
 }
 
 impl LiteClipApp {
     pub fn new(recorder: Arc<Mutex<Recorder>>) -> Self {
+        let (cached_state, cached_ffmpeg_found, cached_last_saved_path, cached_hotkey_label) = {
+            let rec = recorder.lock().unwrap();
+            (
+                rec.state,
+                rec.ffmpeg_found,
+                rec.last_saved_path.clone(),
+                rec.settings.hotkey.label().to_string(),
+            )
+        };
+
         Self {
             recorder,
             status_message: String::new(),
             status_timer: 0.0,
             save_in_progress: false,
+            start_in_progress: false,
             panel: Panel::Main,
             pending_hotkey: None,
             save_result_rx: None,
+            start_result_rx: None,
             visuals_initialized: false,
+            cached_state,
+            cached_ffmpeg_found,
+            cached_last_saved_path,
+            cached_hotkey_label,
+        }
+    }
+
+    fn trigger_start(&mut self) {
+        if self.start_in_progress {
+            warn!("Start already in progress — ignoring duplicate trigger");
+            return;
+        }
+
+        info!("User triggered: START recording");
+        self.start_in_progress = true;
+        self.status_message = "Starting replay buffer...".to_string();
+        self.status_timer = 2.0;
+
+        let recorder = Arc::clone(&self.recorder);
+        let (tx, rx) = mpsc::channel();
+        self.start_result_rx = Some(rx);
+
+        std::thread::spawn(move || {
+            let result = {
+                let mut rec = recorder.lock().unwrap();
+                rec.start()
+            };
+            let message = match result {
+                Ok(()) => StartResult::Success,
+                Err(err) => StartResult::Error(err),
+            };
+            let _ = tx.send(message);
+        });
+    }
+
+    fn poll_start_result(&mut self) {
+        let Some(rx) = self.start_result_rx.as_ref() else {
+            return;
+        };
+
+        match rx.try_recv() {
+            Ok(StartResult::Success) => {
+                info!("Recording started successfully");
+                self.status_message = "Replay buffer active!".into();
+                self.status_timer = 3.0;
+                self.start_in_progress = false;
+                self.start_result_rx = None;
+            }
+            Ok(StartResult::Error(e)) => {
+                error!("Start failed: {}", e);
+                self.status_message = format!("Error: {}", e);
+                self.status_timer = 5.0;
+                self.start_in_progress = false;
+                self.start_result_rx = None;
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {
+                error!("Start worker thread disconnected unexpectedly");
+                self.status_message = "Start worker disconnected.".to_string();
+                self.status_timer = 5.0;
+                self.start_in_progress = false;
+                self.start_result_rx = None;
+            }
+        }
+    }
+
+    fn refresh_main_snapshot(&mut self) {
+        if let Ok(rec) = self.recorder.try_lock() {
+            self.cached_state = rec.state;
+            self.cached_ffmpeg_found = rec.ffmpeg_found;
+            self.cached_last_saved_path = rec.last_saved_path.clone();
+            self.cached_hotkey_label = rec.settings.hotkey.label().to_string();
         }
     }
 
     /// Trigger an auto-save clip (no dialog — saves to ~/Videos/LiteClip/).
     pub fn trigger_save(&mut self) {
         if self.save_in_progress {
+            warn!("Save already in progress — ignoring duplicate trigger");
             return;
         }
 
+        info!("User triggered: SAVE clip");
         self.save_in_progress = true;
         self.status_message = "Saving clip...".to_string();
         self.status_timer = 2.0;
@@ -85,12 +183,14 @@ impl LiteClipApp {
                     .unwrap_or_default()
                     .to_str()
                     .unwrap_or("clip.mp4");
+                info!("Clip saved: {}", path.display());
                 self.status_message = format!("Clip saved! {}", name);
                 self.status_timer = 5.0;
                 self.save_in_progress = false;
                 self.save_result_rx = None;
             }
             Ok(SaveResult::Error(e)) => {
+                error!("Save failed: {}", e);
                 self.status_message = format!("Save failed: {}", e);
                 self.status_timer = 5.0;
                 self.save_in_progress = false;
@@ -98,6 +198,7 @@ impl LiteClipApp {
             }
             Err(mpsc::TryRecvError::Empty) => {}
             Err(mpsc::TryRecvError::Disconnected) => {
+                error!("Save worker thread disconnected unexpectedly");
                 self.status_message = "Save worker disconnected.".to_string();
                 self.status_timer = 5.0;
                 self.save_in_progress = false;
@@ -108,15 +209,11 @@ impl LiteClipApp {
 
     /// Draw the main panel (Medal-style).
     fn draw_main(&mut self, ui: &mut egui::Ui) {
-        let (state, ffmpeg_found, last_saved, hotkey_label) = {
-            let rec = self.recorder.lock().unwrap();
-            (
-                rec.state,
-                rec.ffmpeg_found,
-                rec.last_saved_path.clone(),
-                rec.settings.hotkey.label(),
-            )
-        };
+        self.refresh_main_snapshot();
+        let state = self.cached_state;
+        let ffmpeg_found = self.cached_ffmpeg_found;
+        let last_saved = self.cached_last_saved_path.clone();
+        let hotkey_label = self.cached_hotkey_label.clone();
 
         // --- FFmpeg warning ---
         if !ffmpeg_found {
@@ -182,28 +279,23 @@ impl LiteClipApp {
 
             match state {
                 RecorderState::Idle => {
-                    if ui
-                        .add_sized(
-                            egui::vec2(avail, 36.0),
-                            egui::Button::new(
-                                egui::RichText::new("▶  START BUFFER").size(14.0).strong(),
-                            )
-                            .fill(egui::Color32::from_rgb(35, 110, 65))
-                            .corner_radius(6.0),
+                    let start_btn = ui.add_enabled(
+                        !self.start_in_progress,
+                        egui::Button::new(
+                            egui::RichText::new(if self.start_in_progress {
+                                "⏳  STARTING..."
+                            } else {
+                                "▶  START BUFFER"
+                            })
+                            .size(14.0)
+                            .strong(),
                         )
-                        .clicked()
-                    {
-                        let mut rec = self.recorder.lock().unwrap();
-                        match rec.start() {
-                            Ok(()) => {
-                                self.status_message = "Replay buffer active!".into();
-                                self.status_timer = 3.0;
-                            }
-                            Err(e) => {
-                                self.status_message = format!("Error: {}", e);
-                                self.status_timer = 5.0;
-                            }
-                        }
+                        .fill(egui::Color32::from_rgb(35, 110, 65))
+                        .corner_radius(6.0)
+                        .min_size(egui::vec2(avail, 36.0)),
+                    );
+                    if start_btn.clicked() {
+                        self.trigger_start();
                     }
                 }
                 RecorderState::Recording => {
@@ -234,10 +326,23 @@ impl LiteClipApp {
                         )
                         .clicked()
                     {
-                        let mut rec = self.recorder.lock().unwrap();
-                        rec.stop();
-                        self.status_message = "Buffer stopped.".into();
-                        self.status_timer = 3.0;
+                        info!("User triggered: STOP recording");
+                        let stopped = if let Ok(mut rec) = self.recorder.try_lock() {
+                            rec.stop();
+                            true
+                        } else {
+                            false
+                        };
+                        if stopped {
+                            info!("Recording stopped by user");
+                            self.status_message = "Buffer stopped.".into();
+                            self.status_timer = 3.0;
+                            self.refresh_main_snapshot();
+                        } else {
+                            warn!("Could not stop — recorder lock is held");
+                            self.status_message = "Recorder is busy, try again...".into();
+                            self.status_timer = 2.0;
+                        }
                     }
                 }
                 RecorderState::Saving => {
@@ -327,11 +432,13 @@ impl LiteClipApp {
             mut hotkey,
             mut buffer_seconds,
             mut quality,
+            mut video_encoder,
             mut framerate,
             mut resolution,
             mut capture_audio,
             mut audio_device,
             audio_devices,
+            available_video_encoders,
             output_dir,
         ) = {
             let rec = self.recorder.lock().unwrap();
@@ -339,11 +446,13 @@ impl LiteClipApp {
                 rec.settings.hotkey,
                 rec.settings.buffer_seconds,
                 rec.settings.quality,
+                rec.settings.video_encoder,
                 rec.settings.framerate,
                 rec.settings.resolution,
                 rec.settings.capture_audio,
                 rec.settings.audio_device.clone(),
                 rec.audio_devices.clone(),
+                rec.video_encoders.clone(),
                 rec.settings.output_dir.clone(),
             )
         };
@@ -390,6 +499,31 @@ impl LiteClipApp {
                     .show_ui(ui, |ui| {
                         for q in Quality::all() {
                             ui.selectable_value(&mut quality, *q, q.label());
+                        }
+                    });
+            });
+
+            // --- Encoder ---
+            setting_row(ui, "Encoder", |ui| {
+                egui::ComboBox::from_id_salt("encoder_sel")
+                    .selected_text(video_encoder.label())
+                    .width(150.0)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut video_encoder,
+                            VideoEncoder::Auto,
+                            VideoEncoder::Auto.label(),
+                        );
+
+                        for enc in VideoEncoder::all() {
+                            if *enc == VideoEncoder::Auto {
+                                continue;
+                            }
+                            if *enc == VideoEncoder::Libx264
+                                || available_video_encoders.contains(enc)
+                            {
+                                ui.selectable_value(&mut video_encoder, *enc, enc.label());
+                            }
                         }
                     });
             });
@@ -518,6 +652,7 @@ impl LiteClipApp {
             rec.settings.hotkey = hotkey;
             rec.settings.buffer_seconds = buffer_seconds;
             rec.settings.quality = quality;
+            rec.settings.video_encoder = video_encoder;
             rec.settings.framerate = framerate;
             rec.settings.resolution = resolution;
             rec.settings.capture_audio = capture_audio;
@@ -533,7 +668,9 @@ impl LiteClipApp {
 
 impl eframe::App for LiteClipApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_start_result();
         self.poll_save_result();
+        self.refresh_main_snapshot();
 
         let dt = ctx.input(|i| i.stable_dt) as f64;
 
@@ -555,9 +692,10 @@ impl eframe::App for LiteClipApp {
         }
 
         let should_animate = self.status_timer > 0.0
+            || self.start_in_progress
             || self.save_in_progress
             || matches!(
-                self.recorder.lock().unwrap().state,
+                self.cached_state,
                 RecorderState::Recording | RecorderState::Saving
             );
         if should_animate {

@@ -22,9 +22,19 @@ impl Quality {
     pub fn preset(&self) -> &'static str {
         match self {
             Quality::Low => "ultrafast",
-            Quality::Medium => "veryfast",
-            Quality::High => "fast",
-            Quality::Ultra => "medium",
+            Quality::Medium => "superfast",
+            Quality::High => "veryfast",
+            Quality::Ultra => "faster",
+        }
+    }
+
+    /// Target bitrate used for hardware encoders.
+    pub fn target_bitrate_kbps(&self) -> u32 {
+        match self {
+            Quality::Low => 4000,
+            Quality::Medium => 7000,
+            Quality::High => 11000,
+            Quality::Ultra => 16000,
         }
     }
 
@@ -39,6 +49,71 @@ impl Quality {
 
     pub fn all() -> &'static [Quality] {
         &[Quality::Low, Quality::Medium, Quality::High, Quality::Ultra]
+    }
+}
+
+/// Video encoder preset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoEncoder {
+    Auto,
+    Libx264,
+    H264Nvenc,
+    H264Qsv,
+    H264Amf,
+}
+
+impl VideoEncoder {
+    pub fn ffmpeg_name(&self) -> Option<&'static str> {
+        match self {
+            VideoEncoder::Auto => None,
+            VideoEncoder::Libx264 => Some("libx264"),
+            VideoEncoder::H264Nvenc => Some("h264_nvenc"),
+            VideoEncoder::H264Qsv => Some("h264_qsv"),
+            VideoEncoder::H264Amf => Some("h264_amf"),
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            VideoEncoder::Auto => "Auto (recommended)",
+            VideoEncoder::Libx264 => "Software (x264)",
+            VideoEncoder::H264Nvenc => "NVIDIA NVENC",
+            VideoEncoder::H264Qsv => "Intel Quick Sync",
+            VideoEncoder::H264Amf => "AMD AMF",
+        }
+    }
+
+    pub fn all() -> &'static [VideoEncoder] {
+        &[
+            VideoEncoder::Auto,
+            VideoEncoder::Libx264,
+            VideoEncoder::H264Nvenc,
+            VideoEncoder::H264Qsv,
+            VideoEncoder::H264Amf,
+        ]
+    }
+
+    pub fn resolve(&self, available: &[VideoEncoder]) -> VideoEncoder {
+        match self {
+            VideoEncoder::Auto => {
+                if available.contains(&VideoEncoder::H264Nvenc) {
+                    VideoEncoder::H264Nvenc
+                } else if available.contains(&VideoEncoder::H264Qsv) {
+                    VideoEncoder::H264Qsv
+                } else if available.contains(&VideoEncoder::H264Amf) {
+                    VideoEncoder::H264Amf
+                } else {
+                    VideoEncoder::Libx264
+                }
+            }
+            explicit => {
+                if *explicit == VideoEncoder::Libx264 || available.contains(explicit) {
+                    *explicit
+                } else {
+                    VideoEncoder::Libx264
+                }
+            }
+        }
     }
 }
 
@@ -147,6 +222,7 @@ impl HotkeyPreset {
 #[derive(Debug, Clone)]
 pub struct Settings {
     pub quality: Quality,
+    pub video_encoder: VideoEncoder,
     pub framerate: Framerate,
     pub resolution: Resolution,
     pub buffer_seconds: u64,
@@ -164,6 +240,7 @@ impl Default for Settings {
 
         Self {
             quality: Quality::Medium,
+            video_encoder: VideoEncoder::Auto,
             framerate: Framerate::Fps30,
             resolution: Resolution::Native,
             buffer_seconds: 120,
