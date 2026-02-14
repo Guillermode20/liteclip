@@ -1,12 +1,12 @@
 use log::{debug, error, info, warn};
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
-use crate::settings::{Settings, VideoEncoder};
+use crate::settings::{Quality, Settings, VideoEncoder};
 
 /// The input method used for screen capture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,8 +28,23 @@ pub enum RecorderState {
     Saving,
 }
 
+/// Windows-only: create process without a visible console window.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+/// Build an FFmpeg `Command` with the console window suppressed on Windows.
+fn ffmpeg_command() -> Command {
+    let mut cmd = Command::new("ffmpeg");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 /// Manages the FFmpeg subprocess and segment-based replay buffer.
-/// 
+///
 /// The recorder uses FFmpeg to capture screen and audio into 10-second rolling segments.
 /// When a clip is saved, these segments are concatenated using FFmpeg's concat muxer.
 pub struct Recorder {
@@ -56,7 +71,7 @@ impl Recorder {
     /// Create a new Recorder with default settings.
     pub fn new() -> Self {
         // Check if FFmpeg is available on PATH
-        let ffmpeg_found = Command::new("ffmpeg")
+        let ffmpeg_found = ffmpeg_command()
             .arg("-version")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -118,12 +133,9 @@ impl Recorder {
     }
 
     /// Start recording the desktop into rolling segments.
-    /// 
+    ///
     /// This launches an FFmpeg subprocess. It will attempt to use hardware encoders
     /// if available and falls back to software (libx264) if they fail.
-    /// 
-    /// # Errors
-    /// Returns an error if FFmpeg is not found, if already recording, or if FFmpeg fails to start.
     pub fn start(&mut self) -> Result<(), String> {
         if !self.ffmpeg_found {
             error!("Cannot start: FFmpeg not found on PATH");
@@ -156,7 +168,6 @@ impl Recorder {
         let force_kf = format!("expr:gte(t,n_forced*{})", segment_duration);
         let fps = self.settings.framerate.value().to_string();
         let crf = self.settings.quality.crf().to_string();
-        let preset = self.settings.quality.preset();
         let wrap = self.segment_wrap().to_string();
         // Keep at least one logical core free so desktop input/rendering stays responsive.
         let encoding_threads = std::thread::available_parallelism()
@@ -170,6 +181,11 @@ impl Recorder {
             selected_encoder, self.settings.video_encoder
         );
 
+        let has_audio =
+            self.settings.capture_audio && self.settings.audio_device.is_some();
+
+        // Pre-compute base arg count to avoid reallocs:
+        // ~12 for video input + ~4 for audio + ~16 for encoder + ~10 for segment muxer + ~4 vf
         let mut base_args: Vec<String> = Vec::with_capacity(48);
 
         // Video input: prefer DDA (Desktop Duplication API) when available to reduce
@@ -196,18 +212,15 @@ impl Recorder {
         }
 
         // Audio input: dshow (if enabled and device available)
-        if self.settings.capture_audio {
-            if let Some(ref device) = self.settings.audio_device {
-                info!("Audio capture enabled — device: {}", device);
-                base_args.extend([
-                    "-f".into(),
-                    "dshow".into(),
-                    "-i".into(),
-                    format!("audio={}", device),
-                ]);
-            } else {
-                warn!("Audio capture enabled but no device selected");
-            }
+        if has_audio {
+            let device = self.settings.audio_device.as_ref().unwrap();
+            info!("Audio capture enabled — device: {}", device);
+            base_args.extend([
+                "-f".into(),
+                "dshow".into(),
+                "-i".into(),
+                format!("audio={}", device),
+            ]);
         }
 
         let mut encoders_to_try = vec![selected_encoder];
@@ -221,43 +234,44 @@ impl Recorder {
         for encoder in encoders_to_try {
             let mut args = base_args.clone();
 
+            let is_hw = encoder.is_hardware();
+
             // Build video filter chain — varies by encoder type.
             // ddagrab emits GPU-backed d3d11 frames that must be downloaded
-            // to system memory. Hardware encoders (NVENC/QSV/AMF) need nv12;
-            // software encoders (libx264) can handle bgra with -pix_fmt.
-            let is_hw_encoder = matches!(
-                encoder,
-                VideoEncoder::H264Nvenc | VideoEncoder::H264Qsv | VideoEncoder::H264Amf
-            );
+            // to system memory. For hw encoders, go directly to nv12;
+            // for software, go to bgra then let pix_fmt convert.
             let mut vfilters = Vec::new();
             if self.screen_capture_input == ScreenCaptureInput::DdaGrab {
-                vfilters.push("hwdownload".to_string());
-                vfilters.push("format=bgra".to_string());
-                if is_hw_encoder {
-                    // Hardware encoders need nv12/yuv420p — bgra → nv12 conversion.
-                    vfilters.push("format=nv12".to_string());
+                vfilters.push("hwdownload");
+                if is_hw {
+                    // Skip bgra intermediate — go directly to nv12
+                    vfilters.push("format=nv12");
+                } else {
+                    vfilters.push("format=bgra");
                 }
             }
             if let Some(scale) = self.settings.resolution.scale_filter() {
-                vfilters.push(scale.to_string());
+                vfilters.push(scale);
             }
             if !vfilters.is_empty() {
-                args.extend(["-vf".into(), vfilters.join(",")]);
+                args.push("-vf".into());
+                args.push(vfilters.join(","));
             }
 
             append_video_encoder_args(
                 &mut args,
                 encoder,
+                &self.settings.quality,
                 &encoding_threads,
-                preset,
                 &crf,
                 &force_kf,
-                self.settings.quality.target_bitrate_kbps(),
             );
 
             // Audio encoding (if audio is being captured)
-            if self.settings.capture_audio && self.settings.audio_device.is_some() {
+            if has_audio {
                 args.extend(["-c:a".into(), "aac".into(), "-b:a".into(), "128k".into()]);
+                // Prevent audio/video desync when dshow delivers at uneven rates
+                args.extend(["-max_muxing_queue_size".into(), "1024".into()]);
             }
 
             // Segment muxer — use MPEG-TS format so data is flushed to disk
@@ -280,7 +294,7 @@ impl Recorder {
 
             info!("Trying encoder {:?} — ffmpeg {}", encoder, args.join(" "));
 
-            let mut child = Command::new("ffmpeg")
+            let mut child = ffmpeg_command()
                 .args(&args)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::null())
@@ -347,21 +361,15 @@ impl Recorder {
                 continue; // Try next encoder
             }
 
-            // FFmpeg is still running after 2s — capture stderr in background for logging
-            if let Some(mut stderr) = child.stderr.take() {
+            // FFmpeg is still running — drain stderr in background with buffered I/O
+            if let Some(stderr) = child.stderr.take() {
                 std::thread::spawn(move || {
-                    let mut buf = [0u8; 4096];
-                    loop {
-                        match stderr.read(&mut buf) {
-                            Ok(0) => break,
-                            Ok(n) => {
-                                let text = String::from_utf8_lossy(&buf[..n]);
-                                for line in text.lines() {
-                                    let trimmed = line.trim();
-                                    if trimmed.is_empty() {
-                                        continue;
-                                    }
-                                    // Log FFmpeg output at debug level (it's very verbose)
+                    let reader = BufReader::with_capacity(4096, stderr);
+                    for line in reader.lines() {
+                        match line {
+                            Ok(text) => {
+                                let trimmed = text.trim();
+                                if !trimmed.is_empty() {
                                     debug!("[ffmpeg] {}", trimmed);
                                 }
                             }
@@ -386,7 +394,7 @@ impl Recorder {
     }
 
     /// Stop recording and terminate the FFmpeg process.
-    /// 
+    ///
     /// This sends a 'q' signal to FFmpeg for a graceful shutdown, ensuring
     /// the last segment is properly closed.
     pub fn stop(&mut self) {
@@ -399,11 +407,6 @@ impl Recorder {
     }
 
     /// Auto-save the current replay buffer to the configured output directory.
-    /// 
-    /// Generates a filename based on the current timestamp.
-    /// 
-    /// # Returns
-    /// The path to the saved clip file.
     pub fn save_clip_auto(&mut self) -> Result<PathBuf, String> {
         let output_path = self.auto_output_path();
         info!("Auto-saving clip to: {}", output_path.display());
@@ -427,7 +430,9 @@ impl Recorder {
             graceful_shutdown(&mut child);
         }
 
-        std::thread::sleep(Duration::from_millis(200));
+        // Poll briefly for the last segment to be fully written, rather than
+        // a fixed 200ms sleep. On fast machines this returns in <50ms.
+        wait_for_segments_flush();
 
         let temp_path = self
             .temp_dir
@@ -441,7 +446,7 @@ impl Recorder {
 
         debug!("Scanning temp dir for segments: {}", temp_path.display());
 
-        // Gather segment files sorted by modification time
+        // Gather segment files sorted by numeric index from filename
         let mut segments: Vec<PathBuf> = fs::read_dir(&temp_path)
             .map_err(|e| {
                 error!("Failed to read temp dir {}: {}", temp_path.display(), e);
@@ -463,7 +468,6 @@ impl Recorder {
                 "No segment files found in {}. Buffer may not have recorded long enough.",
                 temp_path.display()
             );
-            // Log what IS in the temp dir for debugging
             if let Ok(entries) = fs::read_dir(&temp_path) {
                 let files: Vec<String> = entries
                     .filter_map(|e| e.ok())
@@ -471,20 +475,25 @@ impl Recorder {
                     .collect();
                 debug!("Temp dir contents: {:?}", files);
             }
-
-            // Restart FFmpeg if we were recording — otherwise the process stays dead
             self.restore_state_after_save(was_recording);
             return Err("No segments found. Record for a few seconds first.".into());
         }
 
         info!("Found {} segment(s) to concat", segments.len());
 
-        // Sort by modification time (oldest first)
-        segments.sort_unstable_by_key(|p| {
-            fs::metadata(p)
-                .and_then(|m| m.modified())
-                .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+        // Sort by numeric index extracted from filename (seg_NNNN.ts).
+        // This is more reliable than mtime which can alias when segment_wrap
+        // reuses filenames — mtime resolution on NTFS is ~100ms and two
+        // segments written in rapid succession can get the same timestamp.
+        segments.sort_unstable_by(|a, b| {
+            extract_segment_index(a).cmp(&extract_segment_index(b))
         });
+
+        // When segment_wrap is active, reorder so oldest segment comes first.
+        // The oldest segment has the highest mtime gap from its predecessor.
+        if segments.len() > 1 {
+            reorder_wrapped_segments(&mut segments);
+        }
 
         for seg in &segments {
             let size = fs::metadata(seg).map(|m| m.len()).unwrap_or(0);
@@ -511,24 +520,25 @@ impl Recorder {
             let _ = fs::create_dir_all(parent);
         }
 
-        // Concatenate segments into final clip
+        // Concatenate segments into final clip.
+        // -probesize 32 -analyzeduration 0: segments are known-good MPEG-TS, skip probing.
+        // -nostdin: prevent accidental stdin blocking.
         let concat_args = [
-            "-f",
-            "concat",
-            "-safe",
-            "0",
-            "-i",
-            concat_list_path.to_str().unwrap(),
-            "-c",
-            "copy",
+            "-nostdin",
+            "-probesize", "32",
+            "-analyzeduration", "0",
+            "-f", "concat",
+            "-safe", "0",
+            "-i", concat_list_path.to_str().unwrap(),
+            "-c", "copy",
             "-y",
             output_path.to_str().unwrap(),
         ];
         info!("Running concat: ffmpeg {}", concat_args.join(" "));
 
-        let concat_result = Command::new("ffmpeg")
+        let concat_result = ffmpeg_command()
             .args(&concat_args)
-            .stdout(Stdio::piped())
+            .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .output()
             .map_err(|e| {
@@ -555,8 +565,6 @@ impl Recorder {
         );
 
         self.last_saved_path = Some(output_path.to_path_buf());
-
-        // Restart recording if it was active
         self.restore_state_after_save(was_recording);
 
         Ok(output_path.to_path_buf())
@@ -568,16 +576,7 @@ impl Recorder {
         let filename = format!("LiteClip_{}.mp4", now.format("%Y-%m-%d_%H-%M-%S"));
         self.settings.output_dir.join(filename)
     }
-}
 
-impl Drop for Recorder {
-    fn drop(&mut self) {
-        info!("Recorder shutting down");
-        self.stop();
-    }
-}
-
-impl Recorder {
     fn restore_state_after_save(&mut self, was_recording: bool) {
         if was_recording {
             info!("Restarting recording after save...");
@@ -593,6 +592,15 @@ impl Recorder {
     }
 }
 
+impl Drop for Recorder {
+    fn drop(&mut self) {
+        info!("Recorder shutting down");
+        self.stop();
+    }
+}
+
+// ── Helpers ────────────────────────────────────────────────────────
+
 /// Gracefully shutdown an FFmpeg child process.
 /// Sends 'q' to stdin, waits up to 2 seconds, then force-kills if needed.
 fn graceful_shutdown(child: &mut Child) {
@@ -604,7 +612,7 @@ fn graceful_shutdown(child: &mut Child) {
     // Drop stdin to signal EOF — helps FFmpeg realize it should quit
     child.stdin.take();
 
-    // Wait up to 2 seconds for FFmpeg to exit on its own
+    // Wait up to 2 seconds for FFmpeg to exit on its own (poll at 50ms)
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         match child.try_wait() {
@@ -619,7 +627,7 @@ fn graceful_shutdown(child: &mut Child) {
                     let _ = child.wait();
                     return;
                 }
-                std::thread::sleep(Duration::from_millis(100));
+                std::thread::sleep(Duration::from_millis(50));
             }
             Err(e) => {
                 error!("Error checking FFmpeg status: {}", e);
@@ -631,11 +639,59 @@ fn graceful_shutdown(child: &mut Child) {
     }
 }
 
+/// Wait for the file system to flush the last segment after FFmpeg exits.
+/// Polls up to 500ms instead of a fixed 200ms sleep.
+fn wait_for_segments_flush() {
+    let deadline = Instant::now() + Duration::from_millis(500);
+    while Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Extract the numeric index from a segment filename like `seg_0003.ts`.
+fn extract_segment_index(path: &Path) -> u32 {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .and_then(|s| s.strip_prefix("seg_"))
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(u32::MAX)
+}
+
+/// Reorder wrapped segments so the oldest segment is first.
+/// When segment_wrap is active, FFmpeg overwrites old segments in a ring.
+/// The newest segment has the highest mtime; the segment right after it
+/// (by index) is the oldest one still on disk.
+fn reorder_wrapped_segments(segments: &mut Vec<PathBuf>) {
+    // Find the position where mtime jumps backwards (wrap point).
+    let mtimes: Vec<_> = segments
+        .iter()
+        .map(|p| {
+            fs::metadata(p)
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+        })
+        .collect();
+
+    // Look for the newest segment (highest mtime). Everything after it is older.
+    let mut newest_idx = 0;
+    for i in 1..mtimes.len() {
+        if mtimes[i] > mtimes[newest_idx] {
+            newest_idx = i;
+        }
+    }
+
+    // If the newest is not the last element, segments have wrapped.
+    // Rotate so the segment after the newest is first.
+    if newest_idx + 1 < segments.len() {
+        segments.rotate_left(newest_idx + 1);
+    }
+}
+
 /// Detect available audio recording devices via FFmpeg.
 fn detect_audio_devices() -> Vec<String> {
     debug!("Detecting audio devices via FFmpeg dshow...");
-    let output = Command::new("ffmpeg")
-        .args(["-list_devices", "true", "-f", "dshow", "-i", "dummy"])
+    let output = ffmpeg_command()
+        .args(["-loglevel", "error", "-list_devices", "true", "-f", "dshow", "-i", "dummy"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output();
@@ -687,7 +743,7 @@ fn detect_video_encoders(ffmpeg_found: bool) -> Vec<VideoEncoder> {
     }
 
     debug!("Detecting available hardware video encoders...");
-    let output = Command::new("ffmpeg")
+    let output = ffmpeg_command()
         .args(["-hide_banner", "-encoders"])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -720,11 +776,10 @@ fn detect_video_encoders(ffmpeg_found: bool) -> Vec<VideoEncoder> {
         debug!("Testing hardware encoder {} ({})", label, ffmpeg_name);
 
         // Quick 1-frame probe: encode a tiny synthetic nv12 frame.
-        // We use format=nv12 to match the actual ddagrab pipeline where
-        // hardware encoders receive nv12 after hwdownload,format=bgra,format=nv12.
-        let probe = Command::new("ffmpeg")
+        let probe = ffmpeg_command()
             .args([
                 "-hide_banner",
+                "-loglevel", "error",
                 "-f", "lavfi",
                 "-i", "color=c=black:s=256x256:d=0.04,format=nv12",
                 "-frames:v", "1",
@@ -765,7 +820,7 @@ fn detect_screen_capture_input(ffmpeg_found: bool) -> ScreenCaptureInput {
     }
 
     debug!("Detecting FFmpeg screen capture filters...");
-    let output = Command::new("ffmpeg")
+    let output = ffmpeg_command()
         .args(["-hide_banner", "-filters"])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -789,14 +844,16 @@ fn detect_screen_capture_input(ffmpeg_found: bool) -> ScreenCaptureInput {
     }
 }
 
+/// Append encoder-specific FFmpeg arguments.
+///
+/// Uses native preset names for each encoder instead of assuming x264 semantics.
 fn append_video_encoder_args(
     args: &mut Vec<String>,
     encoder: VideoEncoder,
+    quality: &Quality,
     encoding_threads: &str,
-    preset: &str,
     crf: &str,
     force_kf: &str,
-    quality_bitrate_kbps: u32,
 ) {
     match encoder {
         VideoEncoder::Libx264 => {
@@ -806,7 +863,7 @@ fn append_video_encoder_args(
                 "-threads".into(),
                 encoding_threads.to_string(),
                 "-preset".into(),
-                preset.into(),
+                quality.preset().into(),
                 "-crf".into(),
                 crf.into(),
                 "-pix_fmt".into(),
@@ -815,14 +872,15 @@ fn append_video_encoder_args(
                 force_kf.into(),
             ]);
         }
-        VideoEncoder::H264Nvenc | VideoEncoder::H264Qsv | VideoEncoder::H264Amf => {
-            let bitrate = format!("{}k", quality_bitrate_kbps);
-            let maxrate = format!("{}k", quality_bitrate_kbps * 2);
-            let bufsize = format!("{}k", quality_bitrate_kbps * 2);
-
+        VideoEncoder::H264Nvenc => {
+            let bitrate = format!("{}k", quality.target_bitrate_kbps());
+            let maxrate = format!("{}k", quality.target_bitrate_kbps() * 2);
+            let bufsize = format!("{}k", quality.target_bitrate_kbps() * 2);
             args.extend([
                 "-c:v".into(),
-                encoder.ffmpeg_name().unwrap_or("libx264").into(),
+                "h264_nvenc".into(),
+                "-preset".into(),
+                quality.nvenc_preset().into(),
                 "-b:v".into(),
                 bitrate,
                 "-maxrate".into(),
@@ -835,6 +893,48 @@ fn append_video_encoder_args(
                 force_kf.into(),
             ]);
         }
-        VideoEncoder::Auto => {}
+        VideoEncoder::H264Qsv => {
+            let bitrate = format!("{}k", quality.target_bitrate_kbps());
+            let maxrate = format!("{}k", quality.target_bitrate_kbps() * 2);
+            let bufsize = format!("{}k", quality.target_bitrate_kbps() * 2);
+            args.extend([
+                "-c:v".into(),
+                "h264_qsv".into(),
+                "-preset".into(),
+                quality.qsv_preset().into(),
+                "-b:v".into(),
+                bitrate,
+                "-maxrate".into(),
+                maxrate,
+                "-bufsize".into(),
+                bufsize,
+                "-pix_fmt".into(),
+                "yuv420p".into(),
+                "-force_key_frames".into(),
+                force_kf.into(),
+            ]);
+        }
+        VideoEncoder::H264Amf => {
+            let bitrate = format!("{}k", quality.target_bitrate_kbps());
+            let maxrate = format!("{}k", quality.target_bitrate_kbps() * 2);
+            let bufsize = format!("{}k", quality.target_bitrate_kbps() * 2);
+            args.extend([
+                "-c:v".into(),
+                "h264_amf".into(),
+                "-quality".into(),
+                quality.amf_quality().into(),
+                "-b:v".into(),
+                bitrate,
+                "-maxrate".into(),
+                maxrate,
+                "-bufsize".into(),
+                bufsize,
+                "-pix_fmt".into(),
+                "yuv420p".into(),
+                "-force_key_frames".into(),
+                force_kf.into(),
+            ]);
+        }
+        VideoEncoder::Auto => {} // resolved before reaching here
     }
 }

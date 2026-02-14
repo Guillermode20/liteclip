@@ -237,7 +237,7 @@ impl LiteClipApp {
                 ui.label(
                     egui::RichText::new("⚠  FFmpeg Not Found")
                         .size(16.0)
-                        .color(egui::Color32::from_rgb(255, 160, 60))
+                        .color(egui::Color32::from_rgb(255, 80, 80))
                         .strong(),
                 );
                 ui.add_space(4.0);
@@ -245,7 +245,7 @@ impl LiteClipApp {
                     egui::RichText::new(
                         "Install FFmpeg and add it to PATH,\nthen restart LiteClip.",
                     )
-                    .color(egui::Color32::from_rgb(160, 160, 170)),
+                    .color(egui::Color32::from_gray(120)),
                 );
             });
             return;
@@ -256,28 +256,28 @@ impl LiteClipApp {
             match state {
                 RecorderState::Idle => {
                     ui.label(
-                        egui::RichText::new("⏸  STANDBY")
-                            .size(18.0)
-                            .color(egui::Color32::from_rgb(100, 100, 120))
+                        egui::RichText::new("STANDBY")
+                            .size(16.0)
+                            .color(egui::Color32::from_gray(80))
                             .strong(),
                     );
                 }
                 RecorderState::Recording => {
                     // Pulsing red dot effect
-                    let pulse = ((ui.input(|i| i.time) * 2.0).sin() * 0.5 + 0.5) as u8;
-                    let red = 180 + pulse / 3;
+                    let pulse = ((ui.input(|i| i.time) * 3.0).sin() * 0.5 + 0.5) as u8;
+                    let alpha = 100 + pulse.saturating_mul(155);
                     ui.label(
-                        egui::RichText::new("●  REC")
-                            .size(20.0)
-                            .color(egui::Color32::from_rgb(red, 50, 50))
+                        egui::RichText::new("● REC")
+                            .size(16.0)
+                            .color(egui::Color32::from_rgba_premultiplied(255, 50, 50, alpha))
                             .strong(),
                     );
                 }
                 RecorderState::Saving => {
                     ui.label(
-                        egui::RichText::new("⏳  SAVING...")
-                            .size(18.0)
-                            .color(egui::Color32::from_rgb(255, 200, 60))
+                        egui::RichText::new("SAVING...")
+                            .size(16.0)
+                            .color(egui::Color32::WHITE)
                             .strong(),
                     );
                 }
@@ -298,15 +298,14 @@ impl LiteClipApp {
                         !self.start_in_progress,
                         egui::Button::new(
                             egui::RichText::new(if self.start_in_progress {
-                                "⏳  STARTING..."
+                                "INITIALIZING..."
                             } else {
-                                "▶  START BUFFER"
+                                "START BUFFER"
                             })
-                            .size(14.0)
-                            .strong(),
+                            .size(14.0),
                         )
-                        .fill(egui::Color32::from_rgb(35, 110, 65))
-                        .corner_radius(6.0)
+                        .fill(egui::Color32::from_gray(10))
+                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(60)))
                         .min_size(egui::vec2(avail, 36.0)),
                     );
                     if start_btn.clicked() {
@@ -319,12 +318,12 @@ impl LiteClipApp {
                         .add_sized(
                             btn_size,
                             egui::Button::new(
-                                egui::RichText::new(format!("💾  CLIP  [{}]", hotkey_label))
+                                egui::RichText::new(format!("SAVE CLIP [{}]", hotkey_label))
                                     .size(13.0)
-                                    .strong(),
+                                    .color(egui::Color32::BLACK), // Black text on white/light button
                             )
-                            .fill(egui::Color32::from_rgb(50, 80, 160))
-                            .corner_radius(6.0),
+                            .fill(egui::Color32::from_gray(220)) // Light button
+                            .corner_radius(2.0),
                         )
                         .clicked()
                     {
@@ -335,9 +334,10 @@ impl LiteClipApp {
                     if ui
                         .add_sized(
                             btn_size,
-                            egui::Button::new(egui::RichText::new("⏹  STOP").size(13.0).strong())
-                                .fill(egui::Color32::from_rgb(110, 35, 35))
-                                .corner_radius(6.0),
+                            egui::Button::new(egui::RichText::new("STOP").size(13.0).color(egui::Color32::from_rgb(255, 80, 80)))
+                                .fill(egui::Color32::BLACK)
+                                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 40, 40)))
+                                .corner_radius(2.0),
                         )
                         .clicked()
                     {
@@ -363,9 +363,9 @@ impl LiteClipApp {
                 RecorderState::Saving => {
                     ui.add_enabled(
                         false,
-                        egui::Button::new(egui::RichText::new("Saving clip...").size(14.0))
-                            .min_size(egui::vec2(avail, 36.0))
-                            .corner_radius(6.0),
+                        egui::Button::new(egui::RichText::new("Saving...").size(14.0))
+                            .frame(false)
+                            .min_size(egui::vec2(avail, 36.0)),
                     );
                 }
             }
@@ -389,15 +389,15 @@ impl LiteClipApp {
             if let Some(ref path) = last_saved {
                 let name = path.file_name().unwrap_or_default().to_str().unwrap_or("");
                 ui.label(
-                    egui::RichText::new(format!("📁 {}", name))
-                        .small()
-                        .color(egui::Color32::from_rgb(120, 140, 160)),
+                    egui::RichText::new(format!("LAST: {}", name))
+                        .size(10.0)
+                        .color(egui::Color32::from_gray(100)),
                 );
             } else {
                 ui.label(
-                    egui::RichText::new("No clips yet")
-                        .small()
-                        .color(egui::Color32::from_rgb(80, 80, 100)),
+                    egui::RichText::new("NO CLIPS")
+                        .size(10.0)
+                        .color(egui::Color32::from_gray(60)),
                 );
             }
 
@@ -405,9 +405,9 @@ impl LiteClipApp {
                 if ui
                     .add(
                         egui::Button::new(
-                            egui::RichText::new("⚙")
-                                .size(16.0)
-                                .color(egui::Color32::from_rgb(160, 170, 190)),
+                            egui::RichText::new("SETTINGS")
+                                .size(10.0)
+                                .color(egui::Color32::from_gray(120)),
                         )
                         .frame(false),
                     )
@@ -425,7 +425,7 @@ impl LiteClipApp {
             if ui
                 .add(
                     egui::Button::new(
-                        egui::RichText::new("← Back").color(egui::Color32::from_rgb(140, 170, 220)),
+                        egui::RichText::new("< BACK").color(egui::Color32::from_gray(120)),
                     )
                     .frame(false),
                 )
@@ -434,8 +434,8 @@ impl LiteClipApp {
                 self.panel = Panel::Main;
             }
             ui.heading(
-                egui::RichText::new("Settings")
-                    .color(egui::Color32::from_rgb(200, 210, 230))
+                egui::RichText::new("SETTINGS")
+                    .color(egui::Color32::WHITE)
                     .strong(),
             );
         });
@@ -616,9 +616,10 @@ impl LiteClipApp {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui
                         .add(
-                            egui::Button::new("📂 Browse")
-                                .fill(egui::Color32::from_rgb(50, 55, 65))
-                                .corner_radius(4.0),
+                            egui::Button::new("BROWSE")
+                                .fill(egui::Color32::from_gray(20))
+                                .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(40)))
+                                .corner_radius(2.0),
                         )
                         .clicked()
                     {
@@ -647,11 +648,12 @@ impl LiteClipApp {
             if ui
                 .add(
                     egui::Button::new(
-                        egui::RichText::new("📂  Open Clips Folder")
-                            .color(egui::Color32::from_rgb(160, 180, 210)),
+                        egui::RichText::new("OPEN CLIPS FOLDER")
+                            .color(egui::Color32::from_gray(200)),
                     )
-                    .fill(egui::Color32::from_rgb(40, 45, 55))
-                    .corner_radius(4.0),
+                    .fill(egui::Color32::from_gray(20))
+                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(40)))
+                    .corner_radius(2.0),
                 )
                 .clicked()
             {
@@ -696,12 +698,31 @@ impl eframe::App for LiteClipApp {
 
         if !self.visuals_initialized {
             let mut visuals = egui::Visuals::dark();
-            visuals.override_text_color = Some(egui::Color32::from_rgb(210, 215, 225));
-            visuals.window_fill = egui::Color32::from_rgb(22, 24, 30);
-            visuals.panel_fill = egui::Color32::from_rgb(22, 24, 30);
-            visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(35, 38, 48);
-            visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(45, 50, 62);
-            visuals.widgets.active.bg_fill = egui::Color32::from_rgb(55, 60, 75);
+            visuals.override_text_color = Some(egui::Color32::from_gray(230));
+            visuals.window_fill = egui::Color32::BLACK;
+            visuals.panel_fill = egui::Color32::BLACK;
+            
+            visuals.widgets.noninteractive.bg_fill = egui::Color32::BLACK;
+            visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_gray(30));
+            visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, egui::Color32::from_gray(180));
+
+            visuals.widgets.inactive.bg_fill = egui::Color32::from_gray(10);
+            visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, egui::Color32::from_gray(180));
+            
+            visuals.widgets.hovered.bg_fill = egui::Color32::from_gray(25);
+            visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, egui::Color32::WHITE);
+            
+            visuals.widgets.active.bg_fill = egui::Color32::from_gray(40);
+            visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, egui::Color32::WHITE);
+            
+            visuals.selection.bg_fill = egui::Color32::from_gray(50);
+            visuals.selection.stroke = egui::Stroke::new(1.0, egui::Color32::WHITE);
+            
+            // Thin borders
+            visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_gray(30));
+            visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_gray(60));
+            visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, egui::Color32::WHITE);
+
             ctx.set_visuals(visuals);
             self.visuals_initialized = true;
         }
@@ -723,24 +744,14 @@ impl eframe::App for LiteClipApp {
                 // --- Header ---
                 ui.horizontal(|ui| {
                     ui.label(
-                        egui::RichText::new("⚡")
-                            .size(20.0)
-                            .color(egui::Color32::from_rgb(80, 160, 255)),
-                    );
-                    ui.label(
-                        egui::RichText::new("LiteClip")
-                            .size(18.0)
-                            .color(egui::Color32::from_rgb(200, 210, 235))
+                        egui::RichText::new("LITECLIP")
+                            .size(16.0)
+                            .color(egui::Color32::WHITE)
                             .strong(),
-                    );
-                    ui.label(
-                        egui::RichText::new("v0.2")
-                            .small()
-                            .color(egui::Color32::from_rgb(80, 90, 110)),
                     );
                 });
 
-                ui.add_space(4.0);
+                ui.add_space(8.0);
 
                 match self.panel {
                     Panel::Main => self.draw_main(ui),
@@ -755,18 +766,21 @@ impl eframe::App for LiteClipApp {
 /// A standard settings row: label on the left, widget on the right.
 fn setting_row(ui: &mut egui::Ui, label: &str, add_widget: impl FnOnce(&mut egui::Ui)) {
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(label).color(egui::Color32::from_rgb(180, 190, 210)));
+        ui.label(egui::RichText::new(label.to_uppercase()).size(10.0).color(egui::Color32::from_gray(120)));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), add_widget);
     });
 }
 
 /// Section header divider.
 fn section_header(ui: &mut egui::Ui, title: &str) {
+    ui.add_space(4.0);
     ui.label(
-        egui::RichText::new(format!("─── {} ───", title))
-            .small()
-            .color(egui::Color32::from_rgb(100, 110, 130)),
+        egui::RichText::new(title)
+            .size(11.0)
+            .color(egui::Color32::WHITE)
+            .strong(),
     );
+    ui.separator();
 }
 
 /// Format buffer length for display.

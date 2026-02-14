@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 /// Quality preset controlling CRF and encoder preset.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Quality {
     /// Faster encoding, lower quality, smaller file size.
     Low,
@@ -23,6 +23,7 @@ impl Quality {
         }
     }
 
+    /// x264 preset string.
     pub fn preset(&self) -> &'static str {
         match self {
             Quality::Low => "ultrafast",
@@ -32,7 +33,37 @@ impl Quality {
         }
     }
 
-    /// Target bitrate used for hardware encoders.
+    /// NVENC preset (p1 = fastest, p7 = slowest/best quality).
+    pub fn nvenc_preset(&self) -> &'static str {
+        match self {
+            Quality::Low => "p1",
+            Quality::Medium => "p4",
+            Quality::High => "p5",
+            Quality::Ultra => "p6",
+        }
+    }
+
+    /// Intel QSV preset.
+    pub fn qsv_preset(&self) -> &'static str {
+        match self {
+            Quality::Low => "veryfast",
+            Quality::Medium => "fast",
+            Quality::High => "medium",
+            Quality::Ultra => "slow",
+        }
+    }
+
+    /// AMD AMF quality mode.
+    pub fn amf_quality(&self) -> &'static str {
+        match self {
+            Quality::Low => "speed",
+            Quality::Medium => "balanced",
+            Quality::High => "quality",
+            Quality::Ultra => "quality",
+        }
+    }
+
+    /// Target bitrate used for hardware encoders (kbps).
     pub fn target_bitrate_kbps(&self) -> u32 {
         match self {
             Quality::Low => 4000,
@@ -57,7 +88,7 @@ impl Quality {
 }
 
 /// Video encoder preset.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VideoEncoder {
     /// Automatically choose the best available hardware encoder.
     Auto,
@@ -90,6 +121,14 @@ impl VideoEncoder {
             VideoEncoder::H264Qsv => "Intel Quick Sync",
             VideoEncoder::H264Amf => "AMD AMF",
         }
+    }
+
+    /// Whether this is a hardware-accelerated encoder.
+    pub fn is_hardware(&self) -> bool {
+        matches!(
+            self,
+            VideoEncoder::H264Nvenc | VideoEncoder::H264Qsv | VideoEncoder::H264Amf
+        )
     }
 
     pub fn all() -> &'static [VideoEncoder] {
@@ -127,7 +166,7 @@ impl VideoEncoder {
 }
 
 /// Framerate preset.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Framerate {
     /// 15 frames per second.
     Fps15,
@@ -160,7 +199,7 @@ impl Framerate {
 }
 
 /// Resolution preset.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Resolution {
     /// Use the native resolution of the display.
     Native,
@@ -174,12 +213,14 @@ pub enum Resolution {
 
 impl Resolution {
     /// Returns the FFmpeg scale filter string, or None for native.
+    /// Uses `-2` for height to ensure divisible-by-2 output — required by
+    /// many hardware encoders that reject odd-dimension frames.
     pub fn scale_filter(&self) -> Option<&'static str> {
         match self {
             Resolution::Native => None,
-            Resolution::Res1080p => Some("scale=1920:1080"),
-            Resolution::Res720p => Some("scale=1280:720"),
-            Resolution::Res480p => Some("scale=854:480"),
+            Resolution::Res1080p => Some("scale=1920:-2"),
+            Resolution::Res720p => Some("scale=1280:-2"),
+            Resolution::Res480p => Some("scale=854:-2"),
         }
     }
 
@@ -203,7 +244,7 @@ impl Resolution {
 }
 
 /// Hotkey preset.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HotkeyPreset {
     /// F8 key.
     F8,
@@ -248,6 +289,24 @@ pub struct Settings {
     pub video_encoder: VideoEncoder,
     /// Target framerate for the recording.
     pub framerate: Framerate,
+    /// Target resolution (Native or downscaled).
+    pub resolution: Resolution,
+    /// Rolling buffer length in seconds.
+    pub buffer_seconds: u64,
+    /// Whether to capture desktop audio.
+    pub capture_audio: bool,
+    /// Selected audio device name (None = auto-detect first).
+    pub audio_device: Option<String>,
+    /// Directory to save clips to.
+    pub output_dir: PathBuf,
+    /// Global hotkey preset for saving clips.
+    pub hotkey: HotkeyPreset,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        let output_dir = dirs::video_dir()
+            .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")))
             .join("LiteClip");
 
         Self {
@@ -257,7 +316,7 @@ pub struct Settings {
             resolution: Resolution::Native,
             buffer_seconds: 120,
             capture_audio: true,
-            audio_device: None, // auto-detect
+            audio_device: None,
             output_dir,
             hotkey: HotkeyPreset::F8,
         }
