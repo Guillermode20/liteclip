@@ -1482,6 +1482,8 @@ dependencies = [
  "global-hotkey",
  "log",
  "rfd",
+ "serde",
+ "serde_json",
  "simplelog",
  "tempfile",
 ]

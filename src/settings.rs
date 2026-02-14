@@ -1,7 +1,8 @@
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Quality preset controlling CRF and encoder preset.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Quality {
     /// Faster encoding, lower quality, smaller file size.
     Low,
@@ -88,7 +89,7 @@ impl Quality {
 }
 
 /// Video encoder preset.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum VideoEncoder {
     /// Automatically choose the best available hardware encoder.
     Auto,
@@ -166,7 +167,7 @@ impl VideoEncoder {
 }
 
 /// Framerate preset.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Framerate {
     /// 15 frames per second.
     Fps15,
@@ -199,7 +200,7 @@ impl Framerate {
 }
 
 /// Resolution preset.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Resolution {
     /// Use the native resolution of the display.
     Native,
@@ -244,7 +245,7 @@ impl Resolution {
 }
 
 /// Hotkey preset.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum HotkeyPreset {
     /// F8 key.
     F8,
@@ -281,7 +282,7 @@ impl HotkeyPreset {
 }
 
 /// All app settings.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     /// Encoding quality level.
     pub quality: Quality,
@@ -319,6 +320,39 @@ impl Default for Settings {
             audio_device: None,
             output_dir,
             hotkey: HotkeyPreset::F8,
+        }
+    }
+}
+
+impl Settings {
+    /// Load settings from disk, or return default if missing/invalid.
+    pub fn load() -> Self {
+        let config_dir = dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("LiteClip");
+        let settings_path = config_dir.join("settings.json");
+
+        if let Ok(file) = std::fs::File::open(&settings_path) {
+            let reader = std::io::BufReader::new(file);
+            if let Ok(settings) = serde_json::from_reader(reader) {
+                return settings;
+            }
+        }
+
+        Self::default()
+    }
+
+    /// Save current settings to disk.
+    pub fn save(&self) {
+        let config_dir = dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("LiteClip");
+        let _ = std::fs::create_dir_all(&config_dir);
+        let settings_path = config_dir.join("settings.json");
+
+        if let Ok(file) = std::fs::File::create(&settings_path) {
+            let writer = std::io::BufWriter::new(file);
+            let _ = serde_json::to_writer_pretty(writer, self);
         }
     }
 }

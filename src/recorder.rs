@@ -1,12 +1,25 @@
 use log::{debug, error, info, warn};
+use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 use crate::settings::{Quality, Settings, VideoEncoder};
+
+/// Cache for detected capabilities to avoid re-probing on every startup.
+#[derive(Debug, Serialize, Deserialize)]
+struct RecorderCache {
+    /// Output of `ffmpeg -version` to identify the binary.
+    ffmpeg_version_string: String,
+    /// List of working video encoders.
+    video_encoders: Vec<VideoEncoder>,
+    /// List of detected audio devices.
+    audio_devices: Vec<String>,
+}
+
 
 /// The input method used for screen capture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,27 +98,56 @@ impl Recorder {
             error!("FFmpeg NOT found on PATH — recording will not work");
         }
 
-        // Detect audio devices via FFmpeg
-        let audio_devices = detect_audio_devices();
-        info!("Detected {} audio device(s)", audio_devices.len());
-        for (i, dev) in audio_devices.iter().enumerate() {
-            debug!("  Audio device [{}]: {}", i, dev);
-        }
+        // Try to load cache
+        let cache_dir = dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("LiteClip");
+        let cache_path = cache_dir.join("recorder_cache.json");
+        let ffmpeg_version = get_ffmpeg_version_string().unwrap_or_default();
 
-        let video_encoders = detect_video_encoders(ffmpeg_found);
-        info!("Available video encoders: {:?}", video_encoders);
+        let (audio_devices, video_encoders) = if let Some(cache) = load_recorder_cache(&cache_path, &ffmpeg_version) {
+            info!("Loaded capabilities from cache: {} audio devices, {} encoders", 
+                cache.audio_devices.len(), cache.video_encoders.len());
+            (cache.audio_devices, cache.video_encoders)
+        } else {
+            info!("Capabilities cache missing or invalid — probing system...");
+            let audio_devices = detect_audio_devices();
+            let video_encoders = detect_video_encoders(ffmpeg_found);
+            
+            if !ffmpeg_version.is_empty() {
+                save_recorder_cache(&cache_path, RecorderCache {
+                    ffmpeg_version_string: ffmpeg_version,
+                    video_encoders: video_encoders.clone(),
+                    audio_devices: audio_devices.clone(),
+                });
+            }
+            (audio_devices, video_encoders)
+        };
+
+        info!("Final Audio Devices: {:?}", audio_devices);
+        info!("Final Video Encoders: {:?}", video_encoders);
+        
         let screen_capture_input = detect_screen_capture_input(ffmpeg_found);
         info!(
             "Selected screen capture input: {:?}",
             screen_capture_input
         );
 
-        let mut settings = Settings::default();
+        let mut settings = Settings::load();
 
-        // Auto-select first audio device if available
+        // If no audio device is saved, or the saved one is not in the detected list,
+        // fallback to the first available device.
         if !audio_devices.is_empty() {
-            settings.audio_device = Some(audio_devices[0].clone());
-            info!("Auto-selected audio device: {}", audio_devices[0]);
+             let device_valid = settings.audio_device.as_ref()
+                .map(|saved| audio_devices.contains(saved))
+                .unwrap_or(false);
+            
+            if !device_valid {
+                settings.audio_device = Some(audio_devices[0].clone());
+                info!("Auto-selected audio device: {}", audio_devices[0]);
+            }
+        } else {
+             settings.audio_device = None;
         }
 
         Self {
@@ -238,13 +280,13 @@ impl Recorder {
 
             // Build video filter chain — varies by encoder type.
             // ddagrab emits GPU-backed d3d11 frames that must be downloaded
-            // to system memory. For hw encoders, go directly to nv12;
-            // for software, go to bgra then let pix_fmt convert.
+            // to system memory.  Only NVENC can accept nv12 directly from
+            // hwdownload; AMF/QSV and software all need bgra.
             let mut vfilters = Vec::new();
             if self.screen_capture_input == ScreenCaptureInput::DdaGrab {
                 vfilters.push("hwdownload");
-                if is_hw {
-                    // Skip bgra intermediate — go directly to nv12
+                if encoder == VideoEncoder::H264Nvenc {
+                    // NVENC: skip bgra intermediate — go directly to nv12
                     vfilters.push("format=nv12");
                 } else {
                     vfilters.push("format=bgra");
@@ -305,11 +347,10 @@ impl Recorder {
                     format!("Failed to spawn FFmpeg: {}", e)
                 })?;
 
-            // Poll for up to 2 seconds to check if FFmpeg stays alive.
-            // Some encoders (e.g. NVENC without CUDA) crash after 500-700ms,
-            // so a single short sleep isn't enough to catch failures.
+            // Poll for up to 1 second to check if FFmpeg stays alive.
+            // Some encoders (e.g. NVENC without CUDA) crash after 500-700ms.
             let mut encoder_failed = false;
-            let check_deadline = Instant::now() + Duration::from_secs(2);
+            let check_deadline = Instant::now() + Duration::from_secs(1);
             loop {
                 std::thread::sleep(Duration::from_millis(200));
                 match child.try_wait() {
@@ -691,7 +732,7 @@ fn reorder_wrapped_segments(segments: &mut Vec<PathBuf>) {
 fn detect_audio_devices() -> Vec<String> {
     debug!("Detecting audio devices via FFmpeg dshow...");
     let output = ffmpeg_command()
-        .args(["-loglevel", "error", "-list_devices", "true", "-f", "dshow", "-i", "dummy"])
+        .args(["-list_devices", "true", "-f", "dshow", "-i", "dummy"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output();
@@ -704,36 +745,79 @@ fn detect_audio_devices() -> Vec<String> {
         }
     };
 
-    // FFmpeg lists devices on stderr
+    // FFmpeg lists devices on stderr.
+    // Lines look like:  [dshow @ 0x...] "Microphone (Realtek ...)" (audio)
+    // Alternative names: [dshow @ 0x...]   Alternative name "@device_cm_..."
     let stderr = String::from_utf8_lossy(&output.stderr);
     debug!("FFmpeg device list output:\n{}", stderr);
     let mut devices = Vec::new();
-    let mut in_audio_section = false;
 
     for line in stderr.lines() {
-        if line.contains("DirectShow audio devices") {
-            in_audio_section = true;
+        // Only care about lines tagged as "(audio)"
+        if !line.contains("(audio)") {
             continue;
         }
-        if line.contains("DirectShow video devices") {
-            in_audio_section = false;
-            continue;
-        }
-        if in_audio_section {
-            // Lines look like: [dshow @ ...] "Device Name"
-            if let Some(start) = line.find('"') {
-                if let Some(end) = line[start + 1..].find('"') {
-                    let name = &line[start + 1..start + 1 + end];
-                    // Skip "Alternative name" lines
-                    if !name.starts_with('@') {
-                        devices.push(name.to_string());
-                    }
+        // Extract the quoted device name
+        if let Some(start) = line.find('"') {
+            if let Some(end) = line[start + 1..].find('"') {
+                let name = &line[start + 1..start + 1 + end];
+                // Skip alternative-name lines (start with @)
+                if !name.starts_with('@') {
+                    devices.push(name.to_string());
                 }
             }
         }
     }
 
+    info!("Detected {} audio device(s): {:?}", devices.len(), devices);
     devices
+}
+
+
+
+/// Get a unique string identifying your FFmpeg binary (e.g. version output).
+fn get_ffmpeg_version_string() -> Option<String> {
+    let output = ffmpeg_command()
+        .arg("-version")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+
+    if output.status.success() {
+        String::from_utf8(output.stdout).ok()
+    } else {
+        None
+    }
+}
+
+fn load_recorder_cache(cache_path: &Path, current_version: &str) -> Option<RecorderCache> {
+    let file = fs::File::open(cache_path).ok()?;
+    let reader = BufReader::new(file);
+    let cache: RecorderCache = serde_json::from_reader(reader).ok()?;
+
+    if cache.ffmpeg_version_string == current_version {
+        Some(cache)
+    } else {
+        debug!("Recorder cache invalid: FFmpeg version mismatch");
+        None
+    }
+}
+
+fn save_recorder_cache(cache_path: &Path, cache: RecorderCache) {
+    // Ensure parent dir exists
+    if let Some(parent) = cache_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+
+    if let Ok(file) = fs::File::create(cache_path) {
+        let writer = BufWriter::new(file);
+        if let Err(e) = serde_json::to_writer(writer, &cache) {
+            warn!("Failed to write recorder cache: {}", e);
+        } else {
+            debug!("Recorder cache saved to {}", cache_path.display());
+        }
+    }
 }
 
 fn detect_video_encoders(ffmpeg_found: bool) -> Vec<VideoEncoder> {
@@ -741,6 +825,8 @@ fn detect_video_encoders(ffmpeg_found: bool) -> Vec<VideoEncoder> {
     if !ffmpeg_found {
         return encoders;
     }
+    
+    // Note: Caching logic moved to Recorder::new()
 
     debug!("Detecting available hardware video encoders...");
     let output = ffmpeg_command()
@@ -810,6 +896,7 @@ fn detect_video_encoders(ffmpeg_found: bool) -> Vec<VideoEncoder> {
             }
         }
     }
+
 
     encoders
 }

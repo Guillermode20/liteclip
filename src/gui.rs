@@ -69,7 +69,7 @@ impl LiteClipApp {
             )
         };
 
-        Self {
+        let mut app = Self {
             recorder,
             status_message: String::new(),
             status_timer: 0.0,
@@ -84,7 +84,15 @@ impl LiteClipApp {
             cached_ffmpeg_found,
             cached_last_saved_path,
             cached_hotkey_label,
+        };
+
+        // Auto-start replay buffer on launch
+        if cached_ffmpeg_found {
+            info!("Auto-starting replay buffer on launch");
+            app.trigger_start();
         }
+
+        app
     }
 
     fn trigger_start(&mut self) {
@@ -630,6 +638,8 @@ impl LiteClipApp {
                         {
                             let mut rec = self.recorder.lock().unwrap();
                             rec.settings.output_dir = dir;
+                            rec.settings.save();
+                            info!("Output directory saved");
                         }
                     }
                 });
@@ -666,6 +676,17 @@ impl LiteClipApp {
         // Write all settings back to the recorder
         {
             let mut rec = self.recorder.lock().unwrap();
+            
+            // detecting changes to avoid unnecessary saves (optional optimization, but good practice)
+            let changed = rec.settings.hotkey != hotkey
+                || rec.settings.buffer_seconds != buffer_seconds
+                || rec.settings.quality != quality
+                || rec.settings.video_encoder != video_encoder
+                || rec.settings.framerate != framerate
+                || rec.settings.resolution != resolution
+                || rec.settings.capture_audio != capture_audio
+                || rec.settings.audio_device != audio_device;
+
             rec.settings.hotkey = hotkey;
             rec.settings.buffer_seconds = buffer_seconds;
             rec.settings.quality = quality;
@@ -674,6 +695,14 @@ impl LiteClipApp {
             rec.settings.resolution = resolution;
             rec.settings.capture_audio = capture_audio;
             rec.settings.audio_device = audio_device;
+            
+            if changed {
+                let settings_to_save = rec.settings.clone();
+                std::thread::spawn(move || {
+                    settings_to_save.save();
+                    info!("Settings saved to disk (background)");
+                });
+            }
         }
 
         // Signal hotkey change if needed
@@ -735,7 +764,7 @@ impl eframe::App for LiteClipApp {
                 RecorderState::Recording | RecorderState::Saving
             );
         if should_animate {
-            ctx.request_repaint_after(Duration::from_millis(100));
+            ctx.request_repaint_after(Duration::from_millis(500));
         }
 
         egui::CentralPanel::default()
