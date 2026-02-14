@@ -8,6 +8,12 @@ use tempfile::TempDir;
 
 use crate::settings::{Settings, VideoEncoder};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScreenCaptureInput {
+    DdaGrab,
+    GdiGrab,
+}
+
 /// Current state of the recorder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecorderState {
@@ -24,6 +30,7 @@ pub struct Recorder {
     pub last_saved_path: Option<PathBuf>,
     pub audio_devices: Vec<String>,
     pub video_encoders: Vec<VideoEncoder>,
+    screen_capture_input: ScreenCaptureInput,
 
     child: Option<Child>,
     temp_dir: Option<TempDir>,
@@ -57,6 +64,11 @@ impl Recorder {
 
         let video_encoders = detect_video_encoders(ffmpeg_found);
         info!("Available video encoders: {:?}", video_encoders);
+        let screen_capture_input = detect_screen_capture_input(ffmpeg_found);
+        info!(
+            "Selected screen capture input: {:?}",
+            screen_capture_input
+        );
 
         let mut settings = Settings::default();
 
@@ -73,6 +85,7 @@ impl Recorder {
             last_saved_path: None,
             audio_devices,
             video_encoders,
+            screen_capture_input,
             child: None,
             temp_dir: None,
             started_at: None,
@@ -124,8 +137,9 @@ impl Recorder {
         let crf = self.settings.quality.crf().to_string();
         let preset = self.settings.quality.preset();
         let wrap = self.segment_wrap().to_string();
+        // Keep at least one logical core free so desktop input/rendering stays responsive.
         let encoding_threads = std::thread::available_parallelism()
-            .map(|n| n.get().clamp(1, 4))
+            .map(|n| n.get().saturating_sub(1).clamp(1, 4))
             .unwrap_or(2)
             .to_string();
         let selected_encoder = self.settings.video_encoder.resolve(&self.video_encoders);
@@ -137,15 +151,28 @@ impl Recorder {
 
         let mut base_args: Vec<String> = Vec::with_capacity(48);
 
-        // Video input: gdigrab
-        base_args.extend([
-            "-f".into(),
-            "gdigrab".into(),
-            "-framerate".into(),
-            fps.clone(),
-            "-i".into(),
-            "desktop".into(),
-        ]);
+        // Video input: prefer DDA (Desktop Duplication API) when available to reduce
+        // CPU/GDI overhead; fall back to gdigrab for older FFmpeg builds.
+        match self.screen_capture_input {
+            ScreenCaptureInput::DdaGrab => {
+                base_args.extend([
+                    "-f".into(),
+                    "lavfi".into(),
+                    "-i".into(),
+                    format!("ddagrab=framerate={}", fps),
+                ]);
+            }
+            ScreenCaptureInput::GdiGrab => {
+                base_args.extend([
+                    "-f".into(),
+                    "gdigrab".into(),
+                    "-framerate".into(),
+                    fps.clone(),
+                    "-i".into(),
+                    "desktop".into(),
+                ]);
+            }
+        }
 
         // Audio input: dshow (if enabled and device available)
         if self.settings.capture_audio {
@@ -162,15 +189,6 @@ impl Recorder {
             }
         }
 
-        // Build video filter chain
-        let mut vfilters = Vec::new();
-        if let Some(scale) = self.settings.resolution.scale_filter() {
-            vfilters.push(scale.to_string());
-        }
-        if !vfilters.is_empty() {
-            base_args.extend(["-vf".into(), vfilters.join(",")]);
-        }
-
         let mut encoders_to_try = vec![selected_encoder];
         if self.settings.video_encoder == VideoEncoder::Auto
             && selected_encoder != VideoEncoder::Libx264
@@ -181,6 +199,31 @@ impl Recorder {
         let mut last_error: Option<String> = None;
         for encoder in encoders_to_try {
             let mut args = base_args.clone();
+
+            // Build video filter chain — varies by encoder type.
+            // ddagrab emits GPU-backed d3d11 frames that must be downloaded
+            // to system memory. Hardware encoders (NVENC/QSV/AMF) need nv12;
+            // software encoders (libx264) can handle bgra with -pix_fmt.
+            let is_hw_encoder = matches!(
+                encoder,
+                VideoEncoder::H264Nvenc | VideoEncoder::H264Qsv | VideoEncoder::H264Amf
+            );
+            let mut vfilters = Vec::new();
+            if self.screen_capture_input == ScreenCaptureInput::DdaGrab {
+                vfilters.push("hwdownload".to_string());
+                vfilters.push("format=bgra".to_string());
+                if is_hw_encoder {
+                    // Hardware encoders need nv12/yuv420p — bgra → nv12 conversion.
+                    vfilters.push("format=nv12".to_string());
+                }
+            }
+            if let Some(scale) = self.settings.resolution.scale_filter() {
+                vfilters.push(scale.to_string());
+            }
+            if !vfilters.is_empty() {
+                args.extend(["-vf".into(), vfilters.join(",")]);
+            }
+
             append_video_encoder_args(
                 &mut args,
                 encoder,
@@ -648,12 +691,14 @@ fn detect_video_encoders(ffmpeg_found: bool) -> Vec<VideoEncoder> {
         let ffmpeg_name = encoder_variant.ffmpeg_name().unwrap_or_default();
         debug!("Testing hardware encoder {} ({})", label, ffmpeg_name);
 
-        // Quick 1-frame probe: encode a tiny synthetic frame
+        // Quick 1-frame probe: encode a tiny synthetic nv12 frame.
+        // We use format=nv12 to match the actual ddagrab pipeline where
+        // hardware encoders receive nv12 after hwdownload,format=bgra,format=nv12.
         let probe = Command::new("ffmpeg")
             .args([
                 "-hide_banner",
                 "-f", "lavfi",
-                "-i", "color=c=black:s=64x64:d=0.04",
+                "-i", "color=c=black:s=256x256:d=0.04,format=nv12",
                 "-frames:v", "1",
                 "-c:v", ffmpeg_name,
                 "-f", "null",
@@ -684,6 +729,36 @@ fn detect_video_encoders(ffmpeg_found: bool) -> Vec<VideoEncoder> {
     }
 
     encoders
+}
+
+fn detect_screen_capture_input(ffmpeg_found: bool) -> ScreenCaptureInput {
+    if !ffmpeg_found {
+        return ScreenCaptureInput::GdiGrab;
+    }
+
+    debug!("Detecting FFmpeg screen capture filters...");
+    let output = Command::new("ffmpeg")
+        .args(["-hide_banner", "-filters"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output();
+
+    let output = match output {
+        Ok(o) => o,
+        Err(e) => {
+            warn!("Failed to query FFmpeg filters: {}", e);
+            return ScreenCaptureInput::GdiGrab;
+        }
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if stdout.contains(" ddagrab ") {
+        info!("FFmpeg filter ddagrab detected");
+        ScreenCaptureInput::DdaGrab
+    } else {
+        info!("FFmpeg filter ddagrab not found; using gdigrab");
+        ScreenCaptureInput::GdiGrab
+    }
 }
 
 fn append_video_encoder_args(
