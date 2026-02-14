@@ -1,5 +1,8 @@
 use eframe::egui;
+use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use crate::recorder::{Recorder, RecorderState};
 use crate::settings::{Framerate, HotkeyPreset, Quality, Resolution};
@@ -11,6 +14,11 @@ enum Panel {
     Settings,
 }
 
+enum SaveResult {
+    Success(PathBuf),
+    Error(String),
+}
+
 /// The main GUI application — Medal-style compact overlay.
 pub struct LiteClipApp {
     pub recorder: Arc<Mutex<Recorder>>,
@@ -20,6 +28,8 @@ pub struct LiteClipApp {
     panel: Panel,
     /// Tracks pending hotkey change so we can signal main to re-register.
     pub pending_hotkey: Option<HotkeyPreset>,
+    save_result_rx: Option<Receiver<SaveResult>>,
+    visuals_initialized: bool,
 }
 
 impl LiteClipApp {
@@ -31,6 +41,8 @@ impl LiteClipApp {
             save_in_progress: false,
             panel: Panel::Main,
             pending_hotkey: None,
+            save_result_rx: None,
+            visuals_initialized: false,
         }
     }
 
@@ -41,9 +53,33 @@ impl LiteClipApp {
         }
 
         self.save_in_progress = true;
-        let mut rec = self.recorder.lock().unwrap();
-        match rec.save_clip_auto() {
-            Ok(path) => {
+        self.status_message = "Saving clip...".to_string();
+        self.status_timer = 2.0;
+
+        let recorder = Arc::clone(&self.recorder);
+        let (tx, rx) = mpsc::channel();
+        self.save_result_rx = Some(rx);
+
+        std::thread::spawn(move || {
+            let result = {
+                let mut rec = recorder.lock().unwrap();
+                rec.save_clip_auto()
+            };
+            let message = match result {
+                Ok(path) => SaveResult::Success(path),
+                Err(err) => SaveResult::Error(err),
+            };
+            let _ = tx.send(message);
+        });
+    }
+
+    fn poll_save_result(&mut self) {
+        let Some(rx) = self.save_result_rx.as_ref() else {
+            return;
+        };
+
+        match rx.try_recv() {
+            Ok(SaveResult::Success(path)) => {
                 let name = path
                     .file_name()
                     .unwrap_or_default()
@@ -51,26 +87,34 @@ impl LiteClipApp {
                     .unwrap_or("clip.mp4");
                 self.status_message = format!("Clip saved! {}", name);
                 self.status_timer = 5.0;
+                self.save_in_progress = false;
+                self.save_result_rx = None;
             }
-            Err(e) => {
+            Ok(SaveResult::Error(e)) => {
                 self.status_message = format!("Save failed: {}", e);
                 self.status_timer = 5.0;
+                self.save_in_progress = false;
+                self.save_result_rx = None;
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.status_message = "Save worker disconnected.".to_string();
+                self.status_timer = 5.0;
+                self.save_in_progress = false;
+                self.save_result_rx = None;
             }
         }
-        self.save_in_progress = false;
     }
 
     /// Draw the main panel (Medal-style).
     fn draw_main(&mut self, ui: &mut egui::Ui) {
-        let (state, _elapsed, ffmpeg_found, _buffer_secs, last_saved, hotkey_label) = {
+        let (state, ffmpeg_found, last_saved, hotkey_label) = {
             let rec = self.recorder.lock().unwrap();
             (
                 rec.state,
-                rec.elapsed_seconds(),
                 rec.ffmpeg_found,
-                rec.settings.buffer_seconds,
                 rec.last_saved_path.clone(),
-                rec.settings.hotkey.label().to_string(),
+                rec.settings.hotkey.label(),
             )
         };
 
@@ -489,23 +533,36 @@ impl LiteClipApp {
 
 impl eframe::App for LiteClipApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Request repaint for timer and status fade
-        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        self.poll_save_result();
+
+        let dt = ctx.input(|i| i.stable_dt) as f64;
 
         // Decrease status timer
         if self.status_timer > 0.0 {
-            self.status_timer -= 0.1;
+            self.status_timer = (self.status_timer - dt).max(0.0);
         }
 
-        // Dark theme
-        let mut visuals = egui::Visuals::dark();
-        visuals.override_text_color = Some(egui::Color32::from_rgb(210, 215, 225));
-        visuals.window_fill = egui::Color32::from_rgb(22, 24, 30);
-        visuals.panel_fill = egui::Color32::from_rgb(22, 24, 30);
-        visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(35, 38, 48);
-        visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(45, 50, 62);
-        visuals.widgets.active.bg_fill = egui::Color32::from_rgb(55, 60, 75);
-        ctx.set_visuals(visuals);
+        if !self.visuals_initialized {
+            let mut visuals = egui::Visuals::dark();
+            visuals.override_text_color = Some(egui::Color32::from_rgb(210, 215, 225));
+            visuals.window_fill = egui::Color32::from_rgb(22, 24, 30);
+            visuals.panel_fill = egui::Color32::from_rgb(22, 24, 30);
+            visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(35, 38, 48);
+            visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(45, 50, 62);
+            visuals.widgets.active.bg_fill = egui::Color32::from_rgb(55, 60, 75);
+            ctx.set_visuals(visuals);
+            self.visuals_initialized = true;
+        }
+
+        let should_animate = self.status_timer > 0.0
+            || self.save_in_progress
+            || matches!(
+                self.recorder.lock().unwrap().state,
+                RecorderState::Recording | RecorderState::Saving
+            );
+        if should_animate {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
 
         egui::CentralPanel::default()
             .frame(egui::Frame::central_panel(&ctx.style()).inner_margin(12.0))

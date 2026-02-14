@@ -13,3 +13,9 @@ global-hotkey = "0.6"
 chrono = "0.4"
 dirs = "6"
 tempfile = "3"
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+panic = "abort"
+strip = true

@@ -68,7 +68,7 @@ struct HotkeyWrapper {
 impl eframe::App for HotkeyWrapper {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         // Check for hotkey events
-        if let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
+        while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
             if event.id == self.current_hotkey_id {
                 self.app.trigger_save();
             }

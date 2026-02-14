@@ -1,7 +1,7 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::time::Instant;
 use tempfile::TempDir;
 
@@ -34,10 +34,10 @@ impl Recorder {
         // Check if FFmpeg is available on PATH
         let ffmpeg_found = Command::new("ffmpeg")
             .arg("-version")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map(|mut c| c.wait().is_ok())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
             .unwrap_or(false);
 
         // Detect audio devices via FFmpeg
@@ -64,14 +64,12 @@ impl Recorder {
 
     /// How many segment files to keep (buffer / 10s segments).
     fn segment_wrap(&self) -> u64 {
-        self.settings.buffer_seconds / 10
+        (self.settings.buffer_seconds / 10).max(1)
     }
 
     /// How long the buffer has been recording.
     pub fn elapsed_seconds(&self) -> u64 {
-        self.started_at
-            .map(|t| t.elapsed().as_secs())
-            .unwrap_or(0)
+        self.started_at.map(|t| t.elapsed().as_secs()).unwrap_or(0)
     }
 
     /// Start recording the desktop into rolling segments.
@@ -84,8 +82,7 @@ impl Recorder {
         }
 
         // Create temp dir for segments
-        let temp_dir =
-            TempDir::new().map_err(|e| format!("Failed to create temp dir: {}", e))?;
+        let temp_dir = TempDir::new().map_err(|e| format!("Failed to create temp dir: {}", e))?;
         let segment_pattern = temp_dir.path().join("seg_%04d.mp4");
 
         let segment_duration: u64 = 10;
@@ -95,21 +92,26 @@ impl Recorder {
         let preset = self.settings.quality.preset();
         let wrap = self.segment_wrap().to_string();
 
-        let mut args: Vec<String> = Vec::new();
+        let mut args: Vec<String> = Vec::with_capacity(40);
 
         // Video input: gdigrab
         args.extend([
-            "-f".into(), "gdigrab".into(),
-            "-framerate".into(), fps.clone(),
-            "-i".into(), "desktop".into(),
+            "-f".into(),
+            "gdigrab".into(),
+            "-framerate".into(),
+            fps.clone(),
+            "-i".into(),
+            "desktop".into(),
         ]);
 
         // Audio input: dshow (if enabled and device available)
         if self.settings.capture_audio {
             if let Some(ref device) = self.settings.audio_device {
                 args.extend([
-                    "-f".into(), "dshow".into(),
-                    "-i".into(), format!("audio={}", device),
+                    "-f".into(),
+                    "dshow".into(),
+                    "-i".into(),
+                    format!("audio={}", device),
                 ]);
             }
         }
@@ -125,27 +127,33 @@ impl Recorder {
 
         // Video encoding
         args.extend([
-            "-c:v".into(), "libx264".into(),
-            "-preset".into(), preset.into(),
-            "-crf".into(), crf,
-            "-pix_fmt".into(), "yuv420p".into(),
-            "-force_key_frames".into(), force_kf,
+            "-c:v".into(),
+            "libx264".into(),
+            "-preset".into(),
+            preset.into(),
+            "-crf".into(),
+            crf,
+            "-pix_fmt".into(),
+            "yuv420p".into(),
+            "-force_key_frames".into(),
+            force_kf,
         ]);
 
         // Audio encoding (if audio is being captured)
         if self.settings.capture_audio && self.settings.audio_device.is_some() {
-            args.extend([
-                "-c:a".into(), "aac".into(),
-                "-b:a".into(), "128k".into(),
-            ]);
+            args.extend(["-c:a".into(), "aac".into(), "-b:a".into(), "128k".into()]);
         }
 
         // Segment muxer
         args.extend([
-            "-f".into(), "segment".into(),
-            "-segment_time".into(), segment_duration.to_string(),
-            "-segment_wrap".into(), wrap,
-            "-reset_timestamps".into(), "1".into(),
+            "-f".into(),
+            "segment".into(),
+            "-segment_time".into(),
+            segment_duration.to_string(),
+            "-segment_wrap".into(),
+            wrap,
+            "-reset_timestamps".into(),
+            "1".into(),
             "-y".into(),
         ]);
 
@@ -153,9 +161,9 @@ impl Recorder {
 
         let child = Command::new("ffmpeg")
             .args(&args)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .spawn()
             .map_err(|e| format!("Failed to spawn FFmpeg: {}", e))?;
 
@@ -200,7 +208,9 @@ impl Recorder {
             let _ = child.wait();
         }
 
-        let temp_path = self.temp_dir.as_ref()
+        let temp_path = self
+            .temp_dir
+            .as_ref()
             .ok_or("No temp directory — nothing recorded yet.")?
             .path()
             .to_path_buf();
@@ -229,7 +239,7 @@ impl Recorder {
         }
 
         // Sort by modification time (oldest first)
-        segments.sort_by_key(|p| {
+        segments.sort_unstable_by_key(|p| {
             fs::metadata(p)
                 .and_then(|m| m.modified())
                 .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
@@ -253,33 +263,24 @@ impl Recorder {
 
         // Concatenate segments into final clip
         let concat_result = Command::new("ffmpeg")
-            .args([
-                "-f", "concat",
-                "-safe", "0",
-                "-i",
-            ])
+            .args(["-f", "concat", "-safe", "0", "-i"])
             .arg(concat_list_path.to_str().unwrap())
             .args(["-c", "copy", "-y"])
             .arg(output_path.to_str().unwrap())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .output()
             .map_err(|e| format!("Failed to run FFmpeg concat: {}", e))?;
 
         if !concat_result.status.success() {
+            self.restore_state_after_save(was_recording);
             return Err("FFmpeg concat failed. Check segment files.".into());
         }
 
         self.last_saved_path = Some(output_path.to_path_buf());
 
         // Restart recording if it was active
-        if was_recording {
-            self.temp_dir = None;
-            self.started_at = None;
-            let _ = self.start();
-        } else {
-            self.state = RecorderState::Idle;
-        }
+        self.restore_state_after_save(was_recording);
 
         Ok(output_path.to_path_buf())
     }
@@ -298,12 +299,24 @@ impl Drop for Recorder {
     }
 }
 
+impl Recorder {
+    fn restore_state_after_save(&mut self, was_recording: bool) {
+        if was_recording {
+            self.temp_dir = None;
+            self.started_at = None;
+            let _ = self.start();
+        } else {
+            self.state = RecorderState::Idle;
+        }
+    }
+}
+
 /// Detect available audio recording devices via FFmpeg.
 fn detect_audio_devices() -> Vec<String> {
     let output = Command::new("ffmpeg")
         .args(["-list_devices", "true", "-f", "dshow", "-i", "dummy"])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .output();
 
     let output = match output {
