@@ -20,7 +20,6 @@ struct RecorderCache {
     audio_devices: Vec<String>,
 }
 
-
 /// The input method used for screen capture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScreenCaptureInput {
@@ -101,53 +100,59 @@ impl Recorder {
         // Try to load cache
         let cache_dir = dirs::config_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("LiteClip");
+            .join("LiteClipReplay");
         let cache_path = cache_dir.join("recorder_cache.json");
         let ffmpeg_version = get_ffmpeg_version_string().unwrap_or_default();
 
-        let (audio_devices, video_encoders) = if let Some(cache) = load_recorder_cache(&cache_path, &ffmpeg_version) {
-            info!("Loaded capabilities from cache: {} audio devices, {} encoders", 
-                cache.audio_devices.len(), cache.video_encoders.len());
-            (cache.audio_devices, cache.video_encoders)
-        } else {
-            info!("Capabilities cache missing or invalid — probing system...");
-            let audio_devices = detect_audio_devices();
-            let video_encoders = detect_video_encoders(ffmpeg_found);
-            
-            if !ffmpeg_version.is_empty() {
-                save_recorder_cache(&cache_path, RecorderCache {
-                    ffmpeg_version_string: ffmpeg_version,
-                    video_encoders: video_encoders.clone(),
-                    audio_devices: audio_devices.clone(),
-                });
-            }
-            (audio_devices, video_encoders)
-        };
+        let (audio_devices, video_encoders) =
+            if let Some(cache) = load_recorder_cache(&cache_path, &ffmpeg_version) {
+                info!(
+                    "Loaded capabilities from cache: {} audio devices, {} encoders",
+                    cache.audio_devices.len(),
+                    cache.video_encoders.len()
+                );
+                (cache.audio_devices, cache.video_encoders)
+            } else {
+                info!("Capabilities cache missing or invalid — probing system...");
+                let audio_devices = detect_audio_devices();
+                let video_encoders = detect_video_encoders(ffmpeg_found);
+
+                if !ffmpeg_version.is_empty() {
+                    save_recorder_cache(
+                        &cache_path,
+                        RecorderCache {
+                            ffmpeg_version_string: ffmpeg_version,
+                            video_encoders: video_encoders.clone(),
+                            audio_devices: audio_devices.clone(),
+                        },
+                    );
+                }
+                (audio_devices, video_encoders)
+            };
 
         info!("Final Audio Devices: {:?}", audio_devices);
         info!("Final Video Encoders: {:?}", video_encoders);
-        
+
         let screen_capture_input = detect_screen_capture_input(ffmpeg_found);
-        info!(
-            "Selected screen capture input: {:?}",
-            screen_capture_input
-        );
+        info!("Selected screen capture input: {:?}", screen_capture_input);
 
         let mut settings = Settings::load();
 
         // If no audio device is saved, or the saved one is not in the detected list,
         // fallback to the first available device.
         if !audio_devices.is_empty() {
-             let device_valid = settings.audio_device.as_ref()
+            let device_valid = settings
+                .audio_device
+                .as_ref()
                 .map(|saved| audio_devices.contains(saved))
                 .unwrap_or(false);
-            
+
             if !device_valid {
                 settings.audio_device = Some(audio_devices[0].clone());
                 info!("Auto-selected audio device: {}", audio_devices[0]);
             }
         } else {
-             settings.audio_device = None;
+            settings.audio_device = None;
         }
 
         Self {
@@ -223,8 +228,7 @@ impl Recorder {
             selected_encoder, self.settings.video_encoder
         );
 
-        let has_audio =
-            self.settings.capture_audio && self.settings.audio_device.is_some();
+        let has_audio = self.settings.capture_audio && self.settings.audio_device.is_some();
 
         // Pre-compute base arg count to avoid reallocs:
         // ~12 for video input + ~4 for audio + ~16 for encoder + ~10 for segment muxer + ~4 vf
@@ -526,9 +530,7 @@ impl Recorder {
         // This is more reliable than mtime which can alias when segment_wrap
         // reuses filenames — mtime resolution on NTFS is ~100ms and two
         // segments written in rapid succession can get the same timestamp.
-        segments.sort_unstable_by(|a, b| {
-            extract_segment_index(a).cmp(&extract_segment_index(b))
-        });
+        segments.sort_unstable_by(|a, b| extract_segment_index(a).cmp(&extract_segment_index(b)));
 
         // When segment_wrap is active, reorder so oldest segment comes first.
         // The oldest segment has the highest mtime gap from its predecessor.
@@ -566,12 +568,18 @@ impl Recorder {
         // -nostdin: prevent accidental stdin blocking.
         let concat_args = [
             "-nostdin",
-            "-probesize", "32",
-            "-analyzeduration", "0",
-            "-f", "concat",
-            "-safe", "0",
-            "-i", concat_list_path.to_str().unwrap(),
-            "-c", "copy",
+            "-probesize",
+            "32",
+            "-analyzeduration",
+            "0",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            concat_list_path.to_str().unwrap(),
+            "-c",
+            "copy",
             "-y",
             output_path.to_str().unwrap(),
         ];
@@ -614,7 +622,7 @@ impl Recorder {
     /// Generate an auto-save output path with timestamp.
     fn auto_output_path(&self) -> PathBuf {
         let now = chrono::Local::now();
-        let filename = format!("LiteClip_{}.mp4", now.format("%Y-%m-%d_%H-%M-%S"));
+        let filename = format!("LiteClipReplay_{}.mp4", now.format("%Y-%m-%d_%H-%M-%S"));
         self.settings.output_dir.join(filename)
     }
 
@@ -773,8 +781,6 @@ fn detect_audio_devices() -> Vec<String> {
     devices
 }
 
-
-
 /// Get a unique string identifying your FFmpeg binary (e.g. version output).
 fn get_ffmpeg_version_string() -> Option<String> {
     let output = ffmpeg_command()
@@ -825,7 +831,7 @@ fn detect_video_encoders(ffmpeg_found: bool) -> Vec<VideoEncoder> {
     if !ffmpeg_found {
         return encoders;
     }
-    
+
     // Note: Caching logic moved to Recorder::new()
 
     debug!("Detecting available hardware video encoders...");
@@ -865,12 +871,18 @@ fn detect_video_encoders(ffmpeg_found: bool) -> Vec<VideoEncoder> {
         let probe = ffmpeg_command()
             .args([
                 "-hide_banner",
-                "-loglevel", "error",
-                "-f", "lavfi",
-                "-i", "color=c=black:s=256x256:d=0.04,format=nv12",
-                "-frames:v", "1",
-                "-c:v", ffmpeg_name,
-                "-f", "null",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=256x256:d=0.04,format=nv12",
+                "-frames:v",
+                "1",
+                "-c:v",
+                ffmpeg_name,
+                "-f",
+                "null",
                 "-",
             ])
             .stdout(Stdio::null())
@@ -889,14 +901,16 @@ fn detect_video_encoders(ffmpeg_found: bool) -> Vec<VideoEncoder> {
                     .find(|l| l.contains("Cannot load") || l.contains("Error"))
                     .unwrap_or("probe encode failed")
                     .trim();
-                warn!("Hardware encoder {} compiled in but not usable: {}", label, reason);
+                warn!(
+                    "Hardware encoder {} compiled in but not usable: {}",
+                    label, reason
+                );
             }
             Err(e) => {
                 warn!("Failed to probe encoder {}: {}", label, e);
             }
         }
     }
-
 
     encoders
 }

@@ -12,15 +12,20 @@ use global_hotkey::{
     hotkey::{Code, HotKey, Modifiers},
     GlobalHotKeyEvent, GlobalHotKeyManager,
 };
-use log::{error, info, warn};
+use log::{error, info};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use tray_icon::{
+    menu::{Menu, MenuEvent, MenuItem},
+    TrayIconBuilder,
+};
 
 use gui::LiteClipApp;
 use recorder::Recorder;
 use settings::HotkeyPreset;
 
 /// Main entry point for the LiteClip application.
-/// Initializes logging, shared state, hotkey manager, and starts the eframe GUI loop.
+/// Initializes logging, shared state, hotkey manager, tray icon, and starts the eframe GUI loop.
 fn main() -> eframe::Result<()> {
     init_logging();
 
@@ -40,6 +45,56 @@ fn main() -> eframe::Result<()> {
     let current_hotkey_id = current_hotkey.id();
 
     info!("Initial hotkey registered: {}", initial_hotkey.label());
+
+    // --- System tray icon ---
+    let tray_menu = Menu::new();
+    let show_item = MenuItem::new("Show LiteClip", true, None);
+    let quit_item = MenuItem::new("Quit", true, None);
+    let _ = tray_menu.append(&show_item);
+    let _ = tray_menu.append(&quit_item);
+
+    let show_item_id = show_item.id().clone();
+    let quit_item_id = quit_item.id().clone();
+
+    // Create a simple 32x32 RGBA icon (a filled white/blue square)
+    let icon = create_tray_icon_image();
+
+    let _tray_icon = TrayIconBuilder::new()
+        .with_menu(Box::new(tray_menu))
+        .with_tooltip("LiteClip — Replay Buffer")
+        .with_icon(icon)
+        .build()
+        .expect("Failed to create tray icon");
+
+    // --- Shared flags for tray menu actions ---
+    // A background thread polls MenuEvent (which works even when the window is hidden)
+    // and sets these flags. The update() loop reads them.
+    let tray_show_requested = Arc::new(AtomicBool::new(false));
+    let tray_quit_requested = Arc::new(AtomicBool::new(false));
+
+    let show_flag = tray_show_requested.clone();
+    let recorder_for_quit = recorder.clone();
+
+    // Spawn a dedicated thread to listen for tray menu events
+    std::thread::spawn(move || {
+        let menu_rx = MenuEvent::receiver();
+        loop {
+            // Blocking receive — wakes only on menu clicks
+            if let Ok(event) = menu_rx.recv() {
+                if event.id == show_item_id {
+                    info!("Tray thread: Show requested");
+                    show_flag.store(true, Ordering::SeqCst);
+                } else if event.id == quit_item_id {
+                    info!("Tray thread: Quit — stopping recorder and exiting");
+                    // Stop recorder directly from this thread, then exit
+                    if let Ok(mut rec) = recorder_for_quit.lock() {
+                        rec.stop();
+                    }
+                    std::process::exit(0);
+                }
+            }
+        }
+    });
 
     let recorder_for_app = recorder.clone();
 
@@ -63,13 +118,15 @@ fn main() -> eframe::Result<()> {
                 hotkey_manager,
                 current_hotkey,
                 current_hotkey_id,
+                tray_show_requested,
+                tray_quit_requested,
             }))
         }),
     )
 }
 
-/// Wraps the LiteClipApp to also poll for global hotkey events
-/// and handle dynamic hotkey re-registration.
+/// Wraps the LiteClipApp to also poll for global hotkey events,
+/// tray icon menu events, and handle dynamic hotkey re-registration.
 struct HotkeyWrapper {
     /// The actual LiteClip GUI application
     app: LiteClipApp,
@@ -79,12 +136,50 @@ struct HotkeyWrapper {
     current_hotkey: HotKey,
     /// The unique ID of the currently registered hotkey
     current_hotkey_id: u32,
+    /// Set by background thread when "Show LiteClip" is clicked in tray
+    tray_show_requested: Arc<AtomicBool>,
+    /// Set by background thread when "Quit" is clicked in tray
+    tray_quit_requested: Arc<AtomicBool>,
 }
 
 impl eframe::App for HotkeyWrapper {
     /// Updates the application state every frame.
-    /// Polls for hotkey events and delegates UI rendering to [`LiteClipApp`].
+    /// Polls for hotkey events, tray flags, and delegates UI rendering to [`LiteClipApp`].
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // --- Handle tray quit (checked first, works even after window hidden) ---
+        if self.tray_quit_requested.swap(false, Ordering::SeqCst) {
+            info!("Tray: Quit — stopping recorder and exiting");
+            if let Ok(mut rec) = self.app.recorder.try_lock() {
+                rec.stop();
+            }
+            std::process::exit(0);
+        }
+
+        // --- Handle tray show ---
+        if self.tray_show_requested.swap(false, Ordering::SeqCst) {
+            info!("Tray: Showing window");
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+
+        // --- Handle close-to-tray ---
+        if ctx.input(|i| i.viewport().close_requested()) {
+            let minimize_to_tray = {
+                if let Ok(rec) = self.app.recorder.try_lock() {
+                    rec.settings.minimize_to_tray
+                } else {
+                    false
+                }
+            };
+
+            if minimize_to_tray {
+                // Cancel the close and hide the window instead
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                info!("Window hidden to tray");
+            }
+        }
+
         // Check for hotkey events
         while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
             if event.id == self.current_hotkey_id {
@@ -120,6 +215,9 @@ impl eframe::App for HotkeyWrapper {
 
         // Delegate to the actual app
         self.app.update(ctx, frame);
+
+        // Keep the event loop alive even when hidden, so tray flags are checked
+        ctx.request_repaint_after(std::time::Duration::from_millis(500));
     }
 }
 
@@ -181,3 +279,20 @@ fn create_hotkey(preset: HotkeyPreset) -> HotKey {
     }
 }
 
+/// Create a simple 32×32 RGBA tray icon (a filled colored square).
+fn create_tray_icon_image() -> tray_icon::Icon {
+    let size = 32u32;
+    let mut rgba = Vec::with_capacity((size * size * 4) as usize);
+    for y in 0..size {
+        for x in 0..size {
+            // Draw a rounded-ish icon: white center with dark border
+            let border = x == 0 || y == 0 || x == size - 1 || y == size - 1;
+            if border {
+                rgba.extend_from_slice(&[40, 40, 40, 255]); // dark border
+            } else {
+                rgba.extend_from_slice(&[220, 230, 255, 255]); // light blue-white fill
+            }
+        }
+    }
+    tray_icon::Icon::from_rgba(rgba, size, size).expect("Failed to create tray icon")
+}

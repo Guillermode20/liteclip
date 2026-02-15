@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::recorder::{Recorder, RecorderState};
-use crate::settings::{Framerate, HotkeyPreset, Quality, Resolution, VideoEncoder};
+use crate::settings::{self, Framerate, HotkeyPreset, Quality, Resolution, VideoEncoder};
 
 /// Which panel is visible in the GUI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,8 +26,8 @@ enum StartResult {
 }
 
 /// The main GUI application — Medal-style compact overlay.
-/// 
-/// This struct manages the egui state, UI panels, and communication with 
+///
+/// This struct manages the egui state, UI panels, and communication with
 /// the background [`Recorder`] via shared state and message passing.
 pub struct LiteClipApp {
     /// Shared pointer to the recorder backend.
@@ -40,7 +40,7 @@ pub struct LiteClipApp {
     pub save_in_progress: bool,
     /// Whether a start operation is currently in progress.
     pub start_in_progress: bool,
-    
+
     panel: Panel,
     /// Tracks pending hotkey change so we can signal main to re-register.
     pub pending_hotkey: Option<HotkeyPreset>,
@@ -55,7 +55,7 @@ pub struct LiteClipApp {
 
 impl LiteClipApp {
     /// Create a new LiteClipApp instance.
-    /// 
+    ///
     /// # Arguments
     /// * `recorder` - The shared recorder backend.
     pub fn new(recorder: Arc<Mutex<Recorder>>) -> Self {
@@ -164,7 +164,7 @@ impl LiteClipApp {
     }
 
     /// Trigger an auto-save clip (no dialog — saves to ~/Videos/LiteClip/).
-    /// 
+    ///
     /// This spawns a background thread to handle segment concatenation.
     pub fn trigger_save(&mut self) {
         if self.save_in_progress {
@@ -342,10 +342,14 @@ impl LiteClipApp {
                     if ui
                         .add_sized(
                             btn_size,
-                            egui::Button::new(egui::RichText::new("STOP").size(13.0).color(egui::Color32::from_rgb(255, 80, 80)))
-                                .fill(egui::Color32::BLACK)
-                                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 40, 40)))
-                                .corner_radius(2.0),
+                            egui::Button::new(
+                                egui::RichText::new("STOP")
+                                    .size(13.0)
+                                    .color(egui::Color32::from_rgb(255, 80, 80)),
+                            )
+                            .fill(egui::Color32::BLACK)
+                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 40, 40)))
+                            .corner_radius(2.0),
                         )
                         .clicked()
                     {
@@ -460,6 +464,8 @@ impl LiteClipApp {
             mut resolution,
             mut capture_audio,
             mut audio_device,
+            mut launch_on_startup,
+            mut minimize_to_tray,
             audio_devices,
             available_video_encoders,
             output_dir,
@@ -474,16 +480,33 @@ impl LiteClipApp {
                 rec.settings.resolution,
                 rec.settings.capture_audio,
                 rec.settings.audio_device.clone(),
+                rec.settings.launch_on_startup,
+                rec.settings.minimize_to_tray,
                 rec.audio_devices.clone(),
                 rec.video_encoders.clone(),
                 rec.settings.output_dir.clone(),
             )
         };
 
+        let original_launch_on_startup = launch_on_startup;
+
         let original_hotkey = hotkey;
 
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
+
+            // --- GENERAL ---
+            section_header(ui, "GENERAL");
+
+            setting_row(ui, "Launch on Startup", |ui| {
+                ui.checkbox(&mut launch_on_startup, "");
+            });
+
+            setting_row(ui, "Minimize to Tray", |ui| {
+                ui.checkbox(&mut minimize_to_tray, "");
+            });
+
+            ui.add_space(2.0);
 
             // --- Hotkey ---
             setting_row(ui, "Save Hotkey", |ui| {
@@ -676,7 +699,7 @@ impl LiteClipApp {
         // Write all settings back to the recorder
         {
             let mut rec = self.recorder.lock().unwrap();
-            
+
             // detecting changes to avoid unnecessary saves (optional optimization, but good practice)
             let changed = rec.settings.hotkey != hotkey
                 || rec.settings.buffer_seconds != buffer_seconds
@@ -685,7 +708,9 @@ impl LiteClipApp {
                 || rec.settings.framerate != framerate
                 || rec.settings.resolution != resolution
                 || rec.settings.capture_audio != capture_audio
-                || rec.settings.audio_device != audio_device;
+                || rec.settings.audio_device != audio_device
+                || rec.settings.launch_on_startup != launch_on_startup
+                || rec.settings.minimize_to_tray != minimize_to_tray;
 
             rec.settings.hotkey = hotkey;
             rec.settings.buffer_seconds = buffer_seconds;
@@ -695,7 +720,9 @@ impl LiteClipApp {
             rec.settings.resolution = resolution;
             rec.settings.capture_audio = capture_audio;
             rec.settings.audio_device = audio_device;
-            
+            rec.settings.launch_on_startup = launch_on_startup;
+            rec.settings.minimize_to_tray = minimize_to_tray;
+
             if changed {
                 let settings_to_save = rec.settings.clone();
                 std::thread::spawn(move || {
@@ -703,6 +730,11 @@ impl LiteClipApp {
                     info!("Settings saved to disk (background)");
                 });
             }
+        }
+
+        // Apply startup registry change if toggled
+        if launch_on_startup != original_launch_on_startup {
+            settings::set_launch_on_startup(launch_on_startup);
         }
 
         // Signal hotkey change if needed
@@ -730,26 +762,31 @@ impl eframe::App for LiteClipApp {
             visuals.override_text_color = Some(egui::Color32::from_gray(230));
             visuals.window_fill = egui::Color32::BLACK;
             visuals.panel_fill = egui::Color32::BLACK;
-            
+
             visuals.widgets.noninteractive.bg_fill = egui::Color32::BLACK;
-            visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_gray(30));
-            visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, egui::Color32::from_gray(180));
+            visuals.widgets.noninteractive.bg_stroke =
+                egui::Stroke::new(1.0, egui::Color32::from_gray(30));
+            visuals.widgets.noninteractive.fg_stroke =
+                egui::Stroke::new(1.0, egui::Color32::from_gray(180));
 
             visuals.widgets.inactive.bg_fill = egui::Color32::from_gray(10);
-            visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, egui::Color32::from_gray(180));
-            
+            visuals.widgets.inactive.fg_stroke =
+                egui::Stroke::new(1.0, egui::Color32::from_gray(180));
+
             visuals.widgets.hovered.bg_fill = egui::Color32::from_gray(25);
             visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, egui::Color32::WHITE);
-            
+
             visuals.widgets.active.bg_fill = egui::Color32::from_gray(40);
             visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, egui::Color32::WHITE);
-            
+
             visuals.selection.bg_fill = egui::Color32::from_gray(50);
             visuals.selection.stroke = egui::Stroke::new(1.0, egui::Color32::WHITE);
-            
+
             // Thin borders
-            visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_gray(30));
-            visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_gray(60));
+            visuals.widgets.inactive.bg_stroke =
+                egui::Stroke::new(1.0, egui::Color32::from_gray(30));
+            visuals.widgets.hovered.bg_stroke =
+                egui::Stroke::new(1.0, egui::Color32::from_gray(60));
             visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, egui::Color32::WHITE);
 
             ctx.set_visuals(visuals);
@@ -795,7 +832,11 @@ impl eframe::App for LiteClipApp {
 /// A standard settings row: label on the left, widget on the right.
 fn setting_row(ui: &mut egui::Ui, label: &str, add_widget: impl FnOnce(&mut egui::Ui)) {
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(label.to_uppercase()).size(10.0).color(egui::Color32::from_gray(120)));
+        ui.label(
+            egui::RichText::new(label.to_uppercase())
+                .size(10.0)
+                .color(egui::Color32::from_gray(120)),
+        );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), add_widget);
     });
 }

@@ -1,3 +1,4 @@
+use log::{error, info};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -302,13 +303,19 @@ pub struct Settings {
     pub output_dir: PathBuf,
     /// Global hotkey preset for saving clips.
     pub hotkey: HotkeyPreset,
+    /// Whether to launch the app on Windows startup.
+    #[serde(default)]
+    pub launch_on_startup: bool,
+    /// Whether to minimize to system tray instead of closing.
+    #[serde(default)]
+    pub minimize_to_tray: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         let output_dir = dirs::video_dir()
             .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")))
-            .join("LiteClip");
+            .join("LiteClipReplay");
 
         Self {
             quality: Quality::Medium,
@@ -320,6 +327,8 @@ impl Default for Settings {
             audio_device: None,
             output_dir,
             hotkey: HotkeyPreset::F8,
+            launch_on_startup: false,
+            minimize_to_tray: false,
         }
     }
 }
@@ -329,7 +338,7 @@ impl Settings {
     pub fn load() -> Self {
         let config_dir = dirs::config_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("LiteClip");
+            .join("LiteClipReplay");
         let settings_path = config_dir.join("settings.json");
 
         if let Ok(file) = std::fs::File::open(&settings_path) {
@@ -346,13 +355,54 @@ impl Settings {
     pub fn save(&self) {
         let config_dir = dirs::config_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("LiteClip");
+            .join("LiteClipReplay");
         let _ = std::fs::create_dir_all(&config_dir);
         let settings_path = config_dir.join("settings.json");
 
         if let Ok(file) = std::fs::File::create(&settings_path) {
             let writer = std::io::BufWriter::new(file);
             let _ = serde_json::to_writer_pretty(writer, self);
+        }
+    }
+}
+
+/// Add or remove the app from Windows startup via the registry.
+///
+/// Writes to `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
+pub fn set_launch_on_startup(enabled: bool) {
+    use winreg::enums::*;
+    use winreg::RegKey;
+
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let run_key = match hkcu.open_subkey_with_flags(
+        r"Software\Microsoft\Windows\CurrentVersion\Run",
+        KEY_SET_VALUE | KEY_READ,
+    ) {
+        Ok(key) => key,
+        Err(e) => {
+            error!("Failed to open Run registry key: {}", e);
+            return;
+        }
+    };
+
+    if enabled {
+        match std::env::current_exe() {
+            Ok(exe_path) => {
+                let exe_str = exe_path.display().to_string();
+                match run_key.set_value("LiteClip", &exe_str) {
+                    Ok(()) => info!("Added LiteClip to Windows startup: {}", exe_str),
+                    Err(e) => error!("Failed to set startup registry value: {}", e),
+                }
+            }
+            Err(e) => error!("Failed to get current exe path: {}", e),
+        }
+    } else {
+        match run_key.delete_value("LiteClip") {
+            Ok(()) => info!("Removed LiteClip from Windows startup"),
+            Err(e) => {
+                // Not an error if it wasn't there
+                info!("Could not remove startup entry (may not exist): {}", e);
+            }
         }
     }
 }

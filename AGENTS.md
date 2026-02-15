@@ -1,14 +1,14 @@
-# AGENTS.md - LiteClip Recorder
+# AGENTS.md - LiteClip Replay
 
 ## Overview
 
-LiteClip Recorder is a lightweight Windows desktop screen recording application with a replay buffer feature. It allows users to continuously record their screen in a rolling buffer and save clips retroactively using a global hotkey.
+LiteClip Replay is a lightweight Windows desktop screen recording application with a replay buffer feature. It allows users to continuously record their screen in a rolling buffer and save clips retroactively using a global hotkey.
 
 ## Project Details
 
 | Attribute | Value |
 |-----------|-------|
-| **Name** | liteclip-recorder |
+| **Name** | liteclip-replay |
 | **Version** | 0.1.0 |
 | **Language** | Rust (Edition 2021) |
 | **Platform** | Windows (primary) |
@@ -85,11 +85,11 @@ cargo clean
 ### Architecture
 - **main.rs**: Initializes the application, manages global hotkeys via `HotkeyWrapper`
 - **gui.rs**: Contains `LiteClipApp` struct with all UI logic
-- **recorder.rs**: FFmpeg process management and segment handling
+- **Replay.rs**: FFmpeg process management and segment handling
 - **settings.rs**: Configuration enums and default values
 
 ### State Management
-- Recorder state is wrapped in `Arc<Mutex<Recorder>>` for thread safety
+- Replay state is wrapped in `Arc<Mutex<Replay>>` for thread safety
 - Global hotkeys communicate with the GUI via message passing
 - Settings are persisted in memory (restarts reset to defaults)
 
@@ -131,7 +131,7 @@ strip = true
 ### Adding a New Setting
 1. Add the enum/field to `settings.rs`
 2. Add UI controls in `gui.rs` (in the settings panel)
-3. Apply the setting in `recorder.rs` if it affects recording
+3. Apply the setting in `Replay.rs` if it affects recording
 4. Update hotkey handling in `main.rs` if needed
 
 ### Adding a New Hotkey Preset
