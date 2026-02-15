@@ -105,13 +105,16 @@ impl AppState {
 
         let output_path = self.generate_output_path()?;
 
-        // Get resolution from config
-        let (width, height) = match self.config.video.resolution {
-            crate::config::Resolution::Native => (1920, 1080), // TODO: Get actual resolution
-            crate::config::Resolution::P1080 => (1920, 1080),
-            crate::config::Resolution::P720 => (1280, 720),
-            crate::config::Resolution::P480 => (854, 480),
-        };
+        // Get resolution from the first packet in buffer, or fall back to config
+        let (width, height) = self
+            .buffer
+            .snapshot_first_packet_resolution()
+            .unwrap_or_else(|| match self.config.video.resolution {
+                crate::config::Resolution::Native => (1920, 1080), // Fallback if no packets
+                crate::config::Resolution::P1080 => (1920, 1080),
+                crate::config::Resolution::P720 => (1280, 720),
+                crate::config::Resolution::P480 => (854, 480),
+            });
         let fps = self.config.video.framerate as f64;
 
         let muxer_config = MuxerConfig::new(width, height, fps, &output_path);

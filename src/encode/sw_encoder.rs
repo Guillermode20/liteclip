@@ -50,25 +50,46 @@ fn bgra_to_jpeg_reuse(
             dst[2] = src[0]; // B
         }
     } else {
-        // Nearest-neighbour downscale with precomputed X lookup table
-        let mut x_map: Vec<usize> = Vec::with_capacity(out_w);
-        for x in 0..out_w {
-            x_map.push((x * src_w / out_w) * 4);
-        }
+        // Bilinear downscaling for better quality
+        let x_ratio = src_w as f64 / out_w as f64;
+        let y_ratio = src_h as f64 / out_h as f64;
 
-        for y in 0..out_h {
-            let src_row_base = (y * src_h / out_h) * src_w * 4;
-            let dst_row_base = y * out_w * 3;
+        for dst_y in 0..out_h {
+            let src_y_f = dst_y as f64 * y_ratio;
+            let src_y0 = src_y_f.floor() as usize;
+            let src_y1 = (src_y0 + 1).min(src_h - 1);
+            let y_frac = src_y_f - src_y0 as f64;
 
-            let src_row = &bgra[src_row_base..src_row_base + src_w * 4];
-            let dst_row = &mut rgb_buf[dst_row_base..dst_row_base + out_w * 3];
+            let dst_row_base = dst_y * out_w * 3;
 
-            for x in 0..out_w {
-                let si = x_map[x];
-                let di = x * 3;
-                dst_row[di] = src_row[si + 2]; // R
-                dst_row[di + 1] = src_row[si + 1]; // G
-                dst_row[di + 2] = src_row[si]; // B
+            for dst_x in 0..out_w {
+                let src_x_f = dst_x as f64 * x_ratio;
+                let src_x0 = src_x_f.floor() as usize;
+                let src_x1 = (src_x0 + 1).min(src_w - 1);
+                let x_frac = src_x_f - src_x0 as f64;
+
+                // Get the four neighboring pixels in BGRA
+                let i00 = (src_y0 * src_w + src_x0) * 4;
+                let i10 = (src_y0 * src_w + src_x1) * 4;
+                let i01 = (src_y1 * src_w + src_x0) * 4;
+                let i11 = (src_y1 * src_w + src_x1) * 4;
+
+                let di = dst_row_base + dst_x * 3;
+
+                // Bilinear interpolation for each channel (B, G, R)
+                for c in 0..3 {
+                    let src_c = 2 - c; // Map RGB (0,1,2) to BGRA (2,1,0)
+                    let v00 = bgra[i00 + src_c] as f64;
+                    let v10 = bgra[i10 + src_c] as f64;
+                    let v01 = bgra[i01 + src_c] as f64;
+                    let v11 = bgra[i11 + src_c] as f64;
+
+                    let v_top = v00 + (v10 - v00) * x_frac;
+                    let v_bot = v01 + (v11 - v01) * x_frac;
+                    let v = v_top + (v_bot - v_top) * y_frac;
+
+                    rgb_buf[di + c] = v.round().clamp(0.0, 255.0) as u8;
+                }
             }
         }
     }
@@ -137,11 +158,16 @@ impl Encoder for StubEncoder {
         trace!("Stub encoder frame {}", self.frame_count);
 
         let is_keyframe = self.frame_count % 30 == 0;
+
+        // Use native resolution if configured, otherwise use config resolution
+        let (out_w, out_h) = if self.config.use_native_resolution {
+            frame.resolution
+        } else {
+            self.config.resolution
+        };
+
         let data = bgra_to_jpeg(
-            frame,
-            self.config.resolution.0,
-            self.config.resolution.1,
-            85,
+            frame, out_w, out_h, 92, // High quality JPEG
         )?;
 
         let mut packet = EncodedPacket::new(
@@ -182,6 +208,8 @@ struct WorkItem {
     src_h: u32,
     timestamp: i64,
     resolution: (u32, u32),
+    /// Whether to use native frame resolution (output = source)
+    use_native_resolution: bool,
 }
 
 /// Multi-threaded software encoder.
@@ -214,13 +242,13 @@ impl SoftwareEncoder {
         );
 
         let (packet_tx, packet_rx) = bounded(128);
-        // Bounded to num_workers so we never enqueue more work than can be
-        // processed in parallel – excess frames are dropped at the caller.
-        let (worker_tx, worker_rx) = bounded::<WorkItem>(num_workers);
+        // Bounded to 32 to allow more frames to queue before dropping.
+        // This prevents frame drops when workers are temporarily busy.
+        let (worker_tx, worker_rx) = bounded::<WorkItem>(32);
 
         let out_w = config.resolution.0;
         let out_h = config.resolution.1;
-        let quality = 85u8; // JPEG quality 0-100; 85 = good fidelity, fast encode
+        let quality = 92u8; // JPEG quality 0-100; 92 = high fidelity for screen content
 
         let mut worker_threads = Vec::with_capacity(num_workers);
         for id in 0..num_workers {
@@ -237,12 +265,19 @@ impl SoftwareEncoder {
                 let mut rgb_buf: Vec<u8> = Vec::with_capacity(ow * oh * 3);
 
                 while let Ok(item) = rx.recv() {
+                    // Use native resolution if flag is set, otherwise use config resolution
+                    let (target_w, target_h) = if item.use_native_resolution {
+                        (item.src_w as usize, item.src_h as usize)
+                    } else {
+                        (ow, oh)
+                    };
+
                     match bgra_to_jpeg_reuse(
                         &item.bgra,
                         item.src_w as usize,
                         item.src_h as usize,
-                        ow,
-                        oh,
+                        target_w,
+                        target_h,
                         quality,
                         &mut rgb_buf,
                     ) {
@@ -300,6 +335,7 @@ impl Encoder for SoftwareEncoder {
             src_h: frame.resolution.1,
             timestamp: frame.timestamp,
             resolution: frame.resolution,
+            use_native_resolution: self.config.use_native_resolution,
         };
 
         // Non-blocking send; if all workers are busy we drop the frame

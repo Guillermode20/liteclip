@@ -79,6 +79,11 @@ impl SharedReplayBuffer {
     pub fn newest_pts(&self) -> Option<i64> {
         self.inner.read().newest_pts()
     }
+
+    /// Get the resolution from the first packet in the buffer
+    pub fn snapshot_first_packet_resolution(&self) -> Option<(u32, u32)> {
+        self.inner.read().first_packet_resolution()
+    }
 }
 
 impl Clone for SharedReplayBuffer {
@@ -291,6 +296,11 @@ impl ReplayBuffer {
     /// Get number of keyframes in index
     pub fn keyframe_count(&self) -> usize {
         self.keyframe_index.len()
+    }
+
+    /// Get the resolution from the first packet in the buffer
+    pub fn first_packet_resolution(&self) -> Option<(u32, u32)> {
+        self.packets.front().and_then(|p| p.resolution)
     }
 }
 
