@@ -179,6 +179,47 @@ impl Recorder {
         self.started_at.map(|t| t.elapsed().as_secs()).unwrap_or(0)
     }
 
+    /// Kill any orphaned FFmpeg processes from a previous crashed/Ctrl+C run.
+    /// This prevents "Too many open duplication sessions" errors from ddagrab.
+    #[cfg(windows)]
+    pub fn kill_orphaned_ffmpeg() {
+        use std::os::windows::process::CommandExt;
+        // First check if any ffmpeg.exe processes exist
+        let check = Command::new("tasklist")
+            .args(["/FI", "IMAGENAME eq ffmpeg.exe", "/NH", "/FO", "CSV"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .output();
+
+        match check {
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                if stdout.contains("ffmpeg.exe") {
+                    warn!("Found orphaned FFmpeg process(es) — killing them");
+                    let kill = Command::new("taskkill")
+                        .args(["/F", "/IM", "ffmpeg.exe"])
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .creation_flags(CREATE_NO_WINDOW)
+                        .status();
+                    match kill {
+                        Ok(status) => info!("taskkill ffmpeg.exe exited with {}", status),
+                        Err(e) => warn!("Failed to run taskkill: {}", e),
+                    }
+                    // Brief pause for the OS to release handles
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+            }
+            Err(e) => warn!("Failed to check for orphaned FFmpeg: {}", e),
+        }
+    }
+
+    #[cfg(not(windows))]
+    pub fn kill_orphaned_ffmpeg() {
+        // No-op on non-Windows platforms
+    }
+
     /// Start recording the desktop into rolling segments.
     ///
     /// This launches an FFmpeg subprocess. It will attempt to use hardware encoders
@@ -192,6 +233,9 @@ impl Recorder {
             warn!("Start called but already recording — ignoring");
             return Err("Already recording.".into());
         }
+
+        // Kill any orphaned FFmpeg from a previous crash before acquiring ddagrab
+        Self::kill_orphaned_ffmpeg();
 
         info!(
             "Starting recording — encoder={:?}, quality={:?}, fps={:?}, resolution={:?}, buffer={}s, audio={}",

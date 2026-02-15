@@ -32,6 +32,18 @@ fn main() -> eframe::Result<()> {
     // --- Shared recorder state ---
     let recorder = Arc::new(Mutex::new(Recorder::new()));
 
+    // --- Ctrl+C handler: ensure FFmpeg child is killed on forced exit ---
+    {
+        let recorder_for_ctrlc = recorder.clone();
+        let _ = ctrlc::set_handler(move || {
+            info!("Ctrl+C received — stopping recorder");
+            if let Ok(mut rec) = recorder_for_ctrlc.lock() {
+                rec.stop();
+            }
+            std::process::exit(0);
+        });
+    }
+
     // --- Register initial global hotkey ---
     let hotkey_manager = GlobalHotKeyManager::new().expect("Failed to init hotkey manager");
     let initial_hotkey = {
@@ -79,14 +91,12 @@ fn main() -> eframe::Result<()> {
     std::thread::spawn(move || {
         let menu_rx = MenuEvent::receiver();
         loop {
-            // Blocking receive — wakes only on menu clicks
             if let Ok(event) = menu_rx.recv() {
                 if event.id == show_item_id {
                     info!("Tray thread: Show requested");
                     show_flag.store(true, Ordering::SeqCst);
                 } else if event.id == quit_item_id {
                     info!("Tray thread: Quit — stopping recorder and exiting");
-                    // Stop recorder directly from this thread, then exit
                     if let Ok(mut rec) = recorder_for_quit.lock() {
                         rec.stop();
                     }
@@ -157,8 +167,8 @@ impl eframe::App for HotkeyWrapper {
 
         // --- Handle tray show ---
         if self.tray_show_requested.swap(false, Ordering::SeqCst) {
-            info!("Tray: Showing window");
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            info!("Tray: Restoring window");
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
 
@@ -173,10 +183,12 @@ impl eframe::App for HotkeyWrapper {
             };
 
             if minimize_to_tray {
-                // Cancel the close and hide the window instead
+                // Cancel the close and minimize the window instead.
+                // Using Minimized keeps the event loop alive (unlike Visible(false)
+                // which kills it on Windows), so the tray Show button works.
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                info!("Window hidden to tray");
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                info!("Window minimized to tray");
             }
         }
 
