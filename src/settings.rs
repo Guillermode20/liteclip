@@ -15,6 +15,7 @@ pub enum Quality {
     Ultra,
 }
 
+#[allow(dead_code)]
 impl Quality {
     pub fn crf(&self) -> u32 {
         match self {
@@ -104,8 +105,9 @@ pub enum VideoEncoder {
     H264Amf,
 }
 
+#[allow(dead_code)]
 impl VideoEncoder {
-    pub fn ffmpeg_name(&self) -> Option<&'static str> {
+    pub fn encoder_name(&self) -> Option<&'static str> {
         match self {
             VideoEncoder::Auto => None,
             VideoEncoder::Libx264 => Some("libx264"),
@@ -211,6 +213,7 @@ pub enum EncoderTuning {
     MaxQuality,
 }
 
+#[allow(dead_code)]
 impl EncoderTuning {
     pub fn label(&self) -> &'static str {
         match self {
@@ -319,8 +322,9 @@ pub enum Resolution {
     Res480p,
 }
 
+#[allow(dead_code)]
 impl Resolution {
-    /// Returns the FFmpeg scale filter string, or None for native.
+    /// Returns the scale filter string, or None for native.
     /// Uses `-2` for height to ensure divisible-by-2 output — required by
     /// many hardware encoders that reject odd-dimension frames.
     pub fn scale_filter(&self) -> Option<&'static str> {
@@ -487,8 +491,9 @@ impl Default for Settings {
     }
 }
 
+#[allow(dead_code)]
 impl Settings {
-    /// Returns the active FFmpeg scale filter string, if any.
+    /// Returns the active scale filter string, if any.
     pub fn active_scale_filter(&self) -> Option<String> {
         if self.custom_resolution_enabled {
             let width = clamp_even(self.custom_resolution_width, 320, 7680);
@@ -531,6 +536,7 @@ impl Settings {
     }
 }
 
+#[allow(dead_code)]
 fn clamp_even(value: u32, min: u32, max: u32) -> u32 {
     let clamped = value.clamp(min, max);
     if clamped % 2 == 0 {

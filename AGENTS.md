@@ -18,8 +18,10 @@ LiteClip Replay is a lightweight Windows desktop screen recording application wi
 | Category | Technology |
 |----------|------------|
 | **GUI Framework** | egui via eframe (immediate mode) |
-| **Screen Capture** | FFmpeg with gdigrab |
-| **Audio Capture** | FFmpeg with dshow (DirectShow) |
+| **Screen Capture** | Windows Graphics Capture API (via windows-capture crate) |
+| **Video Encoding** | Windows Media Foundation H.264 (via windows-capture crate) |
+| **Audio Capture** | Windows loopback audio (via windows-capture crate) |
+| **Segment Concat** | Native binary MPEG-TS concatenation (no external tools) |
 | **Global Hotkeys** | global-hotkey crate |
 | **File Dialogs** | rfd (Rust File Dialogs) |
 
@@ -85,7 +87,7 @@ cargo clean
 ### Architecture
 - **main.rs**: Initializes the application, manages global hotkeys via `HotkeyWrapper`
 - **gui.rs**: Contains `LiteClipApp` struct with all UI logic
-- **Replay.rs**: FFmpeg process management and segment handling
+- **Replay.rs**: Windows native capture management and segment handling
 - **settings.rs**: Configuration enums and default values
 
 ### State Management
@@ -111,8 +113,8 @@ cargo clean
 
 ## External Requirements
 
-- **FFmpeg** must be installed and available on PATH
-- Windows OS (uses `gdigrab` and `dshow` for capture)
+- Windows 10/11 (uses Windows Graphics Capture API and Media Foundation)
+- No external tools required (FFmpeg is NOT needed)
 
 ## Release Build Optimization
 

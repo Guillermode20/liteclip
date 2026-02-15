@@ -50,7 +50,7 @@ pub struct LiteClipApp {
     start_result_rx: Option<Receiver<StartResult>>,
     visuals_initialized: bool,
     cached_state: RecorderState,
-    cached_ffmpeg_found: bool,
+    cached_backend_available: bool,
     cached_last_saved_path: Option<PathBuf>,
     cached_hotkey_label: String,
 }
@@ -61,11 +61,11 @@ impl LiteClipApp {
     /// # Arguments
     /// * `recorder` - The shared recorder backend.
     pub fn new(recorder: Arc<Mutex<Recorder>>) -> Self {
-        let (cached_state, cached_ffmpeg_found, cached_last_saved_path, cached_hotkey_label) = {
+        let (cached_state, cached_backend_available, cached_last_saved_path, cached_hotkey_label) = {
             let rec = recorder.lock().unwrap();
             (
                 rec.state,
-                rec.ffmpeg_found,
+                rec.backend_available,
                 rec.last_saved_path.clone(),
                 rec.settings.hotkey.label().to_string(),
             )
@@ -83,13 +83,13 @@ impl LiteClipApp {
             start_result_rx: None,
             visuals_initialized: false,
             cached_state,
-            cached_ffmpeg_found,
+            cached_backend_available,
             cached_last_saved_path,
             cached_hotkey_label,
         };
 
         // Auto-start replay buffer on launch
-        if cached_ffmpeg_found {
+        if cached_backend_available {
             info!("Auto-starting replay buffer on launch");
             app.trigger_start();
         }
@@ -159,7 +159,7 @@ impl LiteClipApp {
     fn refresh_main_snapshot(&mut self) {
         if let Ok(rec) = self.recorder.try_lock() {
             self.cached_state = rec.state;
-            self.cached_ffmpeg_found = rec.ffmpeg_found;
+            self.cached_backend_available = rec.backend_available;
             self.cached_last_saved_path = rec.last_saved_path.clone();
             self.cached_hotkey_label = rec.settings.hotkey.label().to_string();
         }
@@ -204,7 +204,7 @@ impl LiteClipApp {
                     .file_name()
                     .unwrap_or_default()
                     .to_str()
-                    .unwrap_or("clip.mp4");
+                    .unwrap_or("clip.ts");
                 info!("Clip saved: {}", path.display());
                 self.status_message = format!("Clip saved! {}", name);
                 self.status_timer = 5.0;
@@ -241,25 +241,23 @@ impl LiteClipApp {
 
         self.refresh_main_snapshot();
         let state = self.cached_state;
-        let ffmpeg_found = self.cached_ffmpeg_found;
+        let backend_available = self.cached_backend_available;
         let last_saved = self.cached_last_saved_path.clone();
         let hotkey_label = self.cached_hotkey_label.clone();
 
-        // --- FFmpeg warning ---
-        if !ffmpeg_found {
+        // --- backend warning ---
+        if !backend_available {
             ui.vertical_centered(|ui| {
                 ui.add_space(16.0);
                 ui.label(
-                    egui::RichText::new("⚠  FFmpeg Not Found")
+                    egui::RichText::new("⚠  Native Capture Unavailable")
                         .size(15.0)
                         .color(RED_INDICATOR)
                         .strong(),
                 );
                 ui.add_space(6.0);
                 ui.label(
-                    egui::RichText::new(
-                        "Install FFmpeg and add it to PATH,\nthen restart LiteClip.",
-                    )
+                    egui::RichText::new("Windows native recording is unavailable.\nRestart on Windows 10/11 and try again.")
                     .color(TEXT_SECONDARY),
                 );
             });
@@ -376,21 +374,25 @@ impl LiteClipApp {
                         .clicked()
                     {
                         info!("User triggered: STOP recording");
-                        let stopped = if let Ok(mut rec) = self.recorder.try_lock() {
+                        self.status_message = "Stopping buffer...".into();
+                        self.status_timer = 2.0;
+
+                        let stopped = if let Ok(mut rec) = self.recorder.lock() {
                             rec.stop();
                             true
                         } else {
                             false
                         };
+
                         if stopped {
                             info!("Recording stopped by user");
                             self.status_message = "Buffer stopped.".into();
                             self.status_timer = 3.0;
                             self.refresh_main_snapshot();
                         } else {
-                            warn!("Could not stop — recorder lock is held");
-                            self.status_message = "Recorder is busy, try again...".into();
-                            self.status_timer = 2.0;
+                            warn!("Could not stop — recorder lock poisoned");
+                            self.status_message = "Failed to stop recorder.".into();
+                            self.status_timer = 3.0;
                         }
                     }
                 }
@@ -950,8 +952,10 @@ impl LiteClipApp {
             if let Some(result) = buffer_change_restart_result {
                 match result {
                     Ok(()) => {
-                        self.status_message =
-                            format!("Buffer length updated to {}.", format_buffer_length(buffer_seconds));
+                        self.status_message = format!(
+                            "Buffer length updated to {}.",
+                            format_buffer_length(buffer_seconds)
+                        );
                         self.status_timer = 3.0;
                     }
                     Err(err) => {

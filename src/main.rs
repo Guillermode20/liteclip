@@ -1,7 +1,7 @@
 //! LiteClip Recorder
 //!
 //! A lightweight screen recording application with a rolling replay buffer,
-//! similar to Medal.tv or ShadowPlay. Built with Rust, eframe (egui), and FFmpeg.
+//! similar to Medal.tv or ShadowPlay. Built with Rust, eframe (egui), and Windows native capture APIs.
 //!
 //! Architecture:
 //! - Main thread runs the core service (recorder, hotkeys, tray icon)
