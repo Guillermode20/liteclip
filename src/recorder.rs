@@ -12,7 +12,7 @@ use tempfile::TempDir;
 use crate::settings::{RateControl, Resolution, Settings, VideoEncoder};
 
 const SEGMENT_DURATION_SECS: u64 = 4;
-const STABLE_SEGMENT_GUARD_MS: u128 = 1200;
+const STABLE_SEGMENT_GUARD_MS: u128 = 700;
 const MIN_STABLE_SEGMENT_BYTES: u64 = 64 * 1024;
 
 /// Cache for detected capabilities to avoid re-probing on every startup.
@@ -875,7 +875,7 @@ fn graceful_shutdown(child: &mut Child) {
 
 fn collect_segments_for_snapshot(
     segment_root: &Path,
-    recording_active: bool,
+    _recording_active: bool,
 ) -> Result<Vec<PathBuf>, String> {
     let mut segments: Vec<PathBuf> = fs::read_dir(segment_root)
         .map_err(|e| format!("Failed to read temp dir {}: {e}", segment_root.display()))?
@@ -897,12 +897,6 @@ fn collect_segments_for_snapshot(
     segments.sort_unstable_by_key(|path| extract_segment_index(path));
     if segments.len() > 1 {
         reorder_wrapped_segments(segments.as_mut_slice());
-    }
-
-    // While recording is active, the newest segment can still be in-progress.
-    // Dropping it greatly improves concat reliability.
-    if recording_active && segments.len() > 1 {
-        segments.pop();
     }
 
     segments.retain(|path| is_stable_segment(path));

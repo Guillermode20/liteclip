@@ -882,7 +882,9 @@ impl LiteClipApp {
             video_max_bitrate_kbps = video_max_bitrate_kbps.max(video_bitrate_kbps);
             video_bufsize_kbps = video_bufsize_kbps.max(video_bitrate_kbps);
 
+            let mut buffer_change_restart_result: Option<Result<(), String>> = None;
             let mut rec = self.recorder.lock().unwrap();
+            let buffer_seconds_changed = rec.settings.buffer_seconds != buffer_seconds;
 
             // Persist recorder settings that are applied immediately in-process.
             // Hotkey is intentionally excluded and only persisted after successful
@@ -934,6 +936,30 @@ impl LiteClipApp {
             if changed {
                 rec.settings.save();
                 info!("Settings saved to disk");
+            }
+
+            if buffer_seconds_changed && rec.state == RecorderState::Recording {
+                info!(
+                    "Buffer length changed while recording ({}s) — restarting recorder to apply",
+                    buffer_seconds
+                );
+                rec.stop();
+                buffer_change_restart_result = Some(rec.start());
+            }
+
+            if let Some(result) = buffer_change_restart_result {
+                match result {
+                    Ok(()) => {
+                        self.status_message =
+                            format!("Buffer length updated to {}.", format_buffer_length(buffer_seconds));
+                        self.status_timer = 3.0;
+                    }
+                    Err(err) => {
+                        self.status_message =
+                            format!("Buffer updated, but restart failed: {}", err);
+                        self.status_timer = 5.0;
+                    }
+                }
             }
         }
 
