@@ -179,47 +179,6 @@ impl Recorder {
         self.started_at.map(|t| t.elapsed().as_secs()).unwrap_or(0)
     }
 
-    /// Kill any orphaned FFmpeg processes from a previous crashed/Ctrl+C run.
-    /// This prevents "Too many open duplication sessions" errors from ddagrab.
-    #[cfg(windows)]
-    pub fn kill_orphaned_ffmpeg() {
-        use std::os::windows::process::CommandExt;
-        // First check if any ffmpeg.exe processes exist
-        let check = Command::new("tasklist")
-            .args(["/FI", "IMAGENAME eq ffmpeg.exe", "/NH", "/FO", "CSV"])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .creation_flags(CREATE_NO_WINDOW)
-            .output();
-
-        match check {
-            Ok(output) => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                if stdout.contains("ffmpeg.exe") {
-                    warn!("Found orphaned FFmpeg process(es) — killing them");
-                    let kill = Command::new("taskkill")
-                        .args(["/F", "/IM", "ffmpeg.exe"])
-                        .stdout(Stdio::null())
-                        .stderr(Stdio::null())
-                        .creation_flags(CREATE_NO_WINDOW)
-                        .status();
-                    match kill {
-                        Ok(status) => info!("taskkill ffmpeg.exe exited with {}", status),
-                        Err(e) => warn!("Failed to run taskkill: {}", e),
-                    }
-                    // Brief pause for the OS to release handles
-                    std::thread::sleep(Duration::from_millis(500));
-                }
-            }
-            Err(e) => warn!("Failed to check for orphaned FFmpeg: {}", e),
-        }
-    }
-
-    #[cfg(not(windows))]
-    pub fn kill_orphaned_ffmpeg() {
-        // No-op on non-Windows platforms
-    }
-
     /// Start recording the desktop into rolling segments.
     ///
     /// This launches an FFmpeg subprocess. It will attempt to use hardware encoders
@@ -233,9 +192,6 @@ impl Recorder {
             warn!("Start called but already recording — ignoring");
             return Err("Already recording.".into());
         }
-
-        // Kill any orphaned FFmpeg from a previous crash before acquiring ddagrab
-        Self::kill_orphaned_ffmpeg();
 
         info!(
             "Starting recording — encoder={:?}, quality={:?}, fps={:?}, resolution={:?}, buffer={}s, audio={}",
@@ -323,7 +279,6 @@ impl Recorder {
         let mut last_error: Option<String> = None;
         for encoder in encoders_to_try {
             let mut args = base_args.clone();
-
 
             // Build video filter chain — varies by encoder type.
             // ddagrab emits GPU-backed d3d11 frames that must be downloaded
@@ -522,144 +477,147 @@ impl Recorder {
         // a fixed 200ms sleep. On fast machines this returns in <50ms.
         wait_for_segments_flush();
 
-        let temp_path = self
-            .temp_dir
-            .as_ref()
-            .ok_or_else(|| {
-                error!("Save failed: No temp directory — nothing recorded yet");
-                "No temp directory — nothing recorded yet.".to_string()
-            })?
-            .path()
-            .to_path_buf();
+        let result = (|| -> Result<PathBuf, String> {
+            let temp_path = self
+                .temp_dir
+                .as_ref()
+                .ok_or_else(|| {
+                    error!("Save failed: No temp directory — nothing recorded yet");
+                    "No temp directory — nothing recorded yet.".to_string()
+                })?
+                .path()
+                .to_path_buf();
 
-        debug!("Scanning temp dir for segments: {}", temp_path.display());
+            debug!("Scanning temp dir for segments: {}", temp_path.display());
 
-        // Gather segment files sorted by numeric index from filename
-        let mut segments: Vec<PathBuf> = fs::read_dir(&temp_path)
-            .map_err(|e| {
-                error!("Failed to read temp dir {}: {}", temp_path.display(), e);
-                format!("Failed to read temp dir: {}", e)
-            })?
-            .filter_map(|entry| {
-                let entry = entry.ok()?;
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) == Some("ts") {
-                    Some(path)
-                } else {
-                    None
+            // Gather segment files sorted by numeric index from filename
+            let mut segments: Vec<PathBuf> = fs::read_dir(&temp_path)
+                .map_err(|e| {
+                    error!("Failed to read temp dir {}: {}", temp_path.display(), e);
+                    format!("Failed to read temp dir: {}", e)
+                })?
+                .filter_map(|entry| {
+                    let entry = entry.ok()?;
+                    let path = entry.path();
+                    if path.extension().and_then(|e| e.to_str()) == Some("ts") {
+                        Some(path)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            if segments.is_empty() {
+                error!(
+                    "No segment files found in {}. Buffer may not have recorded long enough.",
+                    temp_path.display()
+                );
+                if let Ok(entries) = fs::read_dir(&temp_path) {
+                    let files: Vec<String> = entries
+                        .filter_map(|e| e.ok())
+                        .map(|e| format!("{}", e.path().display()))
+                        .collect();
+                    debug!("Temp dir contents: {:?}", files);
                 }
-            })
-            .collect();
+                return Err("No segments found. Record for a few seconds first.".into());
+            }
 
-        if segments.is_empty() {
-            error!(
-                "No segment files found in {}. Buffer may not have recorded long enough.",
-                temp_path.display()
+            info!("Found {} segment(s) to concat", segments.len());
+
+            // Sort by numeric index extracted from filename (seg_NNNN.ts).
+            // This is more reliable than mtime which can alias when segment_wrap
+            // reuses filenames — mtime resolution on NTFS is ~100ms and two
+            // segments written in rapid succession can get the same timestamp.
+            segments
+                .sort_unstable_by(|a, b| extract_segment_index(a).cmp(&extract_segment_index(b)));
+
+            // When segment_wrap is active, reorder so oldest segment comes first.
+            // The oldest segment has the highest mtime gap from its predecessor.
+            if segments.len() > 1 {
+                reorder_wrapped_segments(&mut segments);
+            }
+
+            for seg in &segments {
+                let size = fs::metadata(seg).map(|m| m.len()).unwrap_or(0);
+                debug!("  Segment: {} ({} bytes)", seg.display(), size);
+            }
+
+            // Create the concat list file
+            let concat_list_path = temp_path.join("concat_list.txt");
+            let mut concat_file = fs::File::create(&concat_list_path).map_err(|e| {
+                error!("Failed to create concat list: {}", e);
+                format!("Failed to create concat list: {}", e)
+            })?;
+
+            for seg in &segments {
+                let escaped_path = escape_ffmpeg_concat_path(seg);
+                writeln!(concat_file, "file '{}'", escaped_path).map_err(|e| {
+                    error!("Failed to write concat list: {}", e);
+                    format!("Failed to write concat list: {}", e)
+                })?;
+            }
+            drop(concat_file);
+
+            // Ensure output directory exists
+            if let Some(parent) = output_path.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+
+            // Concatenate segments into final clip.
+            // -probesize 32 -analyzeduration 0: segments are known-good MPEG-TS, skip probing.
+            // -nostdin: prevent accidental stdin blocking.
+            let concat_args = [
+                "-nostdin",
+                "-probesize",
+                "32",
+                "-analyzeduration",
+                "0",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                concat_list_path.to_str().unwrap(),
+                "-c",
+                "copy",
+                "-y",
+                output_path.to_str().unwrap(),
+            ];
+            info!("Running concat: ffmpeg {}", concat_args.join(" "));
+
+            let concat_result = ffmpeg_command()
+                .args(&concat_args)
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .output()
+                .map_err(|e| {
+                    error!("Failed to run FFmpeg concat: {}", e);
+                    format!("Failed to run FFmpeg concat: {}", e)
+                })?;
+
+            if !concat_result.status.success() {
+                let stderr = String::from_utf8_lossy(&concat_result.stderr);
+                error!("FFmpeg concat failed (status: {})", concat_result.status);
+                if !stderr.is_empty() {
+                    error!("FFmpeg concat stderr:\n{}", stderr);
+                }
+                return Err("FFmpeg concat failed. Check segment files.".into());
+            }
+
+            // Log final file size
+            let file_size = fs::metadata(output_path).map(|m| m.len()).unwrap_or(0);
+            info!(
+                "Clip saved successfully: {} ({:.1} MB)",
+                output_path.display(),
+                file_size as f64 / (1024.0 * 1024.0),
             );
-            if let Ok(entries) = fs::read_dir(&temp_path) {
-                let files: Vec<String> = entries
-                    .filter_map(|e| e.ok())
-                    .map(|e| format!("{}", e.path().display()))
-                    .collect();
-                debug!("Temp dir contents: {:?}", files);
-            }
-            self.restore_state_after_save(was_recording);
-            return Err("No segments found. Record for a few seconds first.".into());
-        }
 
-        info!("Found {} segment(s) to concat", segments.len());
+            self.last_saved_path = Some(output_path.to_path_buf());
+            Ok(output_path.to_path_buf())
+        })();
 
-        // Sort by numeric index extracted from filename (seg_NNNN.ts).
-        // This is more reliable than mtime which can alias when segment_wrap
-        // reuses filenames — mtime resolution on NTFS is ~100ms and two
-        // segments written in rapid succession can get the same timestamp.
-        segments.sort_unstable_by(|a, b| extract_segment_index(a).cmp(&extract_segment_index(b)));
-
-        // When segment_wrap is active, reorder so oldest segment comes first.
-        // The oldest segment has the highest mtime gap from its predecessor.
-        if segments.len() > 1 {
-            reorder_wrapped_segments(&mut segments);
-        }
-
-        for seg in &segments {
-            let size = fs::metadata(seg).map(|m| m.len()).unwrap_or(0);
-            debug!("  Segment: {} ({} bytes)", seg.display(), size);
-        }
-
-        // Create the concat list file
-        let concat_list_path = temp_path.join("concat_list.txt");
-        let mut concat_file = fs::File::create(&concat_list_path).map_err(|e| {
-            error!("Failed to create concat list: {}", e);
-            format!("Failed to create concat list: {}", e)
-        })?;
-
-        for seg in &segments {
-            writeln!(concat_file, "file '{}'", seg.display()).map_err(|e| {
-                error!("Failed to write concat list: {}", e);
-                format!("Failed to write concat list: {}", e)
-            })?;
-        }
-        drop(concat_file);
-
-        // Ensure output directory exists
-        if let Some(parent) = output_path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-
-        // Concatenate segments into final clip.
-        // -probesize 32 -analyzeduration 0: segments are known-good MPEG-TS, skip probing.
-        // -nostdin: prevent accidental stdin blocking.
-        let concat_args = [
-            "-nostdin",
-            "-probesize",
-            "32",
-            "-analyzeduration",
-            "0",
-            "-f",
-            "concat",
-            "-safe",
-            "0",
-            "-i",
-            concat_list_path.to_str().unwrap(),
-            "-c",
-            "copy",
-            "-y",
-            output_path.to_str().unwrap(),
-        ];
-        info!("Running concat: ffmpeg {}", concat_args.join(" "));
-
-        let concat_result = ffmpeg_command()
-            .args(&concat_args)
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .output()
-            .map_err(|e| {
-                error!("Failed to run FFmpeg concat: {}", e);
-                format!("Failed to run FFmpeg concat: {}", e)
-            })?;
-
-        if !concat_result.status.success() {
-            let stderr = String::from_utf8_lossy(&concat_result.stderr);
-            error!("FFmpeg concat failed (status: {})", concat_result.status);
-            if !stderr.is_empty() {
-                error!("FFmpeg concat stderr:\n{}", stderr);
-            }
-            self.restore_state_after_save(was_recording);
-            return Err("FFmpeg concat failed. Check segment files.".into());
-        }
-
-        // Log final file size
-        let file_size = fs::metadata(output_path).map(|m| m.len()).unwrap_or(0);
-        info!(
-            "Clip saved successfully: {} ({:.1} MB)",
-            output_path.display(),
-            file_size as f64 / (1024.0 * 1024.0),
-        );
-
-        self.last_saved_path = Some(output_path.to_path_buf());
         self.restore_state_after_save(was_recording);
-
-        Ok(output_path.to_path_buf())
+        result
     }
 
     /// Generate an auto-save output path with timestamp.
@@ -670,13 +628,18 @@ impl Recorder {
     }
 
     fn restore_state_after_save(&mut self, was_recording: bool) {
+        self.temp_dir = None;
+        self.started_at = None;
+        self.child = None;
+
         if was_recording {
             info!("Restarting recording after save...");
-            self.temp_dir = None;
-            self.started_at = None;
             match self.start() {
                 Ok(()) => info!("Recording restarted successfully"),
-                Err(e) => error!("Failed to restart recording after save: {}", e),
+                Err(e) => {
+                    error!("Failed to restart recording after save: {}", e);
+                    self.state = RecorderState::Idle;
+                }
             }
         } else {
             self.state = RecorderState::Idle;
@@ -747,6 +710,11 @@ fn extract_segment_index(path: &Path) -> u32 {
         .and_then(|s| s.strip_prefix("seg_"))
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(u32::MAX)
+}
+
+/// Escape a path for FFmpeg concat demuxer list files.
+fn escape_ffmpeg_concat_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\'', "'\\''")
 }
 
 /// Reorder wrapped segments so the oldest segment is first.

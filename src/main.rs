@@ -1,6 +1,6 @@
 //! LiteClip Recorder
-//! 
-//! A lightweight screen recording application with a rolling replay buffer, 
+//!
+//! A lightweight screen recording application with a rolling replay buffer,
 //! similar to Medal.tv or ShadowPlay. Built with Rust, eframe (egui), and FFmpeg.
 
 mod gui;
@@ -10,10 +10,10 @@ mod settings;
 use eframe::egui;
 use global_hotkey::{
     hotkey::{Code, HotKey, Modifiers},
-    GlobalHotKeyEvent, GlobalHotKeyManager,
+    GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
 };
-use log::{error, info};
-use std::sync::atomic::{AtomicBool, Ordering};
+use log::{error, info, warn};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use tray_icon::{
     menu::{Menu, MenuEvent, MenuItem},
@@ -50,13 +50,32 @@ fn main() -> eframe::Result<()> {
         let rec = recorder.lock().unwrap();
         rec.settings.hotkey
     };
-    let current_hotkey = create_hotkey(initial_hotkey);
-    hotkey_manager
-        .register(current_hotkey)
-        .expect("Failed to register hotkey");
-    let current_hotkey_id = current_hotkey.id();
+    let (current_hotkey, current_hotkey_id, active_hotkey_preset) =
+        match register_available_hotkey(&hotkey_manager, initial_hotkey) {
+            Some((registered_hotkey, preset)) => {
+                let registered_hotkey_id = registered_hotkey.id();
+                info!("Initial hotkey registered: {}", preset.label());
+                (Some(registered_hotkey), registered_hotkey_id, preset)
+            }
+            None => {
+                error!("Failed to register any global hotkey; hotkey is temporarily disabled");
+                (None, 0, initial_hotkey)
+            }
+        };
 
-    info!("Initial hotkey registered: {}", initial_hotkey.label());
+    if active_hotkey_preset != initial_hotkey {
+        if let Ok(mut rec) = recorder.lock() {
+            rec.settings.hotkey = active_hotkey_preset;
+            rec.settings.save();
+        }
+        warn!(
+            "Preferred hotkey {} unavailable at startup; switched to {}",
+            initial_hotkey.label(),
+            active_hotkey_preset.label()
+        );
+    }
+
+    let hotkey_id_shared = Arc::new(AtomicU32::new(current_hotkey_id));
 
     // --- System tray icon ---
     let tray_menu = Menu::new();
@@ -82,9 +101,9 @@ fn main() -> eframe::Result<()> {
     // A background thread polls MenuEvent (which works even when the window is hidden)
     // and sets these flags. The update() loop reads them.
     let tray_show_requested = Arc::new(AtomicBool::new(false));
-    let tray_quit_requested = Arc::new(AtomicBool::new(false));
-
+    let egui_ctx_handle: Arc<Mutex<Option<egui::Context>>> = Arc::new(Mutex::new(None));
     let show_flag = tray_show_requested.clone();
+    let egui_ctx_for_tray = egui_ctx_handle.clone();
     let recorder_for_quit = recorder.clone();
 
     // Spawn a dedicated thread to listen for tray menu events
@@ -95,6 +114,13 @@ fn main() -> eframe::Result<()> {
                 if event.id == show_item_id {
                     info!("Tray thread: Show requested");
                     show_flag.store(true, Ordering::SeqCst);
+                    if let Ok(guard) = egui_ctx_for_tray.lock() {
+                        if let Some(ctx) = guard.clone() {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                            ctx.request_repaint();
+                        }
+                    }
                 } else if event.id == quit_item_id {
                     info!("Tray thread: Quit — stopping recorder and exiting");
                     if let Ok(mut rec) = recorder_for_quit.lock() {
@@ -106,7 +132,37 @@ fn main() -> eframe::Result<()> {
         }
     });
 
+    let recorder_for_hotkey = recorder.clone();
+    let hotkey_id_for_thread = hotkey_id_shared.clone();
+    std::thread::spawn(move || {
+        let hotkey_rx = GlobalHotKeyEvent::receiver();
+        loop {
+            match hotkey_rx.recv() {
+                Ok(event) => {
+                    let active_hotkey_id = hotkey_id_for_thread.load(Ordering::SeqCst);
+                    if active_hotkey_id != 0
+                        && event.id == active_hotkey_id
+                        && event.state == HotKeyState::Released
+                    {
+                        info!("Global hotkey triggered — saving clip");
+                        if let Ok(mut rec) = recorder_for_hotkey.lock() {
+                            if let Err(e) = rec.save_clip_auto() {
+                                error!("Hotkey save failed: {}", e);
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("Global hotkey event receiver stopped: {}", e);
+                    break;
+                }
+            }
+        }
+    });
+
     let recorder_for_app = recorder.clone();
+    let hotkey_id_for_app = hotkey_id_shared.clone();
+    let egui_ctx_for_app = egui_ctx_handle.clone();
 
     // --- Window options ---
     let options = eframe::NativeOptions {
@@ -128,8 +184,9 @@ fn main() -> eframe::Result<()> {
                 hotkey_manager,
                 current_hotkey,
                 current_hotkey_id,
+                hotkey_id_shared: hotkey_id_for_app,
                 tray_show_requested,
-                tray_quit_requested,
+                egui_ctx_handle: egui_ctx_for_app,
             }))
         }),
     )
@@ -143,26 +200,23 @@ struct HotkeyWrapper {
     /// Manager for global hotkeys
     hotkey_manager: GlobalHotKeyManager,
     /// The currently registered hotkey configuration
-    current_hotkey: HotKey,
+    current_hotkey: Option<HotKey>,
     /// The unique ID of the currently registered hotkey
     current_hotkey_id: u32,
+    /// Shared active hotkey id used by the listener thread.
+    hotkey_id_shared: Arc<AtomicU32>,
     /// Set by background thread when "Show LiteClip" is clicked in tray
     tray_show_requested: Arc<AtomicBool>,
-    /// Set by background thread when "Quit" is clicked in tray
-    tray_quit_requested: Arc<AtomicBool>,
+    /// Latest egui context for tray thread wake-up/show operations.
+    egui_ctx_handle: Arc<Mutex<Option<egui::Context>>>,
 }
 
 impl eframe::App for HotkeyWrapper {
     /// Updates the application state every frame.
     /// Polls for hotkey events, tray flags, and delegates UI rendering to [`LiteClipApp`].
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        // --- Handle tray quit (checked first, works even after window hidden) ---
-        if self.tray_quit_requested.swap(false, Ordering::SeqCst) {
-            info!("Tray: Quit — stopping recorder and exiting");
-            if let Ok(mut rec) = self.app.recorder.try_lock() {
-                rec.stop();
-            }
-            std::process::exit(0);
+        if let Ok(mut handle) = self.egui_ctx_handle.lock() {
+            *handle = Some(ctx.clone());
         }
 
         // --- Handle tray show ---
@@ -192,35 +246,33 @@ impl eframe::App for HotkeyWrapper {
             }
         }
 
-        // Check for hotkey events
-        while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
-            if event.id == self.current_hotkey_id {
-                info!("Global hotkey triggered — saving clip");
-                self.app.trigger_save();
-            }
-        }
-
         // Check if the GUI requested a hotkey change
         if let Some(new_preset) = self.app.pending_hotkey.take() {
-            // Unregister old hotkey
-            let _ = self.hotkey_manager.unregister(self.current_hotkey);
-
-            // Register new hotkey
             let new_hotkey = create_hotkey(new_preset);
-            match self.hotkey_manager.register(new_hotkey) {
-                Ok(()) => {
-                    info!("Hotkey changed to {}", new_preset.label());
-                    self.current_hotkey = new_hotkey;
-                    self.current_hotkey_id = new_hotkey.id();
-                    self.app.status_message = format!("Hotkey changed to {}", new_preset.label());
-                    self.app.status_timer = 3.0;
-                }
-                Err(e) => {
-                    error!("Failed to register hotkey {}: {}", new_preset.label(), e);
-                    // Re-register old hotkey on failure
-                    let _ = self.hotkey_manager.register(self.current_hotkey);
-                    self.app.status_message = format!("Hotkey error: {}", e);
-                    self.app.status_timer = 5.0;
+            if new_hotkey.id() != self.current_hotkey_id {
+                match self.hotkey_manager.register(new_hotkey) {
+                    Ok(()) => {
+                        if let Some(old_hotkey) = self.current_hotkey.take() {
+                            let _ = self.hotkey_manager.unregister(old_hotkey);
+                        }
+                        info!("Hotkey changed to {}", new_preset.label());
+                        self.current_hotkey = Some(new_hotkey);
+                        self.current_hotkey_id = new_hotkey.id();
+                        self.hotkey_id_shared
+                            .store(self.current_hotkey_id, Ordering::SeqCst);
+                        if let Ok(mut rec) = self.app.recorder.lock() {
+                            rec.settings.hotkey = new_preset;
+                            rec.settings.save();
+                        }
+                        self.app.status_message =
+                            format!("Hotkey changed to {}", new_preset.label());
+                        self.app.status_timer = 3.0;
+                    }
+                    Err(e) => {
+                        error!("Failed to register hotkey {}: {}", new_preset.label(), e);
+                        self.app.status_message = format!("Hotkey error: {}", e);
+                        self.app.status_timer = 5.0;
+                    }
                 }
             }
         }
@@ -276,7 +328,7 @@ fn init_logging() {
 }
 
 /// Converts a [`HotkeyPreset`] into a concrete [`HotKey`] instance.
-/// 
+///
 /// # Arguments
 /// * `preset` - The preset configuration chosen by the user.
 fn create_hotkey(preset: HotkeyPreset) -> HotKey {
@@ -289,6 +341,25 @@ fn create_hotkey(preset: HotkeyPreset) -> HotKey {
         }
         HotkeyPreset::AltF9 => HotKey::new(Some(Modifiers::ALT), Code::F9),
     }
+}
+
+fn register_available_hotkey(
+    manager: &GlobalHotKeyManager,
+    preferred: HotkeyPreset,
+) -> Option<(HotKey, HotkeyPreset)> {
+    for preset in std::iter::once(preferred).chain(
+        HotkeyPreset::all()
+            .iter()
+            .copied()
+            .filter(|candidate| *candidate != preferred),
+    ) {
+        let hotkey = create_hotkey(preset);
+        match manager.register(hotkey) {
+            Ok(()) => return Some((hotkey, preset)),
+            Err(e) => warn!("Hotkey {} unavailable: {}", preset.label(), e),
+        }
+    }
+    None
 }
 
 /// Create a simple 32×32 RGBA tray icon (a filled colored square).

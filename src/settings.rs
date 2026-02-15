@@ -389,7 +389,7 @@ pub fn set_launch_on_startup(enabled: bool) {
     if enabled {
         match std::env::current_exe() {
             Ok(exe_path) => {
-                let exe_str = exe_path.display().to_string();
+                let exe_str = format!("\"{}\"", exe_path.display());
                 match run_key.set_value("LiteClip", &exe_str) {
                     Ok(()) => info!("Added LiteClip to Windows startup: {}", exe_str),
                     Err(e) => error!("Failed to set startup registry value: {}", e),

@@ -700,9 +700,10 @@ impl LiteClipApp {
         {
             let mut rec = self.recorder.lock().unwrap();
 
-            // detecting changes to avoid unnecessary saves (optional optimization, but good practice)
-            let changed = rec.settings.hotkey != hotkey
-                || rec.settings.buffer_seconds != buffer_seconds
+            // Persist recorder settings that are applied immediately in-process.
+            // Hotkey is intentionally excluded and only persisted after successful
+            // registration in main.rs.
+            let changed = rec.settings.buffer_seconds != buffer_seconds
                 || rec.settings.quality != quality
                 || rec.settings.video_encoder != video_encoder
                 || rec.settings.framerate != framerate
@@ -712,7 +713,6 @@ impl LiteClipApp {
                 || rec.settings.launch_on_startup != launch_on_startup
                 || rec.settings.minimize_to_tray != minimize_to_tray;
 
-            rec.settings.hotkey = hotkey;
             rec.settings.buffer_seconds = buffer_seconds;
             rec.settings.quality = quality;
             rec.settings.video_encoder = video_encoder;
@@ -724,11 +724,8 @@ impl LiteClipApp {
             rec.settings.minimize_to_tray = minimize_to_tray;
 
             if changed {
-                let settings_to_save = rec.settings.clone();
-                std::thread::spawn(move || {
-                    settings_to_save.save();
-                    info!("Settings saved to disk (background)");
-                });
+                rec.settings.save();
+                info!("Settings saved to disk");
             }
         }
 
@@ -870,9 +867,20 @@ fn format_buffer_length(secs: u64) -> String {
 
 /// Truncate a string for display.
 fn truncate_str(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
+    if max_len == 0 {
+        return String::new();
+    }
+
+    let mut chars = s.chars();
+    let visible: String = chars.by_ref().take(max_len).collect();
+    if chars.next().is_none() {
+        return visible;
+    }
+
+    if max_len == 1 {
+        "…".to_string()
     } else {
-        format!("{}…", &s[..max_len - 1])
+        let prefix: String = s.chars().take(max_len - 1).collect();
+        format!("{}…", prefix)
     }
 }
