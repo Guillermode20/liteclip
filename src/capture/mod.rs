@@ -4,6 +4,7 @@
 
 use crate::d3d::D3D11Texture;
 use anyhow::Result;
+use bytes::Bytes;
 use crossbeam::channel::Receiver;
 use std::time::Duration;
 
@@ -38,8 +39,9 @@ impl From<&crate::config::Config> for CaptureConfig {
 pub struct CapturedFrame {
     /// GPU-resident texture (no CPU copy)
     pub texture: D3D11Texture,
-    /// CPU-readable BGRA frame bytes (packed, width*height*4)
-    pub bgra: Vec<u8>,
+    /// CPU-readable BGRA frame bytes (packed, width*height*4).
+    /// Uses `Bytes` for reference-counted sharing – cloning is O(1).
+    pub bgra: Bytes,
     /// QPC timestamp for sync
     pub timestamp: i64,
     /// Frame resolution (width, height)

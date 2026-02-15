@@ -1,35 +1,120 @@
-//! Software Encoder (x264 fallback)
+//! Software Encoder
 //!
-//! Uses libx264 for software encoding when hardware acceleration is unavailable.
-//! Phase 1 implementation with CPU readback path.
+//! Parallel JPEG compression pipeline. Uses a thread pool of workers to
+//! encode BGRA frames into MJPEG packets for the ring buffer.
+//! Each worker pre-allocates its RGB conversion buffer to avoid per-frame
+//! allocation overhead.
 
 use super::{EncodedPacket, Encoder, EncoderConfig};
 use anyhow::Result;
+use bytes::Bytes;
 use crossbeam::channel::{bounded, Receiver, Sender};
 use image::{codecs::jpeg::JpegEncoder, ExtendedColorType};
-use tracing::{info, trace};
+use std::thread;
+use tracing::{info, trace, warn};
 
-/// Stub encoder for compilation check
+// ── BGRA → JPEG conversion ──────────────────────────────────────────
+
+/// Encode a BGRA frame slice into a JPEG byte vector.
 ///
-/// This is a stub implementation that allows the code to compile without FFmpeg.
-/// In a real build with FFmpeg, this would be replaced with actual x264 encoding.
+/// `rgb_buf` is a caller-owned scratch buffer that is resized as needed
+/// and reused across calls to eliminate per-frame allocation.
+fn bgra_to_jpeg_reuse(
+    bgra: &[u8],
+    src_w: usize,
+    src_h: usize,
+    out_w: usize,
+    out_h: usize,
+    quality: u8,
+    rgb_buf: &mut Vec<u8>,
+) -> Result<Vec<u8>> {
+    let expected_len = src_w * src_h * 4;
+    if bgra.len() != expected_len {
+        anyhow::bail!(
+            "Invalid BGRA size: got={}, expected={} ({}x{})",
+            bgra.len(),
+            expected_len,
+            src_w,
+            src_h
+        );
+    }
+
+    let rgb_len = out_w * out_h * 3;
+    rgb_buf.resize(rgb_len, 0);
+
+    if out_w == src_w && out_h == src_h {
+        // Fast path – same resolution, just swap B/R channels
+        for (src, dst) in bgra.chunks_exact(4).zip(rgb_buf.chunks_exact_mut(3)) {
+            dst[0] = src[2]; // R
+            dst[1] = src[1]; // G
+            dst[2] = src[0]; // B
+        }
+    } else {
+        // Nearest-neighbour downscale with precomputed X lookup table
+        let mut x_map: Vec<usize> = Vec::with_capacity(out_w);
+        for x in 0..out_w {
+            x_map.push((x * src_w / out_w) * 4);
+        }
+
+        for y in 0..out_h {
+            let src_row_base = (y * src_h / out_h) * src_w * 4;
+            let dst_row_base = y * out_w * 3;
+
+            let src_row = &bgra[src_row_base..src_row_base + src_w * 4];
+            let dst_row = &mut rgb_buf[dst_row_base..dst_row_base + out_w * 3];
+
+            for x in 0..out_w {
+                let si = x_map[x];
+                let di = x * 3;
+                dst_row[di] = src_row[si + 2]; // R
+                dst_row[di + 1] = src_row[si + 1]; // G
+                dst_row[di + 2] = src_row[si]; // B
+            }
+        }
+    }
+
+    // Encode to JPEG – pre-allocate output based on typical compression ratio
+    let mut out = Vec::with_capacity(rgb_len / 6);
+    let mut enc = JpegEncoder::new_with_quality(&mut out, quality);
+    enc.encode(rgb_buf, out_w as u32, out_h as u32, ExtendedColorType::Rgb8)?;
+    Ok(out)
+}
+
+/// Convenience wrapper that allocates its own scratch buffer (used by StubEncoder).
+fn bgra_to_jpeg(
+    frame: &crate::capture::CapturedFrame,
+    output_width: u32,
+    output_height: u32,
+    quality: u8,
+) -> Result<Vec<u8>> {
+    let (sw, sh) = frame.resolution;
+    let mut rgb_buf = Vec::new();
+    bgra_to_jpeg_reuse(
+        &frame.bgra,
+        sw as usize,
+        sh as usize,
+        output_width.max(1) as usize,
+        output_height.max(1) as usize,
+        quality,
+        &mut rgb_buf,
+    )
+}
+
+// ── Stub Encoder (no-FFmpeg build) ──────────────────────────────────
+
+/// Minimal encoder that converts each frame to JPEG on the caller thread.
 pub struct StubEncoder {
-    #[allow(dead_code)]
     config: EncoderConfig,
     packet_rx: Receiver<EncodedPacket>,
-    #[allow(dead_code)]
     packet_tx: Sender<EncodedPacket>,
     frame_count: u64,
-    #[allow(dead_code)]
     running: bool,
 }
 
 impl StubEncoder {
-    /// Create new stub encoder
     pub fn new(config: &EncoderConfig) -> Result<Self> {
         info!("Creating stub encoder");
         let (tx, rx) = bounded(64);
-
         Ok(Self {
             config: config.clone(),
             packet_rx: rx,
@@ -38,64 +123,6 @@ impl StubEncoder {
             running: false,
         })
     }
-}
-
-fn bgra_to_jpeg(
-    frame: &crate::capture::CapturedFrame,
-    output_width: u32,
-    output_height: u32,
-    quality: u8,
-) -> Result<Vec<u8>> {
-    let (src_width, src_height) = frame.resolution;
-    let src_pixel_count = (src_width as usize).saturating_mul(src_height as usize);
-    let expected_len = src_pixel_count.saturating_mul(4);
-
-    if frame.bgra.len() != expected_len {
-        anyhow::bail!(
-            "Invalid BGRA frame size: got={}, expected={} ({}x{})",
-            frame.bgra.len(),
-            expected_len,
-            src_width,
-            src_height
-        );
-    }
-
-    let out_width = output_width.max(1);
-    let out_height = output_height.max(1);
-    let out_pixel_count = (out_width as usize).saturating_mul(out_height as usize);
-
-    let mut rgb = vec![0u8; out_pixel_count.saturating_mul(3)];
-
-    if out_width == src_width && out_height == src_height {
-        for (src, dst) in frame.bgra.chunks_exact(4).zip(rgb.chunks_exact_mut(3)) {
-            dst[0] = src[2]; // R
-            dst[1] = src[1]; // G
-            dst[2] = src[0]; // B
-        }
-    } else {
-        let src_w = src_width as usize;
-        let src_h = src_height as usize;
-        let out_w = out_width as usize;
-        let out_h = out_height as usize;
-
-        for out_y in 0..out_h {
-            let src_y = out_y.saturating_mul(src_h) / out_h;
-            for out_x in 0..out_w {
-                let src_x = out_x.saturating_mul(src_w) / out_w;
-                let src_idx = (src_y * src_w + src_x) * 4;
-                let dst_idx = (out_y * out_w + out_x) * 3;
-
-                rgb[dst_idx] = frame.bgra[src_idx + 2];
-                rgb[dst_idx + 1] = frame.bgra[src_idx + 1];
-                rgb[dst_idx + 2] = frame.bgra[src_idx];
-            }
-        }
-    }
-
-    let mut out = Vec::with_capacity((rgb.len() / 3).max(1024));
-    let mut encoder = JpegEncoder::new_with_quality(&mut out, quality);
-    encoder.encode(&rgb, out_width, out_height, ExtendedColorType::Rgb8)?;
-    Ok(out)
 }
 
 impl Encoder for StubEncoder {
@@ -107,15 +134,14 @@ impl Encoder for StubEncoder {
     }
 
     fn encode_frame(&mut self, frame: &crate::capture::CapturedFrame) -> Result<()> {
-        trace!("Stub encoder received frame {}", self.frame_count);
+        trace!("Stub encoder frame {}", self.frame_count);
 
-        // Forward raw BGRA frame bytes for save-time encoding.
         let is_keyframe = self.frame_count % 30 == 0;
         let data = bgra_to_jpeg(
             frame,
             self.config.resolution.0,
             self.config.resolution.1,
-            20,
+            85,
         )?;
 
         let mut packet = EncodedPacket::new(
@@ -127,16 +153,12 @@ impl Encoder for StubEncoder {
         );
         packet.resolution = Some(frame.resolution);
 
-        if let Err(e) = self.packet_tx.try_send(packet) {
-            trace!("Failed to send encoded packet: {}", e);
-        }
-
+        let _ = self.packet_tx.try_send(packet);
         self.frame_count += 1;
         Ok(())
     }
 
     fn flush(&mut self) -> Result<Vec<EncodedPacket>> {
-        info!("Flushing stub encoder");
         self.running = false;
         Ok(vec![])
     }
@@ -150,93 +172,110 @@ impl Encoder for StubEncoder {
     }
 }
 
-/// Software encoder using libx264
+// ── Software Encoder (parallel JPEG workers) ────────────────────────
+
+/// Message sent to a worker thread. Uses `Bytes` for the BGRA payload
+/// so passing it across threads is a cheap ref-count bump, not a 14 MB copy.
+struct WorkItem {
+    bgra: Bytes,
+    src_w: u32,
+    src_h: u32,
+    timestamp: i64,
+    resolution: (u32, u32),
+}
+
+/// Multi-threaded software encoder.
 ///
-/// This is the fallback encoder when no hardware acceleration is available.
-/// It uses FFmpeg's libx264 codec with the "veryfast" preset for minimal CPU impact.
+/// `encode_frame` pushes work items to a bounded channel; a pool of
+/// worker threads each maintain their own pre-allocated RGB buffer and
+/// JPEG-compress frames in parallel.
 pub struct SoftwareEncoder {
-    #[allow(dead_code)]
     config: EncoderConfig,
     packet_rx: Receiver<EncodedPacket>,
     #[allow(dead_code)]
     packet_tx: Sender<EncodedPacket>,
-    #[allow(dead_code)]
     frame_count: u64,
-    width: u32,
-    height: u32,
-    framerate: u32,
-    #[allow(dead_code)]
-    keyframe_interval: u32,
-    #[allow(dead_code)]
     running: bool,
+    worker_tx: Sender<WorkItem>,
+    #[allow(dead_code)]
+    worker_threads: Vec<thread::JoinHandle<()>>,
 }
 
 impl SoftwareEncoder {
-    /// Create new software encoder
+    /// Create a new software encoder backed by a thread pool.
     pub fn new(config: &EncoderConfig) -> Result<Self> {
-        info!("Creating software encoder (x264 fallback)");
-        let (tx, rx) = bounded(64);
+        let num_workers = thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .clamp(2, 8);
+        info!(
+            "Creating software encoder with {} worker threads",
+            num_workers
+        );
+
+        let (packet_tx, packet_rx) = bounded(128);
+        // Bounded to num_workers so we never enqueue more work than can be
+        // processed in parallel – excess frames are dropped at the caller.
+        let (worker_tx, worker_rx) = bounded::<WorkItem>(num_workers);
+
+        let out_w = config.resolution.0;
+        let out_h = config.resolution.1;
+        let quality = 85u8; // JPEG quality 0-100; 85 = good fidelity, fast encode
+
+        let mut worker_threads = Vec::with_capacity(num_workers);
+        for id in 0..num_workers {
+            let rx = worker_rx.clone();
+            let tx = packet_tx.clone();
+            let ow = out_w as usize;
+            let oh = out_h as usize;
+
+            worker_threads.push(thread::spawn(move || {
+                trace!("Encoder worker {id} started");
+
+                // Each worker keeps its own RGB scratch buffer that is reused
+                // across frames, eliminating repeated heap allocation.
+                let mut rgb_buf: Vec<u8> = Vec::with_capacity(ow * oh * 3);
+
+                while let Ok(item) = rx.recv() {
+                    match bgra_to_jpeg_reuse(
+                        &item.bgra,
+                        item.src_w as usize,
+                        item.src_h as usize,
+                        ow,
+                        oh,
+                        quality,
+                        &mut rgb_buf,
+                    ) {
+                        Ok(jpeg) => {
+                            let mut pkt = EncodedPacket::new(
+                                jpeg,
+                                item.timestamp,
+                                item.timestamp,
+                                true, // Every MJPEG frame is a keyframe
+                                super::StreamType::Video,
+                            );
+                            pkt.resolution = Some(item.resolution);
+                            if tx.send(pkt).is_err() {
+                                break;
+                            }
+                        }
+                        Err(e) => warn!("Worker {id} encode error: {e}"),
+                    }
+                }
+
+                trace!("Encoder worker {id} exiting");
+            }));
+        }
 
         Ok(Self {
             config: config.clone(),
-            packet_rx: rx,
-            packet_tx: tx,
+            packet_rx,
+            packet_tx,
             frame_count: 0,
-            width: config.resolution.0,
-            height: config.resolution.1,
-            framerate: config.framerate,
-            keyframe_interval: config.keyframe_interval_frames(),
             running: false,
+            worker_tx,
+            worker_threads,
         })
-    }
-
-    /// Convert BGRA data to YUV420P format
-    ///
-    /// This is a simple conversion suitable for the Phase 1 CPU readback path.
-    /// In Phase 3, this will be replaced by GPU-accelerated color space conversion.
-    #[allow(dead_code)]
-    fn convert_bgra_to_yuv420p(
-        &self,
-        bgra: &[u8],
-        width: u32,
-        height: u32,
-    ) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
-        let width = width as usize;
-        let height = height as usize;
-        let y_size = width * height;
-        let uv_size = y_size / 4;
-
-        let mut y_plane = vec![0u8; y_size];
-        let mut u_plane = vec![0u8; uv_size];
-        let mut v_plane = vec![0u8; uv_size];
-
-        // Simple BGRA to YUV420p conversion
-        // This is a basic implementation - a production version would use SIMD
-        for row in 0..height {
-            for col in 0..width {
-                let idx = (row * width + col) * 4;
-                let b = bgra[idx] as f32;
-                let g = bgra[idx + 1] as f32;
-                let r = bgra[idx + 2] as f32;
-
-                // Y = 0.299R + 0.587G + 0.114B
-                let y = 0.299 * r + 0.587 * g + 0.114 * b;
-                y_plane[row * width + col] = y.clamp(0.0, 255.0) as u8;
-
-                // Subsample UV (every 2x2 block)
-                if row % 2 == 0 && col % 2 == 0 {
-                    let uv_idx = (row / 2) * (width / 2) + (col / 2);
-                    // U = -0.147R - 0.289G + 0.436B + 128
-                    // V = 0.615R - 0.515G - 0.100B + 128
-                    let u = -0.147 * r - 0.289 * g + 0.436 * b + 128.0;
-                    let v = 0.615 * r - 0.515 * g - 0.100 * b + 128.0;
-                    u_plane[uv_idx] = u.clamp(0.0, 255.0) as u8;
-                    v_plane[uv_idx] = v.clamp(0.0, 255.0) as u8;
-                }
-            }
-        }
-
-        (y_plane, u_plane, v_plane)
     }
 }
 
@@ -244,33 +283,29 @@ impl Encoder for SoftwareEncoder {
     fn init(&mut self, config: &EncoderConfig) -> Result<()> {
         self.config = config.clone();
         self.running = true;
-
         info!(
-            "Software encoder initialized: {}x{} @ {}fps",
-            self.width, self.height, self.framerate
+            "Software encoder ready: {}x{} @ {} FPS, {} workers",
+            config.resolution.0,
+            config.resolution.1,
+            config.framerate,
+            self.worker_threads.len(),
         );
-
         Ok(())
     }
 
     fn encode_frame(&mut self, frame: &crate::capture::CapturedFrame) -> Result<()> {
-        trace!("Software encoding frame {}", self.frame_count);
+        let item = WorkItem {
+            bgra: frame.bgra.clone(), // Bytes clone = ref-count bump, O(1)
+            src_w: frame.resolution.0,
+            src_h: frame.resolution.1,
+            timestamp: frame.timestamp,
+            resolution: frame.resolution,
+        };
 
-        let is_keyframe = self.frame_count % self.keyframe_interval as u64 == 0;
-        let quality = (self.config.bitrate_mbps.saturating_mul(2)).clamp(18, 50) as u8;
-        let data = bgra_to_jpeg(frame, self.width, self.height, quality)?;
-
-        let mut packet = EncodedPacket::new(
-            data,
-            frame.timestamp,
-            frame.timestamp,
-            is_keyframe,
-            super::StreamType::Video,
-        );
-        packet.resolution = Some(frame.resolution);
-
-        if let Err(e) = self.packet_tx.try_send(packet) {
-            trace!("Failed to send encoded packet: {}", e);
+        // Non-blocking send; if all workers are busy we drop the frame
+        // rather than stalling the capture pipeline.
+        if self.worker_tx.try_send(item).is_err() {
+            trace!("Workers busy, dropping frame {}", self.frame_count);
         }
 
         self.frame_count += 1;
@@ -278,8 +313,11 @@ impl Encoder for SoftwareEncoder {
     }
 
     fn flush(&mut self) -> Result<Vec<EncodedPacket>> {
-        info!("Flushing software encoder");
-        self.running = false;
+        info!(
+            "Flushing software encoder ({} frames dispatched)",
+            self.frame_count
+        );
+        // Workers drain naturally when worker_tx is dropped.
         Ok(vec![])
     }
 
@@ -291,6 +329,8 @@ impl Encoder for SoftwareEncoder {
         self.running
     }
 }
+
+// ── Tests ────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -310,36 +350,13 @@ mod tests {
     #[test]
     fn test_stub_encoder_creation() {
         let config = create_test_config();
-        let encoder = StubEncoder::new(&config);
-        assert!(encoder.is_ok());
+        assert!(StubEncoder::new(&config).is_ok());
     }
 
     #[test]
     fn test_software_encoder_creation() {
         let config = create_test_config();
-        let encoder = SoftwareEncoder::new(&config);
-        assert!(encoder.is_ok());
-    }
-
-    #[test]
-    fn test_bgra_to_yuv_conversion() {
-        let config = create_test_config();
-        let encoder = SoftwareEncoder::new(&config).unwrap();
-
-        // Create a 2x2 BGRA image (each pixel is B, G, R, A)
-        let bgra = vec![
-            255, 0, 0, 255, // Blue pixel
-            0, 255, 0, 255, // Green pixel
-            0, 0, 255, 255, // Red pixel
-            255, 255, 255, 255, // White pixel
-        ];
-
-        let (y, u, v) = encoder.convert_bgra_to_yuv420p(&bgra, 2, 2);
-
-        // Check sizes
-        assert_eq!(y.len(), 4); // 2x2 = 4 Y samples
-        assert_eq!(u.len(), 1); // 1x1 = 1 U sample (subsampled)
-        assert_eq!(v.len(), 1); // 1x1 = 1 V sample (subsampled)
+        assert!(SoftwareEncoder::new(&config).is_ok());
     }
 
     #[test]

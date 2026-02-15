@@ -238,11 +238,18 @@ impl ReplayBuffer {
         let keyframe_count = self.keyframe_index.len();
         let memory_usage_percent = (self.total_bytes as f32 / self.max_memory_bytes as f32) * 100.0;
 
-        // Estimate duration based on packet timestamps (QPC is ~10MHz)
+        // Get actual QPC frequency for accurate stats
+        let mut qpc_freq = 10_000_000i64;
+        unsafe {
+            let _ = windows::Win32::System::Performance::QueryPerformanceFrequency(&mut qpc_freq);
+        }
+        let qpc_freq_f64 = qpc_freq as f64;
+
+        // Estimate duration based on packet timestamps (QPC frequency varies)
         let duration_secs = if self.packets.len() >= 2 {
             let first = self.packets.front().map(|p| p.pts).unwrap_or(0);
             let last = self.packets.back().map(|p| p.pts).unwrap_or(0);
-            ((last - first) as f64) / 10_000_000.0 // QPC to seconds (approx)
+            ((last - first) as f64) / qpc_freq_f64
         } else {
             0.0
         };

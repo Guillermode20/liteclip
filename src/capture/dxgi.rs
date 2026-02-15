@@ -5,6 +5,7 @@
 use crate::capture::{CaptureBackend, CaptureConfig, CapturedFrame};
 use crate::d3d::D3D11Texture;
 use anyhow::{bail, Context, Result};
+use bytes::Bytes;
 use crossbeam::channel::{bounded, Receiver, Sender};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -22,7 +23,7 @@ use windows::Win32::Graphics::Dxgi::{
     DXGI_ERROR_NOT_CURRENTLY_AVAILABLE, DXGI_ERROR_UNSUPPORTED, DXGI_ERROR_WAIT_TIMEOUT,
     DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTPUT_DESC,
 };
-use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
+use windows::Win32::System::Performance::QueryPerformanceCounter;
 use windows_core::Interface;
 
 /// DXGI capture state
@@ -46,14 +47,6 @@ impl DxgiCaptureState {
             qpc
         }
     }
-
-    pub fn get_qpc_frequency() -> i64 {
-        unsafe {
-            let mut freq = 0i64;
-            let _ = QueryPerformanceFrequency(&mut freq);
-            freq
-        }
-    }
 }
 
 /// DXGI-based screen capture
@@ -68,7 +61,7 @@ pub struct DxgiCapture {
 impl DxgiCapture {
     /// Create a new DXGI capture instance
     pub fn new() -> Result<Self> {
-        let (frame_tx, frame_rx) = bounded::<CapturedFrame>(32);
+        let (frame_tx, frame_rx) = bounded::<CapturedFrame>(64);
 
         Ok(Self {
             config: CaptureConfig::default(),
@@ -336,7 +329,7 @@ impl DxgiCapture {
 
                         let frame = CapturedFrame {
                             texture: texture_to_send,
-                            bgra,
+                            bgra: Bytes::from(bgra),
                             timestamp,
                             resolution: (state.frame_width, state.frame_height),
                         };
@@ -373,7 +366,8 @@ impl DxgiCapture {
         info!("DXGI capture thread started: {} FPS", config.target_fps);
 
         let frame_duration = Duration::from_nanos(1_000_000_000u64 / config.target_fps as u64);
-        let timeout_ms = 100; // 100ms timeout for AcquireNextFrame
+        // Use a short timeout so we don't block longer than one frame period
+        let timeout_ms = (frame_duration.as_millis() as u32).max(1);
         let mut frame_count = 0u64;
         let mut error_count = 0u32;
         let max_errors = 10;

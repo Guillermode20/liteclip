@@ -7,7 +7,7 @@ use anyhow::Result;
 use bytes::Bytes;
 pub use crossbeam::channel::Receiver as CrossbeamReceiver;
 use crossbeam::channel::{bounded, Receiver, Sender};
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, info, warn};
 
 pub mod cpu_readback;
 pub mod hw_encoder;
@@ -331,7 +331,7 @@ pub fn spawn_encoder(
     config: EncoderConfig,
     buffer: crate::buffer::ring::SharedReplayBuffer,
 ) -> Result<(EncoderHandle, Sender<crate::capture::CapturedFrame>)> {
-    let (frame_tx, frame_rx): (Sender<crate::capture::CapturedFrame>, _) = bounded(4);
+    let (frame_tx, frame_rx): (Sender<crate::capture::CapturedFrame>, _) = bounded(32);
 
     let frame_tx_clone = frame_tx.clone();
 
@@ -347,34 +347,21 @@ pub fn spawn_encoder(
         // Get the packet receiver from the encoder
         let packet_rx = encoder.packet_rx();
 
-        // Main encode loop
+        // Main encode loop – dispatch every frame to parallel workers
+        // and drain completed packets into the ring buffer.
         loop {
-            // Try to receive a frame with timeout to also check for encoded packets
-            match frame_rx.recv() {
-                Ok(mut frame) => {
-                    // If we're behind, keep only the newest frame and drop stale ones.
-                    while let Ok(newer_frame) = frame_rx.try_recv() {
-                        frame = newer_frame;
-                    }
+            // First, drain any already-encoded packets into the buffer
+            while let Ok(packet) = packet_rx.try_recv() {
+                buffer.push(packet);
+            }
 
-                    // Encode the frame
+            match frame_rx.recv() {
+                Ok(frame) => {
                     if let Err(e) = encoder.encode_frame(&frame) {
                         warn!("Failed to encode frame: {}", e);
-                        continue;
-                    }
-
-                    // Drain any encoded packets from the encoder and push to buffer
-                    while let Ok(packet) = packet_rx.try_recv() {
-                        trace!(
-                            "Pushing encoded packet to buffer: pts={}, size={}",
-                            packet.pts,
-                            packet.data.len()
-                        );
-                        buffer.push(packet);
                     }
                 }
                 Err(_) => {
-                    // Channel closed, exit loop
                     debug!("Frame channel closed, shutting down encoder");
                     break;
                 }
@@ -386,17 +373,17 @@ pub fn spawn_encoder(
         match encoder.flush() {
             Ok(packets) => {
                 for packet in packets {
-                    trace!(
-                        "Pushing flushed packet to buffer: pts={}, size={}",
-                        packet.pts,
-                        packet.data.len()
-                    );
                     buffer.push(packet);
                 }
             }
             Err(e) => {
                 warn!("Failed to flush encoder: {}", e);
             }
+        }
+
+        // Final drain of worker output
+        while let Ok(packet) = packet_rx.try_recv() {
+            buffer.push(packet);
         }
 
         info!("Encoder thread stopped");
@@ -436,34 +423,21 @@ pub fn spawn_encoder_with_receiver(
         // Get the packet receiver from the encoder
         let packet_rx = encoder.packet_rx();
 
-        // Main encode loop
+        // Main encode loop – dispatch every frame to parallel workers
+        // and drain completed packets into the ring buffer.
         loop {
-            // Try to receive a frame with timeout to also check for encoded packets
-            match frame_rx.recv() {
-                Ok(mut frame) => {
-                    // If we're behind, keep only the newest frame and drop stale ones.
-                    while let Ok(newer_frame) = frame_rx.try_recv() {
-                        frame = newer_frame;
-                    }
+            // Drain completed packets into the buffer
+            while let Ok(packet) = packet_rx.try_recv() {
+                buffer.push(packet);
+            }
 
-                    // Encode the frame
+            match frame_rx.recv() {
+                Ok(frame) => {
                     if let Err(e) = encoder.encode_frame(&frame) {
                         warn!("Failed to encode frame: {}", e);
-                        continue;
-                    }
-
-                    // Drain any encoded packets from the encoder and push to buffer
-                    while let Ok(packet) = packet_rx.try_recv() {
-                        trace!(
-                            "Pushing encoded packet to buffer: pts={}, size={}",
-                            packet.pts,
-                            packet.data.len()
-                        );
-                        buffer.push(packet);
                     }
                 }
                 Err(_) => {
-                    // Channel closed, exit loop
                     debug!("Frame channel closed, shutting down encoder");
                     break;
                 }
@@ -475,17 +449,17 @@ pub fn spawn_encoder_with_receiver(
         match encoder.flush() {
             Ok(packets) => {
                 for packet in packets {
-                    trace!(
-                        "Pushing flushed packet to buffer: pts={}, size={}",
-                        packet.pts,
-                        packet.data.len()
-                    );
                     buffer.push(packet);
                 }
             }
             Err(e) => {
                 warn!("Failed to flush encoder: {}", e);
             }
+        }
+
+        // Final drain of worker output
+        while let Ok(packet) = packet_rx.try_recv() {
+            buffer.push(packet);
         }
 
         info!("Encoder thread stopped");
