@@ -1,6 +1,8 @@
 # Rust build artifacts
-/target
+/target*
 /target-*
+
+.cargo
 
 # IDEs
 .vscode/

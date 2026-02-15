@@ -184,10 +184,7 @@ impl LiteClipApp {
         self.save_result_rx = Some(rx);
 
         std::thread::spawn(move || {
-            let result = {
-                let mut rec = recorder.lock().unwrap();
-                rec.save_clip_auto()
-            };
+            let result = Recorder::save_clip_auto_detached(&recorder);
             let message = match result {
                 Ok(path) => SaveResult::Success(path),
                 Err(err) => SaveResult::Error(err),
@@ -401,9 +398,7 @@ impl LiteClipApp {
                     ui.add_enabled(
                         false,
                         egui::Button::new(
-                            egui::RichText::new("Saving...")
-                                .size(13.0)
-                                .color(ACCENT),
+                            egui::RichText::new("Saving...").size(13.0).color(ACCENT),
                         )
                         .frame(false)
                         .min_size(egui::vec2(avail, 34.0)),
@@ -826,17 +821,12 @@ impl LiteClipApp {
 
             // --- Output directory ---
             ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new("Save Folder")
-                        .color(TEXT_SECONDARY),
-                );
+                ui.label(egui::RichText::new("Save Folder").color(TEXT_SECONDARY));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui
                         .add(
                             egui::Button::new(
-                                egui::RichText::new("Browse")
-                                    .size(11.0)
-                                    .color(TEXT_PRIMARY),
+                                egui::RichText::new("Browse").size(11.0).color(TEXT_PRIMARY),
                             )
                             .fill(BG_ELEVATED)
                             .stroke(egui::Stroke::new(1.0, BORDER))
@@ -1027,11 +1017,7 @@ impl eframe::App for LiteClipApp {
             .show(ctx, |ui| {
                 // --- Header ---
                 ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new("●")
-                            .size(10.0)
-                            .color(ACCENT),
-                    );
+                    ui.label(egui::RichText::new("●").size(10.0).color(ACCENT));
                     ui.add_space(2.0);
                     ui.label(
                         egui::RichText::new("LITECLIP")
@@ -1086,10 +1072,7 @@ fn section_header(ui: &mut egui::Ui, title: &str) {
     ui.add_space(8.0);
     ui.horizontal(|ui| {
         // Accent bar indicator
-        let (rect, _) = ui.allocate_exact_size(
-            egui::vec2(3.0, 14.0),
-            egui::Sense::hover(),
-        );
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(3.0, 14.0), egui::Sense::hover());
         ui.painter().rect_filled(
             rect,
             egui::CornerRadius::same(2),

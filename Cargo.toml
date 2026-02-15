@@ -27,3 +27,7 @@ codegen-units = 1
 lto = "fat"
 panic = "abort"
 strip = true
+
+[target.'cfg(windows)'.build-dependencies]
+image = "0.25"
+winresource = "0.1"

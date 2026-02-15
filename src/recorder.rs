@@ -4,6 +4,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
@@ -77,6 +78,22 @@ pub struct Recorder {
     child: Option<Child>,
     temp_dir: Option<TempDir>,
     started_at: Option<Instant>,
+    recording_expected: bool,
+    restart_attempts: u32,
+    next_restart_attempt_at: Option<Instant>,
+}
+
+struct SaveJob {
+    was_recording: bool,
+    output_path: PathBuf,
+    child: Option<Child>,
+    temp_dir: Option<TempDir>,
+}
+
+struct SaveExecution {
+    was_recording: bool,
+    temp_dir: Option<TempDir>,
+    save_result: Result<PathBuf, String>,
 }
 
 impl Recorder {
@@ -166,6 +183,9 @@ impl Recorder {
             child: None,
             temp_dir: None,
             started_at: None,
+            recording_expected: false,
+            restart_attempts: 0,
+            next_restart_attempt_at: None,
         }
     }
 
@@ -186,12 +206,16 @@ impl Recorder {
     pub fn start(&mut self) -> Result<(), String> {
         if !self.ffmpeg_found {
             error!("Cannot start: FFmpeg not found on PATH");
+            self.recording_expected = false;
+            self.restart_attempts = 0;
+            self.next_restart_attempt_at = None;
             return Err("FFmpeg not found on PATH. Please install FFmpeg.".into());
         }
         if self.state == RecorderState::Recording {
             warn!("Start called but already recording — ignoring");
             return Err("Already recording.".into());
         }
+        self.recording_expected = true;
 
         info!(
             "Starting recording — encoder={:?}, quality={:?}, fps={:?}, resolution={:?}, buffer={}s, audio={}",
@@ -432,6 +456,8 @@ impl Recorder {
             self.temp_dir = Some(temp_dir);
             self.started_at = Some(Instant::now());
             self.state = RecorderState::Recording;
+            self.restart_attempts = 0;
+            self.next_restart_attempt_at = None;
             return Ok(());
         }
 
@@ -439,6 +465,7 @@ impl Recorder {
             "FFmpeg failed to start recording. Try Software (x264) encoder.".into()
         });
         error!("All encoder attempts failed: {}", err);
+        self.state = RecorderState::Idle;
         Err(err)
     }
 
@@ -453,9 +480,34 @@ impl Recorder {
         }
         self.state = RecorderState::Idle;
         self.started_at = None;
+        self.temp_dir = None;
+        self.recording_expected = false;
+        self.restart_attempts = 0;
+        self.next_restart_attempt_at = None;
+    }
+
+    /// Save a clip without holding the shared recorder mutex during the expensive
+    /// concat phase. This keeps the app responsive during long-running saves.
+    pub fn save_clip_auto_detached(recorder: &Arc<Mutex<Recorder>>) -> Result<PathBuf, String> {
+        let job = {
+            let mut rec = recorder
+                .lock()
+                .map_err(|_| "Recorder lock poisoned while preparing save.".to_string())?;
+            let output_path = rec.auto_output_path();
+            info!("Auto-saving clip to: {}", output_path.display());
+            rec.prepare_save_job(output_path)?
+        };
+
+        let execution = execute_save_job(job);
+
+        let mut rec = recorder
+            .lock()
+            .map_err(|_| "Recorder lock poisoned while finalizing save.".to_string())?;
+        rec.finish_save_job(execution)
     }
 
     /// Auto-save the current replay buffer to the configured output directory.
+    #[allow(dead_code)]
     pub fn save_clip_auto(&mut self) -> Result<PathBuf, String> {
         let output_path = self.auto_output_path();
         info!("Auto-saving clip to: {}", output_path.display());
@@ -463,167 +515,77 @@ impl Recorder {
     }
 
     /// Save the current replay buffer to a specific path.
+    #[allow(dead_code)]
     pub fn save_clip(&mut self, output_path: &Path) -> Result<PathBuf, String> {
-        let was_recording = self.state == RecorderState::Recording;
-        self.state = RecorderState::Saving;
-        info!(
-            "Save clip requested — was_recording={}, elapsed={}s, output={}",
-            was_recording,
-            self.elapsed_seconds(),
-            output_path.display(),
-        );
+        let save_job = self.prepare_save_job(output_path.to_path_buf())?;
+        let execution = execute_save_job(save_job);
+        self.finish_save_job(execution)
+    }
 
-        // Stop FFmpeg so all segments are flushed
-        if let Some(mut child) = self.child.take() {
-            info!("Stopping FFmpeg for segment flush...");
-            graceful_shutdown(&mut child);
+    /// Called periodically by a watchdog thread to detect FFmpeg exits and
+    /// attempt bounded automatic recovery when recording was expected.
+    pub fn health_check_tick(&mut self) {
+        if self.state == RecorderState::Saving {
+            return;
         }
 
-        // Poll briefly for the last segment to be fully written, rather than
-        // a fixed 200ms sleep. On fast machines this returns in <50ms.
-        wait_for_segments_flush();
-
-        let result = (|| -> Result<PathBuf, String> {
-            let temp_path = self
-                .temp_dir
-                .as_ref()
-                .ok_or_else(|| {
-                    error!("Save failed: No temp directory — nothing recorded yet");
-                    "No temp directory — nothing recorded yet.".to_string()
-                })?
-                .path()
-                .to_path_buf();
-
-            debug!("Scanning temp dir for segments: {}", temp_path.display());
-
-            // Gather segment files sorted by numeric index from filename
-            let mut segments: Vec<PathBuf> = fs::read_dir(&temp_path)
-                .map_err(|e| {
-                    error!("Failed to read temp dir {}: {}", temp_path.display(), e);
-                    format!("Failed to read temp dir: {}", e)
-                })?
-                .filter_map(|entry| {
-                    let entry = entry.ok()?;
-                    let path = entry.path();
-                    if path.extension().and_then(|e| e.to_str()) == Some("ts") {
-                        Some(path)
-                    } else {
-                        None
+        if self.state == RecorderState::Recording {
+            let stopped_reason = match self.child.as_mut() {
+                Some(child) => match child.try_wait() {
+                    Ok(Some(status)) => Some(format!("FFmpeg exited with status {}", status)),
+                    Ok(None) => {
+                        self.restart_attempts = 0;
+                        self.next_restart_attempt_at = None;
+                        return;
                     }
-                })
-                .collect();
+                    Err(e) => Some(format!("Failed to poll FFmpeg process: {}", e)),
+                },
+                None => Some("Missing FFmpeg child while state is Recording".into()),
+            };
 
-            if segments.is_empty() {
-                error!(
-                    "No segment files found in {}. Buffer may not have recorded long enough.",
-                    temp_path.display()
-                );
-                if let Ok(entries) = fs::read_dir(&temp_path) {
-                    let files: Vec<String> = entries
-                        .filter_map(|e| e.ok())
-                        .map(|e| format!("{}", e.path().display()))
-                        .collect();
-                    debug!("Temp dir contents: {:?}", files);
-                }
-                return Err("No segments found. Record for a few seconds first.".into());
+            if let Some(reason) = stopped_reason {
+                self.mark_unexpected_stop(&reason);
+            }
+        }
+
+        if self.state == RecorderState::Idle && self.recording_expected {
+            let now = Instant::now();
+            let restart_due = self
+                .next_restart_attempt_at
+                .map(|scheduled| now >= scheduled)
+                .unwrap_or(true);
+            if !restart_due {
+                return;
             }
 
-            info!("Found {} segment(s) to concat", segments.len());
-
-            // Sort by numeric index extracted from filename (seg_NNNN.ts).
-            // This is more reliable than mtime which can alias when segment_wrap
-            // reuses filenames — mtime resolution on NTFS is ~100ms and two
-            // segments written in rapid succession can get the same timestamp.
-            segments
-                .sort_unstable_by(|a, b| extract_segment_index(a).cmp(&extract_segment_index(b)));
-
-            // When segment_wrap is active, reorder so oldest segment comes first.
-            // The oldest segment has the highest mtime gap from its predecessor.
-            if segments.len() > 1 {
-                reorder_wrapped_segments(&mut segments);
-            }
-
-            for seg in &segments {
-                let size = fs::metadata(seg).map(|m| m.len()).unwrap_or(0);
-                debug!("  Segment: {} ({} bytes)", seg.display(), size);
-            }
-
-            // Create the concat list file
-            let concat_list_path = temp_path.join("concat_list.txt");
-            let mut concat_file = fs::File::create(&concat_list_path).map_err(|e| {
-                error!("Failed to create concat list: {}", e);
-                format!("Failed to create concat list: {}", e)
-            })?;
-
-            for seg in &segments {
-                let escaped_path = escape_ffmpeg_concat_path(seg);
-                writeln!(concat_file, "file '{}'", escaped_path).map_err(|e| {
-                    error!("Failed to write concat list: {}", e);
-                    format!("Failed to write concat list: {}", e)
-                })?;
-            }
-            drop(concat_file);
-
-            // Ensure output directory exists
-            if let Some(parent) = output_path.parent() {
-                let _ = fs::create_dir_all(parent);
-            }
-
-            // Concatenate segments into final clip.
-            // -probesize 32 -analyzeduration 0: segments are known-good MPEG-TS, skip probing.
-            // -nostdin: prevent accidental stdin blocking.
-            let concat_args = [
-                "-nostdin",
-                "-probesize",
-                "32",
-                "-analyzeduration",
-                "0",
-                "-f",
-                "concat",
-                "-safe",
-                "0",
-                "-i",
-                concat_list_path.to_str().unwrap(),
-                "-c",
-                "copy",
-                "-y",
-                output_path.to_str().unwrap(),
-            ];
-            info!("Running concat: ffmpeg {}", concat_args.join(" "));
-
-            let concat_result = ffmpeg_command()
-                .args(&concat_args)
-                .stdout(Stdio::null())
-                .stderr(Stdio::piped())
-                .output()
-                .map_err(|e| {
-                    error!("Failed to run FFmpeg concat: {}", e);
-                    format!("Failed to run FFmpeg concat: {}", e)
-                })?;
-
-            if !concat_result.status.success() {
-                let stderr = String::from_utf8_lossy(&concat_result.stderr);
-                error!("FFmpeg concat failed (status: {})", concat_result.status);
-                if !stderr.is_empty() {
-                    error!("FFmpeg concat stderr:\n{}", stderr);
-                }
-                return Err("FFmpeg concat failed. Check segment files.".into());
-            }
-
-            // Log final file size
-            let file_size = fs::metadata(output_path).map(|m| m.len()).unwrap_or(0);
-            info!(
-                "Clip saved successfully: {} ({:.1} MB)",
-                output_path.display(),
-                file_size as f64 / (1024.0 * 1024.0),
+            let attempt_number = self.restart_attempts.saturating_add(1);
+            warn!(
+                "Attempting recorder auto-restart (attempt #{})",
+                attempt_number
             );
 
-            self.last_saved_path = Some(output_path.to_path_buf());
-            Ok(output_path.to_path_buf())
-        })();
-
-        self.restore_state_after_save(was_recording);
-        result
+            match self.start() {
+                Ok(()) => {
+                    info!("Recorder auto-restart succeeded");
+                    self.restart_attempts = 0;
+                    self.next_restart_attempt_at = None;
+                }
+                Err(e) => {
+                    if !self.recording_expected {
+                        return;
+                    }
+                    self.state = RecorderState::Idle;
+                    self.restart_attempts = self.restart_attempts.saturating_add(1);
+                    let delay = Self::restart_backoff_delay(self.restart_attempts);
+                    self.next_restart_attempt_at = Some(Instant::now() + delay);
+                    error!(
+                        "Recorder auto-restart failed: {}. Next retry in {}s",
+                        e,
+                        delay.as_secs()
+                    );
+                }
+            }
+        }
     }
 
     /// Generate an auto-save output path with timestamp.
@@ -633,23 +595,87 @@ impl Recorder {
         self.settings.output_dir.join(filename)
     }
 
-    fn restore_state_after_save(&mut self, was_recording: bool) {
+    fn prepare_save_job(&mut self, output_path: PathBuf) -> Result<SaveJob, String> {
+        if self.state == RecorderState::Saving {
+            warn!("Save requested while another save is in progress");
+            return Err("Save already in progress.".into());
+        }
+
+        let was_recording = self.state == RecorderState::Recording;
+        self.state = RecorderState::Saving;
+        info!(
+            "Save clip requested — was_recording={}, elapsed={}s, output={}",
+            was_recording,
+            self.elapsed_seconds(),
+            output_path.display(),
+        );
+
+        Ok(SaveJob {
+            was_recording,
+            output_path,
+            child: self.child.take(),
+            temp_dir: self.temp_dir.take(),
+        })
+    }
+
+    fn finish_save_job(&mut self, mut execution: SaveExecution) -> Result<PathBuf, String> {
+        self.child = None;
         self.temp_dir = None;
         self.started_at = None;
-        self.child = None;
+        self.state = RecorderState::Idle;
 
-        if was_recording {
-            info!("Restarting recording after save...");
-            match self.start() {
-                Ok(()) => info!("Recording restarted successfully"),
-                Err(e) => {
-                    error!("Failed to restart recording after save: {}", e);
-                    self.state = RecorderState::Idle;
-                }
-            }
-        } else {
-            self.state = RecorderState::Idle;
+        if let Ok(saved_path) = &execution.save_result {
+            self.last_saved_path = Some(saved_path.clone());
         }
+
+        // Keep the temp dir alive for the concat phase and explicitly release it here.
+        execution.temp_dir.take();
+
+        let mut restart_error: Option<String> = None;
+        if execution.was_recording && self.recording_expected {
+            info!("Restarting recording after save...");
+            if let Err(e) = self.start() {
+                self.state = RecorderState::Idle;
+                self.restart_attempts = self.restart_attempts.saturating_add(1);
+                let delay = Self::restart_backoff_delay(self.restart_attempts);
+                self.next_restart_attempt_at = Some(Instant::now() + delay);
+                error!(
+                    "Failed to restart recording after save: {}. Next retry in {}s",
+                    e,
+                    delay.as_secs()
+                );
+                restart_error = Some(e);
+            }
+        }
+
+        match (execution.save_result, restart_error) {
+            (Ok(path), None) => Ok(path),
+            (Ok(path), Some(e)) => Err(format!(
+                "Clip saved to {} but recorder failed to restart: {}",
+                path.display(),
+                e
+            )),
+            (Err(err), None) => Err(err),
+            (Err(err), Some(e)) => Err(format!("{} Recorder restart also failed: {}", err, e)),
+        }
+    }
+
+    fn mark_unexpected_stop(&mut self, reason: &str) {
+        error!("Recorder stopped unexpectedly: {}", reason);
+        self.child = None;
+        self.temp_dir = None;
+        self.started_at = None;
+        self.state = RecorderState::Idle;
+
+        if self.recording_expected && self.next_restart_attempt_at.is_none() {
+            self.next_restart_attempt_at = Some(Instant::now());
+        }
+    }
+
+    fn restart_backoff_delay(attempts: u32) -> Duration {
+        let shift = attempts.saturating_sub(1).min(5);
+        let secs = 1u64 << shift;
+        Duration::from_secs(secs.min(30))
     }
 }
 
@@ -661,6 +687,161 @@ impl Drop for Recorder {
 }
 
 // ── Helpers ────────────────────────────────────────────────────────
+
+fn execute_save_job(mut save_job: SaveJob) -> SaveExecution {
+    if let Some(mut child) = save_job.child.take() {
+        info!("Stopping FFmpeg for segment flush...");
+        graceful_shutdown(&mut child);
+    }
+
+    // Poll briefly for the last segment to be fully written, rather than
+    // a fixed 200ms sleep. On fast machines this returns in <50ms.
+    wait_for_segments_flush();
+
+    let output_path = save_job.output_path.clone();
+    let save_result = (|| -> Result<PathBuf, String> {
+        let temp_path = save_job
+            .temp_dir
+            .as_ref()
+            .ok_or_else(|| {
+                error!("Save failed: No temp directory — nothing recorded yet");
+                "No temp directory — nothing recorded yet.".to_string()
+            })?
+            .path()
+            .to_path_buf();
+
+        debug!("Scanning temp dir for segments: {}", temp_path.display());
+
+        // Gather segment files sorted by numeric index from filename
+        let mut segments: Vec<PathBuf> = fs::read_dir(&temp_path)
+            .map_err(|e| {
+                error!("Failed to read temp dir {}: {}", temp_path.display(), e);
+                format!("Failed to read temp dir: {}", e)
+            })?
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("ts") {
+                    Some(path)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if segments.is_empty() {
+            error!(
+                "No segment files found in {}. Buffer may not have recorded long enough.",
+                temp_path.display()
+            );
+            if let Ok(entries) = fs::read_dir(&temp_path) {
+                let files: Vec<String> = entries
+                    .filter_map(|e| e.ok())
+                    .map(|e| format!("{}", e.path().display()))
+                    .collect();
+                debug!("Temp dir contents: {:?}", files);
+            }
+            return Err("No segments found. Record for a few seconds first.".into());
+        }
+
+        info!("Found {} segment(s) to concat", segments.len());
+
+        // Sort by numeric index extracted from filename (seg_NNNN.ts).
+        // This is more reliable than mtime which can alias when segment_wrap
+        // reuses filenames — mtime resolution on NTFS is ~100ms and two
+        // segments written in rapid succession can get the same timestamp.
+        segments.sort_unstable_by_key(|path| extract_segment_index(path));
+
+        // When segment_wrap is active, reorder so oldest segment comes first.
+        // The oldest segment has the highest mtime gap from its predecessor.
+        if segments.len() > 1 {
+            reorder_wrapped_segments(segments.as_mut_slice());
+        }
+
+        for seg in &segments {
+            let size = fs::metadata(seg).map(|m| m.len()).unwrap_or(0);
+            debug!("  Segment: {} ({} bytes)", seg.display(), size);
+        }
+
+        // Create the concat list file
+        let concat_list_path = temp_path.join("concat_list.txt");
+        let mut concat_file = fs::File::create(&concat_list_path).map_err(|e| {
+            error!("Failed to create concat list: {}", e);
+            format!("Failed to create concat list: {}", e)
+        })?;
+
+        for seg in &segments {
+            let escaped_path = escape_ffmpeg_concat_path(seg);
+            writeln!(concat_file, "file '{}'", escaped_path).map_err(|e| {
+                error!("Failed to write concat list: {}", e);
+                format!("Failed to write concat list: {}", e)
+            })?;
+        }
+        drop(concat_file);
+
+        // Ensure output directory exists
+        if let Some(parent) = output_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+
+        // Concatenate segments into final clip.
+        // -probesize 32 -analyzeduration 0: segments are known-good MPEG-TS, skip probing.
+        // -nostdin: prevent accidental stdin blocking.
+        let concat_args = [
+            "-nostdin",
+            "-probesize",
+            "32",
+            "-analyzeduration",
+            "0",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            concat_list_path.to_str().unwrap(),
+            "-c",
+            "copy",
+            "-y",
+            output_path.to_str().unwrap(),
+        ];
+        info!("Running concat: ffmpeg {}", concat_args.join(" "));
+
+        let concat_result = ffmpeg_command()
+            .args(concat_args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+            .map_err(|e| {
+                error!("Failed to run FFmpeg concat: {}", e);
+                format!("Failed to run FFmpeg concat: {}", e)
+            })?;
+
+        if !concat_result.status.success() {
+            let stderr = String::from_utf8_lossy(&concat_result.stderr);
+            error!("FFmpeg concat failed (status: {})", concat_result.status);
+            if !stderr.is_empty() {
+                error!("FFmpeg concat stderr:\n{}", stderr);
+            }
+            return Err("FFmpeg concat failed. Check segment files.".into());
+        }
+
+        // Log final file size
+        let file_size = fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
+        info!(
+            "Clip saved successfully: {} ({:.1} MB)",
+            output_path.display(),
+            file_size as f64 / (1024.0 * 1024.0),
+        );
+
+        Ok(output_path.clone())
+    })();
+
+    SaveExecution {
+        was_recording: save_job.was_recording,
+        temp_dir: save_job.temp_dir.take(),
+        save_result,
+    }
+}
 
 /// Gracefully shutdown an FFmpeg child process.
 /// Sends 'q' to stdin, waits up to 2 seconds, then force-kills if needed.
@@ -727,7 +908,7 @@ fn escape_ffmpeg_concat_path(path: &Path) -> String {
 /// When segment_wrap is active, FFmpeg overwrites old segments in a ring.
 /// The newest segment has the highest mtime; the segment right after it
 /// (by index) is the oldest one still on disk.
-fn reorder_wrapped_segments(segments: &mut Vec<PathBuf>) {
+fn reorder_wrapped_segments(segments: &mut [PathBuf]) {
     // Find the position where mtime jumps backwards (wrap point).
     let mtimes: Vec<_> = segments
         .iter()
@@ -1116,5 +1297,122 @@ fn append_video_encoder_args(
             ]);
         }
         VideoEncoder::Auto => {} // resolved before reaching here
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn recorder_for_tests() -> Recorder {
+        Recorder {
+            state: RecorderState::Idle,
+            settings: Settings::default(),
+            ffmpeg_found: false,
+            last_saved_path: None,
+            audio_devices: Vec::new(),
+            video_encoders: vec![VideoEncoder::Libx264],
+            screen_capture_input: ScreenCaptureInput::GdiGrab,
+            child: None,
+            temp_dir: None,
+            started_at: None,
+            recording_expected: false,
+            restart_attempts: 0,
+            next_restart_attempt_at: None,
+        }
+    }
+
+    #[test]
+    fn start_without_ffmpeg_fails_cleanly() {
+        let mut recorder = recorder_for_tests();
+        let err = recorder
+            .start()
+            .expect_err("start should fail without ffmpeg");
+        assert!(err.contains("FFmpeg not found"));
+        assert_eq!(recorder.state, RecorderState::Idle);
+        assert!(!recorder.recording_expected);
+    }
+
+    #[test]
+    fn stop_resets_recovery_state() {
+        let mut recorder = recorder_for_tests();
+        recorder.state = RecorderState::Recording;
+        recorder.recording_expected = true;
+        recorder.next_restart_attempt_at = Some(Instant::now() + Duration::from_secs(10));
+        recorder.restart_attempts = 3;
+
+        recorder.stop();
+
+        assert_eq!(recorder.state, RecorderState::Idle);
+        assert!(!recorder.recording_expected);
+        assert!(recorder.next_restart_attempt_at.is_none());
+        assert_eq!(recorder.restart_attempts, 0);
+    }
+
+    #[test]
+    fn save_finalize_updates_last_saved_path_without_restart() {
+        let mut recorder = recorder_for_tests();
+        recorder.state = RecorderState::Recording;
+        recorder.temp_dir = Some(TempDir::new().expect("temp dir"));
+        recorder.recording_expected = false;
+        let output_path = PathBuf::from(r"C:\clips\test_clip.mp4");
+
+        let save_job = recorder
+            .prepare_save_job(output_path.clone())
+            .expect("prepare save should succeed");
+        assert_eq!(recorder.state, RecorderState::Saving);
+
+        let execution = SaveExecution {
+            was_recording: save_job.was_recording,
+            temp_dir: save_job.temp_dir,
+            save_result: Ok(output_path.clone()),
+        };
+
+        let saved = recorder
+            .finish_save_job(execution)
+            .expect("finalize save should succeed");
+        assert_eq!(saved, output_path);
+        assert_eq!(recorder.state, RecorderState::Idle);
+        assert_eq!(recorder.last_saved_path.as_ref(), Some(&saved));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn health_check_detects_dead_child_and_transitions_to_idle() {
+        let mut recorder = recorder_for_tests();
+        recorder.ffmpeg_found = true;
+        recorder.state = RecorderState::Recording;
+        recorder.recording_expected = true;
+        recorder.next_restart_attempt_at = Some(Instant::now() + Duration::from_secs(60));
+        let mut child = Command::new("cmd")
+            .args(["/C", "exit", "0"])
+            .stdin(Stdio::piped())
+            .spawn()
+            .expect("spawn short-lived child");
+        for _ in 0..100 {
+            if child
+                .try_wait()
+                .expect("polling child process should not fail")
+                .is_some()
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        recorder.child = Some(child);
+
+        recorder.health_check_tick();
+
+        assert_eq!(recorder.state, RecorderState::Idle);
+        assert!(recorder.child.is_none());
+        assert!(recorder.recording_expected);
+    }
+
+    #[test]
+    fn restart_backoff_is_capped() {
+        assert_eq!(Recorder::restart_backoff_delay(1), Duration::from_secs(1));
+        assert_eq!(Recorder::restart_backoff_delay(2), Duration::from_secs(2));
+        assert_eq!(Recorder::restart_backoff_delay(3), Duration::from_secs(4));
+        assert_eq!(Recorder::restart_backoff_delay(8), Duration::from_secs(30));
     }
 }

@@ -15,6 +15,7 @@ use global_hotkey::{
 use log::{error, info, warn};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tray_icon::{
     menu::{Menu, MenuEvent, MenuItem},
     TrayIconBuilder,
@@ -45,13 +46,22 @@ fn main() -> eframe::Result<()> {
     }
 
     // --- Register initial global hotkey ---
-    let hotkey_manager = GlobalHotKeyManager::new().expect("Failed to init hotkey manager");
+    let hotkey_manager = match GlobalHotKeyManager::new() {
+        Ok(manager) => Some(manager),
+        Err(e) => {
+            error!(
+                "Failed to initialize global hotkey manager: {}. Hotkeys will be disabled.",
+                e
+            );
+            None
+        }
+    };
     let initial_hotkey = {
         let rec = recorder.lock().unwrap();
         rec.settings.hotkey
     };
-    let (current_hotkey, current_hotkey_id, active_hotkey_preset) =
-        match register_available_hotkey(&hotkey_manager, initial_hotkey) {
+    let (current_hotkey, current_hotkey_id, active_hotkey_preset) = match hotkey_manager.as_ref() {
+        Some(manager) => match register_available_hotkey(manager, initial_hotkey) {
             Some((registered_hotkey, preset)) => {
                 let registered_hotkey_id = registered_hotkey.id();
                 info!("Initial hotkey registered: {}", preset.label());
@@ -61,7 +71,12 @@ fn main() -> eframe::Result<()> {
                 error!("Failed to register any global hotkey; hotkey is temporarily disabled");
                 (None, 0, initial_hotkey)
             }
-        };
+        },
+        None => {
+            warn!("Global hotkey manager unavailable; hotkey is disabled");
+            (None, 0, initial_hotkey)
+        }
+    };
 
     if active_hotkey_preset != initial_hotkey {
         if let Ok(mut rec) = recorder.lock() {
@@ -87,7 +102,7 @@ fn main() -> eframe::Result<()> {
     let show_item_id = show_item.id().clone();
     let quit_item_id = quit_item.id().clone();
 
-    // Create a simple 32x32 RGBA icon (a filled white/blue square)
+    // Create a 32x32 tray icon: white recording dot inside a black circle.
     let icon = create_tray_icon_image();
 
     let _tray_icon = TrayIconBuilder::new()
@@ -145,10 +160,8 @@ fn main() -> eframe::Result<()> {
                         && event.state == HotKeyState::Released
                     {
                         info!("Global hotkey triggered — saving clip");
-                        if let Ok(mut rec) = recorder_for_hotkey.lock() {
-                            if let Err(e) = rec.save_clip_auto() {
-                                error!("Hotkey save failed: {}", e);
-                            }
+                        if let Err(e) = Recorder::save_clip_auto_detached(&recorder_for_hotkey) {
+                            error!("Hotkey save failed: {}", e);
                         }
                     }
                 }
@@ -156,6 +169,19 @@ fn main() -> eframe::Result<()> {
                     error!("Global hotkey event receiver stopped: {}", e);
                     break;
                 }
+            }
+        }
+    });
+
+    // Periodic recorder watchdog for unexpected FFmpeg exits and automatic recovery.
+    let recorder_for_watchdog = recorder.clone();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(2));
+        match recorder_for_watchdog.lock() {
+            Ok(mut rec) => rec.health_check_tick(),
+            Err(_) => {
+                error!("Recorder watchdog stopping: recorder lock poisoned");
+                break;
             }
         }
     });
@@ -171,7 +197,8 @@ fn main() -> eframe::Result<()> {
             .with_inner_size([340.0, 320.0])
             .with_min_inner_size([300.0, 260.0])
             .with_max_inner_size([500.0, 500.0])
-            .with_always_on_top(),
+            .with_always_on_top()
+            .with_icon(create_window_icon_data()),
         ..Default::default()
     };
 
@@ -198,7 +225,7 @@ struct HotkeyWrapper {
     /// The actual LiteClip GUI application
     app: LiteClipApp,
     /// Manager for global hotkeys
-    hotkey_manager: GlobalHotKeyManager,
+    hotkey_manager: Option<GlobalHotKeyManager>,
     /// The currently registered hotkey configuration
     current_hotkey: Option<HotKey>,
     /// The unique ID of the currently registered hotkey
@@ -248,32 +275,37 @@ impl eframe::App for HotkeyWrapper {
 
         // Check if the GUI requested a hotkey change
         if let Some(new_preset) = self.app.pending_hotkey.take() {
-            let new_hotkey = create_hotkey(new_preset);
-            if new_hotkey.id() != self.current_hotkey_id {
-                match self.hotkey_manager.register(new_hotkey) {
-                    Ok(()) => {
-                        if let Some(old_hotkey) = self.current_hotkey.take() {
-                            let _ = self.hotkey_manager.unregister(old_hotkey);
+            if let Some(hotkey_manager) = self.hotkey_manager.as_ref() {
+                let new_hotkey = create_hotkey(new_preset);
+                if new_hotkey.id() != self.current_hotkey_id {
+                    match hotkey_manager.register(new_hotkey) {
+                        Ok(()) => {
+                            if let Some(old_hotkey) = self.current_hotkey.take() {
+                                let _ = hotkey_manager.unregister(old_hotkey);
+                            }
+                            info!("Hotkey changed to {}", new_preset.label());
+                            self.current_hotkey = Some(new_hotkey);
+                            self.current_hotkey_id = new_hotkey.id();
+                            self.hotkey_id_shared
+                                .store(self.current_hotkey_id, Ordering::SeqCst);
+                            if let Ok(mut rec) = self.app.recorder.lock() {
+                                rec.settings.hotkey = new_preset;
+                                rec.settings.save();
+                            }
+                            self.app.status_message =
+                                format!("Hotkey changed to {}", new_preset.label());
+                            self.app.status_timer = 3.0;
                         }
-                        info!("Hotkey changed to {}", new_preset.label());
-                        self.current_hotkey = Some(new_hotkey);
-                        self.current_hotkey_id = new_hotkey.id();
-                        self.hotkey_id_shared
-                            .store(self.current_hotkey_id, Ordering::SeqCst);
-                        if let Ok(mut rec) = self.app.recorder.lock() {
-                            rec.settings.hotkey = new_preset;
-                            rec.settings.save();
+                        Err(e) => {
+                            error!("Failed to register hotkey {}: {}", new_preset.label(), e);
+                            self.app.status_message = format!("Hotkey error: {}", e);
+                            self.app.status_timer = 5.0;
                         }
-                        self.app.status_message =
-                            format!("Hotkey changed to {}", new_preset.label());
-                        self.app.status_timer = 3.0;
-                    }
-                    Err(e) => {
-                        error!("Failed to register hotkey {}: {}", new_preset.label(), e);
-                        self.app.status_message = format!("Hotkey error: {}", e);
-                        self.app.status_timer = 5.0;
                     }
                 }
+            } else {
+                self.app.status_message = "Global hotkeys are unavailable on this system.".into();
+                self.app.status_timer = 5.0;
             }
         }
 
@@ -362,20 +394,46 @@ fn register_available_hotkey(
     None
 }
 
-/// Create a simple 32×32 RGBA tray icon (a filled colored square).
-fn create_tray_icon_image() -> tray_icon::Icon {
-    let size = 32u32;
+/// Builds an icon as a white recording dot inside a larger black circle.
+fn create_record_icon_rgba(size: u32) -> Vec<u8> {
     let mut rgba = Vec::with_capacity((size * size * 4) as usize);
+    let center = (size as f32 - 1.0) / 2.0;
+    let outer_radius = size as f32 * 0.47;
+    let inner_radius = size as f32 * 0.22;
+    let outer_sq = outer_radius * outer_radius;
+    let inner_sq = inner_radius * inner_radius;
+
     for y in 0..size {
         for x in 0..size {
-            // Draw a rounded-ish icon: white center with dark border
-            let border = x == 0 || y == 0 || x == size - 1 || y == size - 1;
-            if border {
-                rgba.extend_from_slice(&[40, 40, 40, 255]); // dark border
+            let dx = x as f32 - center;
+            let dy = y as f32 - center;
+            let dist_sq = dx * dx + dy * dy;
+
+            if dist_sq <= inner_sq {
+                rgba.extend_from_slice(&[255, 255, 255, 255]);
+            } else if dist_sq <= outer_sq {
+                rgba.extend_from_slice(&[0, 0, 0, 255]);
             } else {
-                rgba.extend_from_slice(&[220, 230, 255, 255]); // light blue-white fill
+                rgba.extend_from_slice(&[0, 0, 0, 0]);
             }
         }
     }
-    tray_icon::Icon::from_rgba(rgba, size, size).expect("Failed to create tray icon")
+
+    rgba
+}
+
+fn create_window_icon_data() -> egui::IconData {
+    let size = 64;
+    egui::IconData {
+        rgba: create_record_icon_rgba(size),
+        width: size,
+        height: size,
+    }
+}
+
+/// Create a 32x32 RGBA tray icon.
+fn create_tray_icon_image() -> tray_icon::Icon {
+    let size = 32u32;
+    tray_icon::Icon::from_rgba(create_record_icon_rgba(size), size, size)
+        .expect("Failed to create tray icon")
 }
