@@ -1,5 +1,5 @@
 use eframe::egui;
-use log::{debug, error, info, warn};
+use log::{error, info, warn};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};

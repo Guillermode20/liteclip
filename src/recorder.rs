@@ -280,7 +280,6 @@ impl Recorder {
         for encoder in encoders_to_try {
             let mut args = base_args.clone();
 
-            let is_hw = encoder.is_hardware();
 
             // Build video filter chain — varies by encoder type.
             // ddagrab emits GPU-backed d3d11 frames that must be downloaded

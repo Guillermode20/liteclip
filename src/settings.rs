@@ -126,6 +126,7 @@ impl VideoEncoder {
     }
 
     /// Whether this is a hardware-accelerated encoder.
+    #[allow(dead_code)]
     pub fn is_hardware(&self) -> bool {
         matches!(
             self,
