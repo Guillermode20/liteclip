@@ -1,0 +1,165 @@
+//! Clip Finaliser
+//!
+//! On save trigger: snapshot buffer → mux to MP4 → write to disk.
+//! Uses FFmpeg via ffmpeg-next for MP4 container muxing.
+
+use crate::buffer::ring::SharedReplayBuffer;
+use anyhow::{bail, Context, Result};
+use std::path::PathBuf;
+use std::time::Duration;
+use tokio::task::JoinHandle;
+use tracing::{debug, info, warn};
+
+pub mod muxer;
+
+pub use muxer::{extract_thumbnail, generate_output_path, Muxer, MuxerConfig};
+
+/// Spawn a clip saver task using tokio::task::spawn_blocking
+///
+/// This function:
+/// 1. Acquires read lock on buffer
+/// 2. Snapshots packets from `now - duration` to now
+/// 3. Seeks to nearest keyframe
+/// 4. Creates muxer and writes packets to MP4
+/// 5. Finalizes and returns output path
+///
+/// Runs in a blocking task to avoid blocking the async runtime during I/O.
+pub fn spawn_clip_saver(
+    buffer: SharedReplayBuffer,
+    duration: Duration,
+    output_path: PathBuf,
+    config: MuxerConfig,
+) -> JoinHandle<Result<PathBuf>> {
+    tokio::task::spawn_blocking(move || {
+        info!(
+            "Clip saver started: duration={}s, output={:?}",
+            duration.as_secs(),
+            output_path
+        );
+
+        // Step 1: Snapshot the buffer (sub-ms with Bytes ref counting)
+        let packets = buffer.snapshot().context("Failed to snapshot buffer")?;
+
+        if packets.is_empty() {
+            bail!("No packets in buffer to save");
+        }
+
+        debug!("Snapshot complete: {} packets", packets.len());
+
+        // Step 2: Find time window and seek to nearest keyframe
+        let newest_pts = packets
+            .iter()
+            .map(|p| p.pts)
+            .max()
+            .unwrap_or(0);
+
+        let start_pts = muxer::calculate_clip_start_pts(newest_pts, duration);
+        debug!("Clip window: {} to {} (duration: {}s)", start_pts, newest_pts, duration.as_secs());
+
+        // Step 3: Get packets from keyframe
+        let clip_packets = buffer.snapshot_from(start_pts)
+            .context("Failed to get packets from buffer")?;
+
+        debug!(
+            "Clip packets: {} (seeked to nearest keyframe)",
+            clip_packets.len()
+        );
+
+        // Verify we have at least one keyframe
+        let keyframe_count = clip_packets.iter().filter(|p| p.is_keyframe).count();
+        if keyframe_count == 0 {
+            warn!("No keyframes in clip range - video may not be playable");
+        }
+
+        // Step 4: Create muxer and write packets
+        let mut muxer = Muxer::new(&output_path, &config)
+            .context("Failed to create muxer")?;
+
+        // Step 5: Write video packets (Phase 1: audio is Phase 2)
+        let mut video_count = 0;
+        let mut audio_count = 0;
+
+        for packet in &clip_packets {
+            match packet.stream {
+                crate::encode::StreamType::Video => {
+                    muxer.write_video_packet(packet)
+                        .context("Failed to write video packet")?;
+                    video_count += 1;
+                }
+                crate::encode::StreamType::SystemAudio |
+                crate::encode::StreamType::Microphone => {
+                    // Audio is Phase 2 - skip for now
+                    audio_count += 1;
+                }
+            }
+        }
+
+        debug!(
+            "Wrote {} video packets (skipped {} audio packets for Phase 2)",
+            video_count, audio_count
+        );
+
+        // Step 6: Finalize the MP4 file
+        let final_path = muxer.finalize()
+            .context("Failed to finalize MP4")?;
+
+        info!(
+            "Clip saved successfully: {:?} ({} packets, ~{} seconds)",
+            final_path,
+            video_count,
+            duration.as_secs()
+        );
+
+        // Step 7: Optional thumbnail extraction (Phase 1 optional)
+        // Find first keyframe for thumbnail
+        if let Some(first_keyframe) = clip_packets.iter().find(|p| p.is_keyframe) {
+            debug!("Extracting thumbnail from first keyframe");
+            match extract_thumbnail(first_keyframe, &final_path) {
+                Ok(thumb_path) => {
+                    debug!("Thumbnail extracted: {:?}", thumb_path);
+                }
+                Err(e) => {
+                    warn!("Failed to extract thumbnail: {}", e);
+                    // Don't fail the save if thumbnail extraction fails
+                }
+            }
+        }
+
+        Ok(final_path)
+    })
+}
+
+/// Spawn clip saver with default configuration
+///
+/// Convenience function that generates output path and uses default muxer config.
+pub fn spawn_clip_saver_with_defaults(
+    buffer: SharedReplayBuffer,
+    duration: Duration,
+    save_directory: PathBuf,
+    width: u32,
+    height: u32,
+    fps: f64,
+) -> JoinHandle<Result<PathBuf>> {
+    let output_path = muxer::generate_output_path(&save_directory)
+        .expect("Failed to generate output path");
+
+    let config = MuxerConfig::new(width, height, fps, &output_path);
+
+    spawn_clip_saver(buffer, duration, output_path, config)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+    use crate::encode::StreamType;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn test_muxer_config() {
+        let config = MuxerConfig::new(1920, 1080, 30.0, "/tmp/test.mp4");
+        assert_eq!(config.width, 1920);
+        assert_eq!(config.height, 1080);
+        assert_eq!(config.fps, 30.0);
+    }
+}
