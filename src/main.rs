@@ -22,6 +22,11 @@ async fn main() -> Result<()> {
     println!("LiteClip Replay v{}", version);
     info!("LiteClip Replay v{} starting...", version);
 
+    #[cfg(not(feature = "ffmpeg"))]
+    warn!(
+        "Built without FFmpeg support. Saved clips cannot be muxed to playable MP4. Rebuild with `cargo run --features ffmpeg`."
+    );
+
     // Load configuration from %APPDATA%/liteclip-replay/config.toml
     let config = match Config::load().await {
         Ok(cfg) => {

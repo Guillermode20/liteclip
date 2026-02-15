@@ -5,8 +5,9 @@
 
 use anyhow::Result;
 use bytes::Bytes;
+pub use crossbeam::channel::Receiver as CrossbeamReceiver;
 use crossbeam::channel::{bounded, Receiver, Sender};
-use tracing::{debug, info, trace};
+use tracing::{debug, info, trace, warn};
 
 pub mod cpu_readback;
 pub mod hw_encoder;
@@ -97,7 +98,7 @@ impl EncoderConfig {
 }
 
 /// Encoded packet data
-/// 
+///
 /// Uses `Bytes` for reference-counted data, making clones cheap (just a ref count bump).
 /// This is critical for the snapshot operation which needs to quickly clone the entire
 /// buffer when saving clips.
@@ -113,6 +114,8 @@ pub struct EncodedPacket {
     pub is_keyframe: bool,
     /// Stream type
     pub stream: StreamType,
+    /// Optional frame resolution for raw video payloads
+    pub resolution: Option<(u32, u32)>,
 }
 
 /// Stream type for multiplexed output
@@ -134,6 +137,7 @@ impl std::fmt::Debug for EncodedPacket {
             .field("dts", &self.dts)
             .field("is_keyframe", &self.is_keyframe)
             .field("stream", &self.stream)
+            .field("resolution", &self.resolution)
             .finish()
     }
 }
@@ -153,6 +157,7 @@ impl EncodedPacket {
             dts,
             is_keyframe,
             stream,
+            resolution: None,
         }
     }
 
@@ -215,7 +220,10 @@ pub fn detect_hardware_encoder() -> HardwareEncoder {
 #[allow(dead_code)]
 fn is_encoder_available(codec_name: &str) -> bool {
     // FFmpeg not available in this environment
-    debug!("Checking encoder availability: {} (FFmpeg not compiled in)", codec_name);
+    debug!(
+        "Checking encoder availability: {} (FFmpeg not compiled in)",
+        codec_name
+    );
     false
 }
 
@@ -224,22 +232,84 @@ fn is_encoder_available(codec_name: &str) -> bool {
 /// If encoder_type is Auto, performs hardware detection.
 /// Falls back to software encoder if hardware initialization fails.
 pub fn create_encoder(config: &EncoderConfig) -> Result<Box<dyn Encoder>> {
-    let encoder_type = if config.encoder_type == crate::config::EncoderType::Auto {
-        HardwareEncoder::None.into()
-    } else {
-        config.encoder_type
-    };
+    let encoder_type = config.encoder_type;
 
-    // Create stub encoder for compilation check
-    let encoder: Result<Box<dyn Encoder>> = match encoder_type {
-        _ => {
-            // Create a stub encoder for Phase 1 compilation
-            info!("Using stub encoder for compilation check");
-            sw_encoder::StubEncoder::new(config).map(|e| Box::new(e) as Box<dyn Encoder>)
+    match encoder_type {
+        crate::config::EncoderType::Auto => {
+            // Try hardware encoders in priority order: NVENC -> AMF -> QSV
+            let hw = detect_hardware_encoder();
+            match hw {
+                HardwareEncoder::Nvenc => match hw_encoder::NvencEncoder::new(config) {
+                    Ok(enc) => {
+                        info!("Using NVENC encoder");
+                        return Ok(Box::new(enc) as Box<dyn Encoder>);
+                    }
+                    Err(e) => warn!("Failed to create NVENC encoder: {}", e),
+                },
+                HardwareEncoder::Amf => match hw_encoder::AmfEncoder::new(config) {
+                    Ok(enc) => {
+                        info!("Using AMF encoder");
+                        return Ok(Box::new(enc) as Box<dyn Encoder>);
+                    }
+                    Err(e) => warn!("Failed to create AMF encoder: {}", e),
+                },
+                HardwareEncoder::Qsv => match hw_encoder::QsvEncoder::new(config) {
+                    Ok(enc) => {
+                        info!("Using QSV encoder");
+                        return Ok(Box::new(enc) as Box<dyn Encoder>);
+                    }
+                    Err(e) => warn!("Failed to create QSV encoder: {}", e),
+                },
+                HardwareEncoder::None => {}
+            }
+            // Fall back to software
+            info!("No hardware encoder available, using software encoder");
+            sw_encoder::SoftwareEncoder::new(config).map(|e| Box::new(e) as Box<dyn Encoder>)
         }
-    };
-
-    encoder
+        crate::config::EncoderType::Nvenc => {
+            match hw_encoder::NvencEncoder::new(config) {
+                Ok(enc) => {
+                    info!("Using NVENC encoder");
+                    return Ok(Box::new(enc) as Box<dyn Encoder>);
+                }
+                Err(e) => warn!(
+                    "Failed to create NVENC encoder: {}, falling back to software",
+                    e
+                ),
+            }
+            sw_encoder::SoftwareEncoder::new(config).map(|e| Box::new(e) as Box<dyn Encoder>)
+        }
+        crate::config::EncoderType::Amf => {
+            match hw_encoder::AmfEncoder::new(config) {
+                Ok(enc) => {
+                    info!("Using AMF encoder");
+                    return Ok(Box::new(enc) as Box<dyn Encoder>);
+                }
+                Err(e) => warn!(
+                    "Failed to create AMF encoder: {}, falling back to software",
+                    e
+                ),
+            }
+            sw_encoder::SoftwareEncoder::new(config).map(|e| Box::new(e) as Box<dyn Encoder>)
+        }
+        crate::config::EncoderType::Qsv => {
+            match hw_encoder::QsvEncoder::new(config) {
+                Ok(enc) => {
+                    info!("Using QSV encoder");
+                    return Ok(Box::new(enc) as Box<dyn Encoder>);
+                }
+                Err(e) => warn!(
+                    "Failed to create QSV encoder: {}, falling back to software",
+                    e
+                ),
+            }
+            sw_encoder::SoftwareEncoder::new(config).map(|e| Box::new(e) as Box<dyn Encoder>)
+        }
+        crate::config::EncoderType::Software => {
+            info!("Using software encoder");
+            sw_encoder::SoftwareEncoder::new(config).map(|e| Box::new(e) as Box<dyn Encoder>)
+        }
+    }
 }
 
 /// Encoder thread handle
@@ -255,45 +325,186 @@ pub struct EncoderHandle {
 /// Spawn an encoder on a dedicated thread
 ///
 /// This creates the encoder, initializes it, and runs it on a new thread.
-/// Frames are sent via the returned Sender, and encoded packets are received
-/// via the returned Receiver.
+/// Frames are sent via the returned Sender, and encoded packets are pushed
+/// directly to the SharedReplayBuffer.
 pub fn spawn_encoder(
     config: EncoderConfig,
+    buffer: crate::buffer::ring::SharedReplayBuffer,
 ) -> Result<(EncoderHandle, Sender<crate::capture::CapturedFrame>)> {
     let (frame_tx, frame_rx): (Sender<crate::capture::CapturedFrame>, _) = bounded(4);
-    let (_packet_tx, packet_rx): (_, Receiver<EncodedPacket>) = bounded(64);
 
     let frame_tx_clone = frame_tx.clone();
 
     let thread = std::thread::spawn(move || {
-        info!("Encoder thread started (stub mode)");
+        info!("Encoder thread started");
 
-        // Create stub encoder
+        // Create and initialize encoder
         let mut encoder = create_encoder(&config)?;
         encoder.init(&config)?;
 
-        info!("Stub encoder initialized and ready");
+        info!("Encoder initialized and ready");
+
+        // Get the packet receiver from the encoder
+        let packet_rx = encoder.packet_rx();
 
         // Main encode loop
-        while let Ok(_frame) = frame_rx.recv() {
-            // Stub: just acknowledge frame received
-            trace!("Stub encoder received frame");
+        loop {
+            // Try to receive a frame with timeout to also check for encoded packets
+            match frame_rx.recv() {
+                Ok(mut frame) => {
+                    // If we're behind, keep only the newest frame and drop stale ones.
+                    while let Ok(newer_frame) = frame_rx.try_recv() {
+                        frame = newer_frame;
+                    }
+
+                    // Encode the frame
+                    if let Err(e) = encoder.encode_frame(&frame) {
+                        warn!("Failed to encode frame: {}", e);
+                        continue;
+                    }
+
+                    // Drain any encoded packets from the encoder and push to buffer
+                    while let Ok(packet) = packet_rx.try_recv() {
+                        trace!(
+                            "Pushing encoded packet to buffer: pts={}, size={}",
+                            packet.pts,
+                            packet.data.len()
+                        );
+                        buffer.push(packet);
+                    }
+                }
+                Err(_) => {
+                    // Channel closed, exit loop
+                    debug!("Frame channel closed, shutting down encoder");
+                    break;
+                }
+            }
         }
 
-        // Flush and shutdown
-        info!("Encoder thread shutting down");
-        let _final_packets = encoder.flush()?;
+        // Flush remaining packets
+        info!("Encoder thread shutting down, flushing remaining packets");
+        match encoder.flush() {
+            Ok(packets) => {
+                for packet in packets {
+                    trace!(
+                        "Pushing flushed packet to buffer: pts={}, size={}",
+                        packet.pts,
+                        packet.data.len()
+                    );
+                    buffer.push(packet);
+                }
+            }
+            Err(e) => {
+                warn!("Failed to flush encoder: {}", e);
+            }
+        }
 
+        info!("Encoder thread stopped");
         Ok(())
     });
+
+    // Create a dummy packet_rx for the handle (not used directly since we push to buffer)
+    let (_, dummy_packet_rx) = bounded(1);
 
     let handle = EncoderHandle {
         thread,
         frame_tx: frame_tx_clone.clone(),
-        packet_rx,
+        packet_rx: dummy_packet_rx,
     };
 
     Ok((handle, frame_tx_clone))
+}
+/// Spawn an encoder that receives frames from an existing receiver
+///
+/// This is used when the capture provides its own frame channel.
+/// The encoder thread reads frames from frame_rx and pushes encoded packets
+/// directly to the SharedReplayBuffer.
+pub fn spawn_encoder_with_receiver(
+    config: EncoderConfig,
+    buffer: crate::buffer::ring::SharedReplayBuffer,
+    frame_rx: Receiver<crate::capture::CapturedFrame>,
+) -> Result<EncoderHandle> {
+    let thread = std::thread::spawn(move || {
+        info!("Encoder thread started");
+
+        // Create and initialize encoder
+        let mut encoder = create_encoder(&config)?;
+        encoder.init(&config)?;
+
+        info!("Encoder initialized and ready");
+
+        // Get the packet receiver from the encoder
+        let packet_rx = encoder.packet_rx();
+
+        // Main encode loop
+        loop {
+            // Try to receive a frame with timeout to also check for encoded packets
+            match frame_rx.recv() {
+                Ok(mut frame) => {
+                    // If we're behind, keep only the newest frame and drop stale ones.
+                    while let Ok(newer_frame) = frame_rx.try_recv() {
+                        frame = newer_frame;
+                    }
+
+                    // Encode the frame
+                    if let Err(e) = encoder.encode_frame(&frame) {
+                        warn!("Failed to encode frame: {}", e);
+                        continue;
+                    }
+
+                    // Drain any encoded packets from the encoder and push to buffer
+                    while let Ok(packet) = packet_rx.try_recv() {
+                        trace!(
+                            "Pushing encoded packet to buffer: pts={}, size={}",
+                            packet.pts,
+                            packet.data.len()
+                        );
+                        buffer.push(packet);
+                    }
+                }
+                Err(_) => {
+                    // Channel closed, exit loop
+                    debug!("Frame channel closed, shutting down encoder");
+                    break;
+                }
+            }
+        }
+
+        // Flush remaining packets
+        info!("Encoder thread shutting down, flushing remaining packets");
+        match encoder.flush() {
+            Ok(packets) => {
+                for packet in packets {
+                    trace!(
+                        "Pushing flushed packet to buffer: pts={}, size={}",
+                        packet.pts,
+                        packet.data.len()
+                    );
+                    buffer.push(packet);
+                }
+            }
+            Err(e) => {
+                warn!("Failed to flush encoder: {}", e);
+            }
+        }
+
+        info!("Encoder thread stopped");
+        Ok(())
+    });
+
+    // Create a dummy packet_rx for the handle (not used directly since we push to buffer)
+    let (_, dummy_packet_rx) = bounded(1);
+
+    // Create a dummy frame_tx (not used since we receive from capture's channel)
+    let (dummy_frame_tx, _) = bounded(1);
+
+    let handle = EncoderHandle {
+        thread,
+        frame_tx: dummy_frame_tx,
+        packet_rx: dummy_packet_rx,
+    };
+
+    Ok(handle)
 }
 
 /// Initialize FFmpeg (call once at startup)

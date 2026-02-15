@@ -196,7 +196,7 @@ impl ReplayBuffer {
     }
 
     /// Get packets from timestamp to now
-    /// 
+    ///
     /// Finds the nearest keyframe at or before start_pts and returns all packets
     /// from that point forward. This ensures the video can be decoded properly.
     pub fn snapshot_from(&self, start_pts: i64) -> Result<Vec<EncodedPacket>> {
@@ -236,8 +236,7 @@ impl ReplayBuffer {
     /// Get current buffer statistics
     pub fn stats(&self) -> BufferStats {
         let keyframe_count = self.keyframe_index.len();
-        let memory_usage_percent =
-            (self.total_bytes as f32 / self.max_memory_bytes as f32) * 100.0;
+        let memory_usage_percent = (self.total_bytes as f32 / self.max_memory_bytes as f32) * 100.0;
 
         // Estimate duration based on packet timestamps (QPC is ~10MHz)
         let duration_secs = if self.packets.len() >= 2 {
@@ -292,6 +291,7 @@ impl ReplayBuffer {
 mod tests {
     use super::*;
     use crate::encode::StreamType;
+    use bytes::Bytes;
 
     fn create_test_packet(pts: i64, is_keyframe: bool, size: usize) -> EncodedPacket {
         EncodedPacket {
@@ -300,6 +300,7 @@ mod tests {
             dts: pts,
             is_keyframe,
             stream: StreamType::Video,
+            resolution: None,
         }
     }
 
@@ -364,6 +365,7 @@ mod tests {
             dts: 0,
             is_keyframe: true,
             stream: StreamType::Video,
+            resolution: None,
         };
         buffer.push(packet);
 

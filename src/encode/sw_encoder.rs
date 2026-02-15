@@ -6,6 +6,7 @@
 use super::{EncodedPacket, Encoder, EncoderConfig};
 use anyhow::Result;
 use crossbeam::channel::{bounded, Receiver, Sender};
+use image::{codecs::jpeg::JpegEncoder, ExtendedColorType};
 use tracing::{info, trace};
 
 /// Stub encoder for compilation check
@@ -39,6 +40,64 @@ impl StubEncoder {
     }
 }
 
+fn bgra_to_jpeg(
+    frame: &crate::capture::CapturedFrame,
+    output_width: u32,
+    output_height: u32,
+    quality: u8,
+) -> Result<Vec<u8>> {
+    let (src_width, src_height) = frame.resolution;
+    let src_pixel_count = (src_width as usize).saturating_mul(src_height as usize);
+    let expected_len = src_pixel_count.saturating_mul(4);
+
+    if frame.bgra.len() != expected_len {
+        anyhow::bail!(
+            "Invalid BGRA frame size: got={}, expected={} ({}x{})",
+            frame.bgra.len(),
+            expected_len,
+            src_width,
+            src_height
+        );
+    }
+
+    let out_width = output_width.max(1);
+    let out_height = output_height.max(1);
+    let out_pixel_count = (out_width as usize).saturating_mul(out_height as usize);
+
+    let mut rgb = vec![0u8; out_pixel_count.saturating_mul(3)];
+
+    if out_width == src_width && out_height == src_height {
+        for (src, dst) in frame.bgra.chunks_exact(4).zip(rgb.chunks_exact_mut(3)) {
+            dst[0] = src[2]; // R
+            dst[1] = src[1]; // G
+            dst[2] = src[0]; // B
+        }
+    } else {
+        let src_w = src_width as usize;
+        let src_h = src_height as usize;
+        let out_w = out_width as usize;
+        let out_h = out_height as usize;
+
+        for out_y in 0..out_h {
+            let src_y = out_y.saturating_mul(src_h) / out_h;
+            for out_x in 0..out_w {
+                let src_x = out_x.saturating_mul(src_w) / out_w;
+                let src_idx = (src_y * src_w + src_x) * 4;
+                let dst_idx = (out_y * out_w + out_x) * 3;
+
+                rgb[dst_idx] = frame.bgra[src_idx + 2];
+                rgb[dst_idx + 1] = frame.bgra[src_idx + 1];
+                rgb[dst_idx + 2] = frame.bgra[src_idx];
+            }
+        }
+    }
+
+    let mut out = Vec::with_capacity((rgb.len() / 3).max(1024));
+    let mut encoder = JpegEncoder::new_with_quality(&mut out, quality);
+    encoder.encode(&rgb, out_width, out_height, ExtendedColorType::Rgb8)?;
+    Ok(out)
+}
+
 impl Encoder for StubEncoder {
     fn init(&mut self, config: &EncoderConfig) -> Result<()> {
         self.config = config.clone();
@@ -47,8 +106,31 @@ impl Encoder for StubEncoder {
         Ok(())
     }
 
-    fn encode_frame(&mut self, _frame: &crate::capture::CapturedFrame) -> Result<()> {
+    fn encode_frame(&mut self, frame: &crate::capture::CapturedFrame) -> Result<()> {
         trace!("Stub encoder received frame {}", self.frame_count);
+
+        // Forward raw BGRA frame bytes for save-time encoding.
+        let is_keyframe = self.frame_count % 30 == 0;
+        let data = bgra_to_jpeg(
+            frame,
+            self.config.resolution.0,
+            self.config.resolution.1,
+            20,
+        )?;
+
+        let mut packet = EncodedPacket::new(
+            data,
+            frame.timestamp,
+            frame.timestamp,
+            is_keyframe,
+            super::StreamType::Video,
+        );
+        packet.resolution = Some(frame.resolution);
+
+        if let Err(e) = self.packet_tx.try_send(packet) {
+            trace!("Failed to send encoded packet: {}", e);
+        }
+
         self.frame_count += 1;
         Ok(())
     }
@@ -113,7 +195,12 @@ impl SoftwareEncoder {
     /// This is a simple conversion suitable for the Phase 1 CPU readback path.
     /// In Phase 3, this will be replaced by GPU-accelerated color space conversion.
     #[allow(dead_code)]
-    fn convert_bgra_to_yuv420p(&self, bgra: &[u8], width: u32, height: u32) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    fn convert_bgra_to_yuv420p(
+        &self,
+        bgra: &[u8],
+        width: u32,
+        height: u32,
+    ) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
         let width = width as usize;
         let height = height as usize;
         let y_size = width * height;
@@ -166,8 +253,26 @@ impl Encoder for SoftwareEncoder {
         Ok(())
     }
 
-    fn encode_frame(&mut self, _frame: &crate::capture::CapturedFrame) -> Result<()> {
+    fn encode_frame(&mut self, frame: &crate::capture::CapturedFrame) -> Result<()> {
         trace!("Software encoding frame {}", self.frame_count);
+
+        let is_keyframe = self.frame_count % self.keyframe_interval as u64 == 0;
+        let quality = (self.config.bitrate_mbps.saturating_mul(2)).clamp(18, 50) as u8;
+        let data = bgra_to_jpeg(frame, self.width, self.height, quality)?;
+
+        let mut packet = EncodedPacket::new(
+            data,
+            frame.timestamp,
+            frame.timestamp,
+            is_keyframe,
+            super::StreamType::Video,
+        );
+        packet.resolution = Some(frame.resolution);
+
+        if let Err(e) = self.packet_tx.try_send(packet) {
+            trace!("Failed to send encoded packet: {}", e);
+        }
+
         self.frame_count += 1;
         Ok(())
     }

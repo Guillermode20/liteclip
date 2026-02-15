@@ -1,12 +1,18 @@
 //! MP4 Muxer via FFmpeg
 //!
 //! Muxes encoded video and audio packets into standard MP4 container.
-//! Uses ffmpeg-next for proper MP4 container writing with correct PTS/DTS handling.
+//! Uses optional FFmpeg pipeline integration for MP4 container writing.
 
 use crate::encode::{EncodedPacket, StreamType};
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
-use tracing::{debug, info, trace, warn};
+#[cfg(feature = "ffmpeg")]
+use std::{
+    ffi::OsString,
+    io::Write,
+    process::{Command, Stdio},
+};
+use tracing::{debug, error, info, trace};
 
 /// Muxer configuration
 #[derive(Debug, Clone)]
@@ -65,6 +71,9 @@ pub struct Muxer {
     #[cfg(not(feature = "ffmpeg"))]
     #[allow(dead_code)]
     stub_mode: bool,
+    /// Buffered video packets used for MP4 generation at finalize()
+    #[cfg(feature = "ffmpeg")]
+    video_packets: Vec<EncodedPacket>,
 }
 
 impl Muxer {
@@ -84,12 +93,13 @@ impl Muxer {
             Ok(Self {
                 output_path: path,
                 config: config.clone(),
+                video_packets: Vec::new(),
             })
         }
 
         #[cfg(not(feature = "ffmpeg"))]
         {
-            warn!("FFmpeg feature not enabled - muxer running in stub mode");
+            tracing::warn!("FFmpeg feature not enabled - muxer running in stub mode");
             Ok(Self {
                 output_path: path,
                 config: config.clone(),
@@ -111,11 +121,8 @@ impl Muxer {
 
         #[cfg(feature = "ffmpeg")]
         {
-            // Real FFmpeg implementation would:
-            // 1. Rescale PTS/DTS from QPC (10MHz) to stream timebase
-            // 2. Set keyframe flag if packet.is_keyframe
-            // 3. Write packet using av_interleaved_write_frame
-            self.write_video_packet_ffmpeg(packet)
+            self.video_packets.push(packet.clone());
+            Ok(())
         }
 
         #[cfg(not(feature = "ffmpeg"))]
@@ -129,20 +136,6 @@ impl Muxer {
             );
             Ok(())
         }
-    }
-
-    #[cfg(feature = "ffmpeg")]
-    fn write_video_packet_ffmpeg(&mut self, packet: &EncodedPacket) -> Result<()> {
-        // Implementation when FFmpeg is available
-        // This would use ffmpeg-next to write the packet
-        // For now, just log as stub since ffmpeg-next types aren't fully set up
-        trace!(
-            "FFmpeg: Writing video packet (keyframe={}, size={}, pts={})",
-            packet.is_keyframe,
-            packet.data.len(),
-            packet.pts
-        );
-        Ok(())
     }
 
     /// Write audio packet to MP4
@@ -169,28 +162,180 @@ impl Muxer {
 
         #[cfg(not(feature = "ffmpeg"))]
         {
-            warn!("FFmpeg not available - creating empty stub MP4 file");
+            tracing::warn!("FFmpeg feature disabled - cannot produce MP4");
             self.create_stub_mp4()
         }
     }
 
     #[cfg(feature = "ffmpeg")]
-    fn finalize_ffmpeg(self) -> Result<PathBuf> {
-        // Real FFmpeg finalization would:
-        // 1. av_write_trailer
-        // 2. Close AVFormatContext
-        // 3. If faststart: open file, move moov atom to front
-        info!("FFmpeg MP4 finalized: {:?}", self.output_path);
+    fn finalize_ffmpeg(mut self) -> Result<PathBuf> {
+        let mut qpc_freq = 10_000_000i64;
+        unsafe {
+            let _ = windows::Win32::System::Performance::QueryPerformanceFrequency(&mut qpc_freq);
+        }
+        let qpc_frequency_f64 = qpc_freq as f64;
+        let ffmpeg_cmd = self.resolve_ffmpeg_command();
+
+        if self.video_packets.is_empty() {
+            bail!("No video packets available for MP4 generation");
+        }
+
+        self.video_packets.sort_by_key(|packet| packet.pts);
+
+        let effective_fps = if self.video_packets.len() >= 2 {
+            let first_pts = self
+                .video_packets
+                .first()
+                .map(|packet| packet.pts)
+                .unwrap_or(0);
+            let last_pts = self
+                .video_packets
+                .last()
+                .map(|packet| packet.pts)
+                .unwrap_or(first_pts);
+            let span_qpc = (last_pts - first_pts).max(1) as f64;
+            let span_secs = span_qpc / qpc_frequency_f64;
+            if span_secs > 0.0 {
+                (self.video_packets.len() as f64 / span_secs).clamp(0.1, self.config.fps.max(1.0))
+            } else {
+                self.config.fps.max(1.0)
+            }
+        } else {
+            self.config.fps.max(1.0)
+        };
+
+        info!(
+            "Muxing {} frames with effective input FPS {:.3} (target {:.3}). PPS range: {} - {}",
+            self.video_packets.len(),
+            effective_fps,
+            self.config.fps,
+            self.video_packets.first().map(|p| p.pts).unwrap_or(0),
+            self.video_packets.last().map(|p| p.pts).unwrap_or(0)
+        );
+
+        let mut command = Command::new(&ffmpeg_cmd);
+        command
+            .arg("-y")
+            .arg("-r")
+            .arg(format!("{:.6}", effective_fps))
+            .arg("-f")
+            .arg("mjpeg")
+            .arg("-i")
+            .arg("pipe:0")
+            .arg("-c:v")
+            .arg("libx264")
+            .arg("-r")
+            .arg(format!("{:.6}", effective_fps))
+            .arg("-preset")
+            .arg("ultrafast")
+            .arg("-tune")
+            .arg("zerolatency")
+            .arg("-pix_fmt")
+            .arg("yuv420p");
+
+        if self.config.faststart {
+            command.arg("-movflags").arg("+faststart");
+        }
+
+        let mut child = command
+            .arg(&self.output_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("Failed to launch ffmpeg command: {:?}", ffmpeg_cmd))?;
+
+        let mut written_frames = 0usize;
+        {
+            let stdin = child
+                .stdin
+                .as_mut()
+                .context("Failed to open ffmpeg stdin")?;
+
+            for packet in &self.video_packets {
+                stdin
+                    .write_all(packet.data.as_ref())
+                    .context("Failed writing MJPEG frame bytes to ffmpeg")?;
+                written_frames += 1;
+            }
+        }
+
+        if written_frames == 0 {
+            if self.output_path.exists() {
+                let _ = std::fs::remove_file(&self.output_path);
+            }
+            bail!("No encoded frames available for MP4 generation");
+        }
+
+        let output = child
+            .wait_with_output()
+            .context("Failed waiting for ffmpeg process")?;
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !output.status.success() {
+            if self.output_path.exists() {
+                let _ = std::fs::remove_file(&self.output_path);
+            }
+            error!("FFmpeg stderr:\n{}", stderr);
+            bail!("ffmpeg failed to generate MP4: status {}", output.status);
+        }
+
+        if !stderr.is_empty() {
+            debug!("FFmpeg output:\n{}", stderr);
+        }
+
+        let metadata = std::fs::metadata(&self.output_path)
+            .with_context(|| format!("Missing output MP4 after ffmpeg: {:?}", self.output_path))?;
+        if metadata.len() == 0 {
+            bail!("Generated MP4 is empty: {:?}", self.output_path);
+        }
+
+        info!(
+            "FFmpeg MP4 finalized: {:?} ({} frames)",
+            self.output_path, written_frames
+        );
+
         Ok(self.output_path)
+    }
+
+    #[cfg(feature = "ffmpeg")]
+    fn resolve_ffmpeg_command(&self) -> OsString {
+        if let Ok(custom) = std::env::var("LITECLIP_FFMPEG_PATH") {
+            if !custom.trim().is_empty() {
+                return OsString::from(custom);
+            }
+        }
+
+        if let Ok(cwd) = std::env::current_dir() {
+            let candidate = cwd.join("ffmpeg").join("bin").join("ffmpeg.exe");
+            if candidate.exists() {
+                return candidate.into_os_string();
+            }
+        }
+
+        if let Ok(exe_path) = std::env::current_exe() {
+            if let Some(exe_dir) = exe_path.parent() {
+                let candidate = exe_dir.join("ffmpeg").join("bin").join("ffmpeg.exe");
+                if candidate.exists() {
+                    return candidate.into_os_string();
+                }
+            }
+        }
+
+        OsString::from("ffmpeg")
     }
 
     #[cfg(not(feature = "ffmpeg"))]
     fn create_stub_mp4(&self) -> Result<PathBuf> {
-        // Create an empty file as placeholder when FFmpeg is not available
-        std::fs::write(&self.output_path, b"")
-            .with_context(|| format!("Failed to create stub MP4: {:?}", self.output_path))?;
-        warn!("Created stub MP4 (empty): {:?}", self.output_path);
-        Ok(self.output_path.clone())
+        // Do not create fake/corrupt files when FFmpeg is unavailable.
+        // Return a clear actionable error instead.
+        if self.output_path.exists() {
+            std::fs::remove_file(&self.output_path).with_context(|| {
+                format!("Failed to remove stale output file: {:?}", self.output_path)
+            })?;
+        }
+
+        bail!("Cannot create MP4: FFmpeg feature is disabled. Rebuild with `--features ffmpeg`.")
     }
 
     /// Get output path
@@ -202,20 +347,19 @@ impl Muxer {
 /// Calculate start timestamp for clip based on duration
 ///
 /// Returns the QPC timestamp to seek to (nearest keyframe at or before this time).
-pub fn calculate_clip_start_pts(
-    newest_pts: i64,
-    duration: std::time::Duration,
-) -> i64 {
-    // QPC runs at 10MHz typically
-    const QPC_FREQUENCY: i64 = 10_000_000;
-    let duration_qpc = (duration.as_secs_f64() * QPC_FREQUENCY as f64) as i64;
+pub fn calculate_clip_start_pts(newest_pts: i64, duration: std::time::Duration) -> i64 {
+    let mut qpc_freq = 10_000_000i64;
+    unsafe {
+        let _ = windows::Win32::System::Performance::QueryPerformanceFrequency(&mut qpc_freq);
+    }
+    let duration_qpc = (duration.as_secs_f64() * qpc_freq as f64) as i64;
     let start_pts = (newest_pts - duration_qpc).max(0);
-    
+
     debug!(
         "Clip window: newest_pts={}, duration_qpc={}, start_pts={}",
         newest_pts, duration_qpc, start_pts
     );
-    
+
     start_pts
 }
 
@@ -236,11 +380,11 @@ pub fn generate_output_filename() -> String {
 pub fn generate_output_path(base_dir: &Path) -> Result<PathBuf> {
     let filename = generate_output_filename();
     let output_path = base_dir.join(&filename);
-    
+
     // Ensure directory exists
     std::fs::create_dir_all(base_dir)
         .with_context(|| format!("Failed to create output directory: {:?}", base_dir))?;
-    
+
     Ok(output_path)
 }
 
@@ -248,14 +392,11 @@ pub fn generate_output_path(base_dir: &Path) -> Result<PathBuf> {
 ///
 /// Optional Phase 1 feature: Decodes first keyframe to RGB, encodes as JPEG.
 /// Returns path to thumbnail file.
-pub fn extract_thumbnail(
-    _packet: &EncodedPacket,
-    output_path: &Path,
-) -> Result<PathBuf> {
+pub fn extract_thumbnail(_packet: &EncodedPacket, output_path: &Path) -> Result<PathBuf> {
     // Phase 1: Thumbnail extraction is optional
     // Would require FFmpeg decoding and image encoding
     debug!("Thumbnail extraction not implemented (optional Phase 1)");
-    
+
     // Return placeholder path
     let thumb_path = output_path.with_extension("jpg");
     Ok(thumb_path)
@@ -264,14 +405,13 @@ pub fn extract_thumbnail(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
 
     #[test]
     fn test_muxer_config_creation() {
         let config = MuxerConfig::new(1920, 1080, 30.0, "/tmp/test.mp4")
             .with_video_codec("h264")
             .with_faststart(true);
-        
+
         assert_eq!(config.width, 1920);
         assert_eq!(config.height, 1080);
         assert_eq!(config.fps, 30.0);
@@ -283,9 +423,9 @@ mod tests {
     fn test_calculate_clip_start_pts() {
         let newest_pts = 100_000_000i64; // 10 seconds at 10MHz
         let duration = std::time::Duration::from_secs(5);
-        
+
         let start_pts = calculate_clip_start_pts(newest_pts, duration);
-        
+
         // 5 seconds at 10MHz = 50,000,000
         assert_eq!(start_pts, 50_000_000);
     }
@@ -299,16 +439,16 @@ mod tests {
 
     #[test]
     fn test_generate_output_path() {
-        use std::fs;
         use std::env;
-        
+        use std::fs;
+
         let temp_dir = env::temp_dir().join("liteclip_test");
         let result = generate_output_path(&temp_dir);
-        
+
         assert!(result.is_ok());
         let path = result.unwrap();
         assert!(path.to_string_lossy().ends_with(".mp4"));
-        
+
         // Cleanup
         let _ = fs::remove_dir_all(&temp_dir);
     }

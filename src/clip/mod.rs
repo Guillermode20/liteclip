@@ -47,17 +47,19 @@ pub fn spawn_clip_saver(
         debug!("Snapshot complete: {} packets", packets.len());
 
         // Step 2: Find time window and seek to nearest keyframe
-        let newest_pts = packets
-            .iter()
-            .map(|p| p.pts)
-            .max()
-            .unwrap_or(0);
+        let newest_pts = packets.iter().map(|p| p.pts).max().unwrap_or(0);
 
         let start_pts = muxer::calculate_clip_start_pts(newest_pts, duration);
-        debug!("Clip window: {} to {} (duration: {}s)", start_pts, newest_pts, duration.as_secs());
+        debug!(
+            "Clip window: {} to {} (duration: {}s)",
+            start_pts,
+            newest_pts,
+            duration.as_secs()
+        );
 
         // Step 3: Get packets from keyframe
-        let clip_packets = buffer.snapshot_from(start_pts)
+        let clip_packets = buffer
+            .snapshot_from(start_pts)
             .context("Failed to get packets from buffer")?;
 
         debug!(
@@ -72,8 +74,7 @@ pub fn spawn_clip_saver(
         }
 
         // Step 4: Create muxer and write packets
-        let mut muxer = Muxer::new(&output_path, &config)
-            .context("Failed to create muxer")?;
+        let mut muxer = Muxer::new(&output_path, &config).context("Failed to create muxer")?;
 
         // Step 5: Write video packets (Phase 1: audio is Phase 2)
         let mut video_count = 0;
@@ -82,12 +83,12 @@ pub fn spawn_clip_saver(
         for packet in &clip_packets {
             match packet.stream {
                 crate::encode::StreamType::Video => {
-                    muxer.write_video_packet(packet)
+                    muxer
+                        .write_video_packet(packet)
                         .context("Failed to write video packet")?;
                     video_count += 1;
                 }
-                crate::encode::StreamType::SystemAudio |
-                crate::encode::StreamType::Microphone => {
+                crate::encode::StreamType::SystemAudio | crate::encode::StreamType::Microphone => {
                     // Audio is Phase 2 - skip for now
                     audio_count += 1;
                 }
@@ -100,8 +101,7 @@ pub fn spawn_clip_saver(
         );
 
         // Step 6: Finalize the MP4 file
-        let final_path = muxer.finalize()
-            .context("Failed to finalize MP4")?;
+        let final_path = muxer.finalize().context("Failed to finalize MP4")?;
 
         info!(
             "Clip saved successfully: {:?} ({} packets, ~{} seconds)",
@@ -140,8 +140,8 @@ pub fn spawn_clip_saver_with_defaults(
     height: u32,
     fps: f64,
 ) -> JoinHandle<Result<PathBuf>> {
-    let output_path = muxer::generate_output_path(&save_directory)
-        .expect("Failed to generate output path");
+    let output_path =
+        muxer::generate_output_path(&save_directory).expect("Failed to generate output path");
 
     let config = MuxerConfig::new(width, height, fps, &output_path);
 
@@ -151,9 +151,6 @@ pub fn spawn_clip_saver_with_defaults(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
-    use crate::encode::StreamType;
-    use std::time::Duration;
 
     #[tokio::test]
     async fn test_muxer_config() {

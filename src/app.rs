@@ -4,11 +4,13 @@
 
 use crate::{
     buffer::ring::SharedReplayBuffer,
-    clip::{MuxerConfig, spawn_clip_saver},
+    capture::{dxgi::DxgiCapture, CaptureBackend, CaptureConfig, CapturedFrame},
+    clip::{spawn_clip_saver, MuxerConfig},
     config::Config,
-    encode::{EncoderConfig, spawn_encoder},
+    encode::{spawn_encoder_with_receiver, EncoderConfig},
 };
 use anyhow::{Context, Result};
+use crossbeam::channel::Receiver;
 use std::path::PathBuf;
 use std::time::Duration;
 use tracing::{error, info, warn};
@@ -18,7 +20,7 @@ pub struct AppState {
     config: Config,
     buffer: SharedReplayBuffer,
     encoder_handle: Option<crate::encode::EncoderHandle>,
-    encoder_frame_tx: Option<crossbeam::channel::Sender<crate::capture::CapturedFrame>>,
+    capture: Option<DxgiCapture>,
     is_recording: bool,
 }
 
@@ -31,7 +33,7 @@ impl AppState {
             config,
             buffer,
             encoder_handle: None,
-            encoder_frame_tx: None,
+            capture: None,
             is_recording: false,
         })
     }
@@ -45,16 +47,27 @@ impl AppState {
 
         info!("Starting recording pipeline...");
 
-        // Initialize encoder
-        let encoder_config = EncoderConfig::from(&self.config);
-        let (encoder_handle, frame_tx) = spawn_encoder(encoder_config)
-            .context("Failed to spawn encoder")?;
-        
-        self.encoder_handle = Some(encoder_handle);
-        self.encoder_frame_tx = Some(frame_tx);
+        // Create and start capture first
+        let mut capture = DxgiCapture::new().context("Failed to create DXGI capture")?;
+        let capture_config = CaptureConfig::from(&self.config);
+        capture
+            .start(capture_config)
+            .context("Failed to start capture")?;
 
+        // Get the frame receiver from capture
+        let frame_rx: Receiver<CapturedFrame> = capture.frame_rx();
+
+        // Initialize encoder with the capture's frame receiver
+        let encoder_config = EncoderConfig::from(&self.config);
+        let encoder_handle =
+            spawn_encoder_with_receiver(encoder_config, self.buffer.clone(), frame_rx)
+                .context("Failed to spawn encoder")?;
+
+        self.encoder_handle = Some(encoder_handle);
+        self.capture = Some(capture);
         self.is_recording = true;
-        info!("Recording pipeline started");
+
+        info!("Recording pipeline started (capture + encoder)");
 
         Ok(())
     }
@@ -67,12 +80,14 @@ impl AppState {
 
         info!("Stopping recording pipeline...");
 
-        // Drop the frame sender to signal encoder to shutdown
-        self.encoder_frame_tx = None;
+        // Stop capture first (signals encoder to stop via channel close)
+        if let Some(capture) = self.capture.take() {
+            drop(capture); // This calls stop() via Drop
+            info!("Capture stopped");
+        }
 
         // Wait for encoder thread to finish
         if let Some(handle) = self.encoder_handle.take() {
-            drop(handle.frame_tx);
             match handle.thread.join() {
                 Ok(_) => info!("Encoder thread stopped successfully"),
                 Err(e) => error!("Encoder thread panicked: {:?}", e),
@@ -89,7 +104,7 @@ impl AppState {
         info!("Saving clip...");
 
         let output_path = self.generate_output_path()?;
-        
+
         // Get resolution from config
         let (width, height) = match self.config.video.resolution {
             crate::config::Resolution::Native => (1920, 1080), // TODO: Get actual resolution
@@ -104,14 +119,9 @@ impl AppState {
         // Clone buffer for the clip saver task
         let buffer = self.buffer.clone();
         let duration = Duration::from_secs(self.config.general.replay_duration_secs as u64);
-        
-        let handle = spawn_clip_saver(
-            buffer,
-            duration,
-            output_path.clone(),
-            muxer_config,
-        );
-        
+
+        let handle = spawn_clip_saver(buffer, duration, output_path.clone(), muxer_config);
+
         let result = handle.await.context("Clip saver task panicked")?;
         let final_path = result?;
 
@@ -162,21 +172,10 @@ impl Drop for AppState {
     fn drop(&mut self) {
         if self.is_recording {
             // Clean shutdown attempt in blocking context
-            drop(self.encoder_frame_tx.take());
+            drop(self.capture.take());
             if let Some(handle) = self.encoder_handle.take() {
-                drop(handle.frame_tx);
                 let _ = handle.thread.join();
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_app_state_creation() {
-        // TODO: Add test implementation
     }
 }

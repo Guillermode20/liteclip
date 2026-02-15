@@ -5,16 +5,13 @@ edition = "2021"
 
 [features]
 default = []
-# Enable FFmpeg encoding support
-ffmpeg = ["ffmpeg-next", "ffmpeg-sys-next"]
+# Enable FFmpeg pipeline code paths (no native link-time FFmpeg deps)
+ffmpeg = []
 
 [dependencies]
-# FFmpeg (optional, enabled via --features ffmpeg)
-ffmpeg-next = { version = "7", optional = true }
-ffmpeg-sys-next = { version = "7", optional = true }
-
 # Ref-counted byte buffers
 bytes = "1"
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 
 # Async
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "fs"] }
@@ -53,9 +50,11 @@ windows = { version = "0.58", features = [
     "Win32_System_LibraryLoader",
 ]}
 
+
 # Utilities
 dirs = "6"
 chrono = "0.4"
+windows-core = "0.58"
 
 [profile.release]
 codegen-units = 1

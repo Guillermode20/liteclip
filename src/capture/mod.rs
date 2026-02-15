@@ -38,6 +38,8 @@ impl From<&crate::config::Config> for CaptureConfig {
 pub struct CapturedFrame {
     /// GPU-resident texture (no CPU copy)
     pub texture: D3D11Texture,
+    /// CPU-readable BGRA frame bytes (packed, width*height*4)
+    pub bgra: Vec<u8>,
     /// QPC timestamp for sync
     pub timestamp: i64,
     /// Frame resolution (width, height)
@@ -49,6 +51,7 @@ impl Clone for CapturedFrame {
     fn clone(&self) -> Self {
         Self {
             texture: self.texture.clone(),
+            bgra: self.bgra.clone(),
             timestamp: self.timestamp,
             resolution: self.resolution,
         }
