@@ -274,7 +274,7 @@ fn default_resolution() -> Resolution {
 }
 
 fn default_framerate() -> u32 {
-    30
+    60 // was 30 - increased for smoother playback
 }
 
 fn default_codec() -> Codec {
@@ -282,7 +282,7 @@ fn default_codec() -> Codec {
 }
 
 fn default_bitrate() -> u32 {
-    20
+    50 // was 20 - increased for better quality (50 Mbps vs 20 Mbps)
 }
 
 fn default_encoder() -> EncoderType {
@@ -318,7 +318,7 @@ fn default_hotkey_gallery() -> String {
 }
 
 fn default_memory_limit() -> u32 {
-    512
+    2048 // was 512 - increased for more frame storage (2GB vs 512MB)
 }
 
 fn default_gpu_index() -> u32 {
@@ -349,7 +349,7 @@ mod tests {
     fn test_default_config() {
         let config = Config::default();
         assert_eq!(config.general.replay_duration_secs, 120);
-        assert_eq!(config.video.framerate, 30);
+        assert_eq!(config.video.framerate, 60);
         assert_eq!(config.video.codec, Codec::H264);
     }
 }

@@ -216,9 +216,35 @@ pub enum HardwareEncoder {
 /// Detect available hardware encoder
 ///
 /// Priority order: NVENC → AMF → QSV → None (software)
+#[cfg(feature = "ffmpeg")]
 pub fn detect_hardware_encoder() -> HardwareEncoder {
-    // FFmpeg is not available, so we return None
-    // In a real build with FFmpeg, this would probe the encoders
+    // Try to detect NVENC first
+    if hw_encoder::check_encoder_available("h264_nvenc") {
+        info!("Detected NVIDIA NVENC encoder");
+        return HardwareEncoder::Nvenc;
+    }
+
+    // Try AMF (AMD)
+    if hw_encoder::check_encoder_available("h264_amf") {
+        info!("Detected AMD AMF encoder");
+        return HardwareEncoder::Amf;
+    }
+
+    // Try QSV (Intel)
+    if hw_encoder::check_encoder_available("h264_qsv") {
+        info!("Detected Intel QSV encoder");
+        return HardwareEncoder::Qsv;
+    }
+
+    info!("No hardware encoder detected, using software encoding");
+    HardwareEncoder::None
+}
+
+/// Detect available hardware encoder (non-FFmpeg fallback)
+#[cfg(not(feature = "ffmpeg"))]
+pub fn detect_hardware_encoder() -> HardwareEncoder {
+    // Without FFmpeg, hardware encoders are not available
+    info!("FFmpeg not compiled in, using software encoding");
     HardwareEncoder::None
 }
 

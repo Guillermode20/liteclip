@@ -1,177 +1,635 @@
 //! Hardware Encoder Implementations (NVENC, AMF, QSV)
 //!
-//! Uses FFmpeg C API via ffmpeg-next crate for hardware-accelerated encoding.
-//! Phase 1: CPU readback path - textures are copied to CPU before encoding.
-//! Phase 3: Zero-copy GPU path - direct D3D11 texture to hardware encoder.
+//! Uses FFmpeg CLI with hardware-accelerated encoding (h264_nvenc, h264_amf, h264_qsv).
+//! Each encoder spawns an FFmpeg child process that receives BGRA frames and outputs
+//! H.264 NAL units directly, avoiding the MJPEG intermediate step.
 
-use super::{EncodedPacket, Encoder, EncoderConfig};
-use anyhow::Result;
+use super::{EncodedPacket, Encoder, EncoderConfig, StreamType};
+use anyhow::{Context, Result};
 use crossbeam::channel::{bounded, Receiver, Sender};
-use tracing::{info, trace};
+use std::io::{BufRead, BufReader, Write};
+use std::process::{ChildStdin, Command, Stdio};
+use std::thread;
+use std::time::Instant;
+use tracing::{debug, error, info, trace, warn};
 
-/// NVENC encoder wrapper (stub for Phase 1)
-pub struct NvencEncoder {
-    #[allow(dead_code)]
+/// Convert BGRA to RGB24 format for FFmpeg input
+fn bgra_to_rgb24(bgra: &[u8], width: u32, height: u32) -> Vec<u8> {
+    let expected_len = (width * height * 4) as usize;
+    if bgra.len() != expected_len {
+        return vec![];
+    }
+
+    let mut rgb = Vec::with_capacity(expected_len / 4 * 3);
+    for pixel in bgra.chunks_exact(4) {
+        rgb.push(pixel[2]); // R (from BGRA B)
+        rgb.push(pixel[1]); // G
+        rgb.push(pixel[0]); // B (from BGRA R)
+    }
+    rgb
+}
+
+fn find_annexb_start_code(data: &[u8], from: usize) -> Option<(usize, usize)> {
+    if data.len() < 3 || from >= data.len() {
+        return None;
+    }
+
+    let mut i = from;
+    while i + 2 < data.len() {
+        if i + 3 < data.len()
+            && data[i] == 0x00
+            && data[i + 1] == 0x00
+            && data[i + 2] == 0x00
+            && data[i + 3] == 0x01
+        {
+            return Some((i, 4));
+        }
+
+        if data[i] == 0x00 && data[i + 1] == 0x00 && data[i + 2] == 0x01 {
+            return Some((i, 3));
+        }
+
+        i += 1;
+    }
+
+    None
+}
+
+fn h264_nal_type(nal_data: &[u8]) -> Option<u8> {
+    if nal_data.len() >= 5
+        && nal_data[0] == 0x00
+        && nal_data[1] == 0x00
+        && nal_data[2] == 0x00
+        && nal_data[3] == 0x01
+    {
+        return Some(nal_data[4] & 0x1f);
+    }
+
+    if nal_data.len() >= 4 && nal_data[0] == 0x00 && nal_data[1] == 0x00 && nal_data[2] == 0x01 {
+        return Some(nal_data[3] & 0x1f);
+    }
+
+    None
+}
+
+/// Resolve FFmpeg command path
+fn resolve_ffmpeg_command() -> String {
+    // Check environment variable first
+    if let Ok(custom) = std::env::var("LITECLIP_FFMPEG_PATH") {
+        if !custom.trim().is_empty() {
+            return custom;
+        }
+    }
+
+    // Check local ffmpeg directory
+    if let Ok(cwd) = std::env::current_dir() {
+        let candidate = cwd.join("ffmpeg").join("bin").join("ffmpeg.exe");
+        if candidate.exists() {
+            return candidate.to_string_lossy().to_string();
+        }
+    }
+
+    // Check alongside executable
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            let candidate = exe_dir.join("ffmpeg").join("bin").join("ffmpeg.exe");
+            if candidate.exists() {
+                return candidate.to_string_lossy().to_string();
+            }
+        }
+    }
+
+    // Fallback to system ffmpeg
+    "ffmpeg".to_string()
+}
+
+/// Base hardware encoder using FFmpeg CLI
+pub struct HardwareEncoderBase {
     config: EncoderConfig,
     packet_rx: Receiver<EncodedPacket>,
-    _packet_tx: Sender<EncodedPacket>,
+    packet_tx: Sender<EncodedPacket>,
     frame_count: u64,
-    #[allow(dead_code)]
     running: bool,
+    ffmpeg_process: Option<std::process::Child>,
+    ffmpeg_stdin: Option<ChildStdin>,
+    width: u32,
+    height: u32,
+}
+
+impl HardwareEncoderBase {
+    /// Create new hardware encoder with FFmpeg CLI
+    pub fn new(config: &EncoderConfig, encoder_name: &str) -> Result<Self> {
+        let ffmpeg_cmd = resolve_ffmpeg_command();
+        info!(
+            "Creating {} encoder with FFmpeg: {}",
+            encoder_name, ffmpeg_cmd
+        );
+
+        // Determine resolution
+        let (width, height) = if config.use_native_resolution {
+            // Will be set on first frame
+            (0, 0)
+        } else {
+            config.resolution
+        };
+
+        let (packet_tx, packet_rx) = bounded(64);
+
+        Ok(Self {
+            config: config.clone(),
+            packet_rx,
+            packet_tx,
+            frame_count: 0,
+            running: false,
+            ffmpeg_process: None,
+            ffmpeg_stdin: None,
+            width,
+            height,
+        })
+    }
+
+    /// Initialize the FFmpeg process with hardware encoder settings
+    fn init_ffmpeg(&mut self, width: u32, height: u32, encoder_name: &str) -> Result<()> {
+        let ffmpeg_cmd = resolve_ffmpeg_command();
+
+        // Determine output resolution: use config if set, otherwise native
+        let (out_w, out_h) = if !self.config.use_native_resolution
+            && self.config.resolution.0 > 0
+            && self.config.resolution.1 > 0
+        {
+            self.config.resolution
+        } else {
+            (width, height)
+        };
+
+        // Build FFmpeg command based on encoder type
+        let mut cmd = Command::new(&ffmpeg_cmd);
+        cmd.arg("-y")
+            // Input: raw BGRA video at native capture resolution
+            .arg("-f")
+            .arg("rawvideo")
+            .arg("-pix_fmt")
+            .arg("bgra")
+            .arg("-s")
+            .arg(format!("{}x{}", width, height))
+            .arg("-r")
+            .arg(self.config.framerate.to_string())
+            .arg("-i")
+            .arg("pipe:0");
+
+        // Scale inside FFmpeg when output differs from input
+        if out_w != width || out_h != height {
+            cmd.arg("-vf").arg(format!("scale={}:{}", out_w, out_h));
+        }
+
+        cmd
+            // Output: H.264 NAL units (no container, just raw stream)
+            .arg("-c:v")
+            .arg(encoder_name)
+            .arg("-preset")
+            .arg(self.preset_for_encoder(encoder_name))
+            .arg("-tune")
+            .arg(self.tune_for_encoder(encoder_name))
+            .arg("-bitrate")
+            .arg(format!("{}M", self.config.bitrate_mbps))
+            .arg("-g")
+            .arg(self.config.keyframe_interval_frames().to_string())
+            .arg("-pix_fmt")
+            .arg("yuv420p")
+            .arg("-f")
+            .arg("h264")
+            .arg("pipe:1")
+            // Read input at native framerate - prevents FFmpeg from exiting immediately
+            .arg("-re");
+
+        // Add encoder-specific options
+        self.add_encoder_options(&mut cmd, encoder_name);
+
+        cmd.stdin(Stdio::piped());
+        cmd.stdout(Stdio::piped());
+        // Capture stderr for debugging - helps diagnose FFmpeg failures
+        cmd.stderr(Stdio::piped());
+
+        // Log the full command for debugging
+        let cmd_debug = format!("{:?}", cmd);
+        info!("FFmpeg command: {}", cmd_debug);
+
+        let mut child = cmd
+            .spawn()
+            .with_context(|| format!("Failed to start FFmpeg ({})", encoder_name))?;
+
+        let stdin = child.stdin.take().context("Failed to take FFmpeg stdin")?;
+
+        self.ffmpeg_process = Some(child);
+        self.ffmpeg_stdin = Some(stdin);
+        self.width = out_w;
+        self.height = out_h;
+
+        // Start the output reader thread
+        let packet_tx = self.packet_tx.clone();
+        let stdout = self
+            .ffmpeg_process
+            .as_mut()
+            .unwrap()
+            .stdout
+            .take()
+            .context("Failed to take FFmpeg stdout")?;
+
+        self.spawn_output_reader(stdout, packet_tx);
+
+        // Spawn stderr reader to capture FFmpeg diagnostic output
+        let stderr = self
+            .ffmpeg_process
+            .as_mut()
+            .unwrap()
+            .stderr
+            .take()
+            .context("Failed to take FFmpeg stderr")?;
+
+        self.spawn_stderr_reader(stderr);
+
+        info!(
+            "FFmpeg {} encoder initialized: {}x{} @ {} FPS",
+            encoder_name, width, height, self.config.framerate
+        );
+        Ok(())
+    }
+
+    /// Get preset for encoder type
+    fn preset_for_encoder(&self, encoder_name: &str) -> &str {
+        match encoder_name {
+            "h264_nvenc" => "p4",     // Performance preset for NVENC
+            "h264_amf" => "speed",    // Speed preset for AMF
+            "h264_qsv" => "veryfast", // Veryfast for QSV
+            _ => "fast",
+        }
+    }
+
+    /// Get tune parameter for encoder type
+    fn tune_for_encoder(&self, encoder_name: &str) -> &str {
+        match encoder_name {
+            "h264_nvenc" => "ull",       // Ultra low latency for NVENC
+            "h264_amf" => "zerolatency", // Zero latency for AMF
+            "h264_qsv" => "zerolatency", // Zero latency for QSV
+            _ => "zerolatency",
+        }
+    }
+
+    /// Add encoder-specific options
+    fn add_encoder_options(&self, cmd: &mut Command, encoder_name: &str) {
+        match encoder_name {
+            "h264_nvenc" => {
+                // NVENC specific: low latency
+                cmd.arg("-rc");
+                cmd.arg("cbr");
+                cmd.arg("-delay");
+                cmd.arg("0");
+            }
+            "h264_amf" => {
+                // AMF specific: quality vs speed
+                cmd.arg("-quality");
+                cmd.arg("speed");
+                // Disable B-frames for low latency
+                cmd.arg("-bf");
+                cmd.arg("0");
+                // Force SPS/PPS insertion with every keyframe
+                // This is critical for hardware encoders to produce valid H.264
+                cmd.arg("-sei");
+                cmd.arg("+aud");
+                // Ensure consistent frame rate
+                cmd.arg("-vsync");
+                cmd.arg("cfr");
+            }
+            "h264_qsv" => {
+                // QSV specific: no look ahead
+                cmd.arg("-look_ahead");
+                cmd.arg("0");
+            }
+            _ => {}
+        }
+    }
+
+    /// Spawn thread to read FFmpeg output
+    fn spawn_output_reader(
+        &self,
+        stdout: std::process::ChildStdout,
+        packet_tx: Sender<EncodedPacket>,
+    ) {
+        thread::spawn(move || {
+            use std::io::Read;
+
+            let mut reader = std::io::BufReader::new(stdout);
+            let mut buffer = [0u8; 65536]; // 64KB buffer
+            let mut frame_buffer = Vec::new();
+            let started_at = Instant::now();
+            let mut last_pts = 0i64;
+
+            loop {
+                match reader.read(&mut buffer) {
+                    Ok(0) => {
+                        debug!("FFmpeg output reader: EOF");
+                        break;
+                    }
+                    Ok(n) => {
+                        frame_buffer.extend_from_slice(&buffer[..n]);
+
+                        // Extract NAL units
+                        loop {
+                            let Some((start_pos, start_len)) =
+                                find_annexb_start_code(&frame_buffer, 0)
+                            else {
+                                if frame_buffer.len() > (2 * 1024 * 1024) {
+                                    let keep = 4usize.min(frame_buffer.len());
+                                    let drop_len = frame_buffer.len() - keep;
+                                    frame_buffer.drain(0..drop_len);
+                                }
+                                break;
+                            };
+
+                            if start_pos > 0 {
+                                frame_buffer.drain(0..start_pos);
+                                continue;
+                            }
+
+                            let Some((next_start, _)) =
+                                find_annexb_start_code(&frame_buffer, start_len)
+                            else {
+                                break;
+                            };
+
+                            let nal_data = frame_buffer[0..next_start].to_vec();
+                            frame_buffer.drain(0..next_start);
+
+                            if !nal_data.is_empty() {
+                                let nal_type = h264_nal_type(&nal_data);
+                                let is_keyframe = matches!(nal_type, Some(5 | 7 | 8));
+
+                                let mut pts = (started_at.elapsed().as_nanos() / 100) as i64;
+                                if pts <= last_pts {
+                                    pts = last_pts + 1;
+                                }
+                                last_pts = pts;
+
+                                let packet = EncodedPacket::new(
+                                    nal_data,
+                                    pts,
+                                    pts,
+                                    is_keyframe,
+                                    StreamType::Video,
+                                );
+
+                                if packet_tx.send(packet).is_err() {
+                                    debug!("FFmpeg output reader: channel closed");
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!("FFmpeg output reader error: {}", e);
+                        break;
+                    }
+                }
+            }
+
+            debug!("FFmpeg output reader thread exiting");
+        });
+    }
+
+    /// Spawn thread to read FFmpeg stderr for debugging
+    fn spawn_stderr_reader(&self, stderr: std::process::ChildStderr) {
+        thread::spawn(move || {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines().map_while(Result::ok) {
+                // Log FFmpeg stderr output - contains errors/warnings
+                if line.to_lowercase().contains("error") || line.to_lowercase().contains("fail") {
+                    error!("[FFmpeg] {}", line);
+                } else if line.to_lowercase().contains("warning") {
+                    warn!("[FFmpeg] {}", line);
+                } else {
+                    debug!("[FFmpeg] {}", line);
+                }
+            }
+            debug!("FFmpeg stderr reader thread exiting");
+        });
+    }
+    /// Encode a single frame
+    fn encode_frame_internal(
+        &mut self,
+        frame: &super::super::capture::CapturedFrame,
+    ) -> Result<()> {
+        // Initialize FFmpeg on first frame if not done.
+        // Always use the native frame resolution for the FFmpeg rawvideo input
+        // because we send the raw BGRA bytes as-is (no CPU-side resize).
+        // If a smaller output is desired, FFmpeg scales internally via -vf.
+        if self.ffmpeg_process.is_none() {
+            let (native_w, native_h) = frame.resolution;
+            let encoder_name = self.config.ffmpeg_codec_name();
+            self.init_ffmpeg(native_w, native_h, encoder_name)?;
+        }
+
+        // Write frame to FFmpeg stdin (always native resolution bytes)
+        if let Some(ref mut stdin) = self.ffmpeg_stdin {
+            let data = &frame.bgra;
+
+            stdin
+                .write_all(&data)
+                .context("Failed to write frame to FFmpeg stdin")?;
+            stdin.flush()?;
+
+            self.frame_count += 1;
+            trace!("Encoded frame {} to FFmpeg", self.frame_count);
+        }
+
+        Ok(())
+    }
+
+    /// Flush remaining frames and close FFmpeg
+    fn flush_internal(&mut self) -> Result<Vec<EncodedPacket>> {
+        // Drop stdin to signal EOF to FFmpeg
+        if let Some(stdin) = self.ffmpeg_stdin.take() {
+            drop(stdin);
+        }
+
+        // Wait for FFmpeg to finish
+        if let Some(mut child) = self.ffmpeg_process.take() {
+            match child.wait() {
+                Ok(status) => {
+                    if !status.success() {
+                        warn!("FFmpeg process exited with status: {}", status);
+                    }
+                }
+                Err(e) => {
+                    warn!("Error waiting for FFmpeg process: {}", e);
+                }
+            }
+        }
+
+        self.running = false;
+
+        // Drain remaining packets
+        let mut packets = Vec::new();
+        while let Ok(packet) = self.packet_rx.try_recv() {
+            packets.push(packet);
+        }
+
+        info!("Flushed {} packets from hardware encoder", packets.len());
+        Ok(packets)
+    }
+}
+
+/// NVENC encoder wrapper (NVIDIA)
+pub struct NvencEncoder {
+    base: HardwareEncoderBase,
 }
 
 impl NvencEncoder {
     /// Create new NVENC encoder
     pub fn new(config: &EncoderConfig) -> Result<Self> {
-        info!("Creating NVENC encoder (stub)");
-        let (tx, rx) = bounded(64);
-
-        Ok(Self {
-            config: config.clone(),
-            packet_rx: rx,
-            _packet_tx: tx,
-            frame_count: 0,
-            running: false,
-        })
+        info!("Creating NVENC encoder");
+        let base = HardwareEncoderBase::new(config, "h264_nvenc")?;
+        Ok(Self { base })
     }
 }
 
 impl Encoder for NvencEncoder {
-    fn init(&mut self, _config: &EncoderConfig) -> Result<()> {
-        info!("NVENC encoder initialized (stub)");
-        self.running = true;
+    fn init(&mut self, config: &EncoderConfig) -> Result<()> {
+        self.base.config = config.clone();
+        self.base.running = true;
+        info!("NVENC encoder initialized (ready for frames)");
         Ok(())
     }
 
-    fn encode_frame(&mut self, _frame: &crate::capture::CapturedFrame) -> Result<()> {
-        trace!("NVENC encoding frame {}", self.frame_count);
-        self.frame_count += 1;
-        Ok(())
+    fn encode_frame(&mut self, frame: &super::super::capture::CapturedFrame) -> Result<()> {
+        self.base.encode_frame_internal(frame)
     }
 
     fn flush(&mut self) -> Result<Vec<EncodedPacket>> {
-        info!("Flushing NVENC encoder");
-        self.running = false;
-        Ok(vec![])
+        self.base.flush_internal()
     }
 
     fn packet_rx(&self) -> Receiver<EncodedPacket> {
-        self.packet_rx.clone()
+        self.base.packet_rx.clone()
     }
 
     fn is_running(&self) -> bool {
-        self.running
+        self.base.running
     }
 }
 
-/// AMF encoder wrapper (AMD) (stub for Phase 1)
+/// AMF encoder wrapper (AMD)
 pub struct AmfEncoder {
-    #[allow(dead_code)]
-    config: EncoderConfig,
-    packet_rx: Receiver<EncodedPacket>,
-    _packet_tx: Sender<EncodedPacket>,
-    frame_count: u64,
-    #[allow(dead_code)]
-    running: bool,
+    base: HardwareEncoderBase,
 }
 
 impl AmfEncoder {
     /// Create new AMF encoder
     pub fn new(config: &EncoderConfig) -> Result<Self> {
-        info!("Creating AMF encoder (stub)");
-        let (tx, rx) = bounded(64);
-
-        Ok(Self {
-            config: config.clone(),
-            packet_rx: rx,
-            _packet_tx: tx,
-            frame_count: 0,
-            running: false,
-        })
+        info!("Creating AMF encoder");
+        let base = HardwareEncoderBase::new(config, "h264_amf")?;
+        Ok(Self { base })
     }
 }
 
 impl Encoder for AmfEncoder {
-    fn init(&mut self, _config: &EncoderConfig) -> Result<()> {
-        info!("AMF encoder initialized (stub)");
-        self.running = true;
+    fn init(&mut self, config: &EncoderConfig) -> Result<()> {
+        self.base.config = config.clone();
+        self.base.running = true;
+        info!("AMF encoder initialized (ready for frames)");
         Ok(())
     }
 
-    fn encode_frame(&mut self, _frame: &crate::capture::CapturedFrame) -> Result<()> {
-        trace!("AMF encoding frame {}", self.frame_count);
-        self.frame_count += 1;
-        Ok(())
+    fn encode_frame(&mut self, frame: &super::super::capture::CapturedFrame) -> Result<()> {
+        self.base.encode_frame_internal(frame)
     }
 
     fn flush(&mut self) -> Result<Vec<EncodedPacket>> {
-        info!("Flushing AMF encoder");
-        self.running = false;
-        Ok(vec![])
+        self.base.flush_internal()
     }
 
     fn packet_rx(&self) -> Receiver<EncodedPacket> {
-        self.packet_rx.clone()
+        self.base.packet_rx.clone()
     }
 
     fn is_running(&self) -> bool {
-        self.running
+        self.base.running
     }
 }
 
-/// QSV encoder wrapper (Intel) (stub for Phase 1)
+/// QSV encoder wrapper (Intel)
 pub struct QsvEncoder {
-    #[allow(dead_code)]
-    config: EncoderConfig,
-    packet_rx: Receiver<EncodedPacket>,
-    _packet_tx: Sender<EncodedPacket>,
-    frame_count: u64,
-    #[allow(dead_code)]
-    running: bool,
+    base: HardwareEncoderBase,
 }
 
 impl QsvEncoder {
     /// Create new QSV encoder
     pub fn new(config: &EncoderConfig) -> Result<Self> {
-        info!("Creating QSV encoder (stub)");
-        let (tx, rx) = bounded(64);
-
-        Ok(Self {
-            config: config.clone(),
-            packet_rx: rx,
-            _packet_tx: tx,
-            frame_count: 0,
-            running: false,
-        })
+        info!("Creating QSV encoder");
+        let base = HardwareEncoderBase::new(config, "h264_qsv")?;
+        Ok(Self { base })
     }
 }
 
 impl Encoder for QsvEncoder {
-    fn init(&mut self, _config: &EncoderConfig) -> Result<()> {
-        info!("QSV encoder initialized (stub)");
-        self.running = true;
+    fn init(&mut self, config: &EncoderConfig) -> Result<()> {
+        self.base.config = config.clone();
+        self.base.running = true;
+        info!("QSV encoder initialized (ready for frames)");
         Ok(())
     }
 
-    fn encode_frame(&mut self, _frame: &crate::capture::CapturedFrame) -> Result<()> {
-        trace!("QSV encoding frame {}", self.frame_count);
-        self.frame_count += 1;
-        Ok(())
+    fn encode_frame(&mut self, frame: &super::super::capture::CapturedFrame) -> Result<()> {
+        self.base.encode_frame_internal(frame)
     }
 
     fn flush(&mut self) -> Result<Vec<EncodedPacket>> {
-        info!("Flushing QSV encoder");
-        self.running = false;
-        Ok(vec![])
+        self.base.flush_internal()
     }
 
     fn packet_rx(&self) -> Receiver<EncodedPacket> {
-        self.packet_rx.clone()
+        self.base.packet_rx.clone()
     }
 
     fn is_running(&self) -> bool {
-        self.running
+        self.base.running
     }
+}
+
+/// Check if a hardware encoder is available by attempting to probe it
+#[cfg(feature = "ffmpeg")]
+pub fn check_encoder_available(encoder_name: &str) -> bool {
+    let ffmpeg_cmd = resolve_ffmpeg_command();
+
+    // Try to get encoder info from FFmpeg
+    let output = Command::new(&ffmpeg_cmd)
+        .arg("-hide_banner")
+        .arg("-encoders")
+        .arg("-v")
+        .arg("error")
+        .output();
+
+    match output {
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let stdout = String::from_utf8_lossy(&out.stdout);
+
+            // Check if encoder is listed in available encoders
+            let output_str = format!("{}{}", stdout, stderr);
+            output_str.contains(encoder_name)
+        }
+        Err(e) => {
+            warn!(
+                "Failed to check encoder availability for {}: {}",
+                encoder_name, e
+            );
+            false
+        }
+    }
+}
+
+#[cfg(not(feature = "ffmpeg"))]
+pub fn check_encoder_available(_encoder_name: &str) -> bool {
+    false
 }
 
 #[cfg(test)]
@@ -225,19 +683,19 @@ mod tests {
     }
 
     #[test]
-    fn test_encoder_trait() {
-        use super::super::Encoder;
+    fn test_bgra_to_rgb24() {
+        // Test BGRA to RGB24 conversion
+        let bgra: Vec<u8> = vec![
+            0x00, 0x00, 0xFF, 0xFF, // BGRA: B=0, G=0, R=255, A=255 (Red)
+            0x00, 0xFF, 0x00, 0xFF, // BGRA: B=0, G=255, R=0, A=255 (Green)
+            0xFF, 0x00, 0x00, 0xFF, // BGRA: B=255, G=0, R=0, A=255 (Blue)
+        ];
+        let rgb = bgra_to_rgb24(&bgra, 3, 1);
 
-        let config = create_test_config();
-        let mut encoder = NvencEncoder::new(&config).unwrap();
-        
-        // Test init
-        assert!(encoder.init(&config).is_ok());
-        assert!(encoder.is_running());
-
-        // Test flush
-        let packets = encoder.flush().unwrap();
-        assert!(packets.is_empty());
-        assert!(!encoder.is_running());
+        // Expected: R, G, B
+        assert_eq!(rgb.len(), 9);
+        assert_eq!(rgb[0], 0xFF); // R from first pixel
+        assert_eq!(rgb[1], 0x00); // G from first pixel
+        assert_eq!(rgb[2], 0x00); // B from first pixel
     }
 }

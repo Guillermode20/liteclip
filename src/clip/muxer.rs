@@ -14,6 +14,45 @@ use std::{
 };
 use tracing::{debug, error, info, trace};
 
+/// Detect if packet data is H.264 format by looking for NAL start codes
+///
+/// H.264 NAL units start with either:
+/// - 0x00 0x00 0x00 0x01 (4-byte start code)
+/// - 0x00 0x00 0x01 (3-byte start code)
+fn is_h264_format(data: &[u8]) -> bool {
+    if data.len() < 4 {
+        return false;
+    }
+
+    // Check for 4-byte start code: 0x00 0x00 0x00 0x01
+    if data.len() >= 4 && data[0] == 0x00 && data[1] == 0x00 && data[2] == 0x00 && data[3] == 0x01 {
+        return true;
+    }
+
+    // Check for 3-byte start code: 0x00 0x00 0x01
+    if data.len() >= 3 && data[0] == 0x00 && data[1] == 0x00 && data[2] == 0x01 {
+        return true;
+    }
+
+    // Also check for AVCC format (length-prefixed) which starts with version/profile/level
+    // Common H.264 profiles have these bytes: 0x00 0x00 0x00 (length) followed by NAL unit
+    // For now, we focus on start codes which are more common from hardware encoders
+
+    false
+}
+
+fn h264_nal_type(data: &[u8]) -> Option<u8> {
+    if data.len() >= 5 && data[0..4] == [0x00, 0x00, 0x00, 0x01] {
+        return Some(data[4] & 0x1f);
+    }
+
+    if data.len() >= 4 && data[0..3] == [0x00, 0x00, 0x01] {
+        return Some(data[3] & 0x1f);
+    }
+
+    None
+}
+
 /// Muxer configuration
 #[derive(Debug, Clone)]
 pub struct MuxerConfig {
@@ -182,6 +221,196 @@ impl Muxer {
 
         self.video_packets.sort_by_key(|packet| packet.pts);
 
+        // Detect if frames are already H.264 encoded
+        let is_h264 = self
+            .video_packets
+            .first()
+            .map(|p| is_h264_format(&p.data))
+            .unwrap_or(false);
+
+        if is_h264 {
+            info!("Detected H.264 format - using fast muxing path (no transcoding)");
+            return self.finalize_ffmpeg_h264_copy(ffmpeg_cmd, qpc_frequency_f64);
+        }
+
+        // Fall back to MJPEG transcoding path
+        info!("Detected MJPEG format - using transcoding path");
+        self.finalize_ffmpeg_mjpeg_transcode(ffmpeg_cmd, qpc_frequency_f64)
+    }
+
+    /// Fast path: Mux pre-encoded H.264 frames directly to MP4 without transcoding
+    ///
+    /// Uses FFmpeg's -c:v copy to just remux the H.264 NAL units into MP4 container.
+    /// This is orders of magnitude faster than transcoding.
+    #[cfg(feature = "ffmpeg")]
+    fn finalize_ffmpeg_h264_copy(
+        &self,
+        ffmpeg_cmd: OsString,
+        qpc_frequency_f64: f64,
+    ) -> Result<PathBuf> {
+        let effective_fps = if self.video_packets.len() >= 2 {
+            let first_pts = self.video_packets.first().map(|p| p.pts).unwrap_or(0);
+            let last_pts = self
+                .video_packets
+                .last()
+                .map(|p| p.pts)
+                .unwrap_or(first_pts);
+            let span_qpc = (last_pts - first_pts).max(1) as f64;
+            let span_secs = span_qpc / qpc_frequency_f64;
+            if span_secs > 0.0 {
+                (self.video_packets.len() as f64 / span_secs).clamp(0.1, self.config.fps.max(1.0))
+            } else {
+                self.config.fps.max(1.0)
+            }
+        } else {
+            self.config.fps.max(1.0)
+        };
+
+        info!(
+            "Muxing {} H.264 frames with FPS {:.3}",
+            self.video_packets.len(),
+            effective_fps
+        );
+
+        // Write H.264 stream to a temporary file
+        let h264_temp_path = self.output_path.with_extension("h264");
+        {
+            let mut h264_file = std::fs::File::create(&h264_temp_path).with_context(|| {
+                format!("Failed to create temp H.264 file: {:?}", h264_temp_path)
+            })?;
+
+            let mut first_idr_index: Option<usize> = None;
+            let mut has_sps_before_idr = false;
+            let mut has_pps_before_idr = false;
+            let mut first_sps: Option<&[u8]> = None;
+            let mut first_pps: Option<&[u8]> = None;
+
+            for (index, packet) in self.video_packets.iter().enumerate() {
+                match h264_nal_type(packet.data.as_ref()) {
+                    Some(7) => {
+                        if first_sps.is_none() {
+                            first_sps = Some(packet.data.as_ref());
+                        }
+                        if first_idr_index.is_none() {
+                            has_sps_before_idr = true;
+                        }
+                    }
+                    Some(8) => {
+                        if first_pps.is_none() {
+                            first_pps = Some(packet.data.as_ref());
+                        }
+                        if first_idr_index.is_none() {
+                            has_pps_before_idr = true;
+                        }
+                    }
+                    Some(5) => {
+                        if first_idr_index.is_none() {
+                            first_idr_index = Some(index);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            if first_idr_index.is_some() {
+                if !has_sps_before_idr {
+                    if let Some(sps) = first_sps {
+                        h264_file
+                            .write_all(sps)
+                            .context("Failed to write SPS to temp H.264 file")?;
+                    }
+                }
+
+                if !has_pps_before_idr {
+                    if let Some(pps) = first_pps {
+                        h264_file
+                            .write_all(pps)
+                            .context("Failed to write PPS to temp H.264 file")?;
+                    }
+                }
+            }
+
+            for packet in &self.video_packets {
+                h264_file
+                    .write_all(packet.data.as_ref())
+                    .context("Failed to write H.264 data to temp file")?;
+            }
+        }
+
+        // Use FFmpeg to remux H.264 to MP4 (no transcoding).
+        // Do not pass rawvideo-specific options (e.g. video_size) to H.264 input.
+        let mut command = Command::new(&ffmpeg_cmd);
+        command
+            .arg("-y")
+            .arg("-f")
+            .arg("h264")
+            .arg("-r")
+            .arg(format!("{:.6}", effective_fps))
+            .arg("-i")
+            .arg(&h264_temp_path)
+            // Copy video stream
+            .arg("-c:v")
+            .arg("copy");
+
+        if self.config.faststart {
+            command.arg("-movflags").arg("+faststart");
+        }
+
+        let output = command
+            .arg(&self.output_path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .with_context(|| format!("Failed to run ffmpeg for H.264 remux: {:?}", ffmpeg_cmd))?;
+
+        // Clean up temp file
+        let _ = std::fs::remove_file(&h264_temp_path);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !output.status.success() {
+            if self.output_path.exists() {
+                let _ = std::fs::remove_file(&self.output_path);
+            }
+            error!("FFmpeg H.264 remux stderr:\n{}", stderr);
+            bail!(
+                "ffmpeg failed to remux H.264 to MP4: status {}",
+                output.status
+            );
+        }
+
+        if !stderr.is_empty() {
+            debug!("FFmpeg H.264 remux output:\n{}", stderr);
+        }
+
+        let metadata = std::fs::metadata(&self.output_path).with_context(|| {
+            format!(
+                "Missing output MP4 after H.264 remux: {:?}",
+                self.output_path
+            )
+        })?;
+        if metadata.len() == 0 {
+            bail!(
+                "Generated MP4 is empty after H.264 remux: {:?}",
+                self.output_path
+            );
+        }
+
+        info!(
+            "H.264 fast mux complete: {:?} ({} frames)",
+            self.output_path,
+            self.video_packets.len()
+        );
+
+        Ok(self.output_path.clone())
+    }
+
+    /// Slow path: Transcode MJPEG frames to H.264 and mux to MP4
+    #[cfg(feature = "ffmpeg")]
+    fn finalize_ffmpeg_mjpeg_transcode(
+        &self,
+        ffmpeg_cmd: OsString,
+        qpc_frequency_f64: f64,
+    ) -> Result<PathBuf> {
         let effective_fps = if self.video_packets.len() >= 2 {
             let first_pts = self
                 .video_packets
@@ -227,9 +456,9 @@ impl Muxer {
             .arg("-r")
             .arg(format!("{:.6}", effective_fps))
             .arg("-crf")
-            .arg("18")
+            .arg("23")
             .arg("-preset")
-            .arg("fast")
+            .arg("ultrafast")
             .arg("-tune")
             .arg("zerolatency")
             .arg("-pix_fmt")
@@ -297,7 +526,7 @@ impl Muxer {
             self.output_path, written_frames
         );
 
-        Ok(self.output_path)
+        Ok(self.output_path.clone())
     }
 
     #[cfg(feature = "ffmpeg")]
@@ -453,5 +682,33 @@ mod tests {
 
         // Cleanup
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_is_h264_format_4byte_start_code() {
+        // 4-byte start code: 0x00 0x00 0x00 0x01 followed by NAL unit
+        let h264_data = vec![0x00, 0x00, 0x00, 0x01, 0x67, 0x64, 0x00, 0x1f];
+        assert!(is_h264_format(&h264_data));
+    }
+
+    #[test]
+    fn test_is_h264_format_3byte_start_code() {
+        // 3-byte start code: 0x00 0x00 0x01 followed by NAL unit
+        let h264_data = vec![0x00, 0x00, 0x01, 0x67, 0x64, 0x00, 0x1f];
+        assert!(is_h264_format(&h264_data));
+    }
+
+    #[test]
+    fn test_is_h264_format_mjpeg() {
+        // JPEG starts with 0xFF 0xD8
+        let mjpeg_data = vec![0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46];
+        assert!(!is_h264_format(&mjpeg_data));
+    }
+
+    #[test]
+    fn test_is_h264_format_too_short() {
+        // Too short to be H.264
+        let short_data = vec![0x00, 0x00];
+        assert!(!is_h264_format(&short_data));
     }
 }
