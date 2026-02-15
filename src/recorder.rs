@@ -7,7 +7,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
-use crate::settings::{Quality, Settings, VideoEncoder};
+use crate::settings::{RateControl, Settings, VideoEncoder};
 
 /// Cache for detected capabilities to avoid re-probing on every startup.
 #[derive(Debug, Serialize, Deserialize)]
@@ -214,8 +214,9 @@ impl Recorder {
         let segment_duration: u64 = 10;
         let force_kf = format!("expr:gte(t,n_forced*{})", segment_duration);
         let fps = self.settings.framerate.value().to_string();
-        let crf = self.settings.quality.crf().to_string();
         let wrap = self.segment_wrap().to_string();
+        let keyframe_interval_sec = self.settings.keyframe_interval_sec.max(1);
+        let keyint_frames = (self.settings.framerate.value() * keyframe_interval_sec).to_string();
         // Keep at least one logical core free so desktop input/rendering stays responsive.
         let encoding_threads = std::thread::available_parallelism()
             .map(|n| n.get().saturating_sub(1).clamp(1, 4))
@@ -284,17 +285,17 @@ impl Recorder {
             // ddagrab emits GPU-backed d3d11 frames that must be downloaded
             // to system memory.  Only NVENC can accept nv12 directly from
             // hwdownload; AMF/QSV and software all need bgra.
-            let mut vfilters = Vec::new();
+            let mut vfilters: Vec<String> = Vec::new();
             if self.screen_capture_input == ScreenCaptureInput::DdaGrab {
-                vfilters.push("hwdownload");
+                vfilters.push("hwdownload".into());
                 if encoder == VideoEncoder::H264Nvenc {
                     // NVENC: skip bgra intermediate — go directly to nv12
-                    vfilters.push("format=nv12");
+                    vfilters.push("format=nv12".into());
                 } else {
-                    vfilters.push("format=bgra");
+                    vfilters.push("format=bgra".into());
                 }
             }
-            if let Some(scale) = self.settings.resolution.scale_filter() {
+            if let Some(scale) = self.settings.active_scale_filter() {
                 vfilters.push(scale);
             }
             if !vfilters.is_empty() {
@@ -305,15 +306,20 @@ impl Recorder {
             append_video_encoder_args(
                 &mut args,
                 encoder,
-                &self.settings.quality,
+                &self.settings,
                 &encoding_threads,
-                &crf,
                 &force_kf,
+                &keyint_frames,
             );
 
             // Audio encoding (if audio is being captured)
             if has_audio {
-                args.extend(["-c:a".into(), "aac".into(), "-b:a".into(), "128k".into()]);
+                args.extend([
+                    "-c:a".into(),
+                    "aac".into(),
+                    "-b:a".into(),
+                    format!("{}k", self.settings.audio_bitrate_kbps.clamp(64, 512)),
+                ]);
                 // Prevent audio/video desync when dshow delivers at uneven rates
                 args.extend(["-max_muxing_queue_size".into(), "1024".into()]);
             }
@@ -962,43 +968,83 @@ fn detect_screen_capture_input(ffmpeg_found: bool) -> ScreenCaptureInput {
 fn append_video_encoder_args(
     args: &mut Vec<String>,
     encoder: VideoEncoder,
-    quality: &Quality,
+    settings: &Settings,
     encoding_threads: &str,
-    crf: &str,
     force_kf: &str,
+    keyint_frames: &str,
 ) {
+    let quality = settings.quality;
+    let use_advanced = settings.advanced_video_controls;
+    let rate_control = settings.rate_control;
+    let video_bitrate = settings.video_bitrate_kbps.clamp(1000, 150000);
+    let max_bitrate = settings.video_max_bitrate_kbps.clamp(video_bitrate, 200000);
+    let bufsize = settings.video_bufsize_kbps.clamp(video_bitrate, 400000);
+    let crf = settings.video_crf.clamp(0, 51);
+
     match encoder {
         VideoEncoder::Libx264 => {
-            args.extend([
-                "-c:v".into(),
-                "libx264".into(),
-                "-threads".into(),
-                encoding_threads.to_string(),
-                "-preset".into(),
-                quality.preset().into(),
-                "-crf".into(),
-                crf.into(),
-                "-pix_fmt".into(),
-                "yuv420p".into(),
-                "-force_key_frames".into(),
-                force_kf.into(),
-            ]);
+            let preset = if use_advanced {
+                settings.encoder_tuning.x264_preset()
+            } else {
+                quality.preset()
+            };
+
+            args.extend(["-c:v".into(), "libx264".into()]);
+            args.extend(["-threads".into(), encoding_threads.to_string()]);
+            args.extend(["-preset".into(), preset.into()]);
+
+            match if use_advanced {
+                rate_control
+            } else {
+                RateControl::Preset
+            } {
+                RateControl::Preset | RateControl::Crf => {
+                    let effective_crf = if use_advanced { crf } else { quality.crf() };
+                    args.extend(["-crf".into(), effective_crf.to_string()]);
+                }
+                RateControl::Cbr => {
+                    args.extend(["-b:v".into(), format!("{}k", video_bitrate)]);
+                    args.extend(["-maxrate".into(), format!("{}k", video_bitrate)]);
+                    args.extend(["-bufsize".into(), format!("{}k", bufsize)]);
+                }
+                RateControl::Vbr => {
+                    args.extend(["-b:v".into(), format!("{}k", video_bitrate)]);
+                    args.extend(["-maxrate".into(), format!("{}k", max_bitrate)]);
+                    args.extend(["-bufsize".into(), format!("{}k", bufsize)]);
+                }
+            }
+
+            args.extend(["-g".into(), keyint_frames.into()]);
+            args.extend(["-keyint_min".into(), keyint_frames.into()]);
+            args.extend(["-pix_fmt".into(), "yuv420p".into()]);
+            args.extend(["-force_key_frames".into(), force_kf.into()]);
         }
         VideoEncoder::H264Nvenc => {
-            let bitrate = format!("{}k", quality.target_bitrate_kbps());
-            let maxrate = format!("{}k", quality.target_bitrate_kbps() * 2);
-            let bufsize = format!("{}k", quality.target_bitrate_kbps() * 2);
+            let (target_kbps, max_kbps, buf_kbps) = if use_advanced {
+                (video_bitrate, max_bitrate, bufsize)
+            } else {
+                let base = quality.target_bitrate_kbps();
+                (base, base * 2, base * 2)
+            };
+            let preset = if use_advanced {
+                settings.encoder_tuning.nvenc_preset()
+            } else {
+                quality.nvenc_preset()
+            };
+
             args.extend([
                 "-c:v".into(),
                 "h264_nvenc".into(),
                 "-preset".into(),
-                quality.nvenc_preset().into(),
+                preset.into(),
                 "-b:v".into(),
-                bitrate,
+                format!("{}k", target_kbps),
                 "-maxrate".into(),
-                maxrate,
+                format!("{}k", max_kbps),
                 "-bufsize".into(),
-                bufsize,
+                format!("{}k", buf_kbps),
+                "-g".into(),
+                keyint_frames.into(),
                 "-pix_fmt".into(),
                 "yuv420p".into(),
                 "-force_key_frames".into(),
@@ -1006,20 +1052,31 @@ fn append_video_encoder_args(
             ]);
         }
         VideoEncoder::H264Qsv => {
-            let bitrate = format!("{}k", quality.target_bitrate_kbps());
-            let maxrate = format!("{}k", quality.target_bitrate_kbps() * 2);
-            let bufsize = format!("{}k", quality.target_bitrate_kbps() * 2);
+            let (target_kbps, max_kbps, buf_kbps) = if use_advanced {
+                (video_bitrate, max_bitrate, bufsize)
+            } else {
+                let base = quality.target_bitrate_kbps();
+                (base, base * 2, base * 2)
+            };
+            let preset = if use_advanced {
+                settings.encoder_tuning.qsv_preset()
+            } else {
+                quality.qsv_preset()
+            };
+
             args.extend([
                 "-c:v".into(),
                 "h264_qsv".into(),
                 "-preset".into(),
-                quality.qsv_preset().into(),
+                preset.into(),
                 "-b:v".into(),
-                bitrate,
+                format!("{}k", target_kbps),
                 "-maxrate".into(),
-                maxrate,
+                format!("{}k", max_kbps),
                 "-bufsize".into(),
-                bufsize,
+                format!("{}k", buf_kbps),
+                "-g".into(),
+                keyint_frames.into(),
                 "-pix_fmt".into(),
                 "yuv420p".into(),
                 "-force_key_frames".into(),
@@ -1027,20 +1084,31 @@ fn append_video_encoder_args(
             ]);
         }
         VideoEncoder::H264Amf => {
-            let bitrate = format!("{}k", quality.target_bitrate_kbps());
-            let maxrate = format!("{}k", quality.target_bitrate_kbps() * 2);
-            let bufsize = format!("{}k", quality.target_bitrate_kbps() * 2);
+            let (target_kbps, max_kbps, buf_kbps) = if use_advanced {
+                (video_bitrate, max_bitrate, bufsize)
+            } else {
+                let base = quality.target_bitrate_kbps();
+                (base, base * 2, base * 2)
+            };
+            let amf_quality = if use_advanced {
+                settings.encoder_tuning.amf_quality()
+            } else {
+                quality.amf_quality()
+            };
+
             args.extend([
                 "-c:v".into(),
                 "h264_amf".into(),
                 "-quality".into(),
-                quality.amf_quality().into(),
+                amf_quality.into(),
                 "-b:v".into(),
-                bitrate,
+                format!("{}k", target_kbps),
                 "-maxrate".into(),
-                maxrate,
+                format!("{}k", max_kbps),
                 "-bufsize".into(),
-                bufsize,
+                format!("{}k", buf_kbps),
+                "-g".into(),
+                keyint_frames.into(),
                 "-pix_fmt".into(),
                 "yuv420p".into(),
                 "-force_key_frames".into(),

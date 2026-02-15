@@ -79,7 +79,7 @@ fn main() -> eframe::Result<()> {
 
     // --- System tray icon ---
     let tray_menu = Menu::new();
-    let show_item = MenuItem::new("Show LiteClip", true, None);
+    let show_item = MenuItem::new("Show LiteClip Replay", true, None);
     let quit_item = MenuItem::new("Quit", true, None);
     let _ = tray_menu.append(&show_item);
     let _ = tray_menu.append(&quit_item);
@@ -92,7 +92,7 @@ fn main() -> eframe::Result<()> {
 
     let _tray_icon = TrayIconBuilder::new()
         .with_menu(Box::new(tray_menu))
-        .with_tooltip("LiteClip — Replay Buffer")
+        .with_tooltip("LiteClip Replay")
         .with_icon(icon)
         .build()
         .expect("Failed to create tray icon");
@@ -167,7 +167,7 @@ fn main() -> eframe::Result<()> {
     // --- Window options ---
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("LiteClip")
+            .with_title("LiteClip Replay")
             .with_inner_size([340.0, 320.0])
             .with_min_inner_size([300.0, 260.0])
             .with_max_inner_size([500.0, 500.0])
@@ -176,7 +176,7 @@ fn main() -> eframe::Result<()> {
     };
 
     eframe::run_native(
-        "LiteClip",
+        "LiteClip Replay",
         options,
         Box::new(move |_cc| {
             Ok(Box::new(HotkeyWrapper {
@@ -320,10 +320,10 @@ fn init_logging() {
     ));
 
     if CombinedLogger::init(loggers).is_err() {
-        eprintln!("[LiteClip] Warning: Failed to initialize logger");
+        eprintln!("[LiteClip Replay] Warning: Failed to initialize logger");
     }
 
-    info!("=== LiteClip started ===");
+    info!("=== LiteClip Replay started ===");
     info!("Log file: {}", log_path.display());
 }
 

@@ -168,6 +168,111 @@ impl VideoEncoder {
     }
 }
 
+/// Rate control mode for video encoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RateControl {
+    /// Use the built-in quality presets (simple mode).
+    Preset,
+    /// Constant bitrate.
+    Cbr,
+    /// Variable bitrate with a target and max bitrate.
+    Vbr,
+    /// Constant quality (CRF-like). Best supported with software x264.
+    Crf,
+}
+
+impl RateControl {
+    pub fn label(&self) -> &'static str {
+        match self {
+            RateControl::Preset => "Preset (simple)",
+            RateControl::Cbr => "CBR",
+            RateControl::Vbr => "VBR",
+            RateControl::Crf => "CRF (quality-based)",
+        }
+    }
+
+    pub fn all() -> &'static [RateControl] {
+        &[
+            RateControl::Preset,
+            RateControl::Cbr,
+            RateControl::Vbr,
+            RateControl::Crf,
+        ]
+    }
+}
+
+/// Generic encoder speed/quality tuning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum EncoderTuning {
+    Fastest,
+    Fast,
+    Balanced,
+    Quality,
+    MaxQuality,
+}
+
+impl EncoderTuning {
+    pub fn label(&self) -> &'static str {
+        match self {
+            EncoderTuning::Fastest => "Fastest",
+            EncoderTuning::Fast => "Fast",
+            EncoderTuning::Balanced => "Balanced",
+            EncoderTuning::Quality => "Quality",
+            EncoderTuning::MaxQuality => "Max Quality",
+        }
+    }
+
+    pub fn all() -> &'static [EncoderTuning] {
+        &[
+            EncoderTuning::Fastest,
+            EncoderTuning::Fast,
+            EncoderTuning::Balanced,
+            EncoderTuning::Quality,
+            EncoderTuning::MaxQuality,
+        ]
+    }
+
+    pub fn x264_preset(&self) -> &'static str {
+        match self {
+            EncoderTuning::Fastest => "ultrafast",
+            EncoderTuning::Fast => "veryfast",
+            EncoderTuning::Balanced => "faster",
+            EncoderTuning::Quality => "medium",
+            EncoderTuning::MaxQuality => "slow",
+        }
+    }
+
+    pub fn nvenc_preset(&self) -> &'static str {
+        match self {
+            EncoderTuning::Fastest => "p1",
+            EncoderTuning::Fast => "p3",
+            EncoderTuning::Balanced => "p4",
+            EncoderTuning::Quality => "p5",
+            EncoderTuning::MaxQuality => "p7",
+        }
+    }
+
+    pub fn qsv_preset(&self) -> &'static str {
+        match self {
+            EncoderTuning::Fastest => "veryfast",
+            EncoderTuning::Fast => "faster",
+            EncoderTuning::Balanced => "fast",
+            EncoderTuning::Quality => "medium",
+            EncoderTuning::MaxQuality => "slow",
+        }
+    }
+
+    pub fn amf_quality(&self) -> &'static str {
+        match self {
+            EncoderTuning::Fastest => "speed",
+            EncoderTuning::Fast => "speed",
+            EncoderTuning::Balanced => "balanced",
+            EncoderTuning::Quality => "quality",
+            EncoderTuning::MaxQuality => "quality",
+        }
+    }
+}
+
 /// Framerate preset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Framerate {
@@ -294,6 +399,42 @@ pub struct Settings {
     pub framerate: Framerate,
     /// Target resolution (Native or downscaled).
     pub resolution: Resolution,
+    /// Enables advanced encoding controls for power users.
+    #[serde(default = "default_advanced_video_controls")]
+    pub advanced_video_controls: bool,
+    /// Rate control mode (preset/CBR/VBR/CRF).
+    #[serde(default = "default_rate_control")]
+    pub rate_control: RateControl,
+    /// Encoder speed/quality tuning.
+    #[serde(default = "default_encoder_tuning")]
+    pub encoder_tuning: EncoderTuning,
+    /// Target video bitrate in kbps.
+    #[serde(default = "default_video_bitrate_kbps")]
+    pub video_bitrate_kbps: u32,
+    /// Max video bitrate in kbps (used for VBR and hardware rate control).
+    #[serde(default = "default_video_max_bitrate_kbps")]
+    pub video_max_bitrate_kbps: u32,
+    /// Rate control buffer size in kbps.
+    #[serde(default = "default_video_bufsize_kbps")]
+    pub video_bufsize_kbps: u32,
+    /// CRF value for software x264 when using CRF mode.
+    #[serde(default = "default_video_crf")]
+    pub video_crf: u32,
+    /// GOP/keyframe interval in seconds.
+    #[serde(default = "default_keyframe_interval_sec")]
+    pub keyframe_interval_sec: u32,
+    /// Custom output resolution toggle.
+    #[serde(default = "default_custom_resolution_enabled")]
+    pub custom_resolution_enabled: bool,
+    /// Custom output width in pixels.
+    #[serde(default = "default_custom_resolution_width")]
+    pub custom_resolution_width: u32,
+    /// Custom output height in pixels.
+    #[serde(default = "default_custom_resolution_height")]
+    pub custom_resolution_height: u32,
+    /// Audio bitrate in kbps.
+    #[serde(default = "default_audio_bitrate_kbps")]
+    pub audio_bitrate_kbps: u32,
     /// Rolling buffer length in seconds.
     pub buffer_seconds: u64,
     /// Whether to capture desktop audio.
@@ -323,6 +464,18 @@ impl Default for Settings {
             video_encoder: VideoEncoder::Auto,
             framerate: Framerate::Fps30,
             resolution: Resolution::Native,
+            advanced_video_controls: default_advanced_video_controls(),
+            rate_control: default_rate_control(),
+            encoder_tuning: default_encoder_tuning(),
+            video_bitrate_kbps: default_video_bitrate_kbps(),
+            video_max_bitrate_kbps: default_video_max_bitrate_kbps(),
+            video_bufsize_kbps: default_video_bufsize_kbps(),
+            video_crf: default_video_crf(),
+            keyframe_interval_sec: default_keyframe_interval_sec(),
+            custom_resolution_enabled: default_custom_resolution_enabled(),
+            custom_resolution_width: default_custom_resolution_width(),
+            custom_resolution_height: default_custom_resolution_height(),
+            audio_bitrate_kbps: default_audio_bitrate_kbps(),
             buffer_seconds: 120,
             capture_audio: true,
             audio_device: None,
@@ -335,6 +488,17 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// Returns the active FFmpeg scale filter string, if any.
+    pub fn active_scale_filter(&self) -> Option<String> {
+        if self.custom_resolution_enabled {
+            let width = clamp_even(self.custom_resolution_width, 320, 7680);
+            let height = clamp_even(self.custom_resolution_height, 240, 4320);
+            Some(format!("scale={}:{}", width, height))
+        } else {
+            self.resolution.scale_filter().map(str::to_string)
+        }
+    }
+
     /// Load settings from disk, or return default if missing/invalid.
     pub fn load() -> Self {
         let config_dir = dirs::config_dir()
@@ -365,6 +529,65 @@ impl Settings {
             let _ = serde_json::to_writer_pretty(writer, self);
         }
     }
+}
+
+fn clamp_even(value: u32, min: u32, max: u32) -> u32 {
+    let clamped = value.clamp(min, max);
+    if clamped % 2 == 0 {
+        clamped
+    } else if clamped == max {
+        clamped.saturating_sub(1)
+    } else {
+        clamped + 1
+    }
+}
+
+fn default_advanced_video_controls() -> bool {
+    false
+}
+
+fn default_rate_control() -> RateControl {
+    RateControl::Preset
+}
+
+fn default_encoder_tuning() -> EncoderTuning {
+    EncoderTuning::Balanced
+}
+
+fn default_video_bitrate_kbps() -> u32 {
+    8000
+}
+
+fn default_video_max_bitrate_kbps() -> u32 {
+    12000
+}
+
+fn default_video_bufsize_kbps() -> u32 {
+    16000
+}
+
+fn default_video_crf() -> u32 {
+    23
+}
+
+fn default_keyframe_interval_sec() -> u32 {
+    2
+}
+
+fn default_custom_resolution_enabled() -> bool {
+    false
+}
+
+fn default_custom_resolution_width() -> u32 {
+    1920
+}
+
+fn default_custom_resolution_height() -> u32 {
+    1080
+}
+
+fn default_audio_bitrate_kbps() -> u32 {
+    128
 }
 
 /// Add or remove the app from Windows startup via the registry.

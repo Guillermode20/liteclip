@@ -6,7 +6,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::recorder::{Recorder, RecorderState};
-use crate::settings::{self, Framerate, HotkeyPreset, Quality, Resolution, VideoEncoder};
+use crate::settings::{
+    self, EncoderTuning, Framerate, HotkeyPreset, Quality, RateControl, Resolution, VideoEncoder,
+};
 
 /// Which panel is visible in the GUI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -232,6 +234,14 @@ impl LiteClipApp {
 
     /// Draw the main panel (Medal-style).
     fn draw_main(&mut self, ui: &mut egui::Ui) {
+        // Color constants
+        const ACCENT: egui::Color32 = egui::Color32::from_rgb(108, 99, 255);
+        const RED_INDICATOR: egui::Color32 = egui::Color32::from_rgb(255, 64, 96);
+        const TEXT_SECONDARY: egui::Color32 = egui::Color32::from_rgb(136, 144, 160);
+        const TEXT_MUTED: egui::Color32 = egui::Color32::from_rgb(80, 88, 104);
+        const BG_ELEVATED: egui::Color32 = egui::Color32::from_rgb(24, 24, 28);
+        const BORDER: egui::Color32 = egui::Color32::from_rgb(28, 28, 34);
+
         self.refresh_main_snapshot();
         let state = self.cached_state;
         let ffmpeg_found = self.cached_ffmpeg_found;
@@ -241,64 +251,76 @@ impl LiteClipApp {
         // --- FFmpeg warning ---
         if !ffmpeg_found {
             ui.vertical_centered(|ui| {
-                ui.add_space(12.0);
+                ui.add_space(16.0);
                 ui.label(
                     egui::RichText::new("⚠  FFmpeg Not Found")
-                        .size(16.0)
-                        .color(egui::Color32::from_rgb(255, 80, 80))
+                        .size(15.0)
+                        .color(RED_INDICATOR)
                         .strong(),
                 );
-                ui.add_space(4.0);
+                ui.add_space(6.0);
                 ui.label(
                     egui::RichText::new(
                         "Install FFmpeg and add it to PATH,\nthen restart LiteClip.",
                     )
-                    .color(egui::Color32::from_gray(120)),
+                    .color(TEXT_SECONDARY),
                 );
             });
             return;
         }
 
-        // --- Big status area ---
+        // --- Status area ---
+        ui.add_space(4.0);
         ui.vertical_centered(|ui| {
             match state {
                 RecorderState::Idle => {
                     ui.label(
                         egui::RichText::new("STANDBY")
-                            .size(16.0)
-                            .color(egui::Color32::from_gray(80))
+                            .size(14.0)
+                            .color(TEXT_MUTED)
                             .strong(),
                     );
                 }
                 RecorderState::Recording => {
-                    // Pulsing red dot effect
-                    let pulse = ((ui.input(|i| i.time) * 3.0).sin() * 0.5 + 0.5) as u8;
-                    let alpha = 100 + pulse.saturating_mul(155);
-                    ui.label(
-                        egui::RichText::new("● REC")
-                            .size(16.0)
-                            .color(egui::Color32::from_rgba_premultiplied(255, 50, 50, alpha))
-                            .strong(),
-                    );
+                    // Pulsing dot with glow
+                    let t = ui.input(|i| i.time);
+                    let pulse = ((t * 2.5).sin() * 0.5 + 0.5) as f32;
+                    let r = (64.0 + pulse * 191.0) as u8;
+                    let g = (16.0 + pulse * 48.0) as u8;
+                    let b = (32.0 + pulse * 64.0) as u8;
+                    ui.horizontal(|ui| {
+                        ui.add_space(ui.available_width() / 2.0 - 30.0);
+                        ui.label(
+                            egui::RichText::new("●")
+                                .size(14.0)
+                                .color(egui::Color32::from_rgb(r, g, b)),
+                        );
+                        ui.label(
+                            egui::RichText::new("REC")
+                                .size(14.0)
+                                .color(RED_INDICATOR)
+                                .strong(),
+                        );
+                    });
                 }
                 RecorderState::Saving => {
                     ui.label(
                         egui::RichText::new("SAVING...")
-                            .size(16.0)
-                            .color(egui::Color32::WHITE)
+                            .size(14.0)
+                            .color(ACCENT)
                             .strong(),
                     );
                 }
             }
         });
 
-        ui.add_space(6.0);
+        ui.add_space(8.0);
 
         // --- Control buttons ---
         ui.horizontal(|ui| {
             let avail = ui.available_width();
-            let btn_w = (avail - 12.0) / 2.0;
-            let btn_size = egui::vec2(btn_w, 36.0);
+            let btn_w = (avail - 8.0) / 2.0;
+            let btn_size = egui::vec2(btn_w, 34.0);
 
             match state {
                 RecorderState::Idle => {
@@ -308,48 +330,51 @@ impl LiteClipApp {
                             egui::RichText::new(if self.start_in_progress {
                                 "INITIALIZING..."
                             } else {
-                                "START BUFFER"
+                                "▶ START BUFFER"
                             })
-                            .size(14.0),
+                            .size(13.0)
+                            .color(egui::Color32::WHITE),
                         )
-                        .fill(egui::Color32::from_gray(10))
-                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(60)))
-                        .min_size(egui::vec2(avail, 36.0)),
+                        .fill(BG_ELEVATED)
+                        .stroke(egui::Stroke::new(1.0, BORDER))
+                        .corner_radius(6.0)
+                        .min_size(egui::vec2(avail, 34.0)),
                     );
                     if start_btn.clicked() {
                         self.trigger_start();
                     }
                 }
                 RecorderState::Recording => {
-                    // Save clip button (prominent)
+                    // Save clip button — accent filled
                     if ui
                         .add_sized(
                             btn_size,
                             egui::Button::new(
-                                egui::RichText::new(format!("SAVE CLIP [{}]", hotkey_label))
-                                    .size(13.0)
-                                    .color(egui::Color32::BLACK), // Black text on white/light button
+                                egui::RichText::new(format!("⬇ SAVE [{}]", hotkey_label))
+                                    .size(12.0)
+                                    .color(egui::Color32::WHITE)
+                                    .strong(),
                             )
-                            .fill(egui::Color32::from_gray(220)) // Light button
-                            .corner_radius(2.0),
+                            .fill(ACCENT)
+                            .corner_radius(6.0),
                         )
                         .clicked()
                     {
                         self.trigger_save();
                     }
 
-                    // Stop button
+                    // Stop button — outlined red
                     if ui
                         .add_sized(
                             btn_size,
                             egui::Button::new(
-                                egui::RichText::new("STOP")
-                                    .size(13.0)
-                                    .color(egui::Color32::from_rgb(255, 80, 80)),
+                                egui::RichText::new("■ STOP")
+                                    .size(12.0)
+                                    .color(RED_INDICATOR),
                             )
-                            .fill(egui::Color32::BLACK)
-                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 40, 40)))
-                            .corner_radius(2.0),
+                            .fill(egui::Color32::from_rgb(20, 12, 16))
+                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(80, 30, 40)))
+                            .corner_radius(6.0),
                         )
                         .clicked()
                     {
@@ -375,9 +400,13 @@ impl LiteClipApp {
                 RecorderState::Saving => {
                     ui.add_enabled(
                         false,
-                        egui::Button::new(egui::RichText::new("Saving...").size(14.0))
-                            .frame(false)
-                            .min_size(egui::vec2(avail, 36.0)),
+                        egui::Button::new(
+                            egui::RichText::new("Saving...")
+                                .size(13.0)
+                                .color(ACCENT),
+                        )
+                        .frame(false)
+                        .min_size(egui::vec2(avail, 34.0)),
                     );
                 }
             }
@@ -385,31 +414,40 @@ impl LiteClipApp {
 
         // --- Status toast ---
         if self.status_timer > 0.0 {
-            ui.add_space(4.0);
+            ui.add_space(6.0);
             let alpha = (self.status_timer.min(1.0) * 255.0) as u8;
             ui.label(
                 egui::RichText::new(&self.status_message)
-                    .small()
-                    .color(egui::Color32::from_rgba_premultiplied(180, 210, 240, alpha)),
+                    .size(11.0)
+                    .color(egui::Color32::from_rgba_premultiplied(108, 99, 255, alpha)),
             );
         }
 
-        // --- Footer: last save + settings gear ---
-        ui.add_space(2.0);
-        ui.separator();
+        // --- Footer ---
+        ui.add_space(4.0);
+        // Thin separator
+        let rect = ui.available_rect_before_wrap();
+        ui.painter().line_segment(
+            [
+                egui::pos2(rect.left(), rect.top()),
+                egui::pos2(rect.right(), rect.top()),
+            ],
+            egui::Stroke::new(1.0, BORDER),
+        );
+        ui.add_space(6.0);
         ui.horizontal(|ui| {
             if let Some(ref path) = last_saved {
                 let name = path.file_name().unwrap_or_default().to_str().unwrap_or("");
                 ui.label(
-                    egui::RichText::new(format!("LAST: {}", name))
+                    egui::RichText::new(format!("Last: {}", name))
                         .size(10.0)
-                        .color(egui::Color32::from_gray(100)),
+                        .color(TEXT_MUTED),
                 );
             } else {
                 ui.label(
-                    egui::RichText::new("NO CLIPS")
+                    egui::RichText::new("No clips yet")
                         .size(10.0)
-                        .color(egui::Color32::from_gray(60)),
+                        .color(TEXT_MUTED),
                 );
             }
 
@@ -417,9 +455,9 @@ impl LiteClipApp {
                 if ui
                     .add(
                         egui::Button::new(
-                            egui::RichText::new("SETTINGS")
+                            egui::RichText::new("⚙ Settings")
                                 .size(10.0)
-                                .color(egui::Color32::from_gray(120)),
+                                .color(TEXT_SECONDARY),
                         )
                         .frame(false),
                     )
@@ -433,11 +471,18 @@ impl LiteClipApp {
 
     /// Draw the settings panel.
     fn draw_settings(&mut self, ui: &mut egui::Ui) {
+        const TEXT_SECONDARY: egui::Color32 = egui::Color32::from_rgb(136, 144, 160);
+        const TEXT_PRIMARY: egui::Color32 = egui::Color32::from_rgb(232, 236, 240);
+        const BG_ELEVATED: egui::Color32 = egui::Color32::from_rgb(24, 24, 28);
+        const BORDER: egui::Color32 = egui::Color32::from_rgb(28, 28, 34);
+
         ui.horizontal(|ui| {
             if ui
                 .add(
                     egui::Button::new(
-                        egui::RichText::new("< BACK").color(egui::Color32::from_gray(120)),
+                        egui::RichText::new("← Back")
+                            .size(12.0)
+                            .color(TEXT_SECONDARY),
                     )
                     .frame(false),
                 )
@@ -445,14 +490,25 @@ impl LiteClipApp {
             {
                 self.panel = Panel::Main;
             }
-            ui.heading(
-                egui::RichText::new("SETTINGS")
-                    .color(egui::Color32::WHITE)
+            ui.label(
+                egui::RichText::new("Settings")
+                    .size(16.0)
+                    .color(TEXT_PRIMARY)
                     .strong(),
             );
         });
 
-        ui.separator();
+        // Thin separator
+        ui.add_space(4.0);
+        let rect = ui.available_rect_before_wrap();
+        ui.painter().line_segment(
+            [
+                egui::pos2(rect.left(), rect.top()),
+                egui::pos2(rect.right(), rect.top()),
+            ],
+            egui::Stroke::new(1.0, BORDER),
+        );
+        ui.add_space(4.0);
 
         // Snapshot current settings to avoid holding lock across closures
         let (
@@ -462,6 +518,18 @@ impl LiteClipApp {
             mut video_encoder,
             mut framerate,
             mut resolution,
+            mut advanced_video_controls,
+            mut rate_control,
+            mut encoder_tuning,
+            mut video_bitrate_kbps,
+            mut video_max_bitrate_kbps,
+            mut video_bufsize_kbps,
+            mut video_crf,
+            mut keyframe_interval_sec,
+            mut custom_resolution_enabled,
+            mut custom_resolution_width,
+            mut custom_resolution_height,
+            mut audio_bitrate_kbps,
             mut capture_audio,
             mut audio_device,
             mut launch_on_startup,
@@ -478,6 +546,18 @@ impl LiteClipApp {
                 rec.settings.video_encoder,
                 rec.settings.framerate,
                 rec.settings.resolution,
+                rec.settings.advanced_video_controls,
+                rec.settings.rate_control,
+                rec.settings.encoder_tuning,
+                rec.settings.video_bitrate_kbps,
+                rec.settings.video_max_bitrate_kbps,
+                rec.settings.video_bufsize_kbps,
+                rec.settings.video_crf,
+                rec.settings.keyframe_interval_sec,
+                rec.settings.custom_resolution_enabled,
+                rec.settings.custom_resolution_width,
+                rec.settings.custom_resolution_height,
+                rec.settings.audio_bitrate_kbps,
                 rec.settings.capture_audio,
                 rec.settings.audio_device.clone(),
                 rec.settings.launch_on_startup,
@@ -598,6 +678,104 @@ impl LiteClipApp {
                     });
             });
 
+            setting_row(ui, "Advanced Video", |ui| {
+                ui.checkbox(&mut advanced_video_controls, "");
+            });
+
+            if advanced_video_controls {
+                setting_row(ui, "Rate Control", |ui| {
+                    egui::ComboBox::from_id_salt("rate_control_sel")
+                        .selected_text(rate_control.label())
+                        .width(150.0)
+                        .show_ui(ui, |ui| {
+                            for mode in RateControl::all() {
+                                ui.selectable_value(&mut rate_control, *mode, mode.label());
+                            }
+                        });
+                });
+
+                setting_row(ui, "Encoder Tuning", |ui| {
+                    egui::ComboBox::from_id_salt("encoder_tuning_sel")
+                        .selected_text(encoder_tuning.label())
+                        .width(150.0)
+                        .show_ui(ui, |ui| {
+                            for tune in EncoderTuning::all() {
+                                ui.selectable_value(&mut encoder_tuning, *tune, tune.label());
+                            }
+                        });
+                });
+
+                if rate_control != RateControl::Preset {
+                    setting_row(ui, "Video Bitrate (kbps)", |ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut video_bitrate_kbps)
+                                .range(1000..=150000)
+                                .speed(100.0),
+                        );
+                    });
+                }
+
+                if rate_control == RateControl::Vbr {
+                    setting_row(ui, "Max Bitrate (kbps)", |ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut video_max_bitrate_kbps)
+                                .range(1000..=200000)
+                                .speed(100.0),
+                        );
+                    });
+                }
+
+                if matches!(rate_control, RateControl::Cbr | RateControl::Vbr) {
+                    setting_row(ui, "Buffer Size (kbps)", |ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut video_bufsize_kbps)
+                                .range(1000..=400000)
+                                .speed(100.0),
+                        );
+                    });
+                }
+
+                if rate_control == RateControl::Crf {
+                    setting_row(ui, "CRF", |ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut video_crf)
+                                .range(0..=51)
+                                .speed(1.0),
+                        );
+                    });
+                }
+
+                setting_row(ui, "Keyframe Sec", |ui| {
+                    ui.add(
+                        egui::DragValue::new(&mut keyframe_interval_sec)
+                            .range(1..=10)
+                            .speed(1.0),
+                    );
+                });
+
+                setting_row(ui, "Custom Resolution", |ui| {
+                    ui.checkbox(&mut custom_resolution_enabled, "");
+                });
+
+                if custom_resolution_enabled {
+                    setting_row(ui, "Custom Width", |ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut custom_resolution_width)
+                                .range(320..=7680)
+                                .speed(2.0),
+                        );
+                    });
+
+                    setting_row(ui, "Custom Height", |ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut custom_resolution_height)
+                                .range(240..=4320)
+                                .speed(2.0),
+                        );
+                    });
+                }
+            }
+
             ui.add_space(2.0);
             section_header(ui, "AUDIO");
 
@@ -608,6 +786,14 @@ impl LiteClipApp {
 
             // --- Audio device selector ---
             if capture_audio {
+                setting_row(ui, "Audio Bitrate", |ui| {
+                    ui.add(
+                        egui::DragValue::new(&mut audio_bitrate_kbps)
+                            .range(64..=512)
+                            .speed(8.0),
+                    );
+                });
+
                 setting_row(ui, "Audio Device", |ui| {
                     let mut current = audio_device.clone().unwrap_or_else(|| "None".to_string());
 
@@ -642,15 +828,19 @@ impl LiteClipApp {
             ui.horizontal(|ui| {
                 ui.label(
                     egui::RichText::new("Save Folder")
-                        .color(egui::Color32::from_rgb(180, 190, 210)),
+                        .color(TEXT_SECONDARY),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui
                         .add(
-                            egui::Button::new("BROWSE")
-                                .fill(egui::Color32::from_gray(20))
-                                .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(40)))
-                                .corner_radius(2.0),
+                            egui::Button::new(
+                                egui::RichText::new("Browse")
+                                    .size(11.0)
+                                    .color(TEXT_PRIMARY),
+                            )
+                            .fill(BG_ELEVATED)
+                            .stroke(egui::Stroke::new(1.0, BORDER))
+                            .corner_radius(6.0),
                         )
                         .clicked()
                     {
@@ -673,20 +863,21 @@ impl LiteClipApp {
                 egui::RichText::new(output_dir.display().to_string())
                     .small()
                     .monospace()
-                    .color(egui::Color32::from_rgb(120, 130, 150)),
+                    .color(egui::Color32::from_rgb(80, 88, 104)),
             );
 
             // --- Open output folder ---
-            ui.add_space(4.0);
+            ui.add_space(6.0);
             if ui
                 .add(
                     egui::Button::new(
-                        egui::RichText::new("OPEN CLIPS FOLDER")
-                            .color(egui::Color32::from_gray(200)),
+                        egui::RichText::new("Open Clips Folder")
+                            .size(11.0)
+                            .color(TEXT_PRIMARY),
                     )
-                    .fill(egui::Color32::from_gray(20))
-                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(40)))
-                    .corner_radius(2.0),
+                    .fill(BG_ELEVATED)
+                    .stroke(egui::Stroke::new(1.0, BORDER))
+                    .corner_radius(6.0),
                 )
                 .clicked()
             {
@@ -698,6 +889,9 @@ impl LiteClipApp {
 
         // Write all settings back to the recorder
         {
+            video_max_bitrate_kbps = video_max_bitrate_kbps.max(video_bitrate_kbps);
+            video_bufsize_kbps = video_bufsize_kbps.max(video_bitrate_kbps);
+
             let mut rec = self.recorder.lock().unwrap();
 
             // Persist recorder settings that are applied immediately in-process.
@@ -708,6 +902,18 @@ impl LiteClipApp {
                 || rec.settings.video_encoder != video_encoder
                 || rec.settings.framerate != framerate
                 || rec.settings.resolution != resolution
+                || rec.settings.advanced_video_controls != advanced_video_controls
+                || rec.settings.rate_control != rate_control
+                || rec.settings.encoder_tuning != encoder_tuning
+                || rec.settings.video_bitrate_kbps != video_bitrate_kbps
+                || rec.settings.video_max_bitrate_kbps != video_max_bitrate_kbps
+                || rec.settings.video_bufsize_kbps != video_bufsize_kbps
+                || rec.settings.video_crf != video_crf
+                || rec.settings.keyframe_interval_sec != keyframe_interval_sec
+                || rec.settings.custom_resolution_enabled != custom_resolution_enabled
+                || rec.settings.custom_resolution_width != custom_resolution_width
+                || rec.settings.custom_resolution_height != custom_resolution_height
+                || rec.settings.audio_bitrate_kbps != audio_bitrate_kbps
                 || rec.settings.capture_audio != capture_audio
                 || rec.settings.audio_device != audio_device
                 || rec.settings.launch_on_startup != launch_on_startup
@@ -718,6 +924,18 @@ impl LiteClipApp {
             rec.settings.video_encoder = video_encoder;
             rec.settings.framerate = framerate;
             rec.settings.resolution = resolution;
+            rec.settings.advanced_video_controls = advanced_video_controls;
+            rec.settings.rate_control = rate_control;
+            rec.settings.encoder_tuning = encoder_tuning;
+            rec.settings.video_bitrate_kbps = video_bitrate_kbps;
+            rec.settings.video_max_bitrate_kbps = video_max_bitrate_kbps;
+            rec.settings.video_bufsize_kbps = video_bufsize_kbps;
+            rec.settings.video_crf = video_crf;
+            rec.settings.keyframe_interval_sec = keyframe_interval_sec;
+            rec.settings.custom_resolution_enabled = custom_resolution_enabled;
+            rec.settings.custom_resolution_width = custom_resolution_width;
+            rec.settings.custom_resolution_height = custom_resolution_height;
+            rec.settings.audio_bitrate_kbps = audio_bitrate_kbps;
             rec.settings.capture_audio = capture_audio;
             rec.settings.audio_device = audio_device;
             rec.settings.launch_on_startup = launch_on_startup;
@@ -754,37 +972,40 @@ impl eframe::App for LiteClipApp {
             self.status_timer = (self.status_timer - dt).max(0.0);
         }
 
+        // ── Color palette constants ──
+        const BG_PRIMARY: egui::Color32 = egui::Color32::from_rgb(10, 10, 12);
+        const BG_ELEVATED: egui::Color32 = egui::Color32::from_rgb(24, 24, 28);
+        const ACCENT: egui::Color32 = egui::Color32::from_rgb(108, 99, 255);
+        const ACCENT_HOVER: egui::Color32 = egui::Color32::from_rgb(123, 115, 255);
+        const ACCENT_MUTED: egui::Color32 = egui::Color32::from_rgb(42, 38, 64);
+        const TEXT_PRIMARY: egui::Color32 = egui::Color32::from_rgb(232, 236, 240);
+        const TEXT_SECONDARY: egui::Color32 = egui::Color32::from_rgb(136, 144, 160);
+        const BORDER: egui::Color32 = egui::Color32::from_rgb(28, 28, 34);
+
         if !self.visuals_initialized {
             let mut visuals = egui::Visuals::dark();
-            visuals.override_text_color = Some(egui::Color32::from_gray(230));
-            visuals.window_fill = egui::Color32::BLACK;
-            visuals.panel_fill = egui::Color32::BLACK;
+            visuals.override_text_color = Some(TEXT_PRIMARY);
+            visuals.window_fill = BG_PRIMARY;
+            visuals.panel_fill = BG_PRIMARY;
 
-            visuals.widgets.noninteractive.bg_fill = egui::Color32::BLACK;
-            visuals.widgets.noninteractive.bg_stroke =
-                egui::Stroke::new(1.0, egui::Color32::from_gray(30));
-            visuals.widgets.noninteractive.fg_stroke =
-                egui::Stroke::new(1.0, egui::Color32::from_gray(180));
+            visuals.widgets.noninteractive.bg_fill = BG_PRIMARY;
+            visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, BORDER);
+            visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, TEXT_SECONDARY);
 
-            visuals.widgets.inactive.bg_fill = egui::Color32::from_gray(10);
-            visuals.widgets.inactive.fg_stroke =
-                egui::Stroke::new(1.0, egui::Color32::from_gray(180));
+            visuals.widgets.inactive.bg_fill = BG_ELEVATED;
+            visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, TEXT_PRIMARY);
+            visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, BORDER);
 
-            visuals.widgets.hovered.bg_fill = egui::Color32::from_gray(25);
+            visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(30, 30, 38);
             visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, egui::Color32::WHITE);
+            visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, ACCENT);
 
-            visuals.widgets.active.bg_fill = egui::Color32::from_gray(40);
+            visuals.widgets.active.bg_fill = ACCENT_MUTED;
             visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, egui::Color32::WHITE);
+            visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, ACCENT_HOVER);
 
-            visuals.selection.bg_fill = egui::Color32::from_gray(50);
-            visuals.selection.stroke = egui::Stroke::new(1.0, egui::Color32::WHITE);
-
-            // Thin borders
-            visuals.widgets.inactive.bg_stroke =
-                egui::Stroke::new(1.0, egui::Color32::from_gray(30));
-            visuals.widgets.hovered.bg_stroke =
-                egui::Stroke::new(1.0, egui::Color32::from_gray(60));
-            visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, egui::Color32::WHITE);
+            visuals.selection.bg_fill = ACCENT_MUTED;
+            visuals.selection.stroke = egui::Stroke::new(1.0, ACCENT);
 
             ctx.set_visuals(visuals);
             self.visuals_initialized = true;
@@ -802,19 +1023,41 @@ impl eframe::App for LiteClipApp {
         }
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::central_panel(&ctx.style()).inner_margin(12.0))
+            .frame(egui::Frame::central_panel(&ctx.style()).inner_margin(16.0))
             .show(ctx, |ui| {
                 // --- Header ---
                 ui.horizontal(|ui| {
                     ui.label(
+                        egui::RichText::new("●")
+                            .size(10.0)
+                            .color(ACCENT),
+                    );
+                    ui.add_space(2.0);
+                    ui.label(
                         egui::RichText::new("LITECLIP")
-                            .size(16.0)
-                            .color(egui::Color32::WHITE)
+                            .size(15.0)
+                            .color(TEXT_PRIMARY)
                             .strong(),
+                    );
+                    ui.label(
+                        egui::RichText::new("REPLAY")
+                            .size(15.0)
+                            .color(TEXT_SECONDARY),
                     );
                 });
 
-                ui.add_space(8.0);
+                // Thin accent separator line
+                ui.add_space(6.0);
+                let rect = ui.available_rect_before_wrap();
+                let line_y = rect.top();
+                ui.painter().line_segment(
+                    [
+                        egui::pos2(rect.left(), line_y),
+                        egui::pos2(rect.right(), line_y),
+                    ],
+                    egui::Stroke::new(1.0, BORDER),
+                );
+                ui.add_space(10.0);
 
                 match self.panel {
                     Panel::Main => self.draw_main(ui),
@@ -830,24 +1073,37 @@ impl eframe::App for LiteClipApp {
 fn setting_row(ui: &mut egui::Ui, label: &str, add_widget: impl FnOnce(&mut egui::Ui)) {
     ui.horizontal(|ui| {
         ui.label(
-            egui::RichText::new(label.to_uppercase())
-                .size(10.0)
-                .color(egui::Color32::from_gray(120)),
+            egui::RichText::new(label)
+                .size(11.0)
+                .color(egui::Color32::from_rgb(136, 144, 160)),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), add_widget);
     });
 }
 
-/// Section header divider.
+/// Section header with accent indicator bar.
 fn section_header(ui: &mut egui::Ui, title: &str) {
-    ui.add_space(4.0);
-    ui.label(
-        egui::RichText::new(title)
-            .size(11.0)
-            .color(egui::Color32::WHITE)
-            .strong(),
-    );
-    ui.separator();
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        // Accent bar indicator
+        let (rect, _) = ui.allocate_exact_size(
+            egui::vec2(3.0, 14.0),
+            egui::Sense::hover(),
+        );
+        ui.painter().rect_filled(
+            rect,
+            egui::CornerRadius::same(2),
+            egui::Color32::from_rgb(108, 99, 255),
+        );
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new(title)
+                .size(11.0)
+                .color(egui::Color32::from_rgb(232, 236, 240))
+                .strong(),
+        );
+    });
+    ui.add_space(2.0);
 }
 
 /// Format buffer length for display.
