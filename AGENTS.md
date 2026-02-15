@@ -2,76 +2,58 @@
 
 This file provides guidance to agents when working with code in this repository.
 
-## Project Overview
-LiteClip Replay - A Windows-only screen recording application with replay buffer. Captures via DXGI Desktop Duplication, encodes with FFmpeg (optional), and saves clips on hotkey trigger.
+## Project Context
+
+LiteClip Recorder is a Windows-only screen capture application using D3D11/DXGI Desktop Duplication. It captures desktop frames, encodes them using hardware encoders (NVENC/AMF/QSV) via FFmpeg CLI or software JPEG encoding, stores them in a memory-bounded ring buffer, and saves clips on hotkey trigger.
 
 ## Build Commands
-```powershell
-# Build without FFmpeg (MP4 muxing stubbed)
-cargo build
 
-# Build with FFmpeg support (required for playable MP4 output)
-cargo build --features ffmpeg
+Standard Cargo commands work. The `ffmpeg` feature flag enables FFmpeg code paths but requires FFmpeg at runtime (not link-time):
 
-# Run with FFmpeg
+```bash
+cargo build --release --features ffmpeg
 cargo run --features ffmpeg
-
-# Run tests
-cargo test
-
-# Run a specific test
-cargo test test_name
 ```
 
-## Critical Architecture Patterns
+**Critical:** Release profile uses `lto = "fat"` and `panic = "abort"` - expect longer compile times for optimized binaries.
 
-### Threading Model
-- **Main thread**: Async tokio runtime, handles AppState and clip saving
-- **Platform thread**: Hidden Win32 window (`HWND_MESSAGE`) running `GetMessage` pump for global hotkeys
-- **Capture thread**: DXGI Desktop Duplication frame acquisition
-- **Encoder thread**: Receives frames via `crossbeam::channel`, pushes encoded packets to ring buffer
-- Events flow: `Win32 WM_HOTKEY` → `crossbeam::Sender` → `tokio::mpsc::channel` → async handler
+## Platform Requirements
 
-### Hotkey System
-- Uses Win32 `RegisterHotKey` API which requires a window handle
-- Hidden window created with `HWND_MESSAGE` (message-only, no UI)
-- Hotkey IDs are hardcoded constants in BOTH `hotkeys.rs` and `msg_loop.rs` - must stay in sync:
-  - `HOTKEY_ID_SAVE_CLIP = 1000`
-  - `HOTKEY_ID_TOGGLE_RECORDING = 1001`
-  - `HOTKEY_ID_SCREENSHOT = 1002`
-  - `HOTKEY_ID_OPEN_GALLERY = 1003`
+- Windows 10+ with DXGI 1.2 support
+- Windows SDK (for D3D11 headers)
+- FFmpeg in PATH or at expected locations (checked in order: `LITECLIP_FFMPEG_PATH` env var, `./ffmpeg/bin/ffmpeg.exe`, `<exe_dir>/ffmpeg/bin/ffmpeg.exe`, system PATH)
 
-### Ring Buffer Design
-- Uses `Bytes` crate for reference-counted packet data
-- `SharedReplayBuffer` wraps `Arc<RwLock<ReplayBuffer>>` with parking_lot (not std::sync)
-- Snapshots are cheap: cloning the buffer only bumps ref counts, copies no data
-- Memory budget enforcement: evicts old packets when `max_memory_bytes` exceeded
+## Critical Code Patterns
 
-### Config Location
-- Stored at `%APPDATA%/liteclip-replay/liteclip-replay.toml`
-- Created automatically with defaults if missing
-- Uses `dirs::data_dir()` for cross-Windows compatibility
+### Hardware Encoder Selection
+Encoder selection happens in [`encode/mod.rs`](src/encode/mod.rs) but actual FFmpeg command building with encoder-specific flags is in [`encode/hw_encoder.rs`](src/encode/hw_encoder.rs). Each encoder requires different flags:
 
-### FFmpeg Integration
-- FFmpeg support is **optional** via `ffmpeg` feature flag
-- Without FFmpeg: clips cannot be muxed to MP4 (compile warning emitted in `main.rs`)
-- All muxing code uses `#[cfg(feature = "ffmpeg")]` guards with stub fallbacks
+- **h264_nvenc**: Uses `preset=p4`, `tune=ll` (low latency), `rc=vbr`, `cq=23`
+- **h264_amf**: **CRITICAL** - requires `-bf 0` (disable B-frames), `-sei +aud`, `-vsync cfr`. Missing B-frame disable produces unplayable output.
+- **h264_qsv**: Uses `preset=veryfast`
 
-### Encoder Shutdown Pattern
-- Encoder thread is joined synchronously in `stop_recording()`:
-  ```rust
-  if let Some(handle) = self.encoder_handle.take() {
-      match handle.thread.join() { ... }
-  }
-  ```
-- This is intentional - ensures all packets are flushed before saving
+Encoder initialization is lazy - happens on first frame, not at encoder creation.
 
-### Windows API Dependencies
-- Requires Windows SDK with DXGI, D3D11, MediaFoundation headers
-- Links against: `d3d11`, `dxgi`, `dxguid`, `user32`, `gdi32` (see `build.rs`)
+### Frame Data Flow
+[`CapturedFrame`](src/capture/mod.rs) contains **both** a D3D11 texture handle AND CPU BGRA bytes. Even when using hardware encoding that only needs the GPU texture, CPU readback happens unconditionally (Phase 1 limitation). This means unnecessary memory copies.
 
-## Code Style
-- Use `anyhow::Result` for error handling (not `Result<T, E>`)
-- Tracing for logging: `info!`, `debug!`, `warn!`, `error!` (not println!)
-- Win32 APIs are `unsafe` - wrap in `unsafe` blocks with context
-- Platform code is Windows-only - no cross-platform abstractions
+### Ring Buffer Eviction
+The [`ReplayBuffer`](src/buffer/ring.rs) evicts based on **memory bytes**, not duration. The `duration` field is informational only. High-bitrate content means fewer seconds stored. Keyframe indices are rebuilt O(N) on every eviction which can stall under memory pressure.
+
+### Error Handling
+Many error paths log with `warn!`/`error!` and continue silently rather than propagating. The encoder thread may be dead but the application continues running. Always check thread join results.
+
+### Configuration
+Config stored at `%APPDATA%/liteclip-replay/liteclip-replay.toml`. Resolution config is ignored if `use_native_resolution` is true - actual resolution comes from the first captured frame.
+
+## Testing
+
+No special test configuration. Standard `cargo test` works, though hardware encoder tests require FFmpeg and compatible GPU.
+
+## Dependencies
+
+- `windows` crate with many Win32 features enabled - see Cargo.toml for full list
+- `tokio` for async runtime
+- `crossbeam` for thread channels
+- `parking_lot` for synchronization primitives
+- `bytes` for ref-counted buffers (used throughout for cheap cloning)
