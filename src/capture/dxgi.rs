@@ -321,6 +321,7 @@ impl DxgiCapture {
                         let total_bytes = row_bytes * height;
                         let src_ptr = mapped.pData as *const u8;
 
+                        // Pre-allocate buffer with exact capacity to avoid reallocations
                         let mut bgra_buffer = BytesMut::with_capacity(total_bytes);
                         // SAFETY: We immediately and fully initialize the buffer below before freeze.
                         bgra_buffer.set_len(total_bytes);
@@ -336,13 +337,20 @@ impl DxgiCapture {
                                 total_bytes,
                             );
                         } else {
+                            // Optimized row-by-row copy with reduced bounds checking
                             let dst_ptr = bgra_buffer.as_mut_ptr();
-                            for row in 0..height {
+                            let mut src_row_offset = 0;
+                            let mut dst_row_offset = 0;
+                            
+                            for _row in 0..height {
                                 std::ptr::copy_nonoverlapping(
-                                    src_ptr.add(row * src_pitch),
-                                    dst_ptr.add(row * row_bytes),
+                                    src_ptr.add(src_row_offset),
+                                    dst_ptr.add(dst_row_offset),
                                     row_bytes,
                                 );
+                                
+                                src_row_offset += src_pitch;
+                                dst_row_offset += row_bytes;
                             }
                         }
 
@@ -401,6 +409,11 @@ impl DxgiCapture {
         // naturally pace capture without introducing an additional software sleep.
         let timeout_ms = (1000u32 / config.target_fps.max(1)).max(1)
             + u32::from(!1000u32.is_multiple_of(config.target_fps.max(1)));
+        
+        // Calculate the target interval between frames in nanoseconds
+        let frame_interval_ns = 1_000_000_000u64 / config.target_fps.max(1) as u64;
+        let mut last_frame_time = std::time::Instant::now();
+        
         let mut frame_count = 0u64;
         let mut error_count = 0u32;
         let max_errors = 10;
@@ -416,20 +429,41 @@ impl DxgiCapture {
 
         info!("DXGI capture initialized and running");
 
+        // Reduce logging frequency to avoid impacting performance
+        let mut log_counter = 0u64;
+        const LOG_INTERVAL: u64 = 300; // Log every 300 frames
+
         while running.load(Ordering::Relaxed) {
             // Try to capture a frame
             match Self::capture_frame(&mut state, timeout_ms) {
                 Ok(Some(frame)) => {
+                    // Enforce frame rate by waiting if necessary
+                    let elapsed = last_frame_time.elapsed().as_nanos() as u64;
+                    if elapsed < frame_interval_ns {
+                        let sleep_ns = frame_interval_ns - elapsed;
+                        std::thread::sleep(Duration::from_nanos(sleep_ns));
+                    }
+                    
+                    // Update the last frame time to now
+                    last_frame_time = std::time::Instant::now();
+                    
                     // Send frame to encoder
-                    match frame_tx.try_send(frame) {
+                    match frame_tx.send(frame) {
                         Ok(()) => {
                             frame_count += 1;
                             error_count = 0; // Reset error count on success
+                            
+                            // Periodic logging to avoid impacting performance
+                            if frame_count % LOG_INTERVAL == 0 {
+                                log_counter += 1;
+                                if log_counter % 10 == 0 { // Every 10 intervals (3000 frames)
+                                    info!("Captured {} frames", frame_count);
+                                } else {
+                                    debug!("Captured {} frames", frame_count);
+                                }
+                            }
                         }
-                        Err(crossbeam::channel::TrySendError::Full(_)) => {
-                            debug!("Frame channel full - dropping frame");
-                        }
-                        Err(crossbeam::channel::TrySendError::Disconnected(_)) => {
+                        Err(crossbeam::channel::SendError(_)) => {
                             // Channel closed - encoder stopped
                             info!("Frame channel closed, stopping capture");
                             break;
@@ -438,6 +472,8 @@ impl DxgiCapture {
                 }
                 Ok(None) => {
                     // Timeout - no new frame, continue
+                    // Small yield to allow other threads to run
+                    std::thread::yield_now();
                 }
                 Err(e) => {
                     error!("Capture error: {}", e);

@@ -12,7 +12,7 @@ use std::time::Duration;
 use tracing::{debug, trace};
 
 /// Cached QPC frequency (queried once, reused everywhere)
-fn qpc_frequency() -> i64 {
+pub fn qpc_frequency() -> i64 {
     static FREQ: OnceLock<i64> = OnceLock::new();
     *FREQ.get_or_init(|| {
         let mut freq = 10_000_000i64;
@@ -174,6 +174,8 @@ impl ReplayBuffer {
         let target_duration_qpc = (self.duration.as_secs_f64() * qpc_frequency() as f64) as i64;
 
         // Evict based on duration: remove packets until we're under target duration
+        // Batch eviction for better performance
+        let mut packets_to_evict = 0;
         while !self.packets.is_empty() {
             let oldest_pts = self.packets.front().map(|p| p.pts).unwrap_or(packet.pts);
             let projected_span = packet.pts.saturating_sub(oldest_pts);
@@ -181,12 +183,33 @@ impl ReplayBuffer {
             if projected_span <= target_duration_qpc {
                 break;
             }
+            packets_to_evict += 1;
+            
+            // Limit batch eviction to prevent long stalls
+            if packets_to_evict >= 10 {
+                break;
+            }
+        }
+        
+        // Perform batch eviction
+        for _ in 0..packets_to_evict {
+            if self.packets.is_empty() {
+                break;
+            }
             self.evict_oldest();
         }
 
         // Memory cap as safety guard (in case of timestamp issues or config errors)
+        // Also batch this eviction
+        let mut memory_evictions = 0;
         while self.total_bytes + packet_size > self.max_memory_bytes && !self.packets.is_empty() {
             self.evict_oldest();
+            memory_evictions += 1;
+            
+            // Limit batch eviction to prevent long stalls
+            if memory_evictions >= 10 {
+                break;
+            }
         }
 
         // Index keyframes using absolute index (base_offset + current length)

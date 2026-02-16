@@ -15,6 +15,9 @@ use std::thread;
 use std::time::Instant;
 use tracing::{debug, enabled, error, info, trace, warn, Level};
 
+// Import the QPC frequency function from the buffer module
+use crate::buffer::ring::qpc_frequency;
+
 /// Convert BGRA to RGB24 format for FFmpeg input
 #[cfg(test)]
 fn bgra_to_rgb24(bgra: &[u8], width: u32, height: u32) -> Vec<u8> {
@@ -209,7 +212,10 @@ impl HardwareEncoderBase {
                 .arg("-r")
                 .arg(self.config.framerate.to_string())
                 .arg("-i")
-                .arg("pipe:0");
+                .arg("pipe:0")
+                // Ensure constant frame rate timing
+                .arg("-vsync")
+                .arg("cfr");
         } else {
             // Pull-model input: FFmpeg captures desktop directly via ddagrab.
             cmd.arg("-f")
@@ -218,7 +224,10 @@ impl HardwareEncoderBase {
                 .arg(format!(
                     "ddagrab=output_idx={}:framerate={}",
                     self.config.output_index, self.config.framerate
-                ));
+                ))
+                // Ensure constant frame rate timing
+                .arg("-vsync")
+                .arg("cfr");
 
             // ddagrab frames are D3D11 hardware surfaces; AMF path needs download
             // into system memory to avoid unsupported auto-scale graph initialization.
@@ -263,6 +272,10 @@ impl HardwareEncoderBase {
             .arg(self.config.keyframe_interval_frames().to_string())
             .arg("-pix_fmt")
             .arg("yuv420p")
+            .arg("-r")
+            .arg(self.config.framerate.to_string())  // Explicit output frame rate
+            .arg("-vsync")
+            .arg("cfr")  // Constant frame rate to maintain timing
             .arg("-f")
             .arg("h264")
             .arg("pipe:1");
@@ -375,8 +388,18 @@ impl HardwareEncoderBase {
                     cmd.arg("-cq");
                     cmd.arg(self.cq_value().to_string());
                 }
+                
+                // Optimize for performance/latency
                 cmd.arg("-delay");
-                cmd.arg("0");
+                cmd.arg("0"); // No delay for lowest latency
+                
+                // Use faster presets for higher framerates
+                cmd.arg("-tune");
+                cmd.arg("ull"); // Ultra-low latency mode
+                
+                // Reduce B-frame usage for lower latency
+                cmd.arg("-b_ref_mode");
+                cmd.arg("disabled");
             }
             "h264_amf" | "hevc_amf" | "av1_amf" => {
                 // AMF-specific quality mode. Keep required compatibility flags.
@@ -392,11 +415,19 @@ impl HardwareEncoderBase {
                 // Ensure consistent frame rate
                 cmd.arg("-vsync");
                 cmd.arg("cfr");
+                
+                // Optimize for performance
+                cmd.arg("-usage");
+                cmd.arg("lowlatency");
             }
             "h264_qsv" | "hevc_qsv" => {
-                // QSV specific: no look ahead
+                // QSV specific: no look ahead for lower latency
                 cmd.arg("-look_ahead");
                 cmd.arg("0");
+                
+                // Optimize for performance
+                cmd.arg("-preset");
+                cmd.arg("faster"); // Use faster preset for higher framerates
             }
             _ => {}
         }
@@ -482,13 +513,16 @@ impl HardwareEncoderBase {
         stdout: std::process::ChildStdout,
         packet_tx: Sender<EncodedPacket>,
     ) -> thread::JoinHandle<()> {
+        let framerate = self.config.framerate as f64;
+        let qpc_freq = qpc_frequency(); // Use the cached QPC frequency
+        
         thread::spawn(move || {
             use std::io::Read;
 
             let mut reader = std::io::BufReader::new(stdout);
             let mut buffer = [0u8; 65536]; // 64KB buffer
-            let mut frame_buffer = BytesMut::new();
-            let started_at = Instant::now();
+            let mut frame_buffer = BytesMut::with_capacity(1024 * 1024); // Pre-allocate 1MB
+            let mut frame_count = 0u64;
             let mut last_pts = 0i64;
 
             loop {
@@ -529,16 +563,24 @@ impl HardwareEncoderBase {
                                 let nal_type = h264_nal_type(&nal_data);
                                 let is_keyframe = matches!(nal_type, Some(5 | 7 | 8));
 
-                                let mut pts = (started_at.elapsed().as_nanos() / 100) as i64;
-                                if pts <= last_pts {
-                                    pts = last_pts + 1;
-                                }
-                                last_pts = pts;
+                                // Calculate PTS based on frame count and configured framerate
+                                // This ensures proper timing regardless of encoding speed
+                                let pts_increment = (qpc_freq as f64 / framerate) as i64;
+                                let pts = ((frame_count as f64) * pts_increment as f64) as i64;
+                                
+                                // Ensure monotonically increasing timestamps
+                                let final_pts = if pts <= last_pts {
+                                    last_pts + 1
+                                } else {
+                                    pts
+                                };
+                                last_pts = final_pts;
+                                frame_count += 1;
 
                                 let packet = EncodedPacket::new(
                                     nal_data,
-                                    pts,
-                                    pts,
+                                    final_pts,
+                                    final_pts,
                                     is_keyframe,
                                     StreamType::Video,
                                 );

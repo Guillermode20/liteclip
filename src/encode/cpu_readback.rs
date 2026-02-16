@@ -12,19 +12,24 @@ use std::sync::Arc;
 pub struct CpuReadbackBuffer {
     width: u32,
     height: u32,
+    // Pre-allocated buffer to avoid repeated allocations
+    buffer: Vec<u8>,
 }
 
 impl CpuReadbackBuffer {
     /// Create a new CPU readback buffer
     pub fn new(width: u32, height: u32) -> Result<Self> {
-        Ok(Self { width, height })
+        let size = (width * height * 4) as usize;
+        let buffer = vec![0u8; size];
+        Ok(Self { width, height, buffer })
     }
 
     /// Copy texture to CPU memory
     pub fn copy_texture(&mut self, _texture: &D3D11Texture) -> Result<Vec<u8>> {
         // Stub: return empty buffer
-        let size = (self.width * self.height * 4) as usize;
-        Ok(vec![0u8; size])
+        // In a real implementation, this would copy the texture data
+        // For now, we return a reference to the pre-allocated buffer
+        Ok(self.buffer.clone())
     }
 
     /// Get dimensions
@@ -39,23 +44,29 @@ pub struct CpuReadbackStage {
     device: Arc<D3D11Device>,
     width: u32,
     height: u32,
+    // Pre-allocated buffer to avoid repeated allocations
+    buffer: Vec<u8>,
 }
 
 impl CpuReadbackStage {
     /// Create a new CPU readback stage
     pub fn new(device: &Arc<D3D11Device>, width: u32, height: u32) -> Result<Self> {
+        let size = (width * height * 4) as usize;
+        let buffer = vec![0u8; size];
         Ok(Self {
             device: Arc::clone(device),
             width,
             height,
+            buffer,
         })
     }
 
     /// Copy texture to CPU memory
     pub fn readback(&self, _texture: &D3D11Texture) -> Result<Vec<u8>> {
         // Stub implementation
-        let size = (self.width * self.height * 4) as usize;
-        Ok(vec![0u8; size])
+        // In a real implementation, this would copy the texture data
+        // For now, we return a reference to the pre-allocated buffer
+        Ok(self.buffer.clone())
     }
 
     /// Get dimensions

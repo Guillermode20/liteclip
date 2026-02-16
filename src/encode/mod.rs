@@ -368,65 +368,90 @@ pub fn spawn_encoder(
     config: EncoderConfig,
     buffer: crate::buffer::ring::SharedReplayBuffer,
 ) -> Result<(EncoderHandle, Sender<crate::capture::CapturedFrame>)> {
-    let (frame_tx, frame_rx): (Sender<crate::capture::CapturedFrame>, _) = bounded(32);
+    let (frame_tx, frame_rx): (Sender<crate::capture::CapturedFrame>, _) = bounded(64); // Increased buffer size
 
     let frame_tx_clone = frame_tx.clone();
 
-    let thread = std::thread::spawn(move || {
-        debug!("Encoder thread started");
+    let thread = std::thread::Builder::new()
+        .name("encoder".to_string())
+        .stack_size(4 * 1024 * 1024) // 4MB stack size for heavy encoding operations
+        .spawn(move || {
+            debug!("Encoder thread started");
 
-        // Create and initialize encoder
-        let mut encoder = create_encoder(&config)?;
-        encoder.init(&config)?;
+            // Create and initialize encoder
+            let mut encoder = create_encoder(&config)?;
+            encoder.init(&config)?;
 
-        debug!("Encoder initialized");
+            debug!("Encoder initialized");
 
-        // Get the packet receiver from the encoder
-        let packet_rx = encoder.packet_rx();
+            // Get the packet receiver from the encoder
+            let packet_rx = encoder.packet_rx();
 
-        // Main encode loop – dispatch every frame to parallel workers
-        // and drain completed packets into the ring buffer.
-        loop {
-            // First, drain any already-encoded packets into the buffer
+            // Main encode loop – dispatch every frame to parallel workers
+            // and drain completed packets into the ring buffer.
+            let mut packet_batch = Vec::with_capacity(16); // Batch packets for better performance
+            
+            loop {
+                // First, drain any already-encoded packets into the buffer in batches
+                let mut count = 0;
+                while let Ok(packet) = packet_rx.try_recv() {
+                    packet_batch.push(packet);
+                    count += 1;
+                    
+                    // Process in batches to reduce lock contention
+                    if count >= 16 {
+                        break;
+                    }
+                }
+                
+                // Push batch to buffer
+                if !packet_batch.is_empty() {
+                    for packet in packet_batch.drain(..) {
+                        buffer.push(packet);
+                    }
+                }
+
+                match frame_rx.recv_timeout(std::time::Duration::from_millis(10)) {
+                    Ok(frame) => {
+                        if let Err(e) = encoder.encode_frame(&frame) {
+                            warn!("Failed to encode frame: {}", e);
+                        }
+                    }
+                    Err(crossbeam::channel::RecvTimeoutError::Timeout) => {}
+                    Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
+                        debug!("Frame channel closed, shutting down encoder");
+                        break;
+                    }
+                }
+            }
+
+            // Flush remaining packets
+            debug!("Encoder thread shutting down");
+            match encoder.flush() {
+                Ok(packets) => {
+                    for packet in packets {
+                        buffer.push(packet);
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to flush encoder: {}", e);
+                }
+            }
+
+            // Final drain of worker output
+            let mut final_packets = Vec::new();
             while let Ok(packet) = packet_rx.try_recv() {
+                final_packets.push(packet);
+            }
+            
+            // Push final packets in batch
+            for packet in final_packets {
                 buffer.push(packet);
             }
 
-            match frame_rx.recv_timeout(std::time::Duration::from_millis(10)) {
-                Ok(frame) => {
-                    if let Err(e) = encoder.encode_frame(&frame) {
-                        warn!("Failed to encode frame: {}", e);
-                    }
-                }
-                Err(crossbeam::channel::RecvTimeoutError::Timeout) => {}
-                Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
-                    debug!("Frame channel closed, shutting down encoder");
-                    break;
-                }
-            }
-        }
-
-        // Flush remaining packets
-        debug!("Encoder thread shutting down");
-        match encoder.flush() {
-            Ok(packets) => {
-                for packet in packets {
-                    buffer.push(packet);
-                }
-            }
-            Err(e) => {
-                warn!("Failed to flush encoder: {}", e);
-            }
-        }
-
-        // Final drain of worker output
-        while let Ok(packet) = packet_rx.try_recv() {
-            buffer.push(packet);
-        }
-
-        debug!("Encoder thread stopped");
-        Ok(())
-    });
+            debug!("Encoder thread stopped");
+            Ok(())
+        })?;
 
     // Create a dummy packet_rx for the handle (not used directly since we push to buffer)
     let (_, dummy_packet_rx) = bounded(1);
@@ -450,61 +475,86 @@ pub fn spawn_encoder_with_receiver(
     buffer: crate::buffer::ring::SharedReplayBuffer,
     frame_rx: Receiver<crate::capture::CapturedFrame>,
 ) -> Result<EncoderHandle> {
-    let thread = std::thread::spawn(move || {
-        debug!("Encoder thread started");
+    let thread = std::thread::Builder::new()
+        .name("encoder".to_string())
+        .stack_size(4 * 1024 * 1024) // 4MB stack size for heavy encoding operations
+        .spawn(move || {
+            debug!("Encoder thread started");
 
-        // Create and initialize encoder
-        let mut encoder = create_encoder(&config)?;
-        encoder.init(&config)?;
+            // Create and initialize encoder
+            let mut encoder = create_encoder(&config)?;
+            encoder.init(&config)?;
 
-        debug!("Encoder initialized");
+            debug!("Encoder initialized");
 
-        // Get the packet receiver from the encoder
-        let packet_rx = encoder.packet_rx();
+            // Get the packet receiver from the encoder
+            let packet_rx = encoder.packet_rx();
 
-        // Main encode loop – dispatch every frame to parallel workers
-        // and drain completed packets into the ring buffer.
-        loop {
-            // Drain completed packets into the buffer
+            // Main encode loop – dispatch every frame to parallel workers
+            // and drain completed packets into the ring buffer.
+            let mut packet_batch = Vec::with_capacity(16); // Batch packets for better performance
+            
+            loop {
+                // Drain completed packets into the buffer in batches
+                let mut count = 0;
+                while let Ok(packet) = packet_rx.try_recv() {
+                    packet_batch.push(packet);
+                    count += 1;
+                    
+                    // Process in batches to reduce lock contention
+                    if count >= 16 {
+                        break;
+                    }
+                }
+                
+                // Push batch to buffer
+                if !packet_batch.is_empty() {
+                    for packet in packet_batch.drain(..) {
+                        buffer.push(packet);
+                    }
+                }
+
+                match frame_rx.recv_timeout(std::time::Duration::from_millis(10)) {
+                    Ok(frame) => {
+                        if let Err(e) = encoder.encode_frame(&frame) {
+                            warn!("Failed to encode frame: {}", e);
+                        }
+                    }
+                    Err(crossbeam::channel::RecvTimeoutError::Timeout) => {}
+                    Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
+                        debug!("Frame channel closed, shutting down encoder");
+                        break;
+                    }
+                }
+            }
+
+            // Flush remaining packets
+            debug!("Encoder thread shutting down");
+            match encoder.flush() {
+                Ok(packets) => {
+                    for packet in packets {
+                        buffer.push(packet);
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to flush encoder: {}", e);
+                }
+            }
+
+            // Final drain of worker output
+            let mut final_packets = Vec::new();
             while let Ok(packet) = packet_rx.try_recv() {
+                final_packets.push(packet);
+            }
+            
+            // Push final packets in batch
+            for packet in final_packets {
                 buffer.push(packet);
             }
 
-            match frame_rx.recv_timeout(std::time::Duration::from_millis(10)) {
-                Ok(frame) => {
-                    if let Err(e) = encoder.encode_frame(&frame) {
-                        warn!("Failed to encode frame: {}", e);
-                    }
-                }
-                Err(crossbeam::channel::RecvTimeoutError::Timeout) => {}
-                Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
-                    debug!("Frame channel closed, shutting down encoder");
-                    break;
-                }
-            }
-        }
-
-        // Flush remaining packets
-        debug!("Encoder thread shutting down");
-        match encoder.flush() {
-            Ok(packets) => {
-                for packet in packets {
-                    buffer.push(packet);
-                }
-            }
-            Err(e) => {
-                warn!("Failed to flush encoder: {}", e);
-            }
-        }
-
-        // Final drain of worker output
-        while let Ok(packet) = packet_rx.try_recv() {
-            buffer.push(packet);
-        }
-
-        debug!("Encoder thread stopped");
-        Ok(())
-    });
+            debug!("Encoder thread stopped");
+            Ok(())
+        })?;
 
     // Create a dummy packet_rx for the handle (not used directly since we push to buffer)
     let (_, dummy_packet_rx) = bounded(1);
