@@ -173,15 +173,15 @@ pub fn parse_hotkey(hotkey: &str) -> Result<(HOT_KEY_MODIFIERS, u32)> {
 
     for part in &parts {
         match *part {
-            "Alt" => modifiers.0 |= MOD_ALT.0 as u32,
-            "Ctrl" | "Control" => modifiers.0 |= MOD_CONTROL.0 as u32,
-            "Shift" => modifiers.0 |= MOD_SHIFT.0 as u32,
-            "Win" => modifiers.0 |= MOD_WIN.0 as u32,
+            "Alt" => modifiers.0 |= MOD_ALT.0,
+            "Ctrl" | "Control" => modifiers.0 |= MOD_CONTROL.0,
+            "Shift" => modifiers.0 |= MOD_SHIFT.0,
+            "Win" => modifiers.0 |= MOD_WIN.0,
             _ => {
                 // Parse function keys (F1-F24)
                 if part.len() >= 2 && part.starts_with('F') {
                     if let Ok(fnum) = part[1..].parse::<u32>() {
-                        if fnum >= 1 && fnum <= 24 {
+                        if (1..=24).contains(&fnum) {
                             // VK_F1 = 0x70
                             key = 0x6F + fnum;
                         }

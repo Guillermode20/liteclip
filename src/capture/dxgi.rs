@@ -7,11 +7,18 @@ use crate::d3d::D3D11Texture;
 use anyhow::{bail, Context, Result};
 use bytes::Bytes;
 use crossbeam::channel::{bounded, Receiver, Sender};
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{spawn, JoinHandle};
 use std::time::Duration;
-use tracing::{debug, error, info, trace, warn};
+
+thread_local! {
+    /// Reusable frame buffer to avoid per-frame allocations.
+    /// Capacity grows as needed and is reused for subsequent frames.
+    static FRAME_BUFFER: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+}
+use tracing::{debug, error, info, warn};
 
 use windows::Win32::Graphics::Direct3D11::{
     ID3D11Device, ID3D11DeviceContext, ID3D11Resource, ID3D11Texture2D, D3D11_MAPPED_SUBRESOURCE,
@@ -43,8 +50,7 @@ impl DxgiCaptureState {
     pub fn get_qpc_timestamp() -> i64 {
         unsafe {
             let mut qpc = 0i64;
-            QueryPerformanceCounter(&mut qpc)
-                .expect("QueryPerformanceCounter should never fail");
+            QueryPerformanceCounter(&mut qpc).expect("QueryPerformanceCounter should never fail");
             qpc
         }
     }
@@ -62,7 +68,7 @@ pub struct DxgiCapture {
 impl DxgiCapture {
     /// Create a new DXGI capture instance
     pub fn new() -> Result<Self> {
-        let (frame_tx, frame_rx) = bounded::<CapturedFrame>(64);
+        let (frame_tx, frame_rx) = bounded::<CapturedFrame>(256);
 
         Ok(Self {
             config: CaptureConfig::default(),
@@ -301,8 +307,6 @@ impl DxgiCapture {
                         let row_bytes = width * 4;
                         let src_pitch = mapped.RowPitch as usize;
 
-                        let mut bgra = vec![0u8; row_bytes * height];
-
                         if mapped.pData.is_null() {
                             state.d3d_context.Unmap(Some(&staging_resource), 0);
                             bail!("Mapped staging texture has null data pointer");
@@ -312,22 +316,51 @@ impl DxgiCapture {
                         let total_src_bytes = (height.saturating_sub(1))
                             .checked_mul(src_pitch)
                             .and_then(|v| v.checked_add(row_bytes));
-                        if total_src_bytes.is_none() || total_src_bytes.unwrap() > isize::MAX as usize {
+                        if total_src_bytes.is_none()
+                            || total_src_bytes.unwrap() > isize::MAX as usize
+                        {
                             state.d3d_context.Unmap(Some(&staging_resource), 0);
                             bail!(
                                 "Frame dimensions too large for safe copy: {}x{}, pitch={}",
-                                width, height, src_pitch
+                                width,
+                                height,
+                                src_pitch
                             );
                         }
 
+                        let total_bytes = row_bytes * height;
                         let src_ptr = mapped.pData as *const u8;
-                        for row in 0..height {
-                            std::ptr::copy_nonoverlapping(
-                                src_ptr.add(row * src_pitch),
-                                bgra.as_mut_ptr().add(row * row_bytes),
-                                row_bytes,
-                            );
-                        }
+
+                        // Use thread-local buffer to avoid per-frame allocation
+                        let bgra = FRAME_BUFFER.with(|buf| {
+                            let mut buffer = buf.borrow_mut();
+                            buffer.resize(total_bytes, 0);
+
+                            // Optimization: use single memcpy when pitch matches (common case)
+                            // Otherwise fall back to row-by-row copy
+                            if src_pitch == row_bytes {
+                                // SAFETY: buffer has been resized to total_bytes, src_ptr is valid for total_bytes
+                                // as validated by bounds check above
+                                std::ptr::copy_nonoverlapping(
+                                    src_ptr,
+                                    buffer.as_mut_ptr(),
+                                    total_bytes,
+                                );
+                            } else {
+                                // SAFETY: src_ptr is valid for total_src_bytes, dst_ptr is valid for total_bytes
+                                let dst_ptr = buffer.as_mut_ptr();
+                                for row in 0..height {
+                                    std::ptr::copy_nonoverlapping(
+                                        src_ptr.add(row * src_pitch),
+                                        dst_ptr.add(row * row_bytes),
+                                        row_bytes,
+                                    );
+                                }
+                            }
+
+                            // Convert to Bytes - copies into Arc-backed storage
+                            Bytes::copy_from_slice(&buffer)
+                        });
 
                         state.d3d_context.Unmap(Some(&staging_resource), 0);
 
@@ -342,7 +375,7 @@ impl DxgiCapture {
 
                         let frame = CapturedFrame {
                             texture: texture_to_send,
-                            bgra: Bytes::from(bgra),
+                            bgra,
                             timestamp,
                             resolution: (state.frame_width, state.frame_height),
                         };
@@ -378,7 +411,8 @@ impl DxgiCapture {
     ) {
         info!("DXGI capture thread started: {} FPS", config.target_fps);
 
-        let frame_duration = Duration::from_nanos(1_000_000_000u64 / config.target_fps.max(1) as u64);
+        let frame_duration =
+            Duration::from_nanos(1_000_000_000u64 / config.target_fps.max(1) as u64);
         // Use a short timeout so we don't block longer than one frame period
         let timeout_ms = (frame_duration.as_millis() as u32).max(1);
         let mut frame_count = 0u64;
@@ -407,14 +441,9 @@ impl DxgiCapture {
                         Ok(()) => {
                             frame_count += 1;
                             error_count = 0; // Reset error count on success
-
-                            if frame_count % 60 == 0 {
-                                trace!("Captured {} frames", frame_count);
-                            }
                         }
                         Err(crossbeam::channel::TrySendError::Full(_)) => {
-                            // Channel full - encoder can't keep up
-                            warn!("Frame channel full - dropping frame");
+                            debug!("Frame channel full - dropping frame");
                         }
                         Err(crossbeam::channel::TrySendError::Disconnected(_)) => {
                             // Channel closed - encoder stopped

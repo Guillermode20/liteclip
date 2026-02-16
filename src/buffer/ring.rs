@@ -127,9 +127,7 @@ impl ReplayBuffer {
     /// Create new replay buffer from configuration
     pub fn new(config: &crate::config::Config) -> Result<Self> {
         let duration = Duration::from_secs(config.general.replay_duration_secs as u64);
-        let max_memory_bytes = (config.advanced.memory_limit_mb as usize)
-            .checked_mul(1024 * 1024)
-            .unwrap_or(usize::MAX);
+        let max_memory_bytes = (config.advanced.memory_limit_mb as usize).saturating_mul(1024 * 1024);
 
         debug!(
             "Creating ReplayBuffer: {} seconds, {} MB max",
@@ -149,9 +147,7 @@ impl ReplayBuffer {
 
     /// Create a new replay buffer with explicit parameters
     pub fn with_params(duration: Duration, max_memory_mb: usize) -> Self {
-        let max_memory_bytes = max_memory_mb
-            .checked_mul(1024 * 1024)
-            .unwrap_or(usize::MAX);
+        let max_memory_bytes = max_memory_mb.saturating_mul(1024 * 1024);
 
         debug!(
             "Creating ReplayBuffer: {} seconds, {} MB max",
@@ -169,11 +165,25 @@ impl ReplayBuffer {
         }
     }
 
-    /// Push a new packet into the buffer (evicts old if needed)
+    /// Push a new packet into the buffer (evicts old if needed based on duration)
     pub fn push(&mut self, packet: EncodedPacket) {
         let packet_size = packet.data.len();
 
-        // Evict old packets if we'd exceed memory budget
+        // Calculate target duration in QPC units
+        let target_duration_qpc = (self.duration.as_secs_f64() * qpc_frequency() as f64) as i64;
+
+        // Evict based on duration: remove packets until we're under target duration
+        while !self.packets.is_empty() {
+            let oldest_pts = self.packets.front().map(|p| p.pts).unwrap_or(packet.pts);
+            let projected_span = packet.pts.saturating_sub(oldest_pts);
+
+            if projected_span <= target_duration_qpc {
+                break;
+            }
+            self.evict_oldest();
+        }
+
+        // Memory cap as safety guard (in case of timestamp issues or config errors)
         while self.total_bytes + packet_size > self.max_memory_bytes && !self.packets.is_empty() {
             self.evict_oldest();
         }
@@ -187,12 +197,14 @@ impl ReplayBuffer {
         self.total_bytes += packet_size;
         self.packets.push_back(packet);
 
-        trace!(
-            "Buffer: {} packets, {} bytes, {} keyframes",
-            self.packets.len(),
-            self.total_bytes,
-            self.keyframe_index.len()
-        );
+        if self.packets.len() % 100 == 0 {
+            trace!(
+                "Buffer: {} packets, {} bytes, {} keyframes",
+                self.packets.len(),
+                self.total_bytes,
+                self.keyframe_index.len()
+            );
+        }
     }
 
     /// Evict the oldest packet — O(1) operation
@@ -213,7 +225,10 @@ impl ReplayBuffer {
     /// Get a snapshot of all packets (cheap clone via Bytes)
     pub fn snapshot(&self) -> Result<Vec<EncodedPacket>> {
         // Clone is cheap because Bytes is reference-counted
-        Ok(self.packets.iter().cloned().collect())
+        // Pre-allocate with exact capacity to avoid reallocations
+        let mut result = Vec::with_capacity(self.packets.len());
+        result.extend(self.packets.iter().cloned());
+        Ok(result)
     }
 
     /// Get packets from timestamp to now
@@ -230,7 +245,11 @@ impl ReplayBuffer {
             .map(|(_, &abs_idx)| abs_idx.saturating_sub(self.base_offset))
             .unwrap_or(0);
 
-        Ok(self.packets.iter().skip(start_index).cloned().collect())
+        // Pre-allocate with exact capacity to avoid reallocations
+        let remaining = self.packets.len().saturating_sub(start_index);
+        let mut result = Vec::with_capacity(remaining);
+        result.extend(self.packets.iter().skip(start_index).cloned());
+        Ok(result)
     }
 
     /// Get the last N seconds of packets based on duration
@@ -285,9 +304,15 @@ impl ReplayBuffer {
         }
     }
 
-    /// Check if buffer is full (at memory limit)
+    /// Check if buffer is at duration limit
     pub fn is_full(&self) -> bool {
-        self.total_bytes >= self.max_memory_bytes
+        if self.packets.len() < 2 {
+            return false;
+        }
+        let target_duration_qpc = (self.duration.as_secs_f64() * qpc_frequency() as f64) as i64;
+        let first = self.packets.front().map(|p| p.pts).unwrap_or(0);
+        let last = self.packets.back().map(|p| p.pts).unwrap_or(0);
+        last.saturating_sub(first) >= target_duration_qpc
     }
 
     /// Get the oldest packet timestamp

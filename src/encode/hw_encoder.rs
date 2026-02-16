@@ -6,26 +6,46 @@
 
 use super::{EncodedPacket, Encoder, EncoderConfig, StreamType};
 use anyhow::{Context, Result};
+use bytes::{Buf, BytesMut};
 use crossbeam::channel::{bounded, Receiver, Sender};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{ChildStdin, Command, Stdio};
 use std::thread;
 use std::time::Instant;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, enabled, error, info, trace, warn, Level};
 
 /// Convert BGRA to RGB24 format for FFmpeg input
+#[cfg(test)]
 fn bgra_to_rgb24(bgra: &[u8], width: u32, height: u32) -> Vec<u8> {
     let expected_len = (width * height * 4) as usize;
     if bgra.len() != expected_len {
         return vec![];
     }
 
-    let mut rgb = Vec::with_capacity(expected_len / 4 * 3);
-    for pixel in bgra.chunks_exact(4) {
-        rgb.push(pixel[2]); // R (from BGRA B)
-        rgb.push(pixel[1]); // G
-        rgb.push(pixel[0]); // B (from BGRA R)
+    let pixel_count = (width * height) as usize;
+    let mut rgb = Vec::with_capacity(pixel_count * 3);
+
+    // SAFETY: We pre-allocated enough capacity for pixel_count * 3 bytes.
+    // We write exactly pixel_count * 3 bytes via raw pointer, then set_len.
+    // The BGRA slice is validated to have exactly pixel_count * 4 bytes.
+    unsafe {
+        let mut dst: *mut u8 = rgb.as_mut_ptr();
+        let src: *const u8 = bgra.as_ptr();
+
+        for i in 0..pixel_count {
+            let src_offset = i * 4;
+            // BGRA order: [B, G, R, A] -> RGB order: [R, G, B]
+            dst.write(*src.add(src_offset + 2)); // R
+            dst = dst.add(1);
+            dst.write(*src.add(src_offset + 1)); // G
+            dst = dst.add(1);
+            dst.write(*src.add(src_offset)); // B
+            dst = dst.add(1);
+        }
+
+        rgb.set_len(pixel_count * 3);
     }
+
     rgb
 }
 
@@ -219,9 +239,13 @@ impl HardwareEncoderBase {
         // Capture stderr for debugging - helps diagnose FFmpeg failures
         cmd.stderr(Stdio::piped());
 
-        // Log the full command for debugging
-        let cmd_debug = format!("{:?}", cmd);
-        info!("FFmpeg command: {}", cmd_debug);
+        // Log the full command for debugging (only format if info level is enabled)
+        if enabled!(Level::INFO) {
+            let args: Vec<String> = std::iter::once(ffmpeg_cmd.clone())
+                .chain(cmd.get_args().map(|s| s.to_string_lossy().to_string()))
+                .collect();
+            info!("FFmpeg command: {}", args.join(" "));
+        }
 
         let mut child = cmd
             .spawn()
@@ -331,7 +355,7 @@ impl HardwareEncoderBase {
 
             let mut reader = std::io::BufReader::new(stdout);
             let mut buffer = [0u8; 65536]; // 64KB buffer
-            let mut frame_buffer = Vec::new();
+            let mut frame_buffer = BytesMut::new();
             let started_at = Instant::now();
             let mut last_pts = 0i64;
 
@@ -351,14 +375,13 @@ impl HardwareEncoderBase {
                             else {
                                 if frame_buffer.len() > (2 * 1024 * 1024) {
                                     let keep = 4usize.min(frame_buffer.len());
-                                    let drop_len = frame_buffer.len() - keep;
-                                    frame_buffer.drain(0..drop_len);
+                                    frame_buffer.advance(frame_buffer.len() - keep);
                                 }
                                 break;
                             };
 
                             if start_pos > 0 {
-                                frame_buffer.drain(0..start_pos);
+                                frame_buffer.advance(start_pos);
                                 continue;
                             }
 
@@ -368,8 +391,7 @@ impl HardwareEncoderBase {
                                 break;
                             };
 
-                            let nal_data = frame_buffer[0..next_start].to_vec();
-                            frame_buffer.drain(0..next_start);
+                            let nal_data = frame_buffer.split_to(next_start).freeze();
 
                             if !nal_data.is_empty() {
                                 let nal_type = h264_nal_type(&nal_data);
@@ -412,14 +434,7 @@ impl HardwareEncoderBase {
         thread::spawn(move || {
             let reader = BufReader::new(stderr);
             for line in reader.lines().map_while(Result::ok) {
-                // Log FFmpeg stderr output - contains errors/warnings
-                if line.to_lowercase().contains("error") || line.to_lowercase().contains("fail") {
-                    error!("[FFmpeg] {}", line);
-                } else if line.to_lowercase().contains("warning") {
-                    warn!("[FFmpeg] {}", line);
-                } else {
-                    debug!("[FFmpeg] {}", line);
-                }
+                debug!("[FFmpeg] {}", line);
             }
             debug!("FFmpeg stderr reader thread exiting");
         })
@@ -444,12 +459,13 @@ impl HardwareEncoderBase {
             let data = &frame.bgra;
 
             stdin
-                .write_all(&data)
+                .write_all(data)
                 .context("Failed to write frame to FFmpeg stdin")?;
-            stdin.flush()?;
 
             self.frame_count += 1;
-            trace!("Encoded frame {} to FFmpeg", self.frame_count);
+            if self.frame_count % 60 == 0 {
+                trace!("Encoded frame {} to FFmpeg", self.frame_count);
+            }
         }
 
         Ok(())
@@ -577,9 +593,8 @@ pub struct NvencEncoder {
 }
 
 impl NvencEncoder {
-    /// Create new NVENC encoder
     pub fn new(config: &EncoderConfig) -> Result<Self> {
-        info!("Creating NVENC encoder");
+        debug!("Creating NVENC encoder");
         let base = HardwareEncoderBase::new(config, "h264_nvenc")?;
         Ok(Self { base })
     }
@@ -589,7 +604,7 @@ impl Encoder for NvencEncoder {
     fn init(&mut self, config: &EncoderConfig) -> Result<()> {
         self.base.config = config.clone();
         self.base.running = true;
-        info!("NVENC encoder initialized (ready for frames)");
+        debug!("NVENC encoder initialized");
         Ok(())
     }
 
@@ -616,9 +631,8 @@ pub struct AmfEncoder {
 }
 
 impl AmfEncoder {
-    /// Create new AMF encoder
     pub fn new(config: &EncoderConfig) -> Result<Self> {
-        info!("Creating AMF encoder");
+        debug!("Creating AMF encoder");
         let base = HardwareEncoderBase::new(config, "h264_amf")?;
         Ok(Self { base })
     }
@@ -628,7 +642,7 @@ impl Encoder for AmfEncoder {
     fn init(&mut self, config: &EncoderConfig) -> Result<()> {
         self.base.config = config.clone();
         self.base.running = true;
-        info!("AMF encoder initialized (ready for frames)");
+        debug!("AMF encoder initialized");
         Ok(())
     }
 
@@ -655,9 +669,8 @@ pub struct QsvEncoder {
 }
 
 impl QsvEncoder {
-    /// Create new QSV encoder
     pub fn new(config: &EncoderConfig) -> Result<Self> {
-        info!("Creating QSV encoder");
+        debug!("Creating QSV encoder");
         let base = HardwareEncoderBase::new(config, "h264_qsv")?;
         Ok(Self { base })
     }
@@ -667,7 +680,7 @@ impl Encoder for QsvEncoder {
     fn init(&mut self, config: &EncoderConfig) -> Result<()> {
         self.base.config = config.clone();
         self.base.running = true;
-        info!("QSV encoder initialized (ready for frames)");
+        debug!("QSV encoder initialized");
         Ok(())
     }
 

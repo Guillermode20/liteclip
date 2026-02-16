@@ -11,7 +11,7 @@ use bytes::Bytes;
 use crossbeam::channel::{bounded, Receiver, Sender};
 use image::{codecs::jpeg::JpegEncoder, ExtendedColorType};
 use std::thread;
-use tracing::{info, trace, warn};
+use tracing::{debug, info, warn};
 
 // ── BGRA → JPEG conversion ──────────────────────────────────────────
 
@@ -155,8 +155,6 @@ impl Encoder for StubEncoder {
     }
 
     fn encode_frame(&mut self, frame: &crate::capture::CapturedFrame) -> Result<()> {
-        trace!("Stub encoder frame {}", self.frame_count);
-
         let is_keyframe = self.frame_count % 30 == 0;
 
         // Use native resolution if configured, otherwise use config resolution
@@ -258,7 +256,7 @@ impl SoftwareEncoder {
             let oh = out_h as usize;
 
             worker_threads.push(thread::spawn(move || {
-                trace!("Encoder worker {id} started");
+                debug!("Encoder worker {id} started");
 
                 // Each worker keeps its own RGB scratch buffer that is reused
                 // across frames, eliminating repeated heap allocation.
@@ -298,7 +296,7 @@ impl SoftwareEncoder {
                     }
                 }
 
-                trace!("Encoder worker {id} exiting");
+                debug!("Encoder worker {id} exiting");
             }));
         }
 
@@ -340,8 +338,8 @@ impl Encoder for SoftwareEncoder {
 
         // Non-blocking send; if all workers are busy we drop the frame
         // rather than stalling the capture pipeline.
-        if self.worker_tx.try_send(item).is_err() {
-            trace!("Workers busy, dropping frame {}", self.frame_count);
+        if self.worker_tx.try_send(item).is_err() && self.frame_count % 60 == 0 {
+            debug!("Workers busy, dropping frame {}", self.frame_count);
         }
 
         self.frame_count += 1;

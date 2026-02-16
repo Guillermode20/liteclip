@@ -109,7 +109,7 @@ impl AppState {
         let (width, height) = self
             .buffer
             .snapshot_first_packet_resolution()
-            .unwrap_or_else(|| match self.config.video.resolution {
+            .unwrap_or(match self.config.video.resolution {
                 crate::config::Resolution::Native => (1920, 1080), // Fallback if no packets
                 crate::config::Resolution::P1080 => (1920, 1080),
                 crate::config::Resolution::P720 => (1280, 720),

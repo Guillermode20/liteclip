@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 /// Root configuration structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct Config {
     #[serde(default)]
     pub general: GeneralConfig,
@@ -225,17 +226,6 @@ impl Config {
     }
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            general: GeneralConfig::default(),
-            video: VideoConfig::default(),
-            audio: AudioConfig::default(),
-            hotkeys: HotkeyConfig::default(),
-            advanced: AdvancedConfig::default(),
-        }
-    }
-}
 
 impl Default for GeneralConfig {
     fn default() -> Self {

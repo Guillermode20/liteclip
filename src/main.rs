@@ -11,11 +11,12 @@ use tracing::{error, info, warn};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize tracing subscriber for logging
+    // Initialize tracing subscriber for logging (WARN level to reduce noise)
     tracing_subscriber::fmt()
         .with_target(false)
         .with_timer(tracing_subscriber::fmt::time::time())
         .with_level(true)
+        .with_max_level(tracing::Level::INFO)
         .init();
 
     let version = env!("CARGO_PKG_VERSION");
@@ -59,13 +60,13 @@ async fn main() -> Result<()> {
     let hotkey_config = liteclip_replay::platform::HotkeyConfig::from(&config);
     let (platform_handle, event_rx) = liteclip_replay::platform::spawn_platform_thread(hotkey_config)?;
 
-    info!("Platform thread spawned.");
-    info!("Hotkeys registered: {} (save), {} (toggle)", 
+    info!(
+        "Hotkeys registered: {} (save), {} (toggle) | Press {} to save clip",
         config.hotkeys.save_clip,
-        config.hotkeys.toggle_recording
+        config.hotkeys.toggle_recording,
+        config.hotkeys.save_clip
     );
     info!("Press Ctrl+C to exit.");
-    info!("Recording started. Press {} to save clip.", config.hotkeys.save_clip);
 
     // Initialize recording
     {
@@ -132,10 +133,8 @@ async fn main() -> Result<()> {
                                             if let Err(e) = state.stop_recording().await {
                                                 error!("Failed to stop recording: {}", e);
                                             }
-                                        } else {
-                                            if let Err(e) = state.start_recording().await {
-                                                error!("Failed to start recording: {}", e);
-                                            }
+                                        } else if let Err(e) = state.start_recording().await {
+                                            error!("Failed to start recording: {}", e);
                                         }
                                     }
                                     _ => {

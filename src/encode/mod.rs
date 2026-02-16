@@ -219,30 +219,27 @@ pub enum HardwareEncoder {
 /// Priority order: NVENC → AMF → QSV → None (software)
 #[cfg(feature = "ffmpeg")]
 pub fn detect_hardware_encoder() -> HardwareEncoder {
-    info!("Detecting hardware encoders...");
+    debug!("Detecting hardware encoders...");
 
     // Try to detect NVENC first
     if hw_encoder::check_encoder_available("h264_nvenc") {
-        info!("Detected NVIDIA NVENC encoder");
+        info!("Using NVIDIA NVENC encoder");
         return HardwareEncoder::Nvenc;
     }
-    info!("NVIDIA NVENC not available");
 
     // Try AMF (AMD)
     if hw_encoder::check_encoder_available("h264_amf") {
-        info!("Detected AMD AMF encoder");
+        info!("Using AMD AMF encoder");
         return HardwareEncoder::Amf;
     }
-    info!("AMD AMF not available");
 
     // Try QSV (Intel)
     if hw_encoder::check_encoder_available("h264_qsv") {
-        info!("Detected Intel QSV encoder");
+        info!("Using Intel QSV encoder");
         return HardwareEncoder::Qsv;
     }
-    info!("Intel QSV not available");
 
-    info!("No hardware encoder detected, using software encoding");
+    info!("No hardware encoder, using software encoding");
     HardwareEncoder::None
 }
 
@@ -272,82 +269,68 @@ fn is_encoder_available(codec_name: &str) -> bool {
 pub fn create_encoder(config: &EncoderConfig) -> Result<Box<dyn Encoder>> {
     let encoder_type = config.encoder_type;
 
-    match encoder_type {
+    let encoder: Box<dyn Encoder> = match encoder_type {
         crate::config::EncoderType::Auto => {
             // Try hardware encoders in priority order: NVENC -> AMF -> QSV
             let hw = detect_hardware_encoder();
             match hw {
-                HardwareEncoder::Nvenc => match hw_encoder::NvencEncoder::new(config) {
-                    Ok(enc) => {
-                        info!("Using NVENC encoder");
+                HardwareEncoder::Nvenc => {
+                    if let Ok(enc) = hw_encoder::NvencEncoder::new(config) {
                         return Ok(Box::new(enc) as Box<dyn Encoder>);
                     }
-                    Err(e) => warn!("Failed to create NVENC encoder: {}", e),
-                },
-                HardwareEncoder::Amf => match hw_encoder::AmfEncoder::new(config) {
-                    Ok(enc) => {
-                        info!("Using AMF encoder");
+                }
+                HardwareEncoder::Amf => {
+                    if let Ok(enc) = hw_encoder::AmfEncoder::new(config) {
                         return Ok(Box::new(enc) as Box<dyn Encoder>);
                     }
-                    Err(e) => warn!("Failed to create AMF encoder: {}", e),
-                },
-                HardwareEncoder::Qsv => match hw_encoder::QsvEncoder::new(config) {
-                    Ok(enc) => {
-                        info!("Using QSV encoder");
+                }
+                HardwareEncoder::Qsv => {
+                    if let Ok(enc) = hw_encoder::QsvEncoder::new(config) {
                         return Ok(Box::new(enc) as Box<dyn Encoder>);
                     }
-                    Err(e) => warn!("Failed to create QSV encoder: {}", e),
-                },
+                }
                 HardwareEncoder::None => {}
             }
             // Fall back to software
             info!("No hardware encoder available, using software encoder");
-            sw_encoder::SoftwareEncoder::new(config).map(|e| Box::new(e) as Box<dyn Encoder>)
+            Box::new(sw_encoder::SoftwareEncoder::new(config)?) as Box<dyn Encoder>
         }
-        crate::config::EncoderType::Nvenc => {
-            match hw_encoder::NvencEncoder::new(config) {
-                Ok(enc) => {
-                    info!("Using NVENC encoder");
-                    return Ok(Box::new(enc) as Box<dyn Encoder>);
-                }
-                Err(e) => warn!(
+        crate::config::EncoderType::Nvenc => match hw_encoder::NvencEncoder::new(config) {
+            Ok(enc) => Box::new(enc) as Box<dyn Encoder>,
+            Err(e) => {
+                warn!(
                     "Failed to create NVENC encoder: {}, falling back to software",
                     e
-                ),
+                );
+                Box::new(sw_encoder::SoftwareEncoder::new(config)?) as Box<dyn Encoder>
             }
-            sw_encoder::SoftwareEncoder::new(config).map(|e| Box::new(e) as Box<dyn Encoder>)
-        }
-        crate::config::EncoderType::Amf => {
-            match hw_encoder::AmfEncoder::new(config) {
-                Ok(enc) => {
-                    info!("Using AMF encoder");
-                    return Ok(Box::new(enc) as Box<dyn Encoder>);
-                }
-                Err(e) => warn!(
+        },
+        crate::config::EncoderType::Amf => match hw_encoder::AmfEncoder::new(config) {
+            Ok(enc) => Box::new(enc) as Box<dyn Encoder>,
+            Err(e) => {
+                warn!(
                     "Failed to create AMF encoder: {}, falling back to software",
                     e
-                ),
+                );
+                Box::new(sw_encoder::SoftwareEncoder::new(config)?) as Box<dyn Encoder>
             }
-            sw_encoder::SoftwareEncoder::new(config).map(|e| Box::new(e) as Box<dyn Encoder>)
-        }
-        crate::config::EncoderType::Qsv => {
-            match hw_encoder::QsvEncoder::new(config) {
-                Ok(enc) => {
-                    info!("Using QSV encoder");
-                    return Ok(Box::new(enc) as Box<dyn Encoder>);
-                }
-                Err(e) => warn!(
+        },
+        crate::config::EncoderType::Qsv => match hw_encoder::QsvEncoder::new(config) {
+            Ok(enc) => Box::new(enc) as Box<dyn Encoder>,
+            Err(e) => {
+                warn!(
                     "Failed to create QSV encoder: {}, falling back to software",
                     e
-                ),
+                );
+                Box::new(sw_encoder::SoftwareEncoder::new(config)?) as Box<dyn Encoder>
             }
-            sw_encoder::SoftwareEncoder::new(config).map(|e| Box::new(e) as Box<dyn Encoder>)
-        }
+        },
         crate::config::EncoderType::Software => {
-            info!("Using software encoder");
-            sw_encoder::SoftwareEncoder::new(config).map(|e| Box::new(e) as Box<dyn Encoder>)
+            Box::new(sw_encoder::SoftwareEncoder::new(config)?) as Box<dyn Encoder>
         }
-    }
+    };
+
+    Ok(encoder)
 }
 
 /// Encoder thread handle
@@ -374,13 +357,13 @@ pub fn spawn_encoder(
     let frame_tx_clone = frame_tx.clone();
 
     let thread = std::thread::spawn(move || {
-        info!("Encoder thread started");
+        debug!("Encoder thread started");
 
         // Create and initialize encoder
         let mut encoder = create_encoder(&config)?;
         encoder.init(&config)?;
 
-        info!("Encoder initialized and ready");
+        debug!("Encoder initialized");
 
         // Get the packet receiver from the encoder
         let packet_rx = encoder.packet_rx();
@@ -407,7 +390,7 @@ pub fn spawn_encoder(
         }
 
         // Flush remaining packets
-        info!("Encoder thread shutting down, flushing remaining packets");
+        debug!("Encoder thread shutting down");
         match encoder.flush() {
             Ok(packets) => {
                 for packet in packets {
@@ -424,7 +407,7 @@ pub fn spawn_encoder(
             buffer.push(packet);
         }
 
-        info!("Encoder thread stopped");
+        debug!("Encoder thread stopped");
         Ok(())
     });
 
@@ -439,6 +422,7 @@ pub fn spawn_encoder(
 
     Ok((handle, frame_tx_clone))
 }
+
 /// Spawn an encoder that receives frames from an existing receiver
 ///
 /// This is used when the capture provides its own frame channel.
@@ -450,13 +434,13 @@ pub fn spawn_encoder_with_receiver(
     frame_rx: Receiver<crate::capture::CapturedFrame>,
 ) -> Result<EncoderHandle> {
     let thread = std::thread::spawn(move || {
-        info!("Encoder thread started");
+        debug!("Encoder thread started");
 
         // Create and initialize encoder
         let mut encoder = create_encoder(&config)?;
         encoder.init(&config)?;
 
-        info!("Encoder initialized and ready");
+        debug!("Encoder initialized");
 
         // Get the packet receiver from the encoder
         let packet_rx = encoder.packet_rx();
@@ -483,7 +467,7 @@ pub fn spawn_encoder_with_receiver(
         }
 
         // Flush remaining packets
-        info!("Encoder thread shutting down, flushing remaining packets");
+        debug!("Encoder thread shutting down");
         match encoder.flush() {
             Ok(packets) => {
                 for packet in packets {
@@ -500,7 +484,7 @@ pub fn spawn_encoder_with_receiver(
             buffer.push(packet);
         }
 
-        info!("Encoder thread stopped");
+        debug!("Encoder thread stopped");
         Ok(())
     });
 
