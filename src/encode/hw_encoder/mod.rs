@@ -1,11 +1,11 @@
 //! Auto-generated module structure
 
 pub mod amfencoder_traits;
-pub mod functions;
+mod functions;
 pub mod hardwareencoderbase_traits;
 pub mod nvencencoder_traits;
 pub mod qsvencoder_traits;
-pub mod types;
+mod types;
 
 // Re-export all types
 pub use functions::*;

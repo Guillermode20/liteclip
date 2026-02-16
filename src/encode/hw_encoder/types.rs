@@ -11,7 +11,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{ChildStdin, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
-use tracing::{debug, enabled, error, info, trace, warn, Level};
+use tracing::{debug, enabled, error, info, warn, Level};
 
 use super::functions::{find_annexb_start_code, h264_nal_type, query_qpc, resolve_ffmpeg_command};
 use crate::buffer::ring::qpc_frequency;
@@ -208,19 +208,12 @@ impl HardwareEncoderBase {
                 .arg("-r")
                 .arg(self.config.framerate.to_string())
                 .arg("-i")
-                .arg("pipe:0")
-                .arg("-vsync")
-                .arg("cfr");
+                .arg("pipe:0");
         } else {
-            cmd.arg("-f")
-                .arg("lavfi")
-                .arg("-i")
-                .arg(format!(
-                    "ddagrab=output_idx={}:framerate={}",
-                    self.config.output_index, self.config.framerate
-                ))
-                .arg("-vsync")
-                .arg("cfr");
+            cmd.arg("-f").arg("lavfi").arg("-i").arg(format!(
+                "ddagrab=output_idx={}:framerate={}",
+                self.config.output_index, self.config.framerate
+            ));
             if matches!(encoder_name, "h264_amf" | "hevc_amf" | "av1_amf") {
                 video_filters.push("hwdownload,format=bgra".to_string());
             }
@@ -241,13 +234,16 @@ impl HardwareEncoderBase {
             cmd.arg("-tune").arg(tune);
         }
         self.add_rate_control_options(&mut cmd, encoder_name);
+        if encoder_name.starts_with("h264_") {
+            cmd.arg("-bsf:v").arg("h264_mp4toannexb");
+        }
         cmd.arg("-g")
             .arg(self.config.keyframe_interval_frames().to_string())
             .arg("-pix_fmt")
             .arg("yuv420p")
             .arg("-r")
             .arg(self.config.framerate.to_string())
-            .arg("-vsync")
+            .arg("-fps_mode")
             .arg("cfr")
             .arg("-f")
             .arg("h264")
@@ -261,12 +257,16 @@ impl HardwareEncoderBase {
                 .collect();
             info!("FFmpeg command: {}", args.join(" "));
         }
+        info!("Spawning FFmpeg process...");
         let mut child = cmd
             .spawn()
             .with_context(|| format!("Failed to start FFmpeg ({})", encoder_name))?;
+        info!("FFmpeg process spawned successfully");
         let stdin = if self.config.use_cpu_readback {
+            info!("Capturing FFmpeg stdin for CPU readback mode");
             Some(child.stdin.take().context("Failed to take FFmpeg stdin")?)
         } else {
+            info!("Skipping stdin capture (ddagrab mode)");
             None
         };
         self.width = out_w;
@@ -365,16 +365,12 @@ impl HardwareEncoderBase {
                 cmd.arg("0");
                 cmd.arg("-sei");
                 cmd.arg("+aud");
-                cmd.arg("-vsync");
-                cmd.arg("cfr");
                 cmd.arg("-usage");
                 cmd.arg("lowlatency");
             }
             "h264_qsv" | "hevc_qsv" => {
                 cmd.arg("-look_ahead");
                 cmd.arg("0");
-                cmd.arg("-preset");
-                cmd.arg("faster");
             }
             _ => {}
         }
@@ -385,7 +381,8 @@ impl HardwareEncoderBase {
         let bitrate = format!("{}M", bitrate_mbps);
         match self.config.rate_control {
             RateControl::Cbr => {
-                let bufsize = format!("{}M", bitrate_mbps.saturating_mul(2).max(1));
+                // Use a smaller buffer (1s) to avoid stall/latency
+                let bufsize = format!("{}M", bitrate_mbps);
                 cmd.arg("-b:v")
                     .arg(&bitrate)
                     .arg("-maxrate")
@@ -398,16 +395,18 @@ impl HardwareEncoderBase {
             RateControl::Vbr => {
                 let peak_mbps = bitrate_mbps.saturating_mul(2).max(1);
                 let peak = format!("{}M", peak_mbps);
+                let bufsize = format!("{}M", bitrate_mbps);
                 cmd.arg("-b:v")
                     .arg(&bitrate)
                     .arg("-maxrate")
                     .arg(&peak)
                     .arg("-bufsize")
-                    .arg(peak);
+                    .arg(bufsize);
             }
             RateControl::Cq => {
                 let peak_mbps = bitrate_mbps.saturating_mul(2).max(1);
                 let peak = format!("{}M", peak_mbps);
+                let bufsize = format!("{}M", bitrate_mbps);
                 let target_bitrate = if encoder_name.ends_with("_nvenc") {
                     "0".to_string()
                 } else {
@@ -418,7 +417,7 @@ impl HardwareEncoderBase {
                     .arg("-maxrate")
                     .arg(&peak)
                     .arg("-bufsize")
-                    .arg(peak);
+                    .arg(bufsize);
             }
         }
     }
@@ -455,50 +454,59 @@ impl HardwareEncoderBase {
     ) -> thread::JoinHandle<()> {
         let qpc_freq = qpc_frequency();
         thread::spawn(move || {
-            use std::io::Read;
+            info!("FFmpeg output reader thread started");
             use std::cell::Cell;
+            use std::io::Read;
             let mut reader = std::io::BufReader::new(stdout);
             let mut buffer = [0u8; 65536];
             let mut frame_buffer = BytesMut::with_capacity(1024 * 1024);
             let output_reader_start = Instant::now();
             let mut last_pts = start_qpc.saturating_sub(1);
+            let mut avcc_nal_length_size = 4usize;
             let total_packets = Cell::new(0u64);
             let mut last_log_time = Instant::now();
-            
+            let mut bytes_received = 0u64;
+
             // Helper function to process a NAL unit
-            let process_nal = |nal_data: bytes::Bytes, is_last: bool,
-                last_pts: &mut i64, frame_meta_rx: &Receiver<FrameMetadata>| -> bool {
+            let process_nal = |nal_data: bytes::Bytes,
+                               is_last: bool,
+                               last_pts: &mut i64,
+                               frame_meta_rx: &Receiver<FrameMetadata>|
+             -> bool {
                 if nal_data.is_empty() {
                     return true;
                 }
                 let nal_type = h264_nal_type(&nal_data);
                 let is_keyframe = matches!(nal_type, Some(5 | 7 | 8));
                 let is_frame_nal = matches!(nal_type, Some(1 | 5));
-                
+
                 let count = total_packets.get() + 1;
                 total_packets.set(count);
-                if count <= 10 || count % 120 == 0 || is_last {
-                    debug!("NAL packet {}: type={:?}, is_keyframe={}, is_frame_nal={}, size={} bytes",
-                        count, nal_type, is_keyframe, is_frame_nal, nal_data.len());
+                if count == 1 || count % 600 == 0 || is_last {
+                    debug!(
+                        "NAL packet {}: type={:?}, is_keyframe={}, is_frame_nal={}, size={} bytes",
+                        count,
+                        nal_type,
+                        is_keyframe,
+                        is_frame_nal,
+                        nal_data.len()
+                    );
                 }
-                
+
                 let final_pts = if is_frame_nal {
                     match frame_meta_rx.try_recv() {
                         Ok(meta) => {
                             let pts = meta.capture_timestamp;
-                            let normalized =
-                                if pts <= *last_pts { *last_pts + 1 } else { pts };
+                            let normalized = if pts <= *last_pts { *last_pts + 1 } else { pts };
                             *last_pts = normalized;
                             normalized
                         }
                         Err(_) => {
-                            let elapsed_qpc =
-                                (output_reader_start.elapsed().as_secs_f64()
-                                    * qpc_freq as f64)
-                                    as i64;
+                            let elapsed_qpc = (output_reader_start.elapsed().as_secs_f64()
+                                * qpc_freq as f64)
+                                as i64;
                             let pts = start_qpc.saturating_add(elapsed_qpc);
-                            let normalized =
-                                if pts <= *last_pts { *last_pts + 1 } else { pts };
+                            let normalized = if pts <= *last_pts { *last_pts + 1 } else { pts };
                             *last_pts = normalized;
                             normalized
                         }
@@ -521,7 +529,7 @@ impl HardwareEncoderBase {
                 }
                 true
             };
-            
+
             loop {
                 match reader.read(&mut buffer) {
                     Ok(0) => {
@@ -538,62 +546,211 @@ impl HardwareEncoderBase {
                         break;
                     }
                     Ok(n) => {
+                        bytes_received += n as u64;
                         frame_buffer.extend_from_slice(&buffer[..n]);
-                        
+
+                        // Log first bytes received
+                        if bytes_received == n as u64 {
+                            debug!(
+                                "FFmpeg output reader: received first {} bytes from stdout",
+                                n
+                            );
+                        }
+
                         // Periodic logging
-                        if last_log_time.elapsed() >= Duration::from_secs(5) {
+                        if last_log_time.elapsed() >= Duration::from_secs(10) {
                             let count = total_packets.get();
-                            debug!("Output reader status: {} packets, {} bytes in buffer",
-                                count, frame_buffer.len());
+                            debug!(
+                                "FFmpeg output reader: {} bytes received, {} packets created, {} bytes in buffer",
+                                bytes_received,
+                                count,
+                                frame_buffer.len()
+                            );
                             last_log_time = Instant::now();
                         }
-                        
+
                         // Process all complete NAL units in the buffer
                         loop {
                             // Find first start code
-                            let Some((first_start, first_len)) = find_annexb_start_code(&frame_buffer, 0) else {
-                                // No start code found - if buffer is too large, keep last 4 bytes
-                                if frame_buffer.len() > (2 * 1024 * 1024) {
-                                    warn!("Frame buffer exceeded 2MB without start code, discarding {} bytes",
-                                        frame_buffer.len() - 4);
-                                    let keep = 4usize.min(frame_buffer.len());
-                                    frame_buffer.advance(frame_buffer.len() - keep);
+                            let Some((first_start, first_len)) =
+                                find_annexb_start_code(&frame_buffer, 0)
+                            else {
+                                // No start code found in buffer
+
+                                // Handle AVCDecoderConfigurationRecord (avcC) if present.
+                                // Some encoder paths emit this once before length-prefixed NAL units.
+                                if frame_buffer.len() >= 7 && frame_buffer[0] == 1 {
+                                    debug!("Detected AVCC configuration record (avcC) header starting with 0x01");
+                                    let parsed_len_size = ((frame_buffer[4] & 0x03) as usize) + 1;
+                                    if (1..=4).contains(&parsed_len_size) {
+                                        avcc_nal_length_size = parsed_len_size;
+                                    }
+
+                                    let mut cursor = 6usize;
+                                    let mut incomplete = false;
+                                    let sps_count = (frame_buffer[5] & 0x1f) as usize;
+                                    for _ in 0..sps_count {
+                                        if frame_buffer.len() < cursor + 2 {
+                                            incomplete = true;
+                                            break;
+                                        }
+                                        let sps_len = u16::from_be_bytes([
+                                            frame_buffer[cursor],
+                                            frame_buffer[cursor + 1],
+                                        ])
+                                            as usize;
+                                        cursor += 2;
+                                        if frame_buffer.len() < cursor + sps_len {
+                                            incomplete = true;
+                                            break;
+                                        }
+                                        let mut annexb_nal = BytesMut::with_capacity(4 + sps_len);
+                                        annexb_nal.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+                                        annexb_nal.extend_from_slice(
+                                            &frame_buffer[cursor..cursor + sps_len],
+                                        );
+                                        if !process_nal(
+                                            annexb_nal.freeze(),
+                                            false,
+                                            &mut last_pts,
+                                            &frame_meta_rx,
+                                        ) {
+                                            return;
+                                        }
+                                        cursor += sps_len;
+                                    }
+
+                                    if incomplete {
+                                        break;
+                                    }
+
+                                    if frame_buffer.len() < cursor + 1 {
+                                        break;
+                                    }
+
+                                    let pps_count = frame_buffer[cursor] as usize;
+                                    cursor += 1;
+                                    for _ in 0..pps_count {
+                                        if frame_buffer.len() < cursor + 2 {
+                                            incomplete = true;
+                                            break;
+                                        }
+                                        let pps_len = u16::from_be_bytes([
+                                            frame_buffer[cursor],
+                                            frame_buffer[cursor + 1],
+                                        ])
+                                            as usize;
+                                        cursor += 2;
+                                        if frame_buffer.len() < cursor + pps_len {
+                                            incomplete = true;
+                                            break;
+                                        }
+                                        let mut annexb_nal = BytesMut::with_capacity(4 + pps_len);
+                                        annexb_nal.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+                                        annexb_nal.extend_from_slice(
+                                            &frame_buffer[cursor..cursor + pps_len],
+                                        );
+                                        if !process_nal(
+                                            annexb_nal.freeze(),
+                                            false,
+                                            &mut last_pts,
+                                            &frame_meta_rx,
+                                        ) {
+                                            return;
+                                        }
+                                        cursor += pps_len;
+                                    }
+
+                                    if incomplete {
+                                        break;
+                                    }
+
+                                    frame_buffer.advance(cursor);
+                                    continue;
+                                }
+
+                                // Fallback: some encoder paths can emit length-prefixed (AVCC) NALs.
+                                // Convert one AVCC NAL to Annex-B and emit it when possible.
+                                if frame_buffer.len() >= avcc_nal_length_size {
+                                    // ... existing logic but skip if it might be Annex-B start code
+                                    if frame_buffer[0] == 0 && frame_buffer[1] == 0 {
+                                        // Wait for more data to see if it's Annex-B
+                                        break;
+                                    }
+
+                                    let nal_len = match avcc_nal_length_size {
+                                        1 => frame_buffer[0] as usize,
+                                        2 => u16::from_be_bytes([frame_buffer[0], frame_buffer[1]])
+                                            as usize,
+                                        _ => u32::from_be_bytes([
+                                            frame_buffer[0],
+                                            frame_buffer[1],
+                                            frame_buffer[2],
+                                            frame_buffer[3],
+                                        ]) as usize,
+                                    };
+
+                                    if nal_len == 0 {
+                                        frame_buffer.advance(avcc_nal_length_size);
+                                        continue;
+                                    }
+
+                                    if nal_len <= 10 * 1024 * 1024 {
+                                        // Allow up to 10MB frames
+                                        if frame_buffer.len() >= avcc_nal_length_size + nal_len {
+                                            let avcc_nal = frame_buffer
+                                                .split_to(avcc_nal_length_size + nal_len);
+                                            let mut annexb_nal =
+                                                BytesMut::with_capacity(4 + nal_len);
+                                            annexb_nal.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+                                            annexb_nal.extend_from_slice(
+                                                &avcc_nal[avcc_nal_length_size..],
+                                            );
+                                            if !process_nal(
+                                                annexb_nal.freeze(),
+                                                false,
+                                                &mut last_pts,
+                                                &frame_meta_rx,
+                                            ) {
+                                                return;
+                                            }
+                                            continue;
+                                        }
+
+                                        // Incomplete AVCC payload - wait for more data.
+                                        break;
+                                    }
+                                }
+
+                                // No start code found - if buffer is too large, search for ANY 00 00 01
+                                if frame_buffer.len() > (5 * 1024 * 1024) {
+                                    warn!("Frame buffer exceeded 5MB without start code, discarding until next 00 00 01");
+                                    if let Some((pos, _)) = find_annexb_start_code(&frame_buffer, 1)
+                                    {
+                                        frame_buffer.advance(pos);
+                                    } else {
+                                        let keep = 4usize.min(frame_buffer.len());
+                                        frame_buffer.advance(frame_buffer.len() - keep);
+                                    }
                                 }
                                 break;
                             };
-                            
+
                             // Skip any garbage before the first start code
                             if first_start > 0 {
-                                trace!("Discarding {} bytes before start code", first_start);
                                 frame_buffer.advance(first_start);
                                 continue;
                             }
-                            
+
                             // Find second start code (marks end of first NAL)
                             let search_from = first_len;
-                            let Some((second_start, _)) = find_annexb_start_code(&frame_buffer, search_from) else {
-                                // No second start code - we have an incomplete NAL
-                                // For SPS/PPS (NAL types 7/8), they're usually small, so we can emit them
-                                // if buffer seems reasonable
-                                if frame_buffer.len() >= 5 {
-                                    let possible_nal_type = frame_buffer[first_len] & 0x1f;
-                                    if matches!(possible_nal_type, 7 | 8) && frame_buffer.len() < 512 {
-                                        // Small parameter set NAL - likely complete
-                                        trace!("Emitting likely complete parameter set NAL (type {}) without waiting for next start code",
-                                            possible_nal_type);
-                                        let nal_data = frame_buffer.split_to(frame_buffer.len()).freeze();
-                                        if !process_nal(nal_data, false, &mut last_pts, &frame_meta_rx) {
-                                            return;
-                                        }
-                                        continue;
-                                    }
-                                }
-                                
-                                // Otherwise wait for more data
-                                trace!("Incomplete NAL, waiting for more data (buffer: {} bytes)", frame_buffer.len());
+                            let Some((second_start, _)) =
+                                find_annexb_start_code(&frame_buffer, search_from)
+                            else {
+                                // No second start code - wait for more data to ensure we have the full NAL
                                 break;
                             };
-                            
+
                             // Extract the complete NAL unit
                             let nal_data = frame_buffer.split_to(second_start).freeze();
                             if !process_nal(nal_data, false, &mut last_pts, &frame_meta_rx) {
@@ -608,17 +765,21 @@ impl HardwareEncoderBase {
                 }
             }
             let count = total_packets.get();
-            debug!("FFmpeg output reader thread exiting, total_packets={}", count);
+            info!(
+                "FFmpeg output reader thread exiting: {} bytes received, {} packets created",
+                bytes_received, count
+            );
         })
     }
     /// Spawn thread to read FFmpeg stderr for debugging — returns JoinHandle for cleanup
     fn spawn_stderr_reader(&self, stderr: std::process::ChildStderr) -> thread::JoinHandle<()> {
         thread::spawn(move || {
+            info!("FFmpeg stderr reader thread started");
             let reader = BufReader::new(stderr);
             for line in reader.lines().map_while(Result::ok) {
-                debug!("[FFmpeg] {}", line);
+                info!("[FFmpeg stderr] {}", line);
             }
-            debug!("FFmpeg stderr reader thread exiting");
+            info!("FFmpeg stderr reader thread exiting");
         })
     }
     /// Encode a single frame
@@ -652,10 +813,18 @@ impl HardwareEncoderBase {
                     .write_all(data)
                     .context("Failed to write frame to FFmpeg stdin")?;
                 self.frame_count += 1;
-                if self.frame_count % 60 == 0 {
-                    trace!("Encoded frame {} to FFmpeg", self.frame_count);
+                if self.frame_count <= 10 || self.frame_count % 60 == 0 {
+                    info!(
+                        "Sent frame {} to FFmpeg ({} bytes)",
+                        self.frame_count,
+                        data.len()
+                    );
                 }
+            } else {
+                warn!("No stdin available for FFmpeg");
             }
+        } else {
+            warn!("FFmpeg process not initialized");
         }
         Ok(())
     }

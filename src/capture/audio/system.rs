@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 
 use windows::Win32::Media::Audio::{
     eConsole, eMultimedia, eRender, IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator,
@@ -85,14 +85,14 @@ impl WasapiSystemCapture {
             }
         });
 
-        info!("WASAPI system audio capture started");
+        debug!("WASAPI system audio capture started");
         Ok(())
     }
 
     /// Stop capturing system audio
     pub fn stop(&mut self) {
         self.running.store(false, Ordering::SeqCst);
-        info!("WASAPI system audio capture stopped");
+        debug!("WASAPI system audio capture stopped");
     }
 
     /// Get receiver for captured audio packets
@@ -244,7 +244,7 @@ impl WasapiSystemCapture {
                 packet_count = packet_count.saturating_add(1);
 
                 if packet_count == 1 {
-                    info!(
+                    debug!(
                         "WASAPI system loopback received first packet ({} frames, {} bytes)",
                         frame_count, byte_count
                     );
@@ -262,7 +262,7 @@ impl WasapiSystemCapture {
 
         unsafe { audio_client.Stop() }.context("Failed to stop system audio capture")?;
 
-        info!("WASAPI system audio capture loop ended");
+        debug!("WASAPI system audio capture loop ended");
         Ok(())
     }
 }

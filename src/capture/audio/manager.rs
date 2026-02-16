@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-use tracing::{error, info, warn};
+use tracing::{debug, error, warn};
 
 use crate::capture::audio::mic::WasapiMicConfig;
 use crate::capture::audio::system::WasapiSystemConfig;
@@ -47,7 +47,7 @@ impl WasapiAudioManager {
             return Ok(());
         }
 
-        info!("Starting WASAPI audio manager...");
+        debug!("Starting WASAPI audio manager...");
 
         // Create system audio capture if enabled
         if config.capture_system {
@@ -62,7 +62,7 @@ impl WasapiAudioManager {
 
             system_capture.start(system_config)?;
             self.system_capture = Some(system_capture);
-            info!("System audio capture started");
+            debug!("System audio capture started");
         }
 
         // Create microphone capture if enabled
@@ -82,7 +82,7 @@ impl WasapiAudioManager {
 
             mic_capture.start(mic_config)?;
             self.mic_capture = Some(mic_capture);
-            info!("Microphone audio capture started");
+            debug!("Microphone audio capture started");
         }
 
         let mut system_rx = self
@@ -99,7 +99,7 @@ impl WasapiAudioManager {
             Self::forward_loop(running, packet_tx, &mut system_rx, &mut mic_rx)
         }));
 
-        info!("WASAPI audio manager started");
+        debug!("WASAPI audio manager started");
 
         Ok(())
     }
@@ -111,7 +111,7 @@ impl WasapiAudioManager {
         }
 
         self.running.store(false, Ordering::SeqCst);
-        info!("Stopping WASAPI audio manager...");
+        debug!("Stopping WASAPI audio manager...");
 
         if let Some(mut system_capture) = self.system_capture.take() {
             system_capture.stop();
@@ -127,7 +127,7 @@ impl WasapiAudioManager {
             }
         }
 
-        info!("WASAPI audio manager stopped");
+        debug!("WASAPI audio manager stopped");
     }
 
     /// Get receiver for mixed audio packets
@@ -208,14 +208,14 @@ impl WasapiAudioManager {
             if !forwarded_this_tick {
                 thread::sleep(Duration::from_millis(1));
             } else if forwarded_total == 1 || forwarded_total % 500 == 0 {
-                info!(
+                debug!(
                     "Audio forward: {} total packets (system={}, mic={})",
                     forwarded_total, forwarded_system, forwarded_mic
                 );
             }
         }
 
-        info!(
+        debug!(
             "Audio forward loop ended: {} total packets forwarded (system={}, mic={})",
             forwarded_total, forwarded_system, forwarded_mic
         );

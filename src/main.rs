@@ -7,7 +7,7 @@ use anyhow::Result;
 use liteclip_replay::{app::AppState, config::Config};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -123,10 +123,10 @@ async fn main() -> Result<()> {
                                         let state = app_state.read().await;
                                         match state.save_clip().await {
                                             Ok(path) => {
-                                                info!("Clip saved to: {:?}", path);
+                                                debug!("Clip saved to: {:?}", path);
                                             }
                                             Err(e) => {
-                                                error!("Failed to save clip: {}", e);
+                                                error!("Failed to save clip: {:#}", e);
                                             }
                                         }
                                     }

@@ -73,7 +73,6 @@ impl ReplayBuffer {
         // Atomic eviction: check condition and evict in the same loop
         // This prevents race conditions where new packets could be added
         // between calculation and eviction.
-        let mut duration_evictions = 0;
         while !self.packets.is_empty() {
             let oldest_pts = self.packets.front().map(|p| p.pts).unwrap_or(packet.pts);
             let projected_span = packet.pts.saturating_sub(oldest_pts);
@@ -81,20 +80,11 @@ impl ReplayBuffer {
                 break;
             }
             self.evict_oldest();
-            duration_evictions += 1;
-            if duration_evictions >= 10 {
-                break;
-            }
         }
 
         // Memory limit eviction - also atomic
-        let mut memory_evictions = 0;
         while self.total_bytes + packet_size > self.max_memory_bytes && !self.packets.is_empty() {
             self.evict_oldest();
-            memory_evictions += 1;
-            if memory_evictions >= 10 {
-                break;
-            }
         }
 
         // Now safe to add the new packet

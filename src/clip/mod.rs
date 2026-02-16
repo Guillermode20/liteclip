@@ -6,6 +6,7 @@
 use crate::buffer::ring::SharedReplayBuffer;
 use anyhow::{bail, Context, Result};
 use std::path::PathBuf;
+use std::thread;
 use std::time::Duration;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
@@ -58,9 +59,35 @@ pub fn spawn_clip_saver(
         );
 
         // Step 3: Get packets from keyframe
-        let clip_packets = buffer
+        let mut clip_packets = buffer
             .snapshot_from(start_pts)
             .context("Failed to get packets from buffer")?;
+
+        let has_decodable_h264_frame = |packets: &[crate::encode::EncodedPacket]| {
+            packets.iter().any(|packet| {
+                matches!(packet.stream, crate::encode::StreamType::Video)
+                    && matches!(muxer::h264_nal_type(packet.data.as_ref()), Some(1 | 5))
+            })
+        };
+
+        if !has_decodable_h264_frame(&clip_packets) {
+            warn!(
+                "Clip snapshot does not yet contain a decodable H.264 frame; retrying briefly"
+            );
+            for attempt in 1..=5 {
+                thread::sleep(Duration::from_millis(150));
+                clip_packets = buffer
+                    .snapshot_from(start_pts)
+                    .context("Failed to refresh packets from buffer")?;
+                if has_decodable_h264_frame(&clip_packets) {
+                    info!(
+                        "Found decodable H.264 frame after clip snapshot retry {}/5",
+                        attempt
+                    );
+                    break;
+                }
+            }
+        }
 
         debug!(
             "Clip packets: {} (seeked to nearest keyframe)",

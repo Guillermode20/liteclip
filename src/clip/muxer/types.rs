@@ -170,6 +170,11 @@ impl Muxer {
             .iter()
             .filter(|packet| matches!(h264_nal_type(packet.data.as_ref()), Some(1 | 5)))
             .collect();
+        if frame_packets.is_empty() {
+            bail!(
+                "Clip does not yet contain a decodable H.264 frame (no NAL type 1/5 found). Try saving again after a short delay."
+            );
+        }
         let effective_fps = if frame_packets.len() >= 2 {
             let first_pts = frame_packets.first().map(|p| p.pts).unwrap_or(0);
             let last_pts = frame_packets.last().map(|p| p.pts).unwrap_or(first_pts);
@@ -348,7 +353,7 @@ impl Muxer {
             self.video_packets.first().map(|p| p.pts).unwrap_or(0),
             self.video_packets.last().map(|p| p.pts).unwrap_or(0),
         );
-        info!(
+        debug!(
             "Audio packet breakdown: {} system, {} mic (total audio={}). Video PTS range: {}..{}",
             system_packets.len(),
             mic_packets.len(),
@@ -359,12 +364,12 @@ impl Muxer {
         if !system_packets.is_empty() {
             let sys_first = system_packets.first().map(|p| p.pts).unwrap_or(0);
             let sys_last = system_packets.last().map(|p| p.pts).unwrap_or(0);
-            info!("System audio PTS range: {}..{}", sys_first, sys_last);
+            debug!("System audio PTS range: {}..{}", sys_first, sys_last);
         }
         if !mic_packets.is_empty() {
             let mic_first = mic_packets.first().map(|p| p.pts).unwrap_or(0);
             let mic_last = mic_packets.last().map(|p| p.pts).unwrap_or(0);
-            info!("Microphone audio PTS range: {}..{}", mic_first, mic_last);
+            debug!("Microphone audio PTS range: {}..{}", mic_first, mic_last);
         } else if self.config.expect_audio && !system_packets.is_empty() {
             warn!(
                 "Microphone capture was enabled but no mic packets found in clip \
@@ -467,7 +472,7 @@ impl Muxer {
             let _ = std::fs::remove_file(&audio_temp_path);
             return Ok(None);
         }
-        info!(
+        debug!(
             "Prepared PCM audio input for muxing ({}): {} packets, {} bytes (payload={}, silence_padding={}, trimmed_overlap={})",
             stream_suffix, packets.len(), bytes_written, payload_bytes_written,
             silence_padding_bytes, trimmed_overlap_bytes
@@ -530,7 +535,7 @@ impl Muxer {
             "{input_labels}amix=inputs={}:normalize=1[aout]",
             audio_tracks.len()
         );
-        info!(
+        debug!(
             "Mixing {} audio tracks into one output stream: {}",
             audio_tracks.len(),
             audio_tracks

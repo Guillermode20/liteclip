@@ -124,7 +124,7 @@ impl EncoderConfig {
             rate_control: crate::config::RateControl::Vbr,
             quality_value: None,
             keyframe_interval_secs,
-            use_cpu_readback: false,
+            use_cpu_readback: true,
             output_index: 0,
         }
     }

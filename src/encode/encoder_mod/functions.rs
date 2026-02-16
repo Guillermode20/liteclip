@@ -5,7 +5,7 @@
 use crate::encode::{hw_encoder, sw_encoder};
 use anyhow::Result;
 use crossbeam::channel::{bounded, Receiver, Sender};
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 use super::types::{EncodedPacket, EncoderConfig, EncoderHandle, HardwareEncoder};
 /// Encoder trait
@@ -148,22 +148,38 @@ pub fn spawn_encoder(
             debug!("Encoder initialized");
             let packet_rx = encoder.packet_rx();
             let mut packet_batch = Vec::with_capacity(16);
+            let mut frames_encoded = 0u64;
+            let mut packets_received = 0u64;
             loop {
                 let mut count = 0;
                 while let Ok(packet) = packet_rx.try_recv() {
                     packet_batch.push(packet);
                     count += 1;
+                    packets_received += 1;
                     if count >= 16 {
                         break;
                     }
                 }
                 if !packet_batch.is_empty() {
+                    trace!(
+                        "Pushing {} packets to buffer (total received: {})",
+                        packet_batch.len(),
+                        packets_received
+                    );
                     for packet in packet_batch.drain(..) {
                         buffer.push(packet);
                     }
                 }
                 match frame_rx.recv_timeout(std::time::Duration::from_millis(10)) {
                     Ok(frame) => {
+                        frames_encoded += 1;
+                        if frames_encoded % 60 == 0 {
+                            trace!(
+                                "Encoded {} frames, received {} packets",
+                                frames_encoded,
+                                packets_received
+                            );
+                        }
                         if let Err(e) = encoder.encode_frame(&frame) {
                             warn!("Failed to encode frame: {}", e);
                         }
@@ -175,9 +191,14 @@ pub fn spawn_encoder(
                     }
                 }
             }
+            info!(
+                "Encoder loop ended: {} frames encoded, {} packets received",
+                frames_encoded, packets_received
+            );
             debug!("Encoder thread shutting down");
             match encoder.flush() {
                 Ok(packets) => {
+                    info!("Flushed {} packets from encoder", packets.len());
                     for packet in packets {
                         buffer.push(packet);
                     }
@@ -190,6 +211,10 @@ pub fn spawn_encoder(
             while let Ok(packet) = packet_rx.try_recv() {
                 final_packets.push(packet);
             }
+            info!(
+                "Drained {} final packets from encoder channel",
+                final_packets.len()
+            );
             for packet in final_packets {
                 buffer.push(packet);
             }

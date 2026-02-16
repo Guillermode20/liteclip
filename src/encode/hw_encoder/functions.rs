@@ -74,7 +74,7 @@ pub(super) fn find_annexb_start_code(data: &[u8], from: usize) -> Option<(usize,
         }
 
         // Move past this 0x00 to find the next candidate
-        offset = pos + 1;
+        offset += pos + 1;
 
         // Prevent infinite loop and ensure we have room for patterns
         if offset + 2 >= search_data.len() {

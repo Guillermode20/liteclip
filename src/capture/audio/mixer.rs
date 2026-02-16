@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 
 use crate::encode::{EncodedPacket, StreamType};
 
@@ -92,14 +92,14 @@ impl AudioMixer {
             }
         });
 
-        info!("Audio mixer started");
+        debug!("Audio mixer started");
         Ok(())
     }
 
     /// Stop the audio mixer
     pub fn stop(&mut self) {
         self.running.store(false, Ordering::SeqCst);
-        info!("Audio mixer stopped");
+        debug!("Audio mixer stopped");
     }
 
     /// Get receiver for mixed audio packets
@@ -141,7 +141,7 @@ impl AudioMixer {
                 match rx.try_recv() {
                     Ok(packet) => {
                         if !seen_system_input {
-                            info!("Audio mixer received first system input packet");
+                            debug!("Audio mixer received first system input packet");
                             seen_system_input = true;
                         }
                         pending_system = Some((packet, Instant::now()));
@@ -158,7 +158,7 @@ impl AudioMixer {
                 match rx.try_recv() {
                     Ok(packet) => {
                         if !seen_mic_input {
-                            info!("Audio mixer received first microphone input packet");
+                            debug!("Audio mixer received first microphone input packet");
                             seen_mic_input = true;
                         }
                         pending_mic = Some((packet, Instant::now()));
@@ -197,7 +197,7 @@ impl AudioMixer {
 
                 output_packets = output_packets.saturating_add(1);
                 if output_packets == 1 {
-                    info!("Audio mixer emitted first mixed packet");
+                    debug!("Audio mixer emitted first mixed packet");
                 } else if output_packets % 500 == 0 {
                     debug!("Audio mixer emitted {} packets", output_packets);
                 }
@@ -223,7 +223,7 @@ impl AudioMixer {
 
                     output_packets = output_packets.saturating_add(1);
                     if output_packets == 1 {
-                        info!("Audio mixer emitted first packet (system source)");
+                        debug!("Audio mixer emitted first packet (system source)");
                     } else if output_packets % 500 == 0 {
                         debug!("Audio mixer emitted {} packets", output_packets);
                     }
@@ -246,7 +246,7 @@ impl AudioMixer {
 
                     output_packets = output_packets.saturating_add(1);
                     if output_packets == 1 {
-                        info!("Audio mixer emitted first packet (microphone source)");
+                        debug!("Audio mixer emitted first packet (microphone source)");
                     } else if output_packets % 500 == 0 {
                         debug!("Audio mixer emitted {} packets", output_packets);
                     }
@@ -260,7 +260,7 @@ impl AudioMixer {
             thread::sleep(Duration::from_millis(1));
         }
 
-        info!("Audio mixing loop ended");
+        debug!("Audio mixing loop ended");
         Ok(())
     }
 }

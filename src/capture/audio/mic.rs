@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 
 use windows::Win32::Media::Audio::{
     eCapture, eConsole, IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator, MMDeviceEnumerator,
@@ -94,7 +94,7 @@ impl WasapiMicCapture {
         thread::sleep(Duration::from_millis(500));
 
         if self.initialized.load(Ordering::SeqCst) {
-            info!("WASAPI microphone audio capture started and initialized successfully");
+            debug!("WASAPI microphone audio capture started and initialized successfully");
         } else if self.running.load(Ordering::SeqCst) {
             warn!("WASAPI microphone capture thread has not confirmed initialization after 500ms; mic audio may be unavailable");
         } else {
@@ -107,7 +107,7 @@ impl WasapiMicCapture {
     /// Stop capturing microphone audio
     pub fn stop(&mut self) {
         self.running.store(false, Ordering::SeqCst);
-        info!("WASAPI microphone audio capture stopped");
+        debug!("WASAPI microphone audio capture stopped");
     }
 
     /// Get receiver for captured audio packets
@@ -194,7 +194,7 @@ impl WasapiMicCapture {
 
         // Signal that WASAPI initialization succeeded
         initialized.store(true, Ordering::SeqCst);
-        info!("WASAPI microphone capture loop initialized successfully");
+        debug!("WASAPI microphone capture loop initialized successfully");
 
         let start_qpc = query_qpc()?;
         let qpc_freq = qpc_frequency() as f64;
@@ -268,7 +268,7 @@ impl WasapiMicCapture {
 
         unsafe { audio_client.Stop() }.context("Failed to stop microphone capture")?;
 
-        info!("WASAPI microphone audio capture loop ended");
+        debug!("WASAPI microphone audio capture loop ended");
         Ok(())
     }
 }

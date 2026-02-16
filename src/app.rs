@@ -15,7 +15,7 @@ use anyhow::{Context, Result};
 use crossbeam::channel::Receiver;
 use std::path::PathBuf;
 use std::time::Duration;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// Central application state
 pub struct AppState {
@@ -87,12 +87,12 @@ impl AppState {
                 forwarded_packets = forwarded_packets.saturating_add(1);
 
                 if forwarded_packets == 1 {
-                    info!(
+                    debug!(
                         "Forwarded first audio packet to replay buffer ({})",
                         context
                     );
                 } else if forwarded_packets % 500 == 0 {
-                    info!(
+                    debug!(
                         "Forwarded {} audio packets to replay buffer",
                         forwarded_packets
                     );
@@ -101,7 +101,7 @@ impl AppState {
         });
 
         self.audio_manager = Some(audio_manager);
-        info!("Audio capture started");
+        debug!("Audio capture started");
         Ok(())
     }
 
@@ -234,7 +234,7 @@ impl AppState {
         let result = handle.await.context("Clip saver task panicked")?;
         let final_path = result?;
 
-        info!("Clip saved to: {:?}", final_path);
+        debug!("Clip saved to: {:?}", final_path);
         Ok(final_path)
     }
 
