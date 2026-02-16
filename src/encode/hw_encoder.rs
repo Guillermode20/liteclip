@@ -526,7 +526,6 @@ impl HardwareEncoderBase {
         packet_tx: Sender<EncodedPacket>,
         start_qpc: i64,
     ) -> thread::JoinHandle<()> {
-        let framerate = self.config.framerate as f64;
         let qpc_freq = qpc_frequency(); // Use the cached QPC frequency
 
         thread::spawn(move || {
@@ -535,7 +534,7 @@ impl HardwareEncoderBase {
             let mut reader = std::io::BufReader::new(stdout);
             let mut buffer = [0u8; 65536]; // 64KB buffer
             let mut frame_buffer = BytesMut::with_capacity(1024 * 1024); // Pre-allocate 1MB
-            let mut frame_count = 0u64;
+            let output_reader_start = Instant::now();
             let mut last_pts = start_qpc.saturating_sub(1);
 
             loop {
@@ -575,19 +574,25 @@ impl HardwareEncoderBase {
                             if !nal_data.is_empty() {
                                 let nal_type = h264_nal_type(&nal_data);
                                 let is_keyframe = matches!(nal_type, Some(5 | 7 | 8));
+                                let is_frame_nal = matches!(nal_type, Some(1 | 5));
 
-                                // Calculate PTS based on frame count and configured framerate
-                                // anchored to wall-clock QPC so it shares timestamp domain
-                                // with WASAPI audio packets.
-                                let pts_increment = (qpc_freq as f64 / framerate) as i64;
-                                let pts = start_qpc.saturating_add(
-                                    ((frame_count as f64) * pts_increment as f64) as i64,
-                                );
-
-                                // Ensure monotonically increasing timestamps
-                                let final_pts = if pts <= last_pts { last_pts + 1 } else { pts };
-                                last_pts = final_pts;
-                                frame_count += 1;
+                                let final_pts = if is_frame_nal {
+                                    // Timestamp actual frame NAL units from elapsed wall-clock
+                                    // time to keep video timeline aligned with captured audio.
+                                    let elapsed_qpc = (output_reader_start.elapsed().as_secs_f64()
+                                        * qpc_freq as f64)
+                                        as i64;
+                                    let pts = start_qpc.saturating_add(elapsed_qpc);
+                                    let normalized = if pts <= last_pts { last_pts + 1 } else { pts };
+                                    last_pts = normalized;
+                                    normalized
+                                } else if last_pts < start_qpc {
+                                    // Parameter-set NALs before first frame.
+                                    start_qpc
+                                } else {
+                                    // Keep non-frame NAL units on current timeline point.
+                                    last_pts
+                                };
 
                                 let packet = EncodedPacket::new(
                                     nal_data,

@@ -328,17 +328,21 @@ impl Muxer {
         ffmpeg_cmd: OsString,
         qpc_frequency_f64: f64,
     ) -> Result<PathBuf> {
-        let effective_fps = if self.video_packets.len() >= 2 {
-            let first_pts = self.video_packets.first().map(|p| p.pts).unwrap_or(0);
-            let last_pts = self
-                .video_packets
-                .last()
-                .map(|p| p.pts)
-                .unwrap_or(first_pts);
+        // H.264 streams can contain multiple non-frame NAL units (SPS/PPS/AUD).
+        // Derive FPS from actual frame NALs only so timing isn't inflated.
+        let frame_packets: Vec<&EncodedPacket> = self
+            .video_packets
+            .iter()
+            .filter(|packet| matches!(h264_nal_type(packet.data.as_ref()), Some(1 | 5)))
+            .collect();
+        let effective_fps = if frame_packets.len() >= 2 {
+            let first_pts = frame_packets.first().map(|p| p.pts).unwrap_or(0);
+            let last_pts = frame_packets.last().map(|p| p.pts).unwrap_or(first_pts);
             let span_qpc = (last_pts - first_pts).max(1) as f64;
             let span_secs = span_qpc / qpc_frequency_f64;
             if span_secs > 0.0 {
-                (self.video_packets.len() as f64 / span_secs).clamp(0.1, self.config.fps.max(1.0))
+                ((frame_packets.len().saturating_sub(1)) as f64 / span_secs)
+                    .clamp(0.1, self.config.fps.max(1.0))
             } else {
                 self.config.fps.max(1.0)
             }
@@ -347,9 +351,10 @@ impl Muxer {
         };
 
         info!(
-            "Muxing {} H.264 frames with FPS {:.3}",
-            self.video_packets.len(),
-            effective_fps
+            "Muxing H.264 stream with FPS {:.3} (frame_nals={}, total_nals={})",
+            effective_fps,
+            frame_packets.len(),
+            self.video_packets.len()
         );
 
         // Write H.264 stream to a temporary file
@@ -444,21 +449,7 @@ impl Muxer {
         }
 
         command.arg("-map").arg("0:v:0").arg("-c:v").arg("copy");
-
-        if !audio_tracks.is_empty() {
-            command.arg("-c:a").arg("aac").arg("-b:a").arg(AUDIO_BITRATE);
-
-            for (index, track) in audio_tracks.iter().enumerate() {
-                let input_index = index + 1; // input 0 is video
-                command
-                    .arg("-map")
-                    .arg(format!("{input_index}:a:0"))
-                    .arg(format!("-metadata:s:a:{index}"))
-                    .arg(format!("title={}", track.title));
-            }
-        } else {
-            command.arg("-an");
-        }
+        Self::append_ffmpeg_audio_track_mapping_args(&mut command, &audio_tracks);
 
         if self.config.faststart {
             command.arg("-movflags").arg("+faststart");
@@ -544,6 +535,39 @@ impl Muxer {
             }
         }
 
+        let video_pts_range = (
+            self.video_packets.first().map(|p| p.pts).unwrap_or(0),
+            self.video_packets.last().map(|p| p.pts).unwrap_or(0),
+        );
+
+        info!(
+            "Audio packet breakdown: {} system, {} mic (total audio={}). Video PTS range: {}..{}",
+            system_packets.len(),
+            mic_packets.len(),
+            self.audio_packets.len(),
+            video_pts_range.0,
+            video_pts_range.1,
+        );
+
+        if !system_packets.is_empty() {
+            let sys_first = system_packets.first().map(|p| p.pts).unwrap_or(0);
+            let sys_last = system_packets.last().map(|p| p.pts).unwrap_or(0);
+            info!("System audio PTS range: {}..{}", sys_first, sys_last);
+        }
+
+        if !mic_packets.is_empty() {
+            let mic_first = mic_packets.first().map(|p| p.pts).unwrap_or(0);
+            let mic_last = mic_packets.last().map(|p| p.pts).unwrap_or(0);
+            info!("Microphone audio PTS range: {}..{}", mic_first, mic_last);
+        } else if self.config.expect_audio && !system_packets.is_empty() {
+            warn!(
+                "Microphone capture was enabled but no mic packets found in clip \
+                 (system audio has {} packets). Mic capture may have failed silently \
+                 or mic packets were evicted from the buffer.",
+                system_packets.len()
+            );
+        }
+
         let mut tracks = Vec::new();
 
         if let Some(path) = self.write_stream_audio_temp_pcm(&system_packets, "system")? {
@@ -595,7 +619,6 @@ impl Muxer {
         let bytes_per_second = AUDIO_SAMPLE_RATE as f64 * bytes_per_frame as f64;
         let qpc_freq = qpc_frequency() as f64;
         let video_start_pts = self.video_packets.first().map(|p| p.pts).unwrap_or(0);
-
         let mut bytes_written = 0usize;
         let mut payload_bytes_written = 0usize;
         let mut silence_padding_bytes = 0usize;
@@ -718,14 +741,39 @@ impl Muxer {
 
         command.arg("-c:a").arg("aac").arg("-b:a").arg(AUDIO_BITRATE);
 
-        for (index, track) in audio_tracks.iter().enumerate() {
-            let input_index = index + 1; // input 0 is video
-            command
-                .arg("-map")
-                .arg(format!("{input_index}:a:0"))
-                .arg(format!("-metadata:s:a:{index}"))
-                .arg(format!("title={}", track.title));
+        if audio_tracks.len() == 1 {
+            // Single source: map directly.
+            command.arg("-map").arg("1:a:0");
+            return;
         }
+
+        // Multiple sources: mix down to one output track so players always
+        // include both system and mic audio by default.
+        let mut input_labels = String::new();
+        for index in 0..audio_tracks.len() {
+            let input_index = index + 1; // input 0 is video
+            input_labels.push_str(&format!("[{input_index}:a:0]"));
+        }
+        let filter = format!(
+            "{input_labels}amix=inputs={}:normalize=0[aout]",
+            audio_tracks.len()
+        );
+
+        info!(
+            "Mixing {} audio tracks into one output stream: {}",
+            audio_tracks.len(),
+            audio_tracks
+                .iter()
+                .map(|track| track.title)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+
+        command
+            .arg("-filter_complex")
+            .arg(filter)
+            .arg("-map")
+            .arg("[aout]");
     }
 
     /// Slow path: Transcode MJPEG frames to H.264 and mux to MP4
@@ -749,7 +797,8 @@ impl Muxer {
             let span_qpc = (last_pts - first_pts).max(1) as f64;
             let span_secs = span_qpc / qpc_frequency_f64;
             if span_secs > 0.0 {
-                (self.video_packets.len() as f64 / span_secs).clamp(0.1, self.config.fps.max(1.0))
+                ((self.video_packets.len().saturating_sub(1)) as f64 / span_secs)
+                    .clamp(0.1, self.config.fps.max(1.0))
             } else {
                 self.config.fps.max(1.0)
             }

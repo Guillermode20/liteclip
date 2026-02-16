@@ -124,9 +124,15 @@ impl WasapiSystemCapture {
             unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }
                 .context("Failed to create MMDeviceEnumerator")?;
 
+        // Log all available render devices
+        crate::capture::audio::device_info::log_all_render_devices(&enumerator);
+
         let device = unsafe { enumerator.GetDefaultAudioEndpoint(eRender, eMultimedia) }
             .or_else(|_| unsafe { enumerator.GetDefaultAudioEndpoint(eRender, eConsole) })
             .context("Failed to get default render endpoint for loopback capture")?;
+
+        // Log which device was selected for loopback
+        crate::capture::audio::device_info::log_device("Selected system audio device (loopback)", &device);
 
         let audio_client: IAudioClient = unsafe { device.Activate(CLSCTX_ALL, None) }
             .context("Failed to activate IAudioClient for system loopback")?;

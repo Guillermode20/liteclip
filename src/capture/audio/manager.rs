@@ -143,7 +143,9 @@ impl WasapiAudioManager {
         system_rx: &mut Option<Receiver<EncodedPacket>>,
         mic_rx: &mut Option<Receiver<EncodedPacket>>,
     ) {
-        let mut forwarded_packets: u64 = 0;
+        let mut forwarded_total: u64 = 0;
+        let mut forwarded_system: u64 = 0;
+        let mut forwarded_mic: u64 = 0;
 
         while running.load(Ordering::SeqCst) {
             let mut forwarded_this_tick = false;
@@ -157,7 +159,8 @@ impl WasapiAudioManager {
                             warn!("Audio manager output channel disconnected while forwarding system audio");
                             break;
                         }
-                        forwarded_packets = forwarded_packets.saturating_add(1);
+                        forwarded_total = forwarded_total.saturating_add(1);
+                        forwarded_system = forwarded_system.saturating_add(1);
                         forwarded_this_tick = true;
                     }
                     Err(TryRecvError::Empty) => {}
@@ -175,7 +178,8 @@ impl WasapiAudioManager {
                             warn!("Audio manager output channel disconnected while forwarding microphone audio");
                             break;
                         }
-                        forwarded_packets = forwarded_packets.saturating_add(1);
+                        forwarded_total = forwarded_total.saturating_add(1);
+                        forwarded_mic = forwarded_mic.saturating_add(1);
                         forwarded_this_tick = true;
                     }
                     Err(TryRecvError::Empty) => {}
@@ -200,13 +204,18 @@ impl WasapiAudioManager {
 
             if !forwarded_this_tick {
                 thread::sleep(Duration::from_millis(1));
-            } else if forwarded_packets == 1 || forwarded_packets % 500 == 0 {
+            } else if forwarded_total == 1 || forwarded_total % 500 == 0 {
                 info!(
-                    "Forwarded {} audio packets from capture channels",
-                    forwarded_packets
+                    "Audio forward: {} total packets (system={}, mic={})",
+                    forwarded_total, forwarded_system, forwarded_mic
                 );
             }
         }
+
+        info!(
+            "Audio forward loop ended: {} total packets forwarded (system={}, mic={})",
+            forwarded_total, forwarded_system, forwarded_mic
+        );
     }
 }
 

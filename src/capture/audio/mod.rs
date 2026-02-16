@@ -3,6 +3,7 @@
 //! Implements system audio capture using WASAPI loopback mode
 //! and microphone capture using WASAPI capture mode.
 
+pub mod device_info;
 pub mod manager;
 pub mod mic;
 pub mod mixer;

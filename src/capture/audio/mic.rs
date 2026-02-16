@@ -47,6 +47,7 @@ impl Default for WasapiMicConfig {
 /// WASAPI microphone capture implementation
 pub struct WasapiMicCapture {
     running: Arc<AtomicBool>,
+    initialized: Arc<AtomicBool>,
     packet_tx: Sender<EncodedPacket>,
     packet_rx: Receiver<EncodedPacket>,
     processed_samples: Arc<AtomicU64>,
@@ -59,6 +60,7 @@ impl WasapiMicCapture {
 
         Ok(Self {
             running: Arc::new(AtomicBool::new(false)),
+            initialized: Arc::new(AtomicBool::new(false)),
             packet_tx,
             packet_rx,
             processed_samples: Arc::new(AtomicU64::new(0)),
@@ -72,19 +74,33 @@ impl WasapiMicCapture {
         }
 
         self.running.store(true, Ordering::SeqCst);
+        self.initialized.store(false, Ordering::SeqCst);
 
         let running = Arc::clone(&self.running);
+        let initialized = Arc::clone(&self.initialized);
         let packet_tx = self.packet_tx.clone();
         let processed_samples = Arc::clone(&self.processed_samples);
 
         // Spawn the capture thread
         thread::spawn(move || {
-            if let Err(e) = Self::capture_loop(running, packet_tx, processed_samples, config) {
+            if let Err(e) =
+                Self::capture_loop(running, initialized, packet_tx, processed_samples, config)
+            {
                 error!("Microphone audio capture error: {}", e);
             }
         });
 
-        info!("WASAPI microphone audio capture started");
+        // Wait briefly for the capture thread to initialize WASAPI and report status
+        thread::sleep(Duration::from_millis(500));
+
+        if self.initialized.load(Ordering::SeqCst) {
+            info!("WASAPI microphone audio capture started and initialized successfully");
+        } else if self.running.load(Ordering::SeqCst) {
+            warn!("WASAPI microphone capture thread has not confirmed initialization after 500ms; mic audio may be unavailable");
+        } else {
+            warn!("WASAPI microphone capture thread exited during initialization; mic audio is unavailable");
+        }
+
         Ok(())
     }
 
@@ -99,6 +115,11 @@ impl WasapiMicCapture {
         self.packet_rx.clone()
     }
 
+    /// Check if the capture loop has successfully initialized WASAPI
+    pub fn is_initialized(&self) -> bool {
+        self.initialized.load(Ordering::SeqCst)
+    }
+
     /// Get the number of samples processed
     pub fn samples_processed(&self) -> u64 {
         self.processed_samples.load(Ordering::SeqCst)
@@ -107,6 +128,7 @@ impl WasapiMicCapture {
     /// Main capture loop
     fn capture_loop(
         running: Arc<AtomicBool>,
+        initialized: Arc<AtomicBool>,
         packet_tx: Sender<EncodedPacket>,
         processed_samples: Arc<AtomicU64>,
         config: WasapiMicConfig,
@@ -123,8 +145,14 @@ impl WasapiMicCapture {
             unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }
                 .context("Failed to create MMDeviceEnumerator")?;
 
+        // Log all available capture devices so the user can see what's available
+        crate::capture::audio::device_info::log_all_capture_devices(&enumerator);
+
         let device = unsafe { enumerator.GetDefaultAudioEndpoint(eCapture, eConsole) }
             .context("Failed to get default microphone endpoint")?;
+
+        // Log which device was selected
+        crate::capture::audio::device_info::log_device("Selected microphone device", &device);
 
         let audio_client: IAudioClient = unsafe { device.Activate(CLSCTX_ALL, None) }
             .context("Failed to activate IAudioClient for microphone")?;
@@ -164,6 +192,10 @@ impl WasapiMicCapture {
 
         unsafe { audio_client.Start() }.context("Failed to start microphone capture")?;
 
+        // Signal that WASAPI initialization succeeded
+        initialized.store(true, Ordering::SeqCst);
+        info!("WASAPI microphone capture loop initialized successfully");
+
         let start_qpc = query_qpc()?;
         let qpc_freq = qpc_frequency() as f64;
         let sample_rate = config.sample_rate.max(1) as f64;
@@ -182,14 +214,16 @@ impl WasapiMicCapture {
                 let mut data_ptr = std::ptr::null_mut();
                 let mut frame_count = 0u32;
                 let mut flags = 0u32;
+                let mut device_position = 0u64;
+                let mut qpc_position = 0u64;
 
                 unsafe {
                     capture_client.GetBuffer(
                         &mut data_ptr,
                         &mut frame_count,
                         &mut flags,
-                        None,
-                        None,
+                        Some(&mut device_position),
+                        Some(&mut qpc_position),
                     )
                 }
                 .context("IAudioCaptureClient::GetBuffer failed")?;
@@ -210,7 +244,11 @@ impl WasapiMicCapture {
                 unsafe { capture_client.ReleaseBuffer(frame_count) }
                     .context("IAudioCaptureClient::ReleaseBuffer failed")?;
 
-                let pts = start_qpc + ((total_frames as f64 / sample_rate) * qpc_freq) as i64;
+                let pts = if qpc_position > 0 {
+                    qpc_position.min(i64::MAX as u64) as i64
+                } else {
+                    start_qpc + ((total_frames as f64 / sample_rate) * qpc_freq) as i64
+                };
                 total_frames = total_frames.saturating_add(frame_count as u64);
 
                 let packet =
