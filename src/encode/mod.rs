@@ -93,6 +93,7 @@ impl EncoderConfig {
             (crate::config::Codec::H265, _) => "libx265",
             // AV1
             (crate::config::Codec::Av1, crate::config::EncoderType::Nvenc) => "av1_nvenc",
+            (crate::config::Codec::Av1, crate::config::EncoderType::Amf) => "av1_amf",
             (_, _) => "libaom-av1",
         }
     }
@@ -218,23 +219,28 @@ pub enum HardwareEncoder {
 /// Priority order: NVENC → AMF → QSV → None (software)
 #[cfg(feature = "ffmpeg")]
 pub fn detect_hardware_encoder() -> HardwareEncoder {
+    info!("Detecting hardware encoders...");
+
     // Try to detect NVENC first
     if hw_encoder::check_encoder_available("h264_nvenc") {
         info!("Detected NVIDIA NVENC encoder");
         return HardwareEncoder::Nvenc;
     }
+    info!("NVIDIA NVENC not available");
 
     // Try AMF (AMD)
     if hw_encoder::check_encoder_available("h264_amf") {
         info!("Detected AMD AMF encoder");
         return HardwareEncoder::Amf;
     }
+    info!("AMD AMF not available");
 
     // Try QSV (Intel)
     if hw_encoder::check_encoder_available("h264_qsv") {
         info!("Detected Intel QSV encoder");
         return HardwareEncoder::Qsv;
     }
+    info!("Intel QSV not available");
 
     info!("No hardware encoder detected, using software encoding");
     HardwareEncoder::None

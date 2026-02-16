@@ -191,10 +191,18 @@ impl HardwareEncoderBase {
         cmd
             // Output: H.264 NAL units (no container, just raw stream)
             .arg("-c:v")
-            .arg(encoder_name)
-            .arg("-preset")
-            .arg(self.preset_for_encoder(encoder_name))
-            .arg("-tune")
+            .arg(encoder_name);
+
+        // Add encoder-specific options immediately after -c:v (required for AMF)
+        self.add_encoder_options(&mut cmd, encoder_name);
+
+        // Add preset if supported by the encoder
+        let preset = self.preset_for_encoder(encoder_name);
+        if !preset.is_empty() {
+            cmd.arg("-preset").arg(preset);
+        }
+
+        cmd.arg("-tune")
             .arg(self.tune_for_encoder(encoder_name))
             .arg("-bitrate")
             .arg(format!("{}M", self.config.bitrate_mbps))
@@ -205,9 +213,6 @@ impl HardwareEncoderBase {
             .arg("-f")
             .arg("h264")
             .arg("pipe:1");
-
-        // Add encoder-specific options
-        self.add_encoder_options(&mut cmd, encoder_name);
 
         cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::piped());
@@ -264,9 +269,9 @@ impl HardwareEncoderBase {
     /// Get preset for encoder type
     fn preset_for_encoder(&self, encoder_name: &str) -> &str {
         match encoder_name {
-            "h264_nvenc" => "p4",     // Performance preset for NVENC
-            "h264_amf" => "speed",    // Speed preset for AMF
-            "h264_qsv" => "veryfast", // Veryfast for QSV
+            "h264_nvenc" => "p4",          // Performance preset for NVENC
+            "h264_qsv" => "veryfast",      // Veryfast for QSV
+            "h264_amf" | "hevc_amf" => "", // AMF uses -quality instead, not -preset
             _ => "fast",
         }
     }
@@ -291,11 +296,11 @@ impl HardwareEncoderBase {
                 cmd.arg("-delay");
                 cmd.arg("0");
             }
-            "h264_amf" => {
+            "h264_amf" | "hevc_amf" | "av1_amf" => {
                 // AMF specific: quality vs speed
                 cmd.arg("-quality");
                 cmd.arg("speed");
-                // Disable B-frames for low latency
+                // Disable B-frames for low latency (critical for AMF)
                 cmd.arg("-bf");
                 cmd.arg("0");
                 // Force SPS/PPS insertion with every keyframe
@@ -492,7 +497,10 @@ impl HardwareEncoderBase {
             let start = Instant::now();
             while !handle.is_finished() {
                 if start.elapsed() > join_timeout {
-                    warn!("stdout reader thread did not finish within {:?}", join_timeout);
+                    warn!(
+                        "stdout reader thread did not finish within {:?}",
+                        join_timeout
+                    );
                     break;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));
@@ -505,7 +513,10 @@ impl HardwareEncoderBase {
             let start = Instant::now();
             while !handle.is_finished() {
                 if start.elapsed() > join_timeout {
-                    warn!("stderr reader thread did not finish within {:?}", join_timeout);
+                    warn!(
+                        "stderr reader thread did not finish within {:?}",
+                        join_timeout
+                    );
                     break;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));
@@ -700,26 +711,56 @@ pub fn check_encoder_available(encoder_name: &str) -> bool {
             output_str.contains(encoder_name)
         }
         Err(e) => {
-            warn!("Failed to check encoder listing for {}: {}", encoder_name, e);
+            warn!(
+                "Failed to check encoder listing for {}: {}",
+                encoder_name, e
+            );
             return false;
         }
     };
 
     if !listed {
+        info!("Encoder {} not found in FFmpeg", encoder_name);
         return false;
     }
 
     // Probe the encoder by attempting a tiny encode to verify it actually works
     // (catches cases where encoder is listed but GPU driver is missing/broken)
-    let probe = Command::new(&ffmpeg_cmd)
+    let mut probe_cmd = Command::new(&ffmpeg_cmd);
+    probe_cmd
         .arg("-hide_banner")
-        .arg("-v").arg("error")
-        .arg("-f").arg("lavfi")
-        .arg("-i").arg("nullsrc=s=16x16:d=0.04")
-        .arg("-c:v").arg(encoder_name)
-        .arg("-f").arg("null")
-        .arg("-")
-        .output();
+        .arg("-v")
+        .arg("error")
+        .arg("-f")
+        .arg("lavfi")
+        .arg("-i")
+        .arg("nullsrc=s=320x240:d=0.04")
+        .arg("-c:v")
+        .arg(encoder_name)
+        .arg("-pix_fmt")
+        .arg("yuv420p")
+        .arg("-frames:v")
+        .arg("1");
+
+    // Add encoder-specific options for the probe
+    match encoder_name {
+        "h264_amf" | "hevc_amf" | "av1_amf" => {
+            probe_cmd.arg("-quality").arg("speed");
+            probe_cmd.arg("-bf").arg("0");
+        }
+        "h264_nvenc" | "hevc_nvenc" | "av1_nvenc" => {
+            probe_cmd.arg("-preset").arg("p4");
+        }
+        "h264_qsv" | "hevc_qsv" => {
+            probe_cmd.arg("-preset").arg("veryfast");
+        }
+        _ => {}
+    }
+
+    // Log the probe command for debugging
+    debug!("Probing encoder {} with FFmpeg", encoder_name);
+
+    let probe = probe_cmd.arg("-f").arg("null").arg("-").output();
 
     match probe {
         Ok(out) => {
@@ -728,6 +769,10 @@ pub fn check_encoder_available(encoder_name: &str) -> bool {
                 true
             } else {
                 let stderr = String::from_utf8_lossy(&out.stderr);
+                info!(
+                    "Encoder {} is listed but probe failed - may indicate missing/broken driver",
+                    encoder_name
+                );
                 warn!("Encoder {} probe failed: {}", encoder_name, stderr.trim());
                 false
             }
