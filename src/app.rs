@@ -177,7 +177,10 @@ impl Drop for AppState {
             // Clean shutdown attempt in blocking context
             drop(self.capture.take());
             if let Some(handle) = self.encoder_handle.take() {
-                let _ = handle.thread.join();
+                match handle.thread.join() {
+                    Ok(_) => {}
+                    Err(e) => warn!("Encoder thread panicked during drop: {:?}", e),
+                }
             }
         }
     }

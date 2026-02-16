@@ -43,7 +43,8 @@ impl DxgiCaptureState {
     pub fn get_qpc_timestamp() -> i64 {
         unsafe {
             let mut qpc = 0i64;
-            let _ = QueryPerformanceCounter(&mut qpc);
+            QueryPerformanceCounter(&mut qpc)
+                .expect("QueryPerformanceCounter should never fail");
             qpc
         }
     }
@@ -307,6 +308,18 @@ impl DxgiCapture {
                             bail!("Mapped staging texture has null data pointer");
                         }
 
+                        // Validate pointer arithmetic bounds to prevent overflow
+                        let total_src_bytes = (height.saturating_sub(1))
+                            .checked_mul(src_pitch)
+                            .and_then(|v| v.checked_add(row_bytes));
+                        if total_src_bytes.is_none() || total_src_bytes.unwrap() > isize::MAX as usize {
+                            state.d3d_context.Unmap(Some(&staging_resource), 0);
+                            bail!(
+                                "Frame dimensions too large for safe copy: {}x{}, pitch={}",
+                                width, height, src_pitch
+                            );
+                        }
+
                         let src_ptr = mapped.pData as *const u8;
                         for row in 0..height {
                             std::ptr::copy_nonoverlapping(
@@ -365,7 +378,7 @@ impl DxgiCapture {
     ) {
         info!("DXGI capture thread started: {} FPS", config.target_fps);
 
-        let frame_duration = Duration::from_nanos(1_000_000_000u64 / config.target_fps as u64);
+        let frame_duration = Duration::from_nanos(1_000_000_000u64 / config.target_fps.max(1) as u64);
         // Use a short timeout so we don't block longer than one frame period
         let timeout_ms = (frame_duration.as_millis() as u32).max(1);
         let mut frame_count = 0u64;

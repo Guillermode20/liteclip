@@ -183,6 +183,46 @@ impl Config {
             .join("liteclip-replay")
             .join("liteclip-replay.toml"))
     }
+
+    /// Validate and sanitize configuration values
+    ///
+    /// Clamps values to safe ranges to prevent panics from invalid user input.
+    pub fn validate(&mut self) {
+        use tracing::warn;
+
+        // Framerate must be > 0 (prevents division by zero in capture and encoder)
+        if self.video.framerate == 0 {
+            warn!("Config: framerate was 0, clamping to 30");
+            self.video.framerate = 30;
+        }
+
+        // Memory limit must be in a sane range
+        if self.advanced.memory_limit_mb == 0 {
+            warn!("Config: memory_limit_mb was 0, clamping to 512");
+            self.advanced.memory_limit_mb = 512;
+        } else if self.advanced.memory_limit_mb > 16384 {
+            warn!("Config: memory_limit_mb was {}, clamping to 16384", self.advanced.memory_limit_mb);
+            self.advanced.memory_limit_mb = 16384;
+        }
+
+        // Bitrate must be > 0
+        if self.video.bitrate_mbps == 0 {
+            warn!("Config: bitrate_mbps was 0, clamping to 20");
+            self.video.bitrate_mbps = 20;
+        }
+
+        // Replay duration must be > 0
+        if self.general.replay_duration_secs == 0 {
+            warn!("Config: replay_duration_secs was 0, clamping to 30");
+            self.general.replay_duration_secs = 30;
+        }
+
+        // Keyframe interval must be > 0
+        if self.advanced.keyframe_interval_secs == 0 {
+            warn!("Config: keyframe_interval_secs was 0, clamping to 1");
+            self.advanced.keyframe_interval_secs = 1;
+        }
+    }
 }
 
 impl Default for Config {
@@ -266,7 +306,14 @@ fn default_replay_duration() -> u32 {
 fn default_save_directory() -> String {
     dirs::video_dir()
         .map(|p| p.join("liteclip-replay").to_string_lossy().to_string())
-        .unwrap_or_else(|| "~/Videos/liteclip-replay".to_string())
+        .unwrap_or_else(|| {
+            // Avoid tilde paths on Windows — they don't expand automatically
+            if let Ok(profile) = std::env::var("USERPROFILE") {
+                format!("{}\\Videos\\liteclip-replay", profile)
+            } else {
+                "C:\\Videos\\liteclip-replay".to_string()
+            }
+        })
 }
 
 fn default_resolution() -> Resolution {

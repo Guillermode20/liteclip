@@ -114,6 +114,10 @@ pub struct HardwareEncoderBase {
     ffmpeg_stdin: Option<ChildStdin>,
     width: u32,
     height: u32,
+    /// JoinHandle for the stdout reader thread
+    stdout_thread: Option<thread::JoinHandle<()>>,
+    /// JoinHandle for the stderr reader thread
+    stderr_thread: Option<thread::JoinHandle<()>>,
 }
 
 impl HardwareEncoderBase {
@@ -145,6 +149,8 @@ impl HardwareEncoderBase {
             ffmpeg_stdin: None,
             width,
             height,
+            stdout_thread: None,
+            stderr_thread: None,
         })
     }
 
@@ -198,9 +204,7 @@ impl HardwareEncoderBase {
             .arg("yuv420p")
             .arg("-f")
             .arg("h264")
-            .arg("pipe:1")
-            // Read input at native framerate - prevents FFmpeg from exiting immediately
-            .arg("-re");
+            .arg("pipe:1");
 
         // Add encoder-specific options
         self.add_encoder_options(&mut cmd, encoder_name);
@@ -235,7 +239,8 @@ impl HardwareEncoderBase {
             .take()
             .context("Failed to take FFmpeg stdout")?;
 
-        self.spawn_output_reader(stdout, packet_tx);
+        let stdout_handle = self.spawn_output_reader(stdout, packet_tx);
+        self.stdout_thread = Some(stdout_handle);
 
         // Spawn stderr reader to capture FFmpeg diagnostic output
         let stderr = self
@@ -246,7 +251,8 @@ impl HardwareEncoderBase {
             .take()
             .context("Failed to take FFmpeg stderr")?;
 
-        self.spawn_stderr_reader(stderr);
+        let stderr_handle = self.spawn_stderr_reader(stderr);
+        self.stderr_thread = Some(stderr_handle);
 
         info!(
             "FFmpeg {} encoder initialized: {}x{} @ {} FPS",
@@ -309,12 +315,12 @@ impl HardwareEncoderBase {
         }
     }
 
-    /// Spawn thread to read FFmpeg output
+    /// Spawn thread to read FFmpeg output — returns JoinHandle for cleanup
     fn spawn_output_reader(
         &self,
         stdout: std::process::ChildStdout,
         packet_tx: Sender<EncodedPacket>,
-    ) {
+    ) -> thread::JoinHandle<()> {
         thread::spawn(move || {
             use std::io::Read;
 
@@ -393,11 +399,11 @@ impl HardwareEncoderBase {
             }
 
             debug!("FFmpeg output reader thread exiting");
-        });
+        })
     }
 
-    /// Spawn thread to read FFmpeg stderr for debugging
-    fn spawn_stderr_reader(&self, stderr: std::process::ChildStderr) {
+    /// Spawn thread to read FFmpeg stderr for debugging — returns JoinHandle for cleanup
+    fn spawn_stderr_reader(&self, stderr: std::process::ChildStderr) -> thread::JoinHandle<()> {
         thread::spawn(move || {
             let reader = BufReader::new(stderr);
             for line in reader.lines().map_while(Result::ok) {
@@ -411,7 +417,7 @@ impl HardwareEncoderBase {
                 }
             }
             debug!("FFmpeg stderr reader thread exiting");
-        });
+        })
     }
     /// Encode a single frame
     fn encode_frame_internal(
@@ -451,17 +457,61 @@ impl HardwareEncoderBase {
             drop(stdin);
         }
 
-        // Wait for FFmpeg to finish
+        // Wait for FFmpeg to finish with a timeout to prevent hanging
         if let Some(mut child) = self.ffmpeg_process.take() {
-            match child.wait() {
-                Ok(status) => {
-                    if !status.success() {
-                        warn!("FFmpeg process exited with status: {}", status);
+            let timeout = std::time::Duration::from_secs(10);
+            let start = Instant::now();
+            loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        if !status.success() {
+                            warn!("FFmpeg process exited with status: {}", status);
+                        }
+                        break;
+                    }
+                    Ok(None) => {
+                        if start.elapsed() > timeout {
+                            warn!("FFmpeg process did not exit within {:?}, killing", timeout);
+                            let _ = child.kill();
+                            let _ = child.wait(); // reap after kill
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                    Err(e) => {
+                        warn!("Error waiting for FFmpeg process: {}", e);
+                        break;
                     }
                 }
-                Err(e) => {
-                    warn!("Error waiting for FFmpeg process: {}", e);
+            }
+        }
+
+        // Join reader threads with a timeout
+        let join_timeout = std::time::Duration::from_secs(5);
+        if let Some(handle) = self.stdout_thread.take() {
+            let start = Instant::now();
+            while !handle.is_finished() {
+                if start.elapsed() > join_timeout {
+                    warn!("stdout reader thread did not finish within {:?}", join_timeout);
+                    break;
                 }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            if handle.is_finished() {
+                let _ = handle.join();
+            }
+        }
+        if let Some(handle) = self.stderr_thread.take() {
+            let start = Instant::now();
+            while !handle.is_finished() {
+                if start.elapsed() > join_timeout {
+                    warn!("stderr reader thread did not finish within {:?}", join_timeout);
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            if handle.is_finished() {
+                let _ = handle.join();
             }
         }
 
@@ -475,6 +525,38 @@ impl HardwareEncoderBase {
 
         info!("Flushed {} packets from hardware encoder", packets.len());
         Ok(packets)
+    }
+}
+
+/// Drop implementation to ensure FFmpeg process is cleaned up
+impl Drop for HardwareEncoderBase {
+    fn drop(&mut self) {
+        // Close stdin to signal EOF
+        drop(self.ffmpeg_stdin.take());
+
+        // Kill FFmpeg process if still running
+        if let Some(mut child) = self.ffmpeg_process.take() {
+            match child.try_wait() {
+                Ok(Some(_)) => {} // already exited
+                _ => {
+                    warn!("FFmpeg process still running during drop, killing");
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            }
+        }
+
+        // Best-effort join reader threads (don't block long)
+        if let Some(handle) = self.stdout_thread.take() {
+            if handle.is_finished() {
+                let _ = handle.join();
+            }
+        }
+        if let Some(handle) = self.stderr_thread.take() {
+            if handle.is_finished() {
+                let _ = handle.join();
+            }
+        }
     }
 }
 
@@ -600,7 +682,7 @@ impl Encoder for QsvEncoder {
 pub fn check_encoder_available(encoder_name: &str) -> bool {
     let ffmpeg_cmd = resolve_ffmpeg_command();
 
-    // Try to get encoder info from FFmpeg
+    // First check if encoder is listed
     let output = Command::new(&ffmpeg_cmd)
         .arg("-hide_banner")
         .arg("-encoders")
@@ -608,20 +690,50 @@ pub fn check_encoder_available(encoder_name: &str) -> bool {
         .arg("error")
         .output();
 
-    match output {
+    let listed = match output {
         Ok(out) => {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            let stdout = String::from_utf8_lossy(&out.stdout);
-
-            // Check if encoder is listed in available encoders
-            let output_str = format!("{}{}", stdout, stderr);
+            let output_str = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
             output_str.contains(encoder_name)
         }
         Err(e) => {
-            warn!(
-                "Failed to check encoder availability for {}: {}",
-                encoder_name, e
-            );
+            warn!("Failed to check encoder listing for {}: {}", encoder_name, e);
+            return false;
+        }
+    };
+
+    if !listed {
+        return false;
+    }
+
+    // Probe the encoder by attempting a tiny encode to verify it actually works
+    // (catches cases where encoder is listed but GPU driver is missing/broken)
+    let probe = Command::new(&ffmpeg_cmd)
+        .arg("-hide_banner")
+        .arg("-v").arg("error")
+        .arg("-f").arg("lavfi")
+        .arg("-i").arg("nullsrc=s=16x16:d=0.04")
+        .arg("-c:v").arg(encoder_name)
+        .arg("-f").arg("null")
+        .arg("-")
+        .output();
+
+    match probe {
+        Ok(out) => {
+            if out.status.success() {
+                info!("Encoder {} probe succeeded", encoder_name);
+                true
+            } else {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                warn!("Encoder {} probe failed: {}", encoder_name, stderr.trim());
+                false
+            }
+        }
+        Err(e) => {
+            warn!("Failed to probe encoder {}: {}", encoder_name, e);
             false
         }
     }

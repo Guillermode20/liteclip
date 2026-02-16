@@ -490,6 +490,8 @@ impl Muxer {
                 written_frames += 1;
             }
         }
+        // Drop stdin explicitly to signal EOF
+        drop(child.stdin.take());
 
         if written_frames == 0 {
             if self.output_path.exists() {
@@ -498,21 +500,46 @@ impl Muxer {
             bail!("No encoded frames available for MP4 generation");
         }
 
-        let output = child
-            .wait_with_output()
-            .context("Failed waiting for ffmpeg process")?;
+        // Drain stdout and stderr concurrently to prevent pipe deadlock.
+        // If FFmpeg fills its stdout/stderr buffer (64KB) and blocks, while we
+        // are waiting via wait_with_output(), both processes would hang.
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
 
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if !output.status.success() {
+        let stdout_thread = std::thread::spawn(move || -> Vec<u8> {
+            let mut buf = Vec::new();
+            if let Some(mut out) = stdout {
+                use std::io::Read;
+                let _ = out.read_to_end(&mut buf);
+            }
+            buf
+        });
+
+        let stderr_thread = std::thread::spawn(move || -> Vec<u8> {
+            let mut buf = Vec::new();
+            if let Some(mut err) = stderr {
+                use std::io::Read;
+                let _ = err.read_to_end(&mut buf);
+            }
+            buf
+        });
+
+        let status = child.wait().context("Failed waiting for ffmpeg process")?;
+
+        let _stdout_data = stdout_thread.join().unwrap_or_default();
+        let stderr_data = stderr_thread.join().unwrap_or_default();
+        let stderr_str = String::from_utf8_lossy(&stderr_data);
+
+        if !status.success() {
             if self.output_path.exists() {
                 let _ = std::fs::remove_file(&self.output_path);
             }
-            error!("FFmpeg stderr:\n{}", stderr);
-            bail!("ffmpeg failed to generate MP4: status {}", output.status);
+            error!("FFmpeg stderr:\n{}", stderr_str);
+            bail!("ffmpeg failed to generate MP4: status {}", status);
         }
 
-        if !stderr.is_empty() {
-            debug!("FFmpeg output:\n{}", stderr);
+        if !stderr_str.is_empty() {
+            debug!("FFmpeg output:\n{}", stderr_str);
         }
 
         let metadata = std::fs::metadata(&self.output_path)

@@ -28,7 +28,7 @@ async fn main() -> Result<()> {
     );
 
     // Load configuration from %APPDATA%/liteclip-replay/config.toml
-    let config = match Config::load().await {
+    let mut config = match Config::load().await {
         Ok(cfg) => {
             let config_path = Config::config_path()?;
             info!("Loaded config from {:?}", config_path);
@@ -39,6 +39,9 @@ async fn main() -> Result<()> {
             Config::default()
         }
     };
+
+    // Validate configuration — clamps invalid values to safe ranges
+    config.validate();
 
     // Log configuration summary
     info!(
@@ -76,11 +79,24 @@ async fn main() -> Result<()> {
     let (tokio_tx, mut tokio_rx) = tokio::sync::mpsc::channel::<liteclip_replay::platform::AppEvent>(100);
     
     // Spawn a thread to bridge crossbeam events to tokio
+    // Wrapped in catch_unwind to prevent silent panics from killing the event pipeline
     std::thread::spawn(move || {
-        while let Ok(event) = event_rx.recv() {
-            if tokio_tx.blocking_send(event).is_err() {
-                break;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            while let Ok(event) = event_rx.recv() {
+                if tokio_tx.blocking_send(event).is_err() {
+                    break;
+                }
             }
+        }));
+        if let Err(panic_info) = result {
+            let msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                s.to_string()
+            } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "unknown panic".to_string()
+            };
+            error!("Bridge thread panicked: {}", msg);
         }
     });
 

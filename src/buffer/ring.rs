@@ -7,9 +7,22 @@ use crate::encode::EncodedPacket;
 use anyhow::Result;
 use parking_lot::RwLock;
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tracing::{debug, trace};
+
+/// Cached QPC frequency (queried once, reused everywhere)
+fn qpc_frequency() -> i64 {
+    static FREQ: OnceLock<i64> = OnceLock::new();
+    *FREQ.get_or_init(|| {
+        let mut freq = 10_000_000i64;
+        unsafe {
+            windows::Win32::System::Performance::QueryPerformanceFrequency(&mut freq)
+                .expect("QueryPerformanceFrequency should never fail on supported Windows");
+        }
+        freq
+    })
+}
 
 /// Statistics about the buffer state
 #[derive(Debug, Clone, Copy, Default)]
@@ -102,17 +115,21 @@ pub struct ReplayBuffer {
     duration: Duration,
     /// Max memory budget in bytes
     max_memory_bytes: usize,
-    /// Keyframe index: QPC timestamp -> packet index
+    /// Keyframe index: QPC timestamp -> absolute packet index
     keyframe_index: BTreeMap<i64, usize>,
     /// Total bytes currently stored
     total_bytes: usize,
+    /// Number of packets evicted from the front (used to adjust keyframe indices)
+    base_offset: usize,
 }
 
 impl ReplayBuffer {
     /// Create new replay buffer from configuration
     pub fn new(config: &crate::config::Config) -> Result<Self> {
         let duration = Duration::from_secs(config.general.replay_duration_secs as u64);
-        let max_memory_bytes = (config.advanced.memory_limit_mb as usize) * 1024 * 1024;
+        let max_memory_bytes = (config.advanced.memory_limit_mb as usize)
+            .checked_mul(1024 * 1024)
+            .unwrap_or(usize::MAX);
 
         debug!(
             "Creating ReplayBuffer: {} seconds, {} MB max",
@@ -126,12 +143,15 @@ impl ReplayBuffer {
             max_memory_bytes,
             keyframe_index: BTreeMap::new(),
             total_bytes: 0,
+            base_offset: 0,
         })
     }
 
     /// Create a new replay buffer with explicit parameters
     pub fn with_params(duration: Duration, max_memory_mb: usize) -> Self {
-        let max_memory_bytes = max_memory_mb * 1024 * 1024;
+        let max_memory_bytes = max_memory_mb
+            .checked_mul(1024 * 1024)
+            .unwrap_or(usize::MAX);
 
         debug!(
             "Creating ReplayBuffer: {} seconds, {} MB max",
@@ -145,6 +165,7 @@ impl ReplayBuffer {
             max_memory_bytes,
             keyframe_index: BTreeMap::new(),
             total_bytes: 0,
+            base_offset: 0,
         }
     }
 
@@ -157,10 +178,10 @@ impl ReplayBuffer {
             self.evict_oldest();
         }
 
-        // Index keyframes
+        // Index keyframes using absolute index (base_offset + current length)
         if packet.is_keyframe {
-            let index = self.packets.len();
-            self.keyframe_index.insert(packet.pts, index);
+            let abs_index = self.base_offset + self.packets.len();
+            self.keyframe_index.insert(packet.pts, abs_index);
         }
 
         self.total_bytes += packet_size;
@@ -174,7 +195,7 @@ impl ReplayBuffer {
         );
     }
 
-    /// Evict the oldest packet
+    /// Evict the oldest packet — O(1) operation
     fn evict_oldest(&mut self) {
         if let Some(packet) = self.packets.pop_front() {
             self.total_bytes -= packet.data.len();
@@ -184,13 +205,8 @@ impl ReplayBuffer {
                 self.keyframe_index.remove(&packet.pts);
             }
 
-            // Update indices in keyframe index - shift all indices down by 1
-            self.keyframe_index = self
-                .keyframe_index
-                .iter()
-                .map(|(&ts, &idx)| (ts, idx.saturating_sub(1)))
-                .filter(|(_, idx)| *idx > 0)
-                .collect();
+            // Increment base_offset so absolute indices remain valid
+            self.base_offset += 1;
         }
     }
 
@@ -206,11 +222,12 @@ impl ReplayBuffer {
     /// from that point forward. This ensures the video can be decoded properly.
     pub fn snapshot_from(&self, start_pts: i64) -> Result<Vec<EncodedPacket>> {
         // Find nearest keyframe at or before start_pts
+        // The stored index is absolute, so subtract base_offset to get VecDeque position
         let start_index = self
             .keyframe_index
             .range(..=start_pts)
             .last()
-            .map(|(_, &idx)| idx)
+            .map(|(_, &abs_idx)| abs_idx.saturating_sub(self.base_offset))
             .unwrap_or(0);
 
         Ok(self.packets.iter().skip(start_index).cloned().collect())
@@ -223,8 +240,8 @@ impl ReplayBuffer {
         }
 
         let newest_pts = self.packets.back().map(|p| p.pts).unwrap_or(0);
-        // Convert duration to QPC units (approximate: QPC is typically 10MHz)
-        let qpc_delta = (duration.as_secs_f64() * 10_000_000.0) as i64;
+        let qpc_freq = qpc_frequency() as f64;
+        let qpc_delta = (duration.as_secs_f64() * qpc_freq) as i64;
         let start_pts = (newest_pts - qpc_delta).max(0);
 
         self.snapshot_from(start_pts)
@@ -235,22 +252,22 @@ impl ReplayBuffer {
         self.packets.clear();
         self.keyframe_index.clear();
         self.total_bytes = 0;
+        self.base_offset = 0;
         debug!("Buffer cleared");
     }
 
     /// Get current buffer statistics
     pub fn stats(&self) -> BufferStats {
         let keyframe_count = self.keyframe_index.len();
-        let memory_usage_percent = (self.total_bytes as f32 / self.max_memory_bytes as f32) * 100.0;
+        let memory_usage_percent = if self.max_memory_bytes > 0 {
+            (self.total_bytes as f32 / self.max_memory_bytes as f32) * 100.0
+        } else {
+            0.0
+        };
 
-        // Get actual QPC frequency for accurate stats
-        let mut qpc_freq = 10_000_000i64;
-        unsafe {
-            let _ = windows::Win32::System::Performance::QueryPerformanceFrequency(&mut qpc_freq);
-        }
-        let qpc_freq_f64 = qpc_freq as f64;
+        let qpc_freq_f64 = qpc_frequency() as f64;
 
-        // Estimate duration based on packet timestamps (QPC frequency varies)
+        // Estimate duration based on packet timestamps
         let duration_secs = if self.packets.len() >= 2 {
             let first = self.packets.front().map(|p| p.pts).unwrap_or(0);
             let last = self.packets.back().map(|p| p.pts).unwrap_or(0);
@@ -405,5 +422,32 @@ mod tests {
         assert!(buffer.packets.is_empty());
         assert!(buffer.keyframe_index.is_empty());
         assert_eq!(buffer.total_bytes, 0);
+        assert_eq!(buffer.base_offset, 0);
+    }
+
+    #[test]
+    fn test_eviction_keyframe_index_correctness() {
+        // Push enough packets to trigger many evictions, then verify snapshot_from still works
+        let mut buffer = ReplayBuffer::with_params(Duration::from_secs(120), 1); // 1 MB
+
+        let mut last_keyframe_pts = 0i64;
+        for i in 0..200 {
+            let is_kf = i % 10 == 0;
+            let pts = i * 1_000_000;
+            if is_kf {
+                last_keyframe_pts = pts;
+            }
+            buffer.push(create_test_packet(pts, is_kf, 10_000)); // 10KB each → ~100 fit in 1MB
+        }
+
+        // Buffer should have evicted many packets
+        assert!(buffer.packets.len() < 200);
+        assert!(buffer.base_offset > 0);
+
+        // snapshot_from with the last known keyframe should still return packets
+        let snap = buffer.snapshot_from(last_keyframe_pts).unwrap();
+        assert!(!snap.is_empty());
+        // First packet in snapshot should be at or before the requested pts
+        assert!(snap[0].pts <= last_keyframe_pts + 10_000_000); // within one keyframe interval
     }
 }

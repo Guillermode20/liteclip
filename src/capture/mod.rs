@@ -73,8 +73,10 @@ pub trait CaptureBackend: Send + 'static {
 }
 
 /// Calculate frame duration from target FPS
+///
+/// Clamps fps to a minimum of 1 to prevent division by zero.
 pub fn frame_duration(fps: u32) -> Duration {
-    Duration::from_nanos(1_000_000_000 / fps as u64)
+    Duration::from_nanos(1_000_000_000 / fps.max(1) as u64)
 }
 
 #[cfg(test)]

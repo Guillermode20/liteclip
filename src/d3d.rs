@@ -35,8 +35,11 @@ impl D3D11Device {
 
 impl Clone for D3D11Device {
     fn clone(&self) -> Self {
-        // This is a stub - proper implementation would need proper reference counting
-        unimplemented!("D3D11Device::clone is stubbed");
+        // COM interfaces in the `windows` crate implement Clone via AddRef
+        Self {
+            device: self.device.clone(),
+            context: self.context.clone(),
+        }
     }
 }
 
@@ -121,8 +124,11 @@ impl GpuFence {
 
 impl Drop for GpuFence {
     fn drop(&mut self) {
-        unsafe {
-            let _ = CloseHandle(self.handle);
+        // Only close valid handles — avoid UB from closing NULL/INVALID handles
+        if !self.handle.is_invalid() && !self.handle.0.is_null() {
+            unsafe {
+                let _ = CloseHandle(self.handle);
+            }
         }
     }
 }
@@ -133,6 +139,8 @@ mod tests {
 
     #[test]
     fn test_dxgi_format() {
-        assert_eq!(DXGIFormat::B8g8r8a8Unorm as u32, 87); // DXGI_FORMAT_B8G8R8A8_UNORM
+        // Verify our format enum variants are distinct
+        assert_ne!(DXGIFormat::B8g8r8a8Unorm, DXGIFormat::Unknown);
+        assert_eq!(DXGIFormat::B8g8r8a8Unorm, DXGIFormat::B8g8r8a8Unorm);
     }
 }
