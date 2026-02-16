@@ -98,6 +98,40 @@ cargo fmt -- --check
 - Document safety invariants with `// SAFETY:` comments
 - Prefer `windows` crate safe wrappers where possible
 
+## Module Structure
+
+The codebase has been split using `splitrs` for better maintainability. Large files (>500 lines) are now organized into submodules:
+
+### Split Modules
+
+| Module | Original File | New Structure |
+|--------|---------------|---------------|
+| **clip/muxer** | `src/clip/muxer.rs` (1268 lines) | `types.rs` + `functions.rs` |
+| **encode/hw_encoder** | `src/encode/hw_encoder.rs` (1152 lines) | `types.rs`, `functions.rs`, `amfencoder_traits.rs`, `nvencencoder_traits.rs`, `qsvencoder_traits.rs`, `hardwareencoderbase_traits.rs` |
+| **encode/encoder_mod** | `src/encode/mod.rs` (682 lines) | `types.rs`, `functions.rs`, `functions_2.rs`, `encodedpacket_traits.rs`, `encoderconfig_traits.rs` |
+| **capture/dxgi** | `src/capture/dxgi.rs` (577 lines) | `types.rs`, `functions.rs`, `dxgicapture_traits.rs` |
+| **config/config_mod** | `src/config.rs` (512 lines) | `types.rs`, `functions.rs`, 5 trait files (audio, video, general, advanced, hotkey config traits) |
+| **buffer/ring** | `src/buffer/ring.rs` (502 lines) | `types.rs`, `functions.rs`, `sharedreplaybuffer_traits.rs` |
+
+### Import Patterns After Split
+
+When working with split modules:
+- Public items are re-exported via `mod.rs` using `pub use types::*` and `pub use functions::*`
+- Trait implementations are in separate `*_traits.rs` files
+- Default helper functions (for serde) are in `functions.rs` and marked `pub` or `pub(super)`
+- Cross-module access within a split directory uses `super::types::TypeName` or `super::functions::function_name`
+
+### Working with Split Files
+
+```rust
+// Example: importing from split hw_encoder module
+use crate::encode::hw_encoder::{HardwareEncoderBase, NvencEncoder, AmfEncoder, QsvEncoder};
+
+// The types are re-exported from submodules
+use crate::encode::hw_encoder::types::HardwareEncoderBase;
+use crate::encode::hw_encoder::functions::resolve_ffmpeg_command;
+```
+
 ## Critical Code Patterns
 
 ### Hardware Encoder Selection

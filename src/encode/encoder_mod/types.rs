@@ -1,0 +1,166 @@
+//! Auto-generated module
+//!
+//! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
+
+use anyhow::Result;
+use bytes::Bytes;
+use crossbeam::channel::{Receiver, Sender};
+
+
+
+/// Encoded packet data
+///
+/// Uses `Bytes` for reference-counted data, making clones cheap (just a ref count bump).
+/// This is critical for the snapshot operation which needs to quickly clone the entire
+/// buffer when saving clips.
+#[derive(Clone)]
+pub struct EncodedPacket {
+    /// Reference-counted byte buffer (cheap clone)
+    pub data: Bytes,
+    /// Presentation timestamp (QPC-based, 10MHz units)
+    pub pts: i64,
+    /// Decode timestamp
+    pub dts: i64,
+    /// True if this is a keyframe (IDR frame)
+    pub is_keyframe: bool,
+    /// Stream type
+    pub stream: StreamType,
+    /// Optional frame resolution for raw video payloads
+    pub resolution: Option<(u32, u32)>,
+}
+impl EncodedPacket {
+    /// Create a new encoded packet
+    pub fn new(
+        data: impl Into<Bytes>,
+        pts: i64,
+        dts: i64,
+        is_keyframe: bool,
+        stream: StreamType,
+    ) -> Self {
+        Self {
+            data: data.into(),
+            pts,
+            dts,
+            is_keyframe,
+            stream,
+            resolution: None,
+        }
+    }
+    /// Create a video keyframe packet
+    pub fn video_keyframe(data: impl Into<Bytes>, pts: i64) -> Self {
+        Self::new(data, pts, pts, true, StreamType::Video)
+    }
+    /// Create a video delta frame packet
+    pub fn video_delta(data: impl Into<Bytes>, pts: i64) -> Self {
+        Self::new(data, pts, pts, false, StreamType::Video)
+    }
+}
+/// Stream type for multiplexed output
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamType {
+    /// Video stream (H.264/H.265/AV1)
+    Video,
+    /// System audio (game/desktop audio)
+    SystemAudio,
+    /// Microphone input
+    Microphone,
+}
+/// Hardware detection result
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HardwareEncoder {
+    /// NVIDIA NVENC available
+    Nvenc,
+    /// AMD AMF available
+    Amf,
+    /// Intel QSV available
+    Qsv,
+    /// No hardware encoder available
+    None,
+}
+/// Encoder configuration
+#[derive(Debug, Clone)]
+pub struct EncoderConfig {
+    /// Video codec to use
+    pub codec: crate::config::Codec,
+    /// Target bitrate in Mbps
+    pub bitrate_mbps: u32,
+    /// Target framerate
+    pub framerate: u32,
+    /// Output resolution (width, height)
+    pub resolution: (u32, u32),
+    /// Whether to use native capture resolution (ignores resolution field)
+    pub use_native_resolution: bool,
+    /// Encoder type selection
+    pub encoder_type: crate::config::EncoderType,
+    /// Quality preset preference (speed vs quality)
+    pub quality_preset: crate::config::QualityPreset,
+    /// Rate control mode preference
+    pub rate_control: crate::config::RateControl,
+    /// Optional quality scalar (e.g. CQ/CRF-like)
+    pub quality_value: Option<u8>,
+    /// Keyframe interval in seconds
+    pub keyframe_interval_secs: u32,
+    /// Force CPU readback path (Phase 1 fallback)
+    pub use_cpu_readback: bool,
+    /// Desktop output index for capture/desktop-grab input selection
+    pub output_index: u32,
+}
+impl EncoderConfig {
+    /// Create encoder configuration with explicit parameters
+    pub fn new(
+        codec: crate::config::Codec,
+        bitrate_mbps: u32,
+        framerate: u32,
+        resolution: (u32, u32),
+        encoder_type: crate::config::EncoderType,
+        keyframe_interval_secs: u32,
+    ) -> Self {
+        Self {
+            codec,
+            bitrate_mbps,
+            framerate,
+            resolution,
+            use_native_resolution: false,
+            encoder_type,
+            quality_preset: crate::config::QualityPreset::Balanced,
+            rate_control: crate::config::RateControl::Vbr,
+            quality_value: None,
+            keyframe_interval_secs,
+            use_cpu_readback: false,
+            output_index: 0,
+        }
+    }
+    /// Get the FFmpeg codec name based on codec and encoder type
+    pub fn ffmpeg_codec_name(&self) -> &'static str {
+        match (self.codec, self.encoder_type) {
+            (crate::config::Codec::H264, crate::config::EncoderType::Nvenc) => {
+                "h264_nvenc"
+            }
+            (crate::config::Codec::H264, crate::config::EncoderType::Amf) => "h264_amf",
+            (crate::config::Codec::H264, crate::config::EncoderType::Qsv) => "h264_qsv",
+            (crate::config::Codec::H264, _) => "libx264",
+            (crate::config::Codec::H265, crate::config::EncoderType::Nvenc) => {
+                "hevc_nvenc"
+            }
+            (crate::config::Codec::H265, crate::config::EncoderType::Amf) => "hevc_amf",
+            (crate::config::Codec::H265, crate::config::EncoderType::Qsv) => "hevc_qsv",
+            (crate::config::Codec::H265, _) => "libx265",
+            (crate::config::Codec::Av1, crate::config::EncoderType::Nvenc) => "av1_nvenc",
+            (crate::config::Codec::Av1, crate::config::EncoderType::Amf) => "av1_amf",
+            (_, _) => "libaom-av1",
+        }
+    }
+    /// Calculate keyframe interval in frames
+    pub fn keyframe_interval_frames(&self) -> u32 {
+        self.keyframe_interval_secs * self.framerate
+    }
+}
+/// Encoder thread handle
+pub struct EncoderHandle {
+    /// Join handle for the encoder thread
+    pub thread: std::thread::JoinHandle<Result<()>>,
+    /// Channel sender for frames
+    pub frame_tx: Sender<crate::capture::CapturedFrame>,
+    /// Channel receiver for packets
+    pub packet_rx: Receiver<EncodedPacket>,
+}
