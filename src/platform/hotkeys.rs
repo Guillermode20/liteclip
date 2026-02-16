@@ -6,7 +6,9 @@ use super::HotkeyConfig;
 use anyhow::{Context, Result};
 use tracing::{debug, error, info, trace};
 use windows::Win32::Foundation::HWND;
-use windows::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS,
+};
 
 /// Hotkey definition
 #[derive(Debug, Clone, Copy)]

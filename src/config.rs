@@ -7,8 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Root configuration structure
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
     #[serde(default)]
     pub general: GeneralConfig,
@@ -52,6 +51,12 @@ pub struct VideoConfig {
     pub bitrate_mbps: u32,
     #[serde(default = "default_encoder")]
     pub encoder: EncoderType,
+    #[serde(default = "default_quality_preset")]
+    pub quality_preset: QualityPreset,
+    #[serde(default = "default_rate_control")]
+    pub rate_control: RateControl,
+    #[serde(default = "default_quality_value")]
+    pub quality_value: Option<u8>,
 }
 
 /// Audio capture settings
@@ -132,6 +137,24 @@ pub enum EncoderType {
     Software,
 }
 
+/// High-level quality/speed tradeoff for encoder options
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum QualityPreset {
+    Performance,
+    Balanced,
+    Quality,
+}
+
+/// Rate control mode preference
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RateControl {
+    Cbr,
+    Vbr,
+    Cq,
+}
+
 /// Overlay position options
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -202,7 +225,10 @@ impl Config {
             warn!("Config: memory_limit_mb was 0, clamping to 512");
             self.advanced.memory_limit_mb = 512;
         } else if self.advanced.memory_limit_mb > 16384 {
-            warn!("Config: memory_limit_mb was {}, clamping to 16384", self.advanced.memory_limit_mb);
+            warn!(
+                "Config: memory_limit_mb was {}, clamping to 16384",
+                self.advanced.memory_limit_mb
+            );
             self.advanced.memory_limit_mb = 16384;
         }
 
@@ -210,6 +236,31 @@ impl Config {
         if self.video.bitrate_mbps == 0 {
             warn!("Config: bitrate_mbps was 0, clamping to 20");
             self.video.bitrate_mbps = 20;
+        } else if self.video.bitrate_mbps > 500 {
+            warn!(
+                "Config: bitrate_mbps was {}, clamping to 500",
+                self.video.bitrate_mbps
+            );
+            self.video.bitrate_mbps = 500;
+        }
+
+        // Quality value (CQ/CRF-like scalar) must be in a safe range if provided
+        if let Some(value) = self.video.quality_value {
+            let clamped = value.clamp(1, 51);
+            if clamped != value {
+                warn!(
+                    "Config: quality_value was {}, clamping to {}",
+                    value, clamped
+                );
+                self.video.quality_value = Some(clamped);
+            }
+        }
+
+        // Provide a deterministic quality value when CQ mode is selected
+        if matches!(self.video.rate_control, RateControl::Cq) && self.video.quality_value.is_none()
+        {
+            self.video.quality_value =
+                Some(default_quality_value_for_preset(self.video.quality_preset));
         }
 
         // Replay duration must be > 0
@@ -225,7 +276,6 @@ impl Config {
         }
     }
 }
-
 
 impl Default for GeneralConfig {
     fn default() -> Self {
@@ -248,6 +298,9 @@ impl Default for VideoConfig {
             codec: default_codec(),
             bitrate_mbps: default_bitrate(),
             encoder: default_encoder(),
+            quality_preset: default_quality_preset(),
+            rate_control: default_rate_control(),
+            quality_value: default_quality_value(),
         }
     }
 }
@@ -326,6 +379,26 @@ fn default_encoder() -> EncoderType {
     EncoderType::Auto
 }
 
+fn default_quality_preset() -> QualityPreset {
+    QualityPreset::Balanced
+}
+
+fn default_rate_control() -> RateControl {
+    RateControl::Vbr
+}
+
+fn default_quality_value() -> Option<u8> {
+    None
+}
+
+fn default_quality_value_for_preset(preset: QualityPreset) -> u8 {
+    match preset {
+        QualityPreset::Performance => 28,
+        QualityPreset::Balanced => 23,
+        QualityPreset::Quality => 19,
+    }
+}
+
 fn default_mic_device() -> String {
     "default".to_string()
 }
@@ -388,5 +461,33 @@ mod tests {
         assert_eq!(config.general.replay_duration_secs, 120);
         assert_eq!(config.video.framerate, 60);
         assert_eq!(config.video.codec, Codec::H264);
+        assert_eq!(config.video.quality_preset, QualityPreset::Balanced);
+        assert_eq!(config.video.rate_control, RateControl::Vbr);
+        assert_eq!(config.video.quality_value, None);
+    }
+
+    #[test]
+    fn test_validate_quality_value_clamps() {
+        let mut config = Config::default();
+        config.video.rate_control = RateControl::Cq;
+        config.video.quality_value = Some(0);
+
+        config.validate();
+        assert_eq!(config.video.quality_value, Some(1));
+
+        config.video.quality_value = Some(99);
+        config.validate();
+        assert_eq!(config.video.quality_value, Some(51));
+    }
+
+    #[test]
+    fn test_validate_cq_sets_default_quality_value() {
+        let mut config = Config::default();
+        config.video.rate_control = RateControl::Cq;
+        config.video.quality_preset = QualityPreset::Quality;
+        config.video.quality_value = None;
+
+        config.validate();
+        assert_eq!(config.video.quality_value, Some(19));
     }
 }

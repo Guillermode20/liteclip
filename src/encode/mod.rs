@@ -28,6 +28,12 @@ pub struct EncoderConfig {
     pub use_native_resolution: bool,
     /// Encoder type selection
     pub encoder_type: crate::config::EncoderType,
+    /// Quality preset preference (speed vs quality)
+    pub quality_preset: crate::config::QualityPreset,
+    /// Rate control mode preference
+    pub rate_control: crate::config::RateControl,
+    /// Optional quality scalar (e.g. CQ/CRF-like)
+    pub quality_value: Option<u8>,
     /// Keyframe interval in seconds
     pub keyframe_interval_secs: u32,
     /// Force CPU readback path (Phase 1 fallback)
@@ -50,6 +56,9 @@ impl From<&crate::config::Config> for EncoderConfig {
             },
             use_native_resolution,
             encoder_type: config.video.encoder,
+            quality_preset: config.video.quality_preset,
+            rate_control: config.video.rate_control,
+            quality_value: config.video.quality_value,
             keyframe_interval_secs: config.advanced.keyframe_interval_secs,
             use_cpu_readback: config.advanced.use_cpu_readback,
         }
@@ -73,6 +82,9 @@ impl EncoderConfig {
             resolution,
             use_native_resolution: false,
             encoder_type,
+            quality_preset: crate::config::QualityPreset::Balanced,
+            rate_control: crate::config::RateControl::Vbr,
+            quality_value: None,
             keyframe_interval_secs,
             use_cpu_readback: false,
         }
@@ -559,6 +571,25 @@ mod tests {
             2,
         );
         assert_eq!(config.keyframe_interval_frames(), 60); // 2 seconds * 30fps
+    }
+
+    #[test]
+    fn test_encoder_config_new_sets_quality_defaults() {
+        let config = EncoderConfig::new(
+            crate::config::Codec::H264,
+            20,
+            30,
+            (1920, 1080),
+            crate::config::EncoderType::Nvenc,
+            1,
+        );
+
+        assert_eq!(
+            config.quality_preset,
+            crate::config::QualityPreset::Balanced
+        );
+        assert_eq!(config.rate_control, crate::config::RateControl::Vbr);
+        assert_eq!(config.quality_value, None);
     }
 
     #[test]

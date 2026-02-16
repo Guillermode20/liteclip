@@ -5,6 +5,7 @@
 //! H.264 NAL units directly, avoiding the MJPEG intermediate step.
 
 use super::{EncodedPacket, Encoder, EncoderConfig, StreamType};
+use crate::config::{QualityPreset, RateControl};
 use anyhow::{Context, Result};
 use bytes::{Buf, BytesMut};
 use crossbeam::channel::{bounded, Receiver, Sender};
@@ -222,11 +223,13 @@ impl HardwareEncoderBase {
             cmd.arg("-preset").arg(preset);
         }
 
-        cmd.arg("-tune")
-            .arg(self.tune_for_encoder(encoder_name))
-            .arg("-bitrate")
-            .arg(format!("{}M", self.config.bitrate_mbps))
-            .arg("-g")
+        if let Some(tune) = self.tune_for_encoder(encoder_name) {
+            cmd.arg("-tune").arg(tune);
+        }
+
+        self.add_rate_control_options(&mut cmd, encoder_name);
+
+        cmd.arg("-g")
             .arg(self.config.keyframe_interval_frames().to_string())
             .arg("-pix_fmt")
             .arg("yuv420p")
@@ -293,37 +296,58 @@ impl HardwareEncoderBase {
     /// Get preset for encoder type
     fn preset_for_encoder(&self, encoder_name: &str) -> &str {
         match encoder_name {
-            "h264_nvenc" => "p4",          // Performance preset for NVENC
-            "h264_qsv" => "veryfast",      // Veryfast for QSV
-            "h264_amf" | "hevc_amf" => "", // AMF uses -quality instead, not -preset
-            _ => "fast",
+            "h264_nvenc" | "hevc_nvenc" | "av1_nvenc" => match self.config.quality_preset {
+                QualityPreset::Performance => "p3",
+                QualityPreset::Balanced => "p5",
+                QualityPreset::Quality => "p7",
+            },
+            "h264_qsv" | "hevc_qsv" => match self.config.quality_preset {
+                QualityPreset::Performance => "veryfast",
+                QualityPreset::Balanced => "faster",
+                QualityPreset::Quality => "medium",
+            },
+            "h264_amf" | "hevc_amf" | "av1_amf" => "", // AMF uses -quality instead, not -preset
+            _ => match self.config.quality_preset {
+                QualityPreset::Performance => "fast",
+                QualityPreset::Balanced => "medium",
+                QualityPreset::Quality => "slow",
+            },
         }
     }
 
     /// Get tune parameter for encoder type
-    fn tune_for_encoder(&self, encoder_name: &str) -> &str {
+    fn tune_for_encoder(&self, encoder_name: &str) -> Option<&str> {
         match encoder_name {
-            "h264_nvenc" => "ull",       // Ultra low latency for NVENC
-            "h264_amf" => "zerolatency", // Zero latency for AMF
-            "h264_qsv" => "zerolatency", // Zero latency for QSV
-            _ => "zerolatency",
+            "h264_nvenc" | "hevc_nvenc" | "av1_nvenc" => {
+                let tune = match self.config.quality_preset {
+                    QualityPreset::Performance => "ull",
+                    QualityPreset::Balanced => "ll",
+                    QualityPreset::Quality => "hq",
+                };
+                Some(tune)
+            }
+            _ => None,
         }
     }
 
     /// Add encoder-specific options
     fn add_encoder_options(&self, cmd: &mut Command, encoder_name: &str) {
         match encoder_name {
-            "h264_nvenc" => {
-                // NVENC specific: low latency
+            "h264_nvenc" | "hevc_nvenc" | "av1_nvenc" => {
+                // NVENC-specific rate control and latency behavior.
                 cmd.arg("-rc");
-                cmd.arg("cbr");
+                cmd.arg(self.nvenc_rate_control_mode());
+                if matches!(self.config.rate_control, RateControl::Cq) {
+                    cmd.arg("-cq");
+                    cmd.arg(self.cq_value().to_string());
+                }
                 cmd.arg("-delay");
                 cmd.arg("0");
             }
             "h264_amf" | "hevc_amf" | "av1_amf" => {
-                // AMF specific: quality vs speed
+                // AMF-specific quality mode. Keep required compatibility flags.
                 cmd.arg("-quality");
-                cmd.arg("speed");
+                cmd.arg(self.amf_quality_mode());
                 // Disable B-frames for low latency (critical for AMF)
                 cmd.arg("-bf");
                 cmd.arg("0");
@@ -335,13 +359,87 @@ impl HardwareEncoderBase {
                 cmd.arg("-vsync");
                 cmd.arg("cfr");
             }
-            "h264_qsv" => {
+            "h264_qsv" | "hevc_qsv" => {
                 // QSV specific: no look ahead
                 cmd.arg("-look_ahead");
                 cmd.arg("0");
             }
             _ => {}
         }
+    }
+
+    /// Add generic bitrate/rate control options used by all encoder types.
+    fn add_rate_control_options(&self, cmd: &mut Command, encoder_name: &str) {
+        let bitrate_mbps = self.config.bitrate_mbps.max(1);
+        let bitrate = format!("{}M", bitrate_mbps);
+
+        match self.config.rate_control {
+            RateControl::Cbr => {
+                let bufsize = format!("{}M", bitrate_mbps.saturating_mul(2).max(1));
+                cmd.arg("-b:v")
+                    .arg(&bitrate)
+                    .arg("-maxrate")
+                    .arg(&bitrate)
+                    .arg("-minrate")
+                    .arg(&bitrate)
+                    .arg("-bufsize")
+                    .arg(bufsize);
+            }
+            RateControl::Vbr => {
+                let peak_mbps = bitrate_mbps.saturating_mul(2).max(1);
+                let peak = format!("{}M", peak_mbps);
+                cmd.arg("-b:v")
+                    .arg(&bitrate)
+                    .arg("-maxrate")
+                    .arg(&peak)
+                    .arg("-bufsize")
+                    .arg(peak);
+            }
+            RateControl::Cq => {
+                let peak_mbps = bitrate_mbps.saturating_mul(2).max(1);
+                let peak = format!("{}M", peak_mbps);
+
+                // NVENC CQ works best with unconstrained average bitrate.
+                let target_bitrate = if encoder_name.ends_with("_nvenc") {
+                    "0".to_string()
+                } else {
+                    bitrate.clone()
+                };
+
+                cmd.arg("-b:v")
+                    .arg(target_bitrate)
+                    .arg("-maxrate")
+                    .arg(&peak)
+                    .arg("-bufsize")
+                    .arg(peak);
+            }
+        }
+    }
+
+    fn amf_quality_mode(&self) -> &str {
+        match self.config.quality_preset {
+            QualityPreset::Performance => "speed",
+            QualityPreset::Balanced => "balanced",
+            QualityPreset::Quality => "quality",
+        }
+    }
+
+    fn nvenc_rate_control_mode(&self) -> &str {
+        match self.config.rate_control {
+            RateControl::Cbr => "cbr",
+            RateControl::Vbr => "vbr",
+            RateControl::Cq => "vbr",
+        }
+    }
+
+    fn cq_value(&self) -> u8 {
+        self.config
+            .quality_value
+            .unwrap_or(match self.config.quality_preset {
+                QualityPreset::Performance => 28,
+                QualityPreset::Balanced => 23,
+                QualityPreset::Quality => 19,
+            })
     }
 
     /// Spawn thread to read FFmpeg output — returns JoinHandle for cleanup
@@ -867,5 +965,32 @@ mod tests {
         assert_eq!(rgb[0], 0xFF); // R from first pixel
         assert_eq!(rgb[1], 0x00); // G from first pixel
         assert_eq!(rgb[2], 0x00); // B from first pixel
+    }
+
+    #[test]
+    fn test_quality_preset_maps_to_nvenc_presets() {
+        let mut config = create_test_config();
+        config.quality_preset = QualityPreset::Performance;
+        let base = HardwareEncoderBase::new(&config, "h264_nvenc").expect("base");
+        assert_eq!(base.preset_for_encoder("h264_nvenc"), "p3");
+
+        config.quality_preset = QualityPreset::Balanced;
+        let base = HardwareEncoderBase::new(&config, "h264_nvenc").expect("base");
+        assert_eq!(base.preset_for_encoder("h264_nvenc"), "p5");
+
+        config.quality_preset = QualityPreset::Quality;
+        let base = HardwareEncoderBase::new(&config, "h264_nvenc").expect("base");
+        assert_eq!(base.preset_for_encoder("h264_nvenc"), "p7");
+    }
+
+    #[test]
+    fn test_cq_default_value_uses_quality_preset() {
+        let mut config = create_test_config();
+        config.rate_control = RateControl::Cq;
+        config.quality_preset = QualityPreset::Quality;
+        config.quality_value = None;
+
+        let base = HardwareEncoderBase::new(&config, "h264_nvenc").expect("base");
+        assert_eq!(base.cq_value(), 19);
     }
 }

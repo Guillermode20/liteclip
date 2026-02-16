@@ -46,11 +46,15 @@ async fn main() -> Result<()> {
 
     // Log configuration summary
     info!(
-        "Configuration: {}s buffer @ {} Mbps, {} FPS, {:?} encoder",
+        "Configuration: {}s buffer @ {} Mbps, {} FPS, codec={:?}, encoder={:?}, quality_preset={:?}, rate_control={:?}, quality_value={:?}",
         config.general.replay_duration_secs,
         config.video.bitrate_mbps,
         config.video.framerate,
-        config.video.encoder
+        config.video.codec,
+        config.video.encoder,
+        config.video.quality_preset,
+        config.video.rate_control,
+        config.video.quality_value
     );
 
     // Initialize application state
@@ -58,13 +62,12 @@ async fn main() -> Result<()> {
 
     // Start the platform message loop for hotkeys
     let hotkey_config = liteclip_replay::platform::HotkeyConfig::from(&config);
-    let (platform_handle, event_rx) = liteclip_replay::platform::spawn_platform_thread(hotkey_config)?;
+    let (platform_handle, event_rx) =
+        liteclip_replay::platform::spawn_platform_thread(hotkey_config)?;
 
     info!(
         "Hotkeys registered: {} (save), {} (toggle) | Press {} to save clip",
-        config.hotkeys.save_clip,
-        config.hotkeys.toggle_recording,
-        config.hotkeys.save_clip
+        config.hotkeys.save_clip, config.hotkeys.toggle_recording, config.hotkeys.save_clip
     );
     info!("Press Ctrl+C to exit.");
 
@@ -77,8 +80,9 @@ async fn main() -> Result<()> {
     }
 
     // Convert the crossbeam receiver to a tokio-compatible channel
-    let (tokio_tx, mut tokio_rx) = tokio::sync::mpsc::channel::<liteclip_replay::platform::AppEvent>(100);
-    
+    let (tokio_tx, mut tokio_rx) =
+        tokio::sync::mpsc::channel::<liteclip_replay::platform::AppEvent>(100);
+
     // Spawn a thread to bridge crossbeam events to tokio
     // Wrapped in catch_unwind to prevent silent panics from killing the event pipeline
     std::thread::spawn(move || {

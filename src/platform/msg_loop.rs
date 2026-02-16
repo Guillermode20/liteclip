@@ -8,7 +8,9 @@ use crossbeam::channel::{Receiver, Sender};
 use tracing::{debug, error, info, trace};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Input::KeyboardAndMouse::{HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, PostQuitMessage,
     RegisterClassW, TranslateMessage, CS_HREDRAW, CS_VREDRAW, HMENU, HWND_MESSAGE, MSG, WM_DESTROY,
@@ -103,7 +105,7 @@ fn create_hidden_window() -> Result<HWND> {
     let class_name: Vec<u16> = CLASS_NAME.encode_utf16().chain(Some(0)).collect();
 
     let hinstance = unsafe { GetModuleHandleW(None).context("Failed to get module handle")? };
-    
+
     let wndclass = WNDCLASSW {
         lpfnWndProc: Some(window_proc),
         hInstance: hinstance.into(),

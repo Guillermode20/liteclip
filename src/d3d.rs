@@ -5,9 +5,7 @@
 use anyhow::{bail, Result};
 use std::sync::Arc;
 use windows::Win32::Foundation::CloseHandle;
-use windows::Win32::Graphics::Direct3D11::{
-    ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
-};
+use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D};
 
 /// D3D11 device wrapper
 pub struct D3D11Device {

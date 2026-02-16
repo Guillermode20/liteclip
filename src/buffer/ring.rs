@@ -127,7 +127,8 @@ impl ReplayBuffer {
     /// Create new replay buffer from configuration
     pub fn new(config: &crate::config::Config) -> Result<Self> {
         let duration = Duration::from_secs(config.general.replay_duration_secs as u64);
-        let max_memory_bytes = (config.advanced.memory_limit_mb as usize).saturating_mul(1024 * 1024);
+        let max_memory_bytes =
+            (config.advanced.memory_limit_mb as usize).saturating_mul(1024 * 1024);
 
         debug!(
             "Creating ReplayBuffer: {} seconds, {} MB max",
