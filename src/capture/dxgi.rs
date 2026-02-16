@@ -5,19 +5,12 @@
 use crate::capture::{CaptureBackend, CaptureConfig, CapturedFrame};
 use crate::d3d::D3D11Texture;
 use anyhow::{bail, Context, Result};
-use bytes::Bytes;
+use bytes::BytesMut;
 use crossbeam::channel::{bounded, Receiver, Sender};
-use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{spawn, JoinHandle};
 use std::time::Duration;
-
-thread_local! {
-    /// Reusable frame buffer to avoid per-frame allocations.
-    /// Capacity grows as needed and is reused for subsequent frames.
-    static FRAME_BUFFER: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
-}
 use tracing::{debug, error, info, warn};
 
 use windows::Win32::Graphics::Direct3D11::{
@@ -285,9 +278,6 @@ impl DxgiCapture {
                             .d3d_context
                             .CopyResource(Some(&staging_resource), Some(&captured_resource));
 
-                        // Flush to ensure copy completes
-                        state.d3d_context.Flush();
-
                         // Map staging texture for CPU readback
                         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
                         state
@@ -331,36 +321,32 @@ impl DxgiCapture {
                         let total_bytes = row_bytes * height;
                         let src_ptr = mapped.pData as *const u8;
 
-                        // Use thread-local buffer to avoid per-frame allocation
-                        let bgra = FRAME_BUFFER.with(|buf| {
-                            let mut buffer = buf.borrow_mut();
-                            buffer.resize(total_bytes, 0);
+                        let mut bgra_buffer = BytesMut::with_capacity(total_bytes);
+                        // SAFETY: We immediately and fully initialize the buffer below before freeze.
+                        bgra_buffer.set_len(total_bytes);
 
-                            // Optimization: use single memcpy when pitch matches (common case)
-                            // Otherwise fall back to row-by-row copy
-                            if src_pitch == row_bytes {
-                                // SAFETY: buffer has been resized to total_bytes, src_ptr is valid for total_bytes
-                                // as validated by bounds check above
+                        // Optimization: use single memcpy when pitch matches (common case)
+                        // Otherwise fall back to row-by-row copy.
+                        // SAFETY: src_ptr and destination pointer are valid for the copied ranges,
+                        // validated by bounds checks above and buffer sizing here.
+                        if src_pitch == row_bytes {
+                            std::ptr::copy_nonoverlapping(
+                                src_ptr,
+                                bgra_buffer.as_mut_ptr(),
+                                total_bytes,
+                            );
+                        } else {
+                            let dst_ptr = bgra_buffer.as_mut_ptr();
+                            for row in 0..height {
                                 std::ptr::copy_nonoverlapping(
-                                    src_ptr,
-                                    buffer.as_mut_ptr(),
-                                    total_bytes,
+                                    src_ptr.add(row * src_pitch),
+                                    dst_ptr.add(row * row_bytes),
+                                    row_bytes,
                                 );
-                            } else {
-                                // SAFETY: src_ptr is valid for total_src_bytes, dst_ptr is valid for total_bytes
-                                let dst_ptr = buffer.as_mut_ptr();
-                                for row in 0..height {
-                                    std::ptr::copy_nonoverlapping(
-                                        src_ptr.add(row * src_pitch),
-                                        dst_ptr.add(row * row_bytes),
-                                        row_bytes,
-                                    );
-                                }
                             }
+                        }
 
-                            // Convert to Bytes - copies into Arc-backed storage
-                            Bytes::copy_from_slice(&buffer)
-                        });
+                        let bgra = bgra_buffer.freeze();
 
                         state.d3d_context.Unmap(Some(&staging_resource), 0);
 
@@ -411,10 +397,10 @@ impl DxgiCapture {
     ) {
         info!("DXGI capture thread started: {} FPS", config.target_fps);
 
-        let frame_duration =
-            Duration::from_nanos(1_000_000_000u64 / config.target_fps.max(1) as u64);
-        // Use a short timeout so we don't block longer than one frame period
-        let timeout_ms = (frame_duration.as_millis() as u32).max(1);
+        // Use a timeout near one frame period (rounded up) so AcquireNextFrame can
+        // naturally pace capture without introducing an additional software sleep.
+        let timeout_ms = (1000u32 / config.target_fps.max(1)).max(1)
+            + u32::from(!1000u32.is_multiple_of(config.target_fps.max(1)));
         let mut frame_count = 0u64;
         let mut error_count = 0u32;
         let max_errors = 10;
@@ -431,8 +417,6 @@ impl DxgiCapture {
         info!("DXGI capture initialized and running");
 
         while running.load(Ordering::Relaxed) {
-            let start_time = std::time::Instant::now();
-
             // Try to capture a frame
             match Self::capture_frame(&mut state, timeout_ms) {
                 Ok(Some(frame)) => {
@@ -479,12 +463,6 @@ impl DxgiCapture {
                         }
                     }
                 }
-            }
-
-            // Maintain frame rate timing
-            let elapsed = start_time.elapsed();
-            if elapsed < frame_duration {
-                std::thread::sleep(frame_duration - elapsed);
             }
         }
 

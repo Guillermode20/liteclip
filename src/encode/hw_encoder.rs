@@ -127,6 +127,7 @@ fn resolve_ffmpeg_command() -> String {
 /// Base hardware encoder using FFmpeg CLI
 pub struct HardwareEncoderBase {
     config: EncoderConfig,
+    encoder_name: String,
     packet_rx: Receiver<EncodedPacket>,
     packet_tx: Sender<EncodedPacket>,
     frame_count: u64,
@@ -162,6 +163,7 @@ impl HardwareEncoderBase {
 
         Ok(Self {
             config: config.clone(),
+            encoder_name: encoder_name.to_string(),
             packet_rx,
             packet_tx,
             frame_count: 0,
@@ -176,8 +178,9 @@ impl HardwareEncoderBase {
     }
 
     /// Initialize the FFmpeg process with hardware encoder settings
-    fn init_ffmpeg(&mut self, width: u32, height: u32, encoder_name: &str) -> Result<()> {
+    fn init_ffmpeg(&mut self, width: u32, height: u32) -> Result<()> {
         let ffmpeg_cmd = resolve_ffmpeg_command();
+        let encoder_name = self.encoder_name.as_str();
 
         // Determine output resolution: use config if set, otherwise native
         let (out_w, out_h) = if !self.config.use_native_resolution
@@ -191,22 +194,49 @@ impl HardwareEncoderBase {
 
         // Build FFmpeg command based on encoder type
         let mut cmd = Command::new(&ffmpeg_cmd);
-        cmd.arg("-y")
-            // Input: raw BGRA video at native capture resolution
-            .arg("-f")
-            .arg("rawvideo")
-            .arg("-pix_fmt")
-            .arg("bgra")
-            .arg("-s")
-            .arg(format!("{}x{}", width, height))
-            .arg("-r")
-            .arg(self.config.framerate.to_string())
-            .arg("-i")
-            .arg("pipe:0");
+        cmd.arg("-y");
+
+        let mut video_filters: Vec<String> = Vec::new();
+
+        if self.config.use_cpu_readback {
+            // Push-model input from app capture thread.
+            cmd.arg("-f")
+                .arg("rawvideo")
+                .arg("-pix_fmt")
+                .arg("bgra")
+                .arg("-s")
+                .arg(format!("{}x{}", width, height))
+                .arg("-r")
+                .arg(self.config.framerate.to_string())
+                .arg("-i")
+                .arg("pipe:0");
+        } else {
+            // Pull-model input: FFmpeg captures desktop directly via ddagrab.
+            cmd.arg("-f")
+                .arg("lavfi")
+                .arg("-i")
+                .arg(format!(
+                    "ddagrab=output_idx={}:framerate={}",
+                    self.config.output_index, self.config.framerate
+                ));
+
+            // ddagrab frames are D3D11 hardware surfaces; AMF path needs download
+            // into system memory to avoid unsupported auto-scale graph initialization.
+            if matches!(
+                encoder_name,
+                "h264_amf" | "hevc_amf" | "av1_amf"
+            ) {
+                video_filters.push("hwdownload,format=bgra".to_string());
+            }
+        }
 
         // Scale inside FFmpeg when output differs from input
         if out_w != width || out_h != height {
-            cmd.arg("-vf").arg(format!("scale={}:{}", out_w, out_h));
+            video_filters.push(format!("scale={}:{}", out_w, out_h));
+        }
+
+        if !video_filters.is_empty() {
+            cmd.arg("-vf").arg(video_filters.join(","));
         }
 
         cmd
@@ -254,10 +284,14 @@ impl HardwareEncoderBase {
             .spawn()
             .with_context(|| format!("Failed to start FFmpeg ({})", encoder_name))?;
 
-        let stdin = child.stdin.take().context("Failed to take FFmpeg stdin")?;
+        let stdin = if self.config.use_cpu_readback {
+            Some(child.stdin.take().context("Failed to take FFmpeg stdin")?)
+        } else {
+            None
+        };
 
         self.ffmpeg_process = Some(child);
-        self.ffmpeg_stdin = Some(stdin);
+        self.ffmpeg_stdin = stdin;
         self.width = out_w;
         self.height = out_h;
 
@@ -548,8 +582,13 @@ impl HardwareEncoderBase {
         // If a smaller output is desired, FFmpeg scales internally via -vf.
         if self.ffmpeg_process.is_none() {
             let (native_w, native_h) = frame.resolution;
-            let encoder_name = self.config.ffmpeg_codec_name();
-            self.init_ffmpeg(native_w, native_h, encoder_name)?;
+            self.init_ffmpeg(native_w, native_h)?;
+        }
+
+        if !self.config.use_cpu_readback {
+            // Pull mode captures desktop in FFmpeg directly; no per-frame stdin writes.
+            self.frame_count += 1;
+            return Ok(());
         }
 
         // Write frame to FFmpeg stdin (always native resolution bytes)
@@ -702,6 +741,9 @@ impl Encoder for NvencEncoder {
     fn init(&mut self, config: &EncoderConfig) -> Result<()> {
         self.base.config = config.clone();
         self.base.running = true;
+        if !self.base.config.use_cpu_readback && self.base.ffmpeg_process.is_none() {
+            self.base.init_ffmpeg(0, 0)?;
+        }
         debug!("NVENC encoder initialized");
         Ok(())
     }
@@ -740,6 +782,9 @@ impl Encoder for AmfEncoder {
     fn init(&mut self, config: &EncoderConfig) -> Result<()> {
         self.base.config = config.clone();
         self.base.running = true;
+        if !self.base.config.use_cpu_readback && self.base.ffmpeg_process.is_none() {
+            self.base.init_ffmpeg(0, 0)?;
+        }
         debug!("AMF encoder initialized");
         Ok(())
     }
@@ -778,6 +823,9 @@ impl Encoder for QsvEncoder {
     fn init(&mut self, config: &EncoderConfig) -> Result<()> {
         self.base.config = config.clone();
         self.base.running = true;
+        if !self.base.config.use_cpu_readback && self.base.ffmpeg_process.is_none() {
+            self.base.init_ffmpeg(0, 0)?;
+        }
         debug!("QSV encoder initialized");
         Ok(())
     }

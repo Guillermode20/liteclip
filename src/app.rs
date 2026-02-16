@@ -7,7 +7,7 @@ use crate::{
     capture::{dxgi::DxgiCapture, CaptureBackend, CaptureConfig, CapturedFrame},
     clip::{spawn_clip_saver, MuxerConfig},
     config::Config,
-    encode::{spawn_encoder_with_receiver, EncoderConfig},
+    encode::{spawn_encoder, spawn_encoder_with_receiver, EncoderConfig},
 };
 use anyhow::{Context, Result};
 use crossbeam::channel::Receiver;
@@ -25,6 +25,25 @@ pub struct AppState {
 }
 
 impl AppState {
+    fn should_use_hardware_pull_mode(config: &Config) -> bool {
+        if config.advanced.use_cpu_readback {
+            return false;
+        }
+
+        match config.video.encoder {
+            crate::config::EncoderType::Nvenc => {
+                crate::encode::hw_encoder::check_encoder_available("h264_nvenc")
+            }
+            crate::config::EncoderType::Amf => {
+                crate::encode::hw_encoder::check_encoder_available("h264_amf")
+            }
+            crate::config::EncoderType::Qsv => {
+                crate::encode::hw_encoder::check_encoder_available("h264_qsv")
+            }
+            _ => false,
+        }
+    }
+
     /// Create new application state with given configuration
     pub fn new(config: Config) -> Result<Self> {
         let buffer = SharedReplayBuffer::new(&config)?;
@@ -47,9 +66,24 @@ impl AppState {
 
         info!("Starting recording pipeline...");
 
+        let encoder_config = EncoderConfig::from(&self.config);
+
+        if Self::should_use_hardware_pull_mode(&self.config) {
+            info!("Using hardware pull mode (FFmpeg desktop grab) - skipping app CPU readback capture");
+            let (encoder_handle, _unused_frame_tx) =
+                spawn_encoder(encoder_config, self.buffer.clone())
+                    .context("Failed to spawn pull-mode encoder")?;
+            self.encoder_handle = Some(encoder_handle);
+            self.capture = None;
+            self.is_recording = true;
+            info!("Recording pipeline started (encoder pull mode)");
+            return Ok(());
+        }
+
         // Create and start capture first
         let mut capture = DxgiCapture::new().context("Failed to create DXGI capture")?;
         let capture_config = CaptureConfig::from(&self.config);
+
         capture
             .start(capture_config)
             .context("Failed to start capture")?;
@@ -58,9 +92,13 @@ impl AppState {
         let frame_rx: Receiver<CapturedFrame> = capture.frame_rx();
 
         // Initialize encoder with the capture's frame receiver
-        let encoder_config = EncoderConfig::from(&self.config);
+        let mut capture_encoder_config = encoder_config;
+        // This pipeline provides captured frames via frame_rx, so encoder must
+        // consume pushed BGRA frames (not FFmpeg desktop pull mode).
+        capture_encoder_config.use_cpu_readback = true;
+
         let encoder_handle =
-            spawn_encoder_with_receiver(encoder_config, self.buffer.clone(), frame_rx)
+            spawn_encoder_with_receiver(capture_encoder_config, self.buffer.clone(), frame_rx)
                 .context("Failed to spawn encoder")?;
 
         self.encoder_handle = Some(encoder_handle);
@@ -88,7 +126,14 @@ impl AppState {
 
         // Wait for encoder thread to finish
         if let Some(handle) = self.encoder_handle.take() {
-            match handle.thread.join() {
+            let crate::encode::EncoderHandle {
+                thread,
+                frame_tx,
+                packet_rx: _,
+            } = handle;
+            drop(frame_tx);
+
+            match thread.join() {
                 Ok(_) => info!("Encoder thread stopped successfully"),
                 Err(e) => error!("Encoder thread panicked: {:?}", e),
             }
@@ -177,7 +222,14 @@ impl Drop for AppState {
             // Clean shutdown attempt in blocking context
             drop(self.capture.take());
             if let Some(handle) = self.encoder_handle.take() {
-                match handle.thread.join() {
+                let crate::encode::EncoderHandle {
+                    thread,
+                    frame_tx,
+                    packet_rx: _,
+                } = handle;
+                drop(frame_tx);
+
+                match thread.join() {
                     Ok(_) => {}
                     Err(e) => warn!("Encoder thread panicked during drop: {:?}", e),
                 }

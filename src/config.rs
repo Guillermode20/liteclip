@@ -21,6 +21,8 @@ pub struct Config {
     pub advanced: AdvancedConfig,
 }
 
+const MAX_FRAMERATE: u32 = 240;
+
 /// General application settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GeneralConfig {
@@ -218,6 +220,12 @@ impl Config {
         if self.video.framerate == 0 {
             warn!("Config: framerate was 0, clamping to 30");
             self.video.framerate = 30;
+        } else if self.video.framerate > MAX_FRAMERATE {
+            warn!(
+                "Config: framerate was {}, clamping to {}",
+                self.video.framerate, MAX_FRAMERATE
+            );
+            self.video.framerate = MAX_FRAMERATE;
         }
 
         // Memory limit must be in a sane range
@@ -489,5 +497,14 @@ mod tests {
 
         config.validate();
         assert_eq!(config.video.quality_value, Some(19));
+    }
+
+    #[test]
+    fn test_validate_framerate_upper_clamp() {
+        let mut config = Config::default();
+        config.video.framerate = 1000;
+
+        config.validate();
+        assert_eq!(config.video.framerate, MAX_FRAMERATE);
     }
 }

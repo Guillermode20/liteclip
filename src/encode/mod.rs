@@ -38,6 +38,8 @@ pub struct EncoderConfig {
     pub keyframe_interval_secs: u32,
     /// Force CPU readback path (Phase 1 fallback)
     pub use_cpu_readback: bool,
+    /// Desktop output index for capture/desktop-grab input selection
+    pub output_index: u32,
 }
 
 impl From<&crate::config::Config> for EncoderConfig {
@@ -61,6 +63,7 @@ impl From<&crate::config::Config> for EncoderConfig {
             quality_value: config.video.quality_value,
             keyframe_interval_secs: config.advanced.keyframe_interval_secs,
             use_cpu_readback: config.advanced.use_cpu_readback,
+            output_index: config.advanced.gpu_index,
         }
     }
 }
@@ -87,6 +90,7 @@ impl EncoderConfig {
             quality_value: None,
             keyframe_interval_secs,
             use_cpu_readback: false,
+            output_index: 0,
         }
     }
 
@@ -388,13 +392,14 @@ pub fn spawn_encoder(
                 buffer.push(packet);
             }
 
-            match frame_rx.recv() {
+            match frame_rx.recv_timeout(std::time::Duration::from_millis(10)) {
                 Ok(frame) => {
                     if let Err(e) = encoder.encode_frame(&frame) {
                         warn!("Failed to encode frame: {}", e);
                     }
                 }
-                Err(_) => {
+                Err(crossbeam::channel::RecvTimeoutError::Timeout) => {}
+                Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
                     debug!("Frame channel closed, shutting down encoder");
                     break;
                 }
@@ -465,13 +470,14 @@ pub fn spawn_encoder_with_receiver(
                 buffer.push(packet);
             }
 
-            match frame_rx.recv() {
+            match frame_rx.recv_timeout(std::time::Duration::from_millis(10)) {
                 Ok(frame) => {
                     if let Err(e) = encoder.encode_frame(&frame) {
                         warn!("Failed to encode frame: {}", e);
                     }
                 }
-                Err(_) => {
+                Err(crossbeam::channel::RecvTimeoutError::Timeout) => {}
+                Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
                     debug!("Frame channel closed, shutting down encoder");
                     break;
                 }
