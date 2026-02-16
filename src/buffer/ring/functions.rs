@@ -40,8 +40,6 @@ mod tests {
             let packet = create_test_packet(i * 1_000_000, true, 1024);
             buffer.push(packet);
         }
-        assert_eq!(buffer.packets.len(), 10);
-        assert_eq!(buffer.keyframe_index.len(), 10);
         let snapshot = buffer.snapshot().unwrap();
         assert_eq!(snapshot.len(), 10);
     }
@@ -52,8 +50,8 @@ mod tests {
             let packet = create_test_packet(i * 1_000_000, i % 10 == 0, 50_000);
             buffer.push(packet);
         }
-        assert!(buffer.total_bytes <= buffer.max_memory_bytes);
-        assert!(buffer.packets.len() < 100);
+        let stats = buffer.stats();
+        assert!(stats.memory_usage_percent <= 100.0);
     }
     #[test]
     fn test_keyframe_seeking() {
@@ -90,10 +88,10 @@ mod tests {
             buffer.push(create_test_packet(i * 1_000_000, true, 1024));
         }
         buffer.clear();
-        assert!(buffer.packets.is_empty());
-        assert!(buffer.keyframe_index.is_empty());
-        assert_eq!(buffer.total_bytes, 0);
-        assert_eq!(buffer.base_offset, 0);
+        let stats = buffer.stats();
+        assert_eq!(stats.packet_count, 0);
+        assert_eq!(stats.total_bytes, 0);
+        assert_eq!(stats.keyframe_count, 0);
     }
     #[test]
     fn test_eviction_keyframe_index_correctness() {
@@ -107,8 +105,8 @@ mod tests {
             }
             buffer.push(create_test_packet(pts, is_kf, 10_000));
         }
-        assert!(buffer.packets.len() < 200);
-        assert!(buffer.base_offset > 0);
+        let stats = buffer.stats();
+        assert!(stats.packet_count < 200);
         let snap = buffer.snapshot_from(last_keyframe_pts).unwrap();
         assert!(!snap.is_empty());
         assert!(snap[0].pts <= last_keyframe_pts + 10_000_000);

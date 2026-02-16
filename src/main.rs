@@ -7,21 +7,22 @@ use anyhow::Result;
 use liteclip_replay::{app::AppState, config::Config};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize tracing subscriber for logging (WARN level to reduce noise)
+    // Initialize compact logger: short, readable output with INFO as default.
     tracing_subscriber::fmt()
+        .compact()
         .with_target(false)
-        .with_timer(tracing_subscriber::fmt::time::time())
+        .without_time()
         .with_level(true)
         .with_max_level(tracing::Level::INFO)
         .init();
 
     let version = env!("CARGO_PKG_VERSION");
     println!("LiteClip Replay v{}", version);
-    info!("LiteClip Replay v{} starting...", version);
+    info!("LiteClip Replay {} starting", version);
 
     #[cfg(not(feature = "ffmpeg"))]
     warn!(
@@ -32,7 +33,7 @@ async fn main() -> Result<()> {
     let mut config = match Config::load().await {
         Ok(cfg) => {
             let config_path = Config::config_path()?;
-            info!("Loaded config from {:?}", config_path);
+            info!("Loaded config: {:?}", config_path);
             cfg
         }
         Err(e) => {
@@ -46,7 +47,7 @@ async fn main() -> Result<()> {
 
     // Log configuration summary
     info!(
-        "Configuration: {}s buffer @ {} Mbps, {} FPS, codec={:?}, encoder={:?}, quality_preset={:?}, rate_control={:?}, quality_value={:?}",
+        "Config: {}s @ {} Mbps, {} FPS, codec={:?}, encoder={:?}, preset={:?}, rc={:?}, q={:?}",
         config.general.replay_duration_secs,
         config.video.bitrate_mbps,
         config.video.framerate,
@@ -66,10 +67,9 @@ async fn main() -> Result<()> {
         liteclip_replay::platform::spawn_platform_thread(hotkey_config)?;
 
     info!(
-        "Hotkeys registered: {} (save), {} (toggle) | Press {} to save clip",
-        config.hotkeys.save_clip, config.hotkeys.toggle_recording, config.hotkeys.save_clip
+        "Hotkeys: save={} toggle={} (Ctrl+C exits)",
+        config.hotkeys.save_clip, config.hotkeys.toggle_recording
     );
-    info!("Press Ctrl+C to exit.");
 
     // Initialize recording
     {
@@ -119,11 +119,11 @@ async fn main() -> Result<()> {
                             liteclip_replay::platform::AppEvent::Hotkey(action) => {
                                 match action {
                                     liteclip_replay::platform::HotkeyAction::SaveClip => {
-                                        info!("Hotkey triggered: SaveClip");
+                                        info!("Hotkey: save clip");
                                         let state = app_state.read().await;
                                         match state.save_clip().await {
                                             Ok(path) => {
-                                                debug!("Clip saved to: {:?}", path);
+                                                info!("Clip saved: {:?}", path);
                                             }
                                             Err(e) => {
                                                 error!("Failed to save clip: {:#}", e);
@@ -131,7 +131,7 @@ async fn main() -> Result<()> {
                                         }
                                     }
                                     liteclip_replay::platform::HotkeyAction::ToggleRecording => {
-                                        info!("Hotkey triggered: ToggleRecording");
+                                        info!("Hotkey: toggle recording");
                                         let mut state = app_state.write().await;
                                         if state.is_recording() {
                                             if let Err(e) = state.stop_recording().await {
@@ -164,14 +164,14 @@ async fn main() -> Result<()> {
 
             // Handle Ctrl+C
             _ = tokio::signal::ctrl_c() => {
-                info!("Ctrl+C received, shutting down...");
+                info!("Ctrl+C received");
                 break;
             }
         }
     }
 
     // Cleanup
-    info!("Shutting down...");
+    info!("Shutting down");
     {
         let mut state = app_state.write().await;
         if let Err(e) = state.stop_recording().await {
@@ -180,7 +180,7 @@ async fn main() -> Result<()> {
     }
 
     platform_handle.join().ok();
-    info!("LiteClip Replay stopped.");
+    info!("LiteClip Replay stopped");
 
     Ok(())
 }

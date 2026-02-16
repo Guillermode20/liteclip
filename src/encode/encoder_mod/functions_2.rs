@@ -4,7 +4,7 @@
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::super::types::{EncodedPacket, EncoderConfig, HardwareEncoder, StreamType};
     #[test]
     fn test_encoder_config_codec_names() {
         let mut config = EncoderConfig::new(

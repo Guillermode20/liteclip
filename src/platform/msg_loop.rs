@@ -47,7 +47,7 @@ pub fn spawn_platform_thread(
 ///
 /// Creates hidden window, registers hotkeys, and processes Win32 messages
 fn run_platform_loop(event_tx: Sender<AppEvent>, hotkey_config: HotkeyConfig) -> Result<()> {
-    info!("Starting platform message loop");
+    debug!("Starting platform message loop");
 
     let hwnd = create_hidden_window()?;
 
@@ -56,7 +56,7 @@ fn run_platform_loop(event_tx: Sender<AppEvent>, hotkey_config: HotkeyConfig) ->
         error!("Failed to register hotkeys: {}", e);
     }
 
-    info!(
+    debug!(
         "Hidden window created (hwnd: {:?}), hotkeys registered",
         hwnd
     );

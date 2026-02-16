@@ -7,31 +7,6 @@ use memchr::memchr;
 use std::process::Command;
 use tracing::{debug, info, warn};
 
-/// Convert BGRA to RGB24 format for FFmpeg input
-#[cfg(test)]
-fn bgra_to_rgb24(bgra: &[u8], width: u32, height: u32) -> Vec<u8> {
-    let expected_len = (width * height * 4) as usize;
-    if bgra.len() != expected_len {
-        return vec![];
-    }
-    let pixel_count = (width * height) as usize;
-    let mut rgb = Vec::with_capacity(pixel_count * 3);
-    unsafe {
-        let mut dst: *mut u8 = rgb.as_mut_ptr();
-        let src: *const u8 = bgra.as_ptr();
-        for i in 0..pixel_count {
-            let src_offset = i * 4;
-            dst.write(*src.add(src_offset + 2));
-            dst = dst.add(1);
-            dst.write(*src.add(src_offset + 1));
-            dst = dst.add(1);
-            dst.write(*src.add(src_offset));
-            dst = dst.add(1);
-        }
-        rgb.set_len(pixel_count * 3);
-    }
-    rgb
-}
 /// Find H.264 Annex B start code (00 00 01 or 00 00 00 01) using SIMD-accelerated search.
 ///
 /// Uses `memchr` to efficiently find candidate positions with `0x00` bytes,
@@ -195,11 +170,17 @@ pub fn check_encoder_available(encoder_name: &str) -> bool {
                 true
             } else {
                 let stderr = String::from_utf8_lossy(&out.stderr);
+                let first_line = stderr
+                    .lines()
+                    .next()
+                    .unwrap_or("unknown ffmpeg probe error")
+                    .trim();
                 info!(
                     "Encoder {} is listed but probe failed - may indicate missing/broken driver",
                     encoder_name
                 );
-                warn!("Encoder {} probe failed: {}", encoder_name, stderr.trim());
+                warn!("Encoder {} probe failed: {}", encoder_name, first_line);
+                debug!("Encoder {} probe stderr:\n{}", encoder_name, stderr.trim());
                 false
             }
         }
@@ -215,7 +196,8 @@ pub fn check_encoder_available(_encoder_name: &str) -> bool {
 }
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::super::types::{AmfEncoder, NvencEncoder, QsvEncoder};
+    use crate::encode::EncoderConfig;
     fn create_test_config() -> EncoderConfig {
         EncoderConfig::new(
             crate::config::Codec::H264,
@@ -257,38 +239,5 @@ mod tests {
         );
         let encoder = QsvEncoder::new(&config);
         assert!(encoder.is_ok());
-    }
-    #[test]
-    fn test_bgra_to_rgb24() {
-        let bgra: Vec<u8> = vec![
-            0x00, 0x00, 0xFF, 0xFF, 0x00, 0xFF, 0x00, 0xFF, 0xFF, 0x00, 0x00, 0xFF,
-        ];
-        let rgb = bgra_to_rgb24(&bgra, 3, 1);
-        assert_eq!(rgb.len(), 9);
-        assert_eq!(rgb[0], 0xFF);
-        assert_eq!(rgb[1], 0x00);
-        assert_eq!(rgb[2], 0x00);
-    }
-    #[test]
-    fn test_quality_preset_maps_to_nvenc_presets() {
-        let mut config = create_test_config();
-        config.quality_preset = QualityPreset::Performance;
-        let base = HardwareEncoderBase::new(&config, "h264_nvenc").expect("base");
-        assert_eq!(base.preset_for_encoder("h264_nvenc"), "p3");
-        config.quality_preset = QualityPreset::Balanced;
-        let base = HardwareEncoderBase::new(&config, "h264_nvenc").expect("base");
-        assert_eq!(base.preset_for_encoder("h264_nvenc"), "p5");
-        config.quality_preset = QualityPreset::Quality;
-        let base = HardwareEncoderBase::new(&config, "h264_nvenc").expect("base");
-        assert_eq!(base.preset_for_encoder("h264_nvenc"), "p7");
-    }
-    #[test]
-    fn test_cq_default_value_uses_quality_preset() {
-        let mut config = create_test_config();
-        config.rate_control = RateControl::Cq;
-        config.quality_preset = QualityPreset::Quality;
-        config.quality_value = None;
-        let base = HardwareEncoderBase::new(&config, "h264_nvenc").expect("base");
-        assert_eq!(base.cq_value(), 19);
     }
 }

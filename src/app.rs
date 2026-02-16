@@ -78,7 +78,8 @@ impl AppState {
 
         let audio_packet_rx = audio_manager.packet_rx();
         let buffer_clone = self.buffer.clone();
-        let context = context.to_string();
+        let context_label = context.to_string();
+        let context_for_thread = context_label.clone();
 
         std::thread::spawn(move || {
             let mut forwarded_packets = 0u64;
@@ -89,7 +90,7 @@ impl AppState {
                 if forwarded_packets == 1 {
                     debug!(
                         "Forwarded first audio packet to replay buffer ({})",
-                        context
+                        context_for_thread
                     );
                 } else if forwarded_packets % 500 == 0 {
                     debug!(
@@ -101,7 +102,7 @@ impl AppState {
         });
 
         self.audio_manager = Some(audio_manager);
-        debug!("Audio capture started");
+        info!("Audio capture started ({})", context_label);
         Ok(())
     }
 
@@ -112,12 +113,12 @@ impl AppState {
             return Ok(());
         }
 
-        info!("Starting recording pipeline...");
+        info!("Recording: starting pipeline");
 
         let encoder_config = EncoderConfig::from(&self.config);
 
         if Self::should_use_hardware_pull_mode(&self.config) {
-            info!("Using hardware pull mode (FFmpeg desktop grab) - skipping app CPU readback capture");
+            info!("Recording mode: hardware pull (FFmpeg desktop grab)");
             let (encoder_handle, _unused_frame_tx) =
                 spawn_encoder(encoder_config, self.buffer.clone())
                     .context("Failed to spawn pull-mode encoder")?;
@@ -127,7 +128,7 @@ impl AppState {
             self.encoder_handle = Some(encoder_handle);
             self.capture = None;
             self.is_recording = true;
-            info!("Recording pipeline started (encoder pull mode)");
+            info!("Recording started");
             return Ok(());
         }
 
@@ -159,7 +160,8 @@ impl AppState {
         self.capture = Some(capture);
         self.is_recording = true;
 
-        info!("Recording pipeline started (capture + encoder + audio)");
+        info!("Recording mode: capture + encoder + audio");
+        info!("Recording started");
 
         Ok(())
     }
@@ -170,18 +172,18 @@ impl AppState {
             return Ok(());
         }
 
-        info!("Stopping recording pipeline...");
+        info!("Recording: stopping pipeline");
 
         // Stop audio capture first
         if let Some(audio_manager) = self.audio_manager.take() {
             drop(audio_manager); // This calls stop() via Drop
-            info!("Audio capture stopped");
+            debug!("Audio capture stopped");
         }
 
         // Stop video capture (signals encoder to stop via channel close)
         if let Some(capture) = self.capture.take() {
             drop(capture); // This calls stop() via Drop
-            info!("Video capture stopped");
+            debug!("Video capture stopped");
         }
 
         // Wait for encoder thread to finish
@@ -200,13 +202,13 @@ impl AppState {
         }
 
         self.is_recording = false;
-        info!("Recording pipeline stopped");
+        info!("Recording stopped");
         Ok(())
     }
 
     /// Save the current buffer contents to a clip
     pub async fn save_clip(&self) -> Result<PathBuf> {
-        info!("Saving clip...");
+        info!("Clip: saving replay buffer");
 
         let output_path = self.generate_output_path()?;
 
@@ -234,7 +236,7 @@ impl AppState {
         let result = handle.await.context("Clip saver task panicked")?;
         let final_path = result?;
 
-        debug!("Clip saved to: {:?}", final_path);
+        info!("Clip: save complete ({:?})", final_path);
         Ok(final_path)
     }
 

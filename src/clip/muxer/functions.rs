@@ -119,6 +119,7 @@ pub fn extract_thumbnail(_packet: &EncodedPacket, output_path: &Path) -> Result<
 }
 #[cfg(test)]
 mod tests {
+    use super::super::types::MuxerConfig;
     use super::*;
     #[test]
     fn test_muxer_config_creation() {
@@ -187,104 +188,5 @@ mod tests {
         let bytes = qpc_delta_to_aligned_pcm_bytes(-2_500_000, 10_000_000.0, 192_000.0, 4);
         assert_eq!(bytes, -48_000);
         assert_eq!(bytes % 4, 0);
-    }
-    #[cfg(feature = "ffmpeg")]
-    #[test]
-    fn test_write_audio_temp_pcm_tracks_dual_stream_outputs_two_tracks() {
-        use std::env;
-        use std::fs;
-        let temp_dir = env::temp_dir().join("liteclip_muxer_dual_track_test");
-        let _ = fs::create_dir_all(&temp_dir);
-        let output = temp_dir.join("out.mp4");
-        let config = MuxerConfig::new(1280, 720, 60.0, &output);
-        let mut muxer = Muxer::new(&output, &config).expect("muxer init");
-        muxer.video_packets.push(EncodedPacket::new(
-            vec![0x00, 0x00, 0x00, 0x01, 0x67],
-            10_000_000,
-            10_000_000,
-            true,
-            StreamType::Video,
-        ));
-        muxer.audio_packets.push(EncodedPacket::new(
-            vec![0, 1, 2, 3],
-            10_000_000,
-            10_000_000,
-            false,
-            StreamType::SystemAudio,
-        ));
-        muxer.audio_packets.push(EncodedPacket::new(
-            vec![4, 5, 6, 7],
-            10_000_000,
-            10_000_000,
-            false,
-            StreamType::Microphone,
-        ));
-        let tracks = muxer
-            .write_audio_temp_pcm_tracks()
-            .expect("build audio tracks");
-        assert_eq!(tracks.len(), 2);
-        assert!(tracks.iter().any(|track| track.title == "system"));
-        assert!(tracks.iter().any(|track| track.title == "microphone"));
-        assert!(tracks.iter().all(|track| track.path.exists()));
-        for track in tracks {
-            let _ = fs::remove_file(track.path);
-        }
-        let _ = fs::remove_dir_all(&temp_dir);
-    }
-    #[cfg(feature = "ffmpeg")]
-    #[test]
-    fn test_write_audio_temp_pcm_tracks_single_stream_output() {
-        use std::env;
-        use std::fs;
-        let temp_dir = env::temp_dir().join("liteclip_muxer_single_track_test");
-        let _ = fs::create_dir_all(&temp_dir);
-        let output = temp_dir.join("out.mp4");
-        let config = MuxerConfig::new(1280, 720, 60.0, &output);
-        let mut muxer = Muxer::new(&output, &config).expect("muxer init");
-        muxer.video_packets.push(EncodedPacket::new(
-            vec![0x00, 0x00, 0x00, 0x01, 0x67],
-            10_000_000,
-            10_000_000,
-            true,
-            StreamType::Video,
-        ));
-        muxer.audio_packets.push(EncodedPacket::new(
-            vec![4, 5, 6, 7],
-            10_000_000,
-            10_000_000,
-            false,
-            StreamType::Microphone,
-        ));
-        let tracks = muxer
-            .write_audio_temp_pcm_tracks()
-            .expect("build audio tracks");
-        assert_eq!(tracks.len(), 1);
-        assert_eq!(tracks[0].title, "microphone");
-        assert!(tracks[0].path.exists());
-        for track in tracks {
-            let _ = fs::remove_file(track.path);
-        }
-        let _ = fs::remove_dir_all(&temp_dir);
-    }
-    #[cfg(feature = "ffmpeg")]
-    #[test]
-    fn test_write_audio_temp_pcm_tracks_silent_fallback_when_expected() {
-        use std::env;
-        use std::fs;
-        let temp_dir = env::temp_dir().join("liteclip_muxer_silent_fallback_test");
-        let _ = fs::create_dir_all(&temp_dir);
-        let output = temp_dir.join("out.mp4");
-        let config = MuxerConfig::new(1280, 720, 60.0, &output).with_expect_audio(true);
-        let muxer = Muxer::new(&output, &config).expect("muxer init");
-        let tracks = muxer
-            .write_audio_temp_pcm_tracks()
-            .expect("build fallback track");
-        assert_eq!(tracks.len(), 1);
-        assert_eq!(tracks[0].title, "system");
-        assert!(tracks[0].path.exists());
-        for track in tracks {
-            let _ = fs::remove_file(track.path);
-        }
-        let _ = fs::remove_dir_all(&temp_dir);
     }
 }

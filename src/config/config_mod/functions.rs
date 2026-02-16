@@ -95,6 +95,7 @@ pub(super) fn default_overlay_position() -> OverlayPosition {
 
 #[cfg(test)]
 mod tests {
+    use super::super::types::Config;
     use super::*;
     #[test]
     fn test_default_config() {

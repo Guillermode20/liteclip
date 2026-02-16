@@ -15,16 +15,16 @@ use super::functions::qpc_frequency;
 /// In-memory ring buffer for encoded packets
 pub struct ReplayBuffer {
     /// Packet queue (oldest at front)
-    packets: VecDeque<EncodedPacket>,
+    pub(crate) packets: VecDeque<EncodedPacket>,
     /// Target duration
     duration: Duration,
     /// Max memory budget in bytes
     max_memory_bytes: usize,
     /// Keyframe index: VecDeque of (pts, relative_index) pairs for O(1) front/back ops
     /// relative_index is the index within the current packets VecDeque
-    keyframe_index: VecDeque<(i64, usize)>,
+    pub(crate) keyframe_index: VecDeque<(i64, usize)>,
     /// Total bytes currently stored
-    total_bytes: usize,
+    pub(crate) total_bytes: usize,
 }
 impl ReplayBuffer {
     /// Create new replay buffer from configuration

@@ -251,22 +251,20 @@ impl HardwareEncoderBase {
         cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
-        if enabled!(Level::INFO) {
+        if enabled!(Level::DEBUG) {
             let args: Vec<String> = std::iter::once(ffmpeg_cmd.clone())
                 .chain(cmd.get_args().map(|s| s.to_string_lossy().to_string()))
                 .collect();
-            info!("FFmpeg command: {}", args.join(" "));
+            debug!("FFmpeg command: {}", args.join(" "));
         }
-        info!("Spawning FFmpeg process...");
         let mut child = cmd
             .spawn()
             .with_context(|| format!("Failed to start FFmpeg ({})", encoder_name))?;
-        info!("FFmpeg process spawned successfully");
         let stdin = if self.config.use_cpu_readback {
-            info!("Capturing FFmpeg stdin for CPU readback mode");
+            debug!("FFmpeg stdin captured (CPU readback mode)");
             Some(child.stdin.take().context("Failed to take FFmpeg stdin")?)
         } else {
-            info!("Skipping stdin capture (ddagrab mode)");
+            debug!("FFmpeg stdin not used (desktop-grab mode)");
             None
         };
         self.width = out_w;
@@ -301,7 +299,7 @@ impl HardwareEncoderBase {
         ));
 
         info!(
-            "FFmpeg {} encoder initialized: {}x{} @ {} FPS",
+            "Encoder ready: {} {}x{} @ {} FPS",
             encoder_name, width, height, self.config.framerate
         );
         Ok(())
@@ -454,7 +452,7 @@ impl HardwareEncoderBase {
     ) -> thread::JoinHandle<()> {
         let qpc_freq = qpc_frequency();
         thread::spawn(move || {
-            info!("FFmpeg output reader thread started");
+            debug!("FFmpeg output reader started");
             use std::cell::Cell;
             use std::io::Read;
             let mut reader = std::io::BufReader::new(stdout);
@@ -466,12 +464,13 @@ impl HardwareEncoderBase {
             let total_packets = Cell::new(0u64);
             let mut last_log_time = Instant::now();
             let mut bytes_received = 0u64;
+            let mut frame_nals_seen = 0u64;
 
             // Helper function to process a NAL unit
-            let process_nal = |nal_data: bytes::Bytes,
-                               is_last: bool,
-                               last_pts: &mut i64,
-                               frame_meta_rx: &Receiver<FrameMetadata>|
+            let mut process_nal = |nal_data: bytes::Bytes,
+                                   is_last: bool,
+                                   last_pts: &mut i64,
+                                   frame_meta_rx: &Receiver<FrameMetadata>|
              -> bool {
                 if nal_data.is_empty() {
                     return true;
@@ -479,6 +478,9 @@ impl HardwareEncoderBase {
                 let nal_type = h264_nal_type(&nal_data);
                 let is_keyframe = matches!(nal_type, Some(5 | 7 | 8));
                 let is_frame_nal = matches!(nal_type, Some(1 | 5));
+                if is_frame_nal {
+                    frame_nals_seen = frame_nals_seen.saturating_add(1);
+                }
 
                 let count = total_packets.get() + 1;
                 total_packets.set(count);
@@ -558,7 +560,7 @@ impl HardwareEncoderBase {
                         }
 
                         // Periodic logging
-                        if last_log_time.elapsed() >= Duration::from_secs(10) {
+                        if last_log_time.elapsed() >= Duration::from_secs(15) {
                             let count = total_packets.get();
                             debug!(
                                 "FFmpeg output reader: {} bytes received, {} packets created, {} bytes in buffer",
@@ -766,20 +768,38 @@ impl HardwareEncoderBase {
             }
             let count = total_packets.get();
             info!(
-                "FFmpeg output reader thread exiting: {} bytes received, {} packets created",
-                bytes_received, count
+                "Encoder output closed: {} bytes, {} packets, {} frame NALs",
+                bytes_received, count, frame_nals_seen
             );
         })
     }
     /// Spawn thread to read FFmpeg stderr for debugging — returns JoinHandle for cleanup
     fn spawn_stderr_reader(&self, stderr: std::process::ChildStderr) -> thread::JoinHandle<()> {
         thread::spawn(move || {
-            info!("FFmpeg stderr reader thread started");
+            debug!("FFmpeg stderr reader started");
             let reader = BufReader::new(stderr);
             for line in reader.lines().map_while(Result::ok) {
-                info!("[FFmpeg stderr] {}", line);
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+
+                let lower = trimmed.to_ascii_lowercase();
+                let is_error = lower.contains("error")
+                    || lower.contains("failed")
+                    || lower.contains("cannot")
+                    || lower.contains("invalid");
+                let is_progress = trimmed.starts_with("frame=");
+
+                if is_error {
+                    warn!("ffmpeg: {}", trimmed);
+                } else if is_progress {
+                    info!("ffmpeg progress: {}", trimmed);
+                } else {
+                    debug!("ffmpeg: {}", trimmed);
+                }
             }
-            info!("FFmpeg stderr reader thread exiting");
+            debug!("FFmpeg stderr reader stopped");
         })
     }
     /// Encode a single frame
@@ -813,8 +833,8 @@ impl HardwareEncoderBase {
                     .write_all(data)
                     .context("Failed to write frame to FFmpeg stdin")?;
                 self.frame_count += 1;
-                if self.frame_count <= 10 || self.frame_count % 60 == 0 {
-                    info!(
+                if self.frame_count == 1 || self.frame_count % 600 == 0 {
+                    debug!(
                         "Sent frame {} to FFmpeg ({} bytes)",
                         self.frame_count,
                         data.len()
