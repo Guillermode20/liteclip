@@ -2,7 +2,7 @@
 //!
 //! Dedicated thread with GetMessage/DispatchMessage pump for hotkeys and tray.
 
-use super::{AppEvent, HotkeyAction, HotkeyConfig};
+use super::{AppEvent, HotkeyAction, HotkeyConfig, PlatformCommand, PlatformHandle};
 use anyhow::{Context, Result};
 use crossbeam::channel::{Receiver, Sender};
 use tracing::{debug, error, info, trace};
@@ -17,6 +17,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_HOTKEY, WNDCLASSW, WS_EX_NOACTIVATE, WS_OVERLAPPED,
 };
 
+use super::tray::TrayManager;
+
 const CLASS_NAME: &str = "LiteClipReplay_HiddenWindow";
 
 /// Hotkey ID constants - unique IDs for each hotkey
@@ -27,29 +29,52 @@ const HOTKEY_ID_OPEN_GALLERY: i32 = 1003;
 
 /// Spawn the platform thread with message loop
 ///
-/// Creates a hidden window, registers hotkeys, and runs the Win32 message pump
+/// Creates a hidden window, registers hotkeys and tray icon, and runs the Win32 message pump
 /// in a dedicated thread. Events are sent to the main thread via crossbeam channel.
 pub fn spawn_platform_thread(
     hotkey_config: HotkeyConfig,
-) -> Result<(std::thread::JoinHandle<()>, Receiver<AppEvent>)> {
+) -> Result<(PlatformHandle, Receiver<AppEvent>)> {
     let (event_tx, event_rx) = crossbeam::channel::unbounded::<AppEvent>();
+    let (command_tx, command_rx) = crossbeam::channel::unbounded::<PlatformCommand>();
 
     let handle = std::thread::spawn(move || {
-        if let Err(e) = run_platform_loop(event_tx, hotkey_config) {
+        if let Err(e) = run_platform_loop(event_tx, command_rx, hotkey_config) {
             error!("Platform message loop error: {}", e);
         }
     });
 
-    Ok((handle, event_rx))
+    let platform_handle = PlatformHandle::new(handle, command_tx);
+
+    Ok((platform_handle, event_rx))
 }
 
 /// Run the platform message loop
 ///
-/// Creates hidden window, registers hotkeys, and processes Win32 messages
-fn run_platform_loop(event_tx: Sender<AppEvent>, hotkey_config: HotkeyConfig) -> Result<()> {
+/// Creates hidden window, registers hotkeys and tray, and processes Win32 messages
+fn run_platform_loop(
+    event_tx: Sender<AppEvent>,
+    command_rx: Receiver<PlatformCommand>,
+    hotkey_config: HotkeyConfig,
+) -> Result<()> {
     debug!("Starting platform message loop");
 
     let hwnd = create_hidden_window()?;
+
+    // Create tray manager
+    let mut tray_manager: Option<TrayManager> = None;
+    match TrayManager::new(hwnd) {
+        Ok(mut tm) => {
+            if let Err(e) = tm.add_icon() {
+                error!("Failed to add tray icon: {}", e);
+            } else {
+                info!("System tray icon initialized");
+                tray_manager = Some(tm);
+            }
+        }
+        Err(e) => {
+            error!("Failed to create tray manager: {}", e);
+        }
+    }
 
     // Register hotkeys from config
     if let Err(e) = super::hotkeys::register_hotkeys(hwnd, &hotkey_config) {
@@ -57,14 +82,47 @@ fn run_platform_loop(event_tx: Sender<AppEvent>, hotkey_config: HotkeyConfig) ->
     }
 
     debug!(
-        "Hidden window created (hwnd: {:?}), hotkeys registered",
+        "Hidden window created (hwnd: {:?}), hotkeys and tray registered",
         hwnd
     );
 
     let mut msg = MSG::default();
     unsafe {
         // Message pump - GetMessageW blocks until a message is available
-        while GetMessageW(&mut msg, HWND::default(), 0, 0).as_bool() {
+        loop {
+            // Check for commands from the main thread (non-blocking)
+            if let Ok(cmd) = command_rx.try_recv() {
+                match cmd {
+                    PlatformCommand::ReRegisterHotkeys(new_config) => {
+                        info!("Re-registering hotkeys with new configuration");
+                        if let Err(e) = super::hotkeys::unregister_all_hotkeys(hwnd) {
+                            error!("Failed to unregister old hotkeys: {}", e);
+                        }
+                        if let Err(e) = super::hotkeys::register_hotkeys(hwnd, &new_config) {
+                            error!("Failed to register new hotkeys: {}", e);
+                        } else {
+                            info!("Hotkeys re-registered successfully");
+                        }
+                    }
+                }
+            }
+
+            // Peek message with timeout to allow command checking
+            let result = GetMessageW(&mut msg, HWND::default(), 0, 0);
+            if !result.as_bool() {
+                break; // WM_QUIT received
+            }
+
+            // Check if tray manager wants to handle this message
+            let mut handled = false;
+            if let Some(ref tray) = tray_manager {
+                handled = tray.handle_message(msg.message, msg.wParam, msg.lParam, &event_tx);
+            }
+
+            if handled {
+                continue;
+            }
+
             match msg.message {
                 WM_HOTKEY => {
                     let action = hotkey_id_to_action(msg.wParam.0 as i32);
@@ -87,6 +145,9 @@ fn run_platform_loop(event_tx: Sender<AppEvent>, hotkey_config: HotkeyConfig) ->
             }
         }
     }
+
+    // Cleanup - drop tray manager first (removes icon)
+    drop(tray_manager);
 
     // Cleanup hotkeys before exit
     if let Err(e) = super::hotkeys::unregister_all_hotkeys(hwnd) {
@@ -141,7 +202,7 @@ fn create_hidden_window() -> Result<HWND> {
 
 /// Window procedure for the hidden window
 ///
-/// Handles WM_DESTROY to post quit message, delegates others to DefWindowProcW
+/// Handles WM_DESTROY to post quit message and tray messages, delegates others to DefWindowProcW
 extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_DESTROY => {

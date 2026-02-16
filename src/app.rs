@@ -277,6 +277,81 @@ impl AppState {
             _ => {}
         }
     }
+
+    /// Apply configuration changes that don't require restart
+    ///
+    /// Updates runtime-modifiable settings like audio volumes and replay buffer duration.
+    /// Logs all changes at info level for visibility.
+    ///
+    /// # Arguments
+    /// * `new_config` - The new configuration to apply
+    ///
+    /// # Returns
+    /// * `Ok(())` if changes were applied successfully
+    /// * `Err` if there was an error applying changes
+    pub fn apply_runtime_config(&mut self, new_config: &Config) -> Result<()> {
+        info!("Applying runtime configuration changes...");
+
+        // Update audio settings if audio manager is active
+        if self.audio_manager.is_some() {
+            // Check if system volume changed
+            if self.config.audio.system_volume != new_config.audio.system_volume {
+                info!(
+                    "Audio: System volume changed from {}% to {}%",
+                    self.config.audio.system_volume, new_config.audio.system_volume
+                );
+            }
+
+            // Check if mic volume changed
+            if self.config.audio.mic_volume != new_config.audio.mic_volume {
+                info!(
+                    "Audio: Mic volume changed from {}% to {}%",
+                    self.config.audio.mic_volume, new_config.audio.mic_volume
+                );
+            }
+
+            // Check if audio capture settings changed (would require restart)
+            if self.config.audio.capture_system != new_config.audio.capture_system {
+                warn!(
+                    "Audio: System capture toggle changed ({} -> {}), requires restart",
+                    self.config.audio.capture_system, new_config.audio.capture_system
+                );
+            }
+
+            if self.config.audio.capture_mic != new_config.audio.capture_mic {
+                warn!(
+                    "Audio: Mic capture toggle changed ({} -> {}), requires restart",
+                    self.config.audio.capture_mic, new_config.audio.capture_mic
+                );
+            }
+        }
+
+        // Check replay duration changes
+        if self.config.general.replay_duration_secs != new_config.general.replay_duration_secs {
+            info!(
+                "Buffer: Replay duration changed from {}s to {}s (effective on next buffer creation)",
+                self.config.general.replay_duration_secs, new_config.general.replay_duration_secs
+            );
+            // Note: The buffer uses this value dynamically, so it will take effect
+            // on the next buffer operation that references the duration
+        }
+
+        // Update the stored configuration
+        self.config = new_config.clone();
+
+        info!("Runtime configuration changes applied successfully");
+        Ok(())
+    }
+
+    /// Get a reference to the current configuration
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
+
+    /// Get a mutable reference to the current configuration
+    pub fn config_mut(&mut self) -> &mut Config {
+        &mut self.config
+    }
 }
 
 impl Drop for AppState {

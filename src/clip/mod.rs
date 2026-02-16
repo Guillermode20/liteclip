@@ -71,9 +71,7 @@ pub fn spawn_clip_saver(
         };
 
         if !has_decodable_h264_frame(&clip_packets) {
-            warn!(
-                "Clip snapshot does not yet contain a decodable H.264 frame; retrying briefly"
-            );
+            warn!("Clip snapshot does not yet contain a decodable H.264 frame; retrying briefly");
             for attempt in 1..=5 {
                 thread::sleep(Duration::from_millis(150));
                 clip_packets = buffer
