@@ -5,10 +5,13 @@
 use super::HotkeyConfig;
 use anyhow::{Context, Result};
 use tracing::{debug, error, info, trace};
-use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{GetLastError, HWND};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS,
 };
+
+/// Windows error code for "Hot key is already registered"
+const ERROR_HOTKEY_ALREADY_REGISTERED: u32 = 1409;
 
 /// Hotkey definition
 #[derive(Debug, Clone, Copy)]
@@ -104,9 +107,22 @@ fn register_single_hotkey(hwnd: HWND, id: i32, hotkey_str: &str) -> Result<()> {
     let hotkey = Hotkey::from_str(hotkey_str, id)?;
 
     unsafe {
-        RegisterHotKey(hwnd, hotkey.id, hotkey.modifiers, hotkey.key)
-            .ok()
-            .context(format!("RegisterHotKey failed for hotkey '{}'", hotkey_str))?;
+        if let Err(_) = RegisterHotKey(hwnd, hotkey.id, hotkey.modifiers, hotkey.key) {
+            let err = GetLastError();
+            let code = err.0;
+            let hint = if code == ERROR_HOTKEY_ALREADY_REGISTERED {
+                " (another app has this hotkey - try different keys in config)"
+            } else {
+                ""
+            };
+            anyhow::bail!(
+                "RegisterHotKey failed for hotkey '{}': Windows error {} (0x{:x}){}",
+                hotkey_str,
+                code,
+                code,
+                hint
+            );
+        }
     }
 
     trace!(

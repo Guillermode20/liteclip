@@ -317,7 +317,7 @@ impl Default for AudioConfig {
     fn default() -> Self {
         Self {
             capture_system: default_true(),
-            capture_mic: default_false(),
+            capture_mic: default_true(),
             mic_device: default_mic_device(),
             mic_volume: default_mic_volume(),
             system_volume: default_system_volume(),
@@ -472,6 +472,8 @@ mod tests {
         assert_eq!(config.video.quality_preset, QualityPreset::Balanced);
         assert_eq!(config.video.rate_control, RateControl::Vbr);
         assert_eq!(config.video.quality_value, None);
+        assert!(config.audio.capture_system);
+        assert!(config.audio.capture_mic);
     }
 
     #[test]

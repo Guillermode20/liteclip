@@ -3,15 +3,16 @@
 //! Coordinates system and microphone audio capture with mixing.
 
 use anyhow::Result;
-use crossbeam::channel::Receiver;
+use crossbeam::channel::{Receiver, Sender, TryRecvError};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tracing::info;
+use std::thread;
+use std::time::Duration;
+use tracing::{error, info, warn};
 
 use crate::capture::audio::mic::WasapiMicConfig;
-use crate::capture::audio::mixer::AudioMixerConfig;
 use crate::capture::audio::system::WasapiSystemConfig;
-use crate::capture::audio::{AudioMixer, WasapiMicCapture, WasapiSystemCapture};
+use crate::capture::audio::{WasapiMicCapture, WasapiSystemCapture};
 use crate::config::AudioConfig;
 use crate::encode::EncodedPacket;
 
@@ -19,22 +20,24 @@ use crate::encode::EncodedPacket;
 pub struct WasapiAudioManager {
     system_capture: Option<WasapiSystemCapture>,
     mic_capture: Option<WasapiMicCapture>,
-    mixer: Option<AudioMixer>,
     running: Arc<AtomicBool>,
+    packet_tx: Sender<EncodedPacket>,
     packet_rx: Receiver<EncodedPacket>,
+    forward_thread: Option<thread::JoinHandle<()>>,
 }
 
 impl WasapiAudioManager {
     /// Create a new WASAPI audio manager
     pub fn new() -> Result<Self> {
-        let (_, packet_rx) = crossbeam::channel::bounded(128); // Placeholder, will be replaced
+        let (packet_tx, packet_rx) = crossbeam::channel::bounded(256);
 
         Ok(Self {
             system_capture: None,
             mic_capture: None,
-            mixer: None,
             running: Arc::new(AtomicBool::new(false)),
+            packet_tx,
             packet_rx,
+            forward_thread: None,
         })
     }
 
@@ -82,31 +85,17 @@ impl WasapiAudioManager {
             info!("Microphone audio capture started");
         }
 
-        // Create and configure mixer
-        let mut mixer = AudioMixer::new()?;
-
-        // Set up receivers based on what's enabled
-        if let Some(ref system_capture) = self.system_capture {
-            mixer.set_system_rx(system_capture.packet_rx());
-        }
-
-        if let Some(ref mic_capture) = self.mic_capture {
-            mixer.set_mic_rx(mic_capture.packet_rx());
-        }
-
-        let mixer_config = AudioMixerConfig {
-            system_volume: (config.system_volume as f32) / 100.0,
-            mic_volume: (config.mic_volume as f32) / 100.0,
-            ..Default::default()
-        };
-
-        // Store the mixer's output receiver
-        let packet_rx = mixer.packet_rx();
-        mixer.start(mixer_config)?;
-        self.mixer = Some(mixer);
-        self.packet_rx = packet_rx;
+        let mut system_rx = self.system_capture.as_ref().map(|capture| capture.packet_rx());
+        let mut mic_rx = self.mic_capture.as_ref().map(|capture| capture.packet_rx());
 
         self.running.store(true, Ordering::SeqCst);
+
+        let running = Arc::clone(&self.running);
+        let packet_tx = self.packet_tx.clone();
+        self.forward_thread = Some(thread::spawn(move || {
+            Self::forward_loop(running, packet_tx, &mut system_rx, &mut mic_rx)
+        }));
+
         info!("WASAPI audio manager started");
 
         Ok(())
@@ -118,6 +107,7 @@ impl WasapiAudioManager {
             return;
         }
 
+        self.running.store(false, Ordering::SeqCst);
         info!("Stopping WASAPI audio manager...");
 
         if let Some(mut system_capture) = self.system_capture.take() {
@@ -128,11 +118,12 @@ impl WasapiAudioManager {
             mic_capture.stop();
         }
 
-        if let Some(mut mixer) = self.mixer.take() {
-            mixer.stop();
+        if let Some(thread) = self.forward_thread.take() {
+            if thread.join().is_err() {
+                error!("Audio forward thread panicked");
+            }
         }
 
-        self.running.store(false, Ordering::SeqCst);
         info!("WASAPI audio manager stopped");
     }
 
@@ -144,6 +135,78 @@ impl WasapiAudioManager {
     /// Check if audio capture is running
     pub fn is_running(&self) -> bool {
         self.running.load(Ordering::SeqCst)
+    }
+
+    fn forward_loop(
+        running: Arc<AtomicBool>,
+        packet_tx: Sender<EncodedPacket>,
+        system_rx: &mut Option<Receiver<EncodedPacket>>,
+        mic_rx: &mut Option<Receiver<EncodedPacket>>,
+    ) {
+        let mut forwarded_packets: u64 = 0;
+
+        while running.load(Ordering::SeqCst) {
+            let mut forwarded_this_tick = false;
+            let mut system_disconnected = false;
+            let mut mic_disconnected = false;
+
+            if let Some(rx) = system_rx.as_ref() {
+                match rx.try_recv() {
+                    Ok(packet) => {
+                        if packet_tx.send(packet).is_err() {
+                            warn!("Audio manager output channel disconnected while forwarding system audio");
+                            break;
+                        }
+                        forwarded_packets = forwarded_packets.saturating_add(1);
+                        forwarded_this_tick = true;
+                    }
+                    Err(TryRecvError::Empty) => {}
+                    Err(TryRecvError::Disconnected) => {
+                        warn!("System audio capture channel disconnected");
+                        system_disconnected = true;
+                    }
+                }
+            }
+
+            if let Some(rx) = mic_rx.as_ref() {
+                match rx.try_recv() {
+                    Ok(packet) => {
+                        if packet_tx.send(packet).is_err() {
+                            warn!("Audio manager output channel disconnected while forwarding microphone audio");
+                            break;
+                        }
+                        forwarded_packets = forwarded_packets.saturating_add(1);
+                        forwarded_this_tick = true;
+                    }
+                    Err(TryRecvError::Empty) => {}
+                    Err(TryRecvError::Disconnected) => {
+                        warn!("Microphone capture channel disconnected");
+                        mic_disconnected = true;
+                    }
+                }
+            }
+
+            if system_disconnected {
+                *system_rx = None;
+            }
+            if mic_disconnected {
+                *mic_rx = None;
+            }
+
+            if system_rx.is_none() && mic_rx.is_none() {
+                warn!("All audio capture channels disconnected, stopping audio forward loop");
+                break;
+            }
+
+            if !forwarded_this_tick {
+                thread::sleep(Duration::from_millis(1));
+            } else if forwarded_packets == 1 || forwarded_packets % 500 == 0 {
+                info!(
+                    "Forwarded {} audio packets from capture channels",
+                    forwarded_packets
+                );
+            }
+        }
     }
 }
 
