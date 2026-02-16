@@ -4,7 +4,7 @@ This file provides guidance to agents when working with code in this repository.
 
 ## Project Context
 
-LiteClip Recorder is a Windows-only screen capture application using D3D11/DXGI Desktop Duplication. It captures desktop frames, encodes them using hardware encoders (NVENC/AMF/QSV) via FFmpeg CLI or software JPEG encoding, stores them in a memory-bounded ring buffer, and saves clips on hotkey trigger.
+LiteClip Replay is a Windows-only screen capture application using D3D11/DXGI Desktop Duplication. It captures desktop frames, encodes them using hardware encoders (NVENC/AMF/QSV) via FFmpeg CLI or software JPEG encoding, stores them in a memory-bounded ring buffer, and saves clips on hotkey trigger.
 
 ## Build Commands
 

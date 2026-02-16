@@ -5,14 +5,20 @@
 use crate::encode::{EncodedPacket, StreamType};
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
-use tracing::{debug, error, info, trace, warn};
 #[cfg(feature = "ffmpeg")]
-use std::{ffi::OsString, io::Write, process::{Command, Stdio}};
+use std::{
+    ffi::OsString,
+    io::Write,
+    process::{Command, Stdio},
+};
+use tracing::{debug, error, info, trace, warn};
 
-use super::functions::{AUDIO_BITRATE, AUDIO_CHANNELS, AUDIO_SAMPLE_RATE, is_h264_format, h264_nal_type, qpc_delta_to_aligned_pcm_bytes, write_silence_bytes};
+use super::functions::{
+    h264_nal_type, is_h264_format, qpc_delta_to_aligned_pcm_bytes, write_silence_bytes,
+    AUDIO_BITRATE, AUDIO_CHANNELS, AUDIO_SAMPLE_RATE,
+};
 #[cfg(feature = "ffmpeg")]
 use crate::buffer::ring::qpc_frequency;
-
 
 /// MP4 muxer for writing clips
 ///
@@ -42,9 +48,7 @@ impl Muxer {
         info!("Creating MP4 muxer for: {:?}", path);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
-                .with_context(|| {
-                    format!("Failed to create output directory: {:?}", parent)
-                })?;
+                .with_context(|| format!("Failed to create output directory: {:?}", parent))?;
         }
         #[cfg(feature = "ffmpeg")]
         {
@@ -82,8 +86,10 @@ impl Muxer {
         #[cfg(not(feature = "ffmpeg"))]
         {
             trace!(
-                "Stub: Writing video packet (keyframe={}, size={}, pts={})", packet
-                .is_keyframe, packet.data.len(), packet.pts
+                "Stub: Writing video packet (keyframe={}, size={}, pts={})",
+                packet.is_keyframe,
+                packet.data.len(),
+                packet.pts
             );
             Ok(())
         }
@@ -100,8 +106,10 @@ impl Muxer {
         #[cfg(not(feature = "ffmpeg"))]
         {
             trace!(
-                "Stub: Received audio packet (size={}, pts={}, stream={:?})", packet.data
-                .len(), packet.pts, packet.stream
+                "Stub: Received audio packet (size={}, pts={}, stream={:?})",
+                packet.data.len(),
+                packet.pts,
+                packet.stream
             );
             Ok(())
         }
@@ -112,7 +120,10 @@ impl Muxer {
     /// and returns the final output path.
     pub fn finalize(self) -> Result<PathBuf> {
         info!("Finalizing MP4: {:?}", self.output_path);
-        #[cfg(feature = "ffmpeg")] { self.finalize_ffmpeg() }
+        #[cfg(feature = "ffmpeg")]
+        {
+            self.finalize_ffmpeg()
+        }
         #[cfg(not(feature = "ffmpeg"))]
         {
             tracing::warn!("FFmpeg feature disabled - cannot produce MP4");
@@ -123,9 +134,7 @@ impl Muxer {
     fn finalize_ffmpeg(mut self) -> Result<PathBuf> {
         let mut qpc_freq = 10_000_000i64;
         unsafe {
-            let _ = windows::Win32::System::Performance::QueryPerformanceFrequency(
-                &mut qpc_freq,
-            );
+            let _ = windows::Win32::System::Performance::QueryPerformanceFrequency(&mut qpc_freq);
         }
         let qpc_frequency_f64 = qpc_freq as f64;
         let ffmpeg_cmd = self.resolve_ffmpeg_command();
@@ -177,14 +186,15 @@ impl Muxer {
         };
         info!(
             "Muxing H.264 stream with FPS {:.3} (frame_nals={}, total_nals={})",
-            effective_fps, frame_packets.len(), self.video_packets.len()
+            effective_fps,
+            frame_packets.len(),
+            self.video_packets.len()
         );
         let h264_temp_path = self.output_path.with_extension("h264");
         {
-            let mut h264_file = std::fs::File::create(&h264_temp_path)
-                .with_context(|| {
-                    format!("Failed to create temp H.264 file: {:?}", h264_temp_path)
-                })?;
+            let mut h264_file = std::fs::File::create(&h264_temp_path).with_context(|| {
+                format!("Failed to create temp H.264 file: {:?}", h264_temp_path)
+            })?;
             let mut first_idr_index: Option<usize> = None;
             let mut has_sps_before_idr = false;
             let mut has_pps_before_idr = false;
@@ -212,6 +222,8 @@ impl Muxer {
                         if first_idr_index.is_none() {
                             first_idr_index = Some(index);
                         }
+                        // SPS/PPS must precede first IDR, so we can stop scanning
+                        break;
                     }
                     _ => {}
                 }
@@ -269,9 +281,7 @@ impl Muxer {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
-            .with_context(|| {
-                format!("Failed to run ffmpeg for H.264 remux: {:?}", ffmpeg_cmd)
-            })?;
+            .with_context(|| format!("Failed to run ffmpeg for H.264 remux: {:?}", ffmpeg_cmd))?;
         let _ = std::fs::remove_file(&h264_temp_path);
         for track in &audio_tracks {
             let _ = std::fs::remove_file(&track.path);
@@ -282,21 +292,30 @@ impl Muxer {
                 let _ = std::fs::remove_file(&self.output_path);
             }
             error!("FFmpeg H.264 remux stderr:\n{}", stderr);
-            bail!("ffmpeg failed to remux H.264 to MP4: status {}", output.status);
+            bail!(
+                "ffmpeg failed to remux H.264 to MP4: status {}",
+                output.status
+            );
         }
         if !stderr.is_empty() {
             debug!("FFmpeg H.264 remux output:\n{}", stderr);
         }
-        let metadata = std::fs::metadata(&self.output_path)
-            .with_context(|| {
-                format!("Missing output MP4 after H.264 remux: {:?}", self.output_path)
-            })?;
+        let metadata = std::fs::metadata(&self.output_path).with_context(|| {
+            format!(
+                "Missing output MP4 after H.264 remux: {:?}",
+                self.output_path
+            )
+        })?;
         if metadata.len() == 0 {
-            bail!("Generated MP4 is empty after H.264 remux: {:?}", self.output_path);
+            bail!(
+                "Generated MP4 is empty after H.264 remux: {:?}",
+                self.output_path
+            );
         }
         info!(
-            "H.264 fast mux complete: {:?} ({} frames)", self.output_path, self
-            .video_packets.len()
+            "H.264 fast mux complete: {:?} ({} frames)",
+            self.output_path,
+            self.video_packets.len()
         );
         Ok(self.output_path.clone())
     }
@@ -308,7 +327,10 @@ impl Muxer {
                     "No captured audio packets found for this clip; generating silent fallback track"
                 );
                 if let Some(path) = self.write_silent_audio_temp_pcm("system")? {
-                    return Ok(vec![AudioTrackInput { path, title : "system", }]);
+                    return Ok(vec![AudioTrackInput {
+                        path,
+                        title: "system",
+                    }]);
                 }
             }
             return Ok(Vec::new());
@@ -328,8 +350,11 @@ impl Muxer {
         );
         info!(
             "Audio packet breakdown: {} system, {} mic (total audio={}). Video PTS range: {}..{}",
-            system_packets.len(), mic_packets.len(), self.audio_packets.len(),
-            video_pts_range.0, video_pts_range.1,
+            system_packets.len(),
+            mic_packets.len(),
+            self.audio_packets.len(),
+            video_pts_range.0,
+            video_pts_range.1,
         );
         if !system_packets.is_empty() {
             let sys_first = system_packets.first().map(|p| p.pts).unwrap_or(0);
@@ -349,31 +374,27 @@ impl Muxer {
             );
         }
         let mut tracks = Vec::new();
-        if let Some(path) = self.write_stream_audio_temp_pcm(&system_packets, "system")?
-        {
-            tracks
-                .push(AudioTrackInput {
-                    path,
-                    title: "system",
-                });
+        if let Some(path) = self.write_stream_audio_temp_pcm(&system_packets, "system")? {
+            tracks.push(AudioTrackInput {
+                path,
+                title: "system",
+            });
         }
         if let Some(path) = self.write_stream_audio_temp_pcm(&mic_packets, "mic")? {
-            tracks
-                .push(AudioTrackInput {
-                    path,
-                    title: "microphone",
-                });
+            tracks.push(AudioTrackInput {
+                path,
+                title: "microphone",
+            });
         }
         if tracks.is_empty() && self.config.expect_audio {
             warn!(
                 "Audio packets were present but unusable after alignment; generating silent fallback track"
             );
             if let Some(path) = self.write_silent_audio_temp_pcm("system")? {
-                tracks
-                    .push(AudioTrackInput {
-                        path,
-                        title: "system",
-                    });
+                tracks.push(AudioTrackInput {
+                    path,
+                    title: "system",
+                });
             }
         }
         Ok(tracks)
@@ -391,9 +412,7 @@ impl Muxer {
             .output_path
             .with_extension(format!("{stream_suffix}.pcm"));
         let mut audio_file = std::fs::File::create(&audio_temp_path)
-            .with_context(|| {
-                format!("Failed to create temp PCM file: {:?}", audio_temp_path)
-            })?;
+            .with_context(|| format!("Failed to create temp PCM file: {:?}", audio_temp_path))?;
         let bytes_per_frame = AUDIO_CHANNELS as usize * 2;
         let bytes_per_second = AUDIO_SAMPLE_RATE as f64 * bytes_per_frame as f64;
         let qpc_freq = qpc_frequency() as f64;
@@ -433,8 +452,7 @@ impl Muxer {
                 skip_bytes = skip_bytes.saturating_add(overlap_aligned).min(aligned_len);
             }
             if skip_bytes >= aligned_len {
-                trimmed_overlap_bytes = trimmed_overlap_bytes
-                    .saturating_add(aligned_len);
+                trimmed_overlap_bytes = trimmed_overlap_bytes.saturating_add(aligned_len);
                 continue;
             }
             audio_file
@@ -457,17 +475,12 @@ impl Muxer {
         Ok(Some(audio_temp_path))
     }
     #[cfg(feature = "ffmpeg")]
-    fn write_silent_audio_temp_pcm(
-        &self,
-        stream_suffix: &str,
-    ) -> Result<Option<PathBuf>> {
+    fn write_silent_audio_temp_pcm(&self, stream_suffix: &str) -> Result<Option<PathBuf>> {
         let audio_temp_path = self
             .output_path
             .with_extension(format!("{stream_suffix}.pcm"));
         let mut audio_file = std::fs::File::create(&audio_temp_path)
-            .with_context(|| {
-                format!("Failed to create temp PCM file: {:?}", audio_temp_path)
-            })?;
+            .with_context(|| format!("Failed to create temp PCM file: {:?}", audio_temp_path))?;
         let duration_secs = 0.2f64;
         let total_frames = (duration_secs * AUDIO_SAMPLE_RATE as f64).round() as usize;
         let bytes_per_frame = AUDIO_CHANNELS as usize * 2;
@@ -499,7 +512,11 @@ impl Muxer {
             command.arg("-an");
             return;
         }
-        command.arg("-c:a").arg("aac").arg("-b:a").arg(AUDIO_BITRATE);
+        command
+            .arg("-c:a")
+            .arg("aac")
+            .arg("-b:a")
+            .arg(AUDIO_BITRATE);
         if audio_tracks.len() == 1 {
             command.arg("-map").arg("1:a:0");
             return;
@@ -510,14 +527,23 @@ impl Muxer {
             input_labels.push_str(&format!("[{input_index}:a:0]"));
         }
         let filter = format!(
-            "{input_labels}amix=inputs={}:normalize=0[aout]", audio_tracks.len()
+            "{input_labels}amix=inputs={}:normalize=1[aout]",
+            audio_tracks.len()
         );
         info!(
-            "Mixing {} audio tracks into one output stream: {}", audio_tracks.len(),
-            audio_tracks.iter().map(| track | track.title).collect::< Vec < _ >> ()
-            .join(", ")
+            "Mixing {} audio tracks into one output stream: {}",
+            audio_tracks.len(),
+            audio_tracks
+                .iter()
+                .map(|track| track.title)
+                .collect::<Vec<_>>()
+                .join(", ")
         );
-        command.arg("-filter_complex").arg(filter).arg("-map").arg("[aout]");
+        command
+            .arg("-filter_complex")
+            .arg(filter)
+            .arg("-map")
+            .arg("[aout]");
     }
     /// Slow path: Transcode MJPEG frames to H.264 and mux to MP4
     #[cfg(feature = "ffmpeg")]
@@ -550,9 +576,11 @@ impl Muxer {
         };
         info!(
             "Muxing {} frames with effective input FPS {:.3} (target {:.3}). PPS range: {} - {}",
-            self.video_packets.len(), effective_fps, self.config.fps, self.video_packets
-            .first().map(| p | p.pts).unwrap_or(0), self.video_packets.last().map(| p | p
-            .pts).unwrap_or(0)
+            self.video_packets.len(),
+            effective_fps,
+            self.config.fps,
+            self.video_packets.first().map(|p| p.pts).unwrap_or(0),
+            self.video_packets.last().map(|p| p.pts).unwrap_or(0)
         );
         let audio_tracks = self.write_audio_temp_pcm_tracks()?;
         let mut command = Command::new(&ffmpeg_cmd);
@@ -600,12 +628,13 @@ impl Muxer {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .with_context(|| {
-                format!("Failed to launch ffmpeg command: {:?}", ffmpeg_cmd)
-            })?;
+            .with_context(|| format!("Failed to launch ffmpeg command: {:?}", ffmpeg_cmd))?;
         let mut written_frames = 0usize;
         {
-            let stdin = child.stdin.as_mut().context("Failed to open ffmpeg stdin")?;
+            let stdin = child
+                .stdin
+                .as_mut()
+                .context("Failed to open ffmpeg stdin")?;
             for packet in &self.video_packets {
                 stdin
                     .write_all(packet.data.as_ref())
@@ -656,14 +685,13 @@ impl Muxer {
             debug!("FFmpeg output:\n{}", stderr_str);
         }
         let metadata = std::fs::metadata(&self.output_path)
-            .with_context(|| {
-                format!("Missing output MP4 after ffmpeg: {:?}", self.output_path)
-            })?;
+            .with_context(|| format!("Missing output MP4 after ffmpeg: {:?}", self.output_path))?;
         if metadata.len() == 0 {
             bail!("Generated MP4 is empty: {:?}", self.output_path);
         }
         info!(
-            "FFmpeg MP4 finalized: {:?} ({} frames)", self.output_path, written_frames
+            "FFmpeg MP4 finalized: {:?} ({} frames)",
+            self.output_path, written_frames
         );
         Ok(self.output_path.clone())
     }
@@ -693,14 +721,11 @@ impl Muxer {
     #[cfg(not(feature = "ffmpeg"))]
     fn create_stub_mp4(&self) -> Result<PathBuf> {
         if self.output_path.exists() {
-            std::fs::remove_file(&self.output_path)
-                .with_context(|| {
-                    format!("Failed to remove stale output file: {:?}", self.output_path)
-                })?;
+            std::fs::remove_file(&self.output_path).with_context(|| {
+                format!("Failed to remove stale output file: {:?}", self.output_path)
+            })?;
         }
-        bail!(
-            "Cannot create MP4: FFmpeg feature is disabled. Rebuild with `--features ffmpeg`."
-        )
+        bail!("Cannot create MP4: FFmpeg feature is disabled. Rebuild with `--features ffmpeg`.")
     }
     /// Get output path
     pub fn output_path(&self) -> &Path {
@@ -727,12 +752,7 @@ pub struct MuxerConfig {
 }
 impl MuxerConfig {
     /// Create new muxer config with basic settings
-    pub fn new(
-        width: u32,
-        height: u32,
-        fps: f64,
-        output_path: impl AsRef<Path>,
-    ) -> Self {
+    pub fn new(width: u32, height: u32, fps: f64, output_path: impl AsRef<Path>) -> Self {
         Self {
             width,
             height,

@@ -2,7 +2,6 @@
 //!
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -46,8 +45,11 @@ mod tests {
             crate::config::EncoderType::Nvenc,
             1,
         );
-        assert_eq!(config.quality_preset, crate ::config::QualityPreset::Balanced);
-        assert_eq!(config.rate_control, crate ::config::RateControl::Vbr);
+        assert_eq!(
+            config.quality_preset,
+            crate::config::QualityPreset::Balanced
+        );
+        assert_eq!(config.rate_control, crate::config::RateControl::Vbr);
         assert_eq!(config.quality_value, None);
     }
     #[test]
@@ -58,17 +60,25 @@ mod tests {
         assert!(packet.is_keyframe);
         assert!(matches!(packet.stream, StreamType::Video));
         let packet = EncodedPacket::video_delta(vec![0u8; 512], 2_000_000);
-        assert!(! packet.is_keyframe);
+        assert!(!packet.is_keyframe);
     }
     #[test]
     fn test_hardware_encoder_conversion() {
-        assert!(
-            matches!(HardwareEncoder::Nvenc.into(), crate ::config::EncoderType::Nvenc)
-        );
-        assert!(matches!(HardwareEncoder::Amf.into(), crate ::config::EncoderType::Amf));
-        assert!(matches!(HardwareEncoder::Qsv.into(), crate ::config::EncoderType::Qsv));
-        assert!(
-            matches!(HardwareEncoder::None.into(), crate ::config::EncoderType::Software)
-        );
+        assert!(matches!(
+            HardwareEncoder::Nvenc.into(),
+            crate::config::EncoderType::Nvenc
+        ));
+        assert!(matches!(
+            HardwareEncoder::Amf.into(),
+            crate::config::EncoderType::Amf
+        ));
+        assert!(matches!(
+            HardwareEncoder::Qsv.into(),
+            crate::config::EncoderType::Qsv
+        ));
+        assert!(matches!(
+            HardwareEncoder::None.into(),
+            crate::config::EncoderType::Software
+        ));
     }
 }

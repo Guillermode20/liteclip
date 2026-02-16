@@ -30,11 +30,9 @@ impl CaptureBackend for DxgiCapture {
         let running = Arc::clone(&self.running);
         let frame_tx = self._frame_tx.clone();
         let config = self.config.clone();
-        self.capture_thread = Some(
-            spawn(move || {
-                Self::capture_loop(running, frame_tx, config);
-            }),
-        );
+        self.capture_thread = Some(spawn(move || {
+            Self::capture_loop(running, frame_tx, config);
+        }));
         Ok(())
     }
     fn stop(&mut self) {
@@ -60,4 +58,3 @@ impl Drop for DxgiCapture {
         self.stop();
     }
 }
-

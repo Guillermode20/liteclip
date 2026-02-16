@@ -8,8 +8,8 @@
 //!
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
-use crate::encode::{EncodedPacket, Encoder, EncoderConfig};
 use crate::capture::CapturedFrame;
+use crate::encode::{EncodedPacket, Encoder, EncoderConfig};
 use anyhow::Result;
 use crossbeam::channel::Receiver;
 use tracing::debug;
@@ -20,16 +20,13 @@ impl Encoder for QsvEncoder {
     fn init(&mut self, config: &EncoderConfig) -> Result<()> {
         self.base.config = config.clone();
         self.base.running = true;
-        if !self.base.config.use_cpu_readback && self.base.ffmpeg_process.is_none() {
+        if !self.base.config.use_cpu_readback && self.base.ffmpeg.is_none() {
             self.base.init_ffmpeg(0, 0)?;
         }
         debug!("QSV encoder initialized");
         Ok(())
     }
-    fn encode_frame(
-        &mut self,
-        frame: &CapturedFrame,
-    ) -> Result<()> {
+    fn encode_frame(&mut self, frame: &CapturedFrame) -> Result<()> {
         self.base.encode_frame_internal(frame)
     }
     fn flush(&mut self) -> Result<Vec<EncodedPacket>> {
@@ -42,4 +39,3 @@ impl Encoder for QsvEncoder {
         self.base.running
     }
 }
-

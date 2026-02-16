@@ -8,8 +8,10 @@
 //!
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
+use super::functions::{
+    default_mic_device, default_mic_volume, default_system_volume, default_true,
+};
 use super::types::AudioConfig;
-use super::functions::{default_mic_device, default_mic_volume, default_system_volume, default_true};
 
 impl Default for AudioConfig {
     fn default() -> Self {
@@ -22,4 +24,3 @@ impl Default for AudioConfig {
         }
     }
 }
-

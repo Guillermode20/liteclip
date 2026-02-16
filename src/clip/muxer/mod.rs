@@ -1,8 +1,8 @@
 //! Auto-generated module structure
 
-pub mod types;
 pub mod functions;
+pub mod types;
 
 // Re-export all types
-pub use types::*;
 pub use functions::*;
+pub use types::*;

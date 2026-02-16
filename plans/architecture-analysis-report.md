@@ -1,4 +1,4 @@
-# LiteClip Recorder - Deep Architecture Analysis Report
+# LiteClip Replay - Deep Architecture Analysis Report
 
 **Analysis Date:** 2026-02-16  
 **Scope:** Complete codebase analysis for hidden issues, architectural debt, and edge cases  
@@ -8,7 +8,7 @@
 
 ## Executive Summary
 
-This comprehensive analysis of the LiteClip Recorder codebase identified **81 distinct issues** across 10 analysis areas:
+This comprehensive analysis of the LiteClip Replay codebase identified **81 distinct issues** across 10 analysis areas:
 
 | Category | Critical | High | Medium | Low | Total |
 |----------|----------|------|--------|-----|-------|

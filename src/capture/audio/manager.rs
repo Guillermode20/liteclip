@@ -85,7 +85,10 @@ impl WasapiAudioManager {
             info!("Microphone audio capture started");
         }
 
-        let mut system_rx = self.system_capture.as_ref().map(|capture| capture.packet_rx());
+        let mut system_rx = self
+            .system_capture
+            .as_ref()
+            .map(|capture| capture.packet_rx());
         let mut mic_rx = self.mic_capture.as_ref().map(|capture| capture.packet_rx());
 
         self.running.store(true, Ordering::SeqCst);

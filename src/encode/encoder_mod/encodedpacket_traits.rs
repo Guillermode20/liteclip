@@ -8,7 +8,6 @@
 //!
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
-
 use super::types::EncodedPacket;
 
 impl std::fmt::Debug for EncodedPacket {
@@ -23,4 +22,3 @@ impl std::fmt::Debug for EncodedPacket {
             .finish()
     }
 }
-

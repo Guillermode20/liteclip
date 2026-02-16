@@ -8,8 +8,10 @@
 //!
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
+use super::functions::{
+    default_hotkey_gallery, default_hotkey_save, default_hotkey_screenshot, default_hotkey_toggle,
+};
 use super::types::HotkeyConfig;
-use super::functions::{default_hotkey_gallery, default_hotkey_save, default_hotkey_screenshot, default_hotkey_toggle};
 
 impl Default for HotkeyConfig {
     fn default() -> Self {
@@ -21,4 +23,3 @@ impl Default for HotkeyConfig {
         }
     }
 }
-

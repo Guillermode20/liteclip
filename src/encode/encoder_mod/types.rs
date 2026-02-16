@@ -6,8 +6,6 @@ use anyhow::Result;
 use bytes::Bytes;
 use crossbeam::channel::{Receiver, Sender};
 
-
-
 /// Encoded packet data
 ///
 /// Uses `Bytes` for reference-counted data, making clones cheap (just a ref count bump).
@@ -133,15 +131,11 @@ impl EncoderConfig {
     /// Get the FFmpeg codec name based on codec and encoder type
     pub fn ffmpeg_codec_name(&self) -> &'static str {
         match (self.codec, self.encoder_type) {
-            (crate::config::Codec::H264, crate::config::EncoderType::Nvenc) => {
-                "h264_nvenc"
-            }
+            (crate::config::Codec::H264, crate::config::EncoderType::Nvenc) => "h264_nvenc",
             (crate::config::Codec::H264, crate::config::EncoderType::Amf) => "h264_amf",
             (crate::config::Codec::H264, crate::config::EncoderType::Qsv) => "h264_qsv",
             (crate::config::Codec::H264, _) => "libx264",
-            (crate::config::Codec::H265, crate::config::EncoderType::Nvenc) => {
-                "hevc_nvenc"
-            }
+            (crate::config::Codec::H265, crate::config::EncoderType::Nvenc) => "hevc_nvenc",
             (crate::config::Codec::H265, crate::config::EncoderType::Amf) => "hevc_amf",
             (crate::config::Codec::H265, crate::config::EncoderType::Qsv) => "hevc_qsv",
             (crate::config::Codec::H265, _) => "libx265",

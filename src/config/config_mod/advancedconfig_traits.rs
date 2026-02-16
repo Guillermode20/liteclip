@@ -8,8 +8,11 @@
 //!
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
+use super::functions::{
+    default_false, default_gpu_index, default_keyframe_interval, default_memory_limit,
+    default_overlay_position, default_true,
+};
 use super::types::AdvancedConfig;
-use super::functions::{default_false, default_gpu_index, default_keyframe_interval, default_memory_limit, default_overlay_position, default_true};
 
 impl Default for AdvancedConfig {
     fn default() -> Self {
@@ -23,4 +26,3 @@ impl Default for AdvancedConfig {
         }
     }
 }
-

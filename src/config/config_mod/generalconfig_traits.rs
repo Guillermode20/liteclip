@@ -8,8 +8,8 @@
 //!
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
-use super::types::GeneralConfig;
 use super::functions::{default_replay_duration, default_save_directory, default_true};
+use super::types::GeneralConfig;
 
 impl Default for GeneralConfig {
     fn default() -> Self {
@@ -23,4 +23,3 @@ impl Default for GeneralConfig {
         }
     }
 }
-

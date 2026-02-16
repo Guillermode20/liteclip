@@ -132,7 +132,10 @@ impl WasapiSystemCapture {
             .context("Failed to get default render endpoint for loopback capture")?;
 
         // Log which device was selected for loopback
-        crate::capture::audio::device_info::log_device("Selected system audio device (loopback)", &device);
+        crate::capture::audio::device_info::log_device(
+            "Selected system audio device (loopback)",
+            &device,
+        );
 
         let audio_client: IAudioClient = unsafe { device.Activate(CLSCTX_ALL, None) }
             .context("Failed to activate IAudioClient for system loopback")?;

@@ -19,4 +19,3 @@ impl Clone for SharedReplayBuffer {
         }
     }
 }
-

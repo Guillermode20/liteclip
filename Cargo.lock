@@ -294,6 +294,7 @@ dependencies = [
  "crossbeam",
  "dirs",
  "image",
+ "memchr",
  "parking_lot",
  "serde",
  "thiserror 1.0.69",

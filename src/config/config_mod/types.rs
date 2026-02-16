@@ -6,14 +6,14 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-use super::functions::{MAX_FRAMERATE, default_true, default_false, default_quality_value_for_preset, 
-    default_mic_device, default_mic_volume, default_system_volume, 
-    default_hotkey_save, default_hotkey_toggle, default_hotkey_screenshot, default_hotkey_gallery,
-    default_resolution, default_framerate, default_codec, default_bitrate, default_encoder,
-    default_quality_preset, default_rate_control, default_quality_value, default_gpu_index,
-    default_keyframe_interval, default_overlay_position, default_memory_limit, default_replay_duration,
-    default_save_directory};
-
+use super::functions::{
+    default_bitrate, default_codec, default_encoder, default_false, default_framerate,
+    default_gpu_index, default_hotkey_gallery, default_hotkey_save, default_hotkey_screenshot,
+    default_hotkey_toggle, default_keyframe_interval, default_memory_limit, default_mic_device,
+    default_mic_volume, default_overlay_position, default_quality_preset, default_quality_value,
+    default_quality_value_for_preset, default_rate_control, default_replay_duration,
+    default_resolution, default_save_directory, default_system_volume, default_true, MAX_FRAMERATE,
+};
 
 /// Encoder selection
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -66,9 +66,7 @@ impl Config {
         if config_path.exists() {
             let content = tokio::fs::read_to_string(&config_path)
                 .await
-                .with_context(|| {
-                    format!("Failed to read config from {:?}", config_path)
-                })?;
+                .with_context(|| format!("Failed to read config from {:?}", config_path))?;
             let config: Config = toml::from_str(&content)?;
             Ok(config)
         } else {
@@ -93,7 +91,9 @@ impl Config {
     /// Get the configuration file path
     pub fn config_path() -> Result<PathBuf> {
         let app_data = dirs::data_dir().context("Failed to get data directory")?;
-        Ok(app_data.join("liteclip-replay").join("liteclip-replay.toml"))
+        Ok(app_data
+            .join("liteclip-replay")
+            .join("liteclip-replay.toml"))
     }
     /// Validate and sanitize configuration values
     ///
@@ -105,8 +105,8 @@ impl Config {
             self.video.framerate = 30;
         } else if self.video.framerate > MAX_FRAMERATE {
             warn!(
-                "Config: framerate was {}, clamping to {}", self.video.framerate,
-                MAX_FRAMERATE
+                "Config: framerate was {}, clamping to {}",
+                self.video.framerate, MAX_FRAMERATE
             );
             self.video.framerate = MAX_FRAMERATE;
         }
@@ -115,8 +115,8 @@ impl Config {
             self.advanced.memory_limit_mb = 512;
         } else if self.advanced.memory_limit_mb > 16384 {
             warn!(
-                "Config: memory_limit_mb was {}, clamping to 16384", self.advanced
-                .memory_limit_mb
+                "Config: memory_limit_mb was {}, clamping to 16384",
+                self.advanced.memory_limit_mb
             );
             self.advanced.memory_limit_mb = 16384;
         }
@@ -125,23 +125,25 @@ impl Config {
             self.video.bitrate_mbps = 20;
         } else if self.video.bitrate_mbps > 500 {
             warn!(
-                "Config: bitrate_mbps was {}, clamping to 500", self.video.bitrate_mbps
+                "Config: bitrate_mbps was {}, clamping to 500",
+                self.video.bitrate_mbps
             );
             self.video.bitrate_mbps = 500;
         }
         if let Some(value) = self.video.quality_value {
             let clamped = value.clamp(1, 51);
             if clamped != value {
-                warn!("Config: quality_value was {}, clamping to {}", value, clamped);
+                warn!(
+                    "Config: quality_value was {}, clamping to {}",
+                    value, clamped
+                );
                 self.video.quality_value = Some(clamped);
             }
         }
-        if matches!(self.video.rate_control, RateControl::Cq)
-            && self.video.quality_value.is_none()
+        if matches!(self.video.rate_control, RateControl::Cq) && self.video.quality_value.is_none()
         {
-            self.video.quality_value = Some(
-                default_quality_value_for_preset(self.video.quality_preset),
-            );
+            self.video.quality_value =
+                Some(default_quality_value_for_preset(self.video.quality_preset));
         }
         if self.general.replay_duration_secs == 0 {
             warn!("Config: replay_duration_secs was 0, clamping to 30");

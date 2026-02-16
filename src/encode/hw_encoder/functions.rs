@@ -3,9 +3,9 @@
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
 use anyhow::{Context, Result};
+use memchr::memchr;
 use std::process::Command;
 use tracing::{debug, info, warn};
-
 
 /// Convert BGRA to RGB24 format for FFmpeg input
 #[cfg(test)]
@@ -32,36 +32,68 @@ fn bgra_to_rgb24(bgra: &[u8], width: u32, height: u32) -> Vec<u8> {
     }
     rgb
 }
-pub(super) fn find_annexb_start_code(
-    data: &[u8],
-    from: usize,
-) -> Option<(usize, usize)> {
+/// Find H.264 Annex B start code (00 00 01 or 00 00 00 01) using SIMD-accelerated search.
+///
+/// Uses `memchr` to efficiently find candidate positions with `0x00` bytes,
+/// then checks for the full start code pattern at those positions.
+///
+/// # Returns
+/// * `Some((position, length))` - position is the start code offset, length is 3 or 4
+/// * `None` - if no start code is found
+pub(super) fn find_annexb_start_code(data: &[u8], from: usize) -> Option<(usize, usize)> {
     if data.len() < 3 || from >= data.len() {
         return None;
     }
-    let mut i = from;
-    while i + 2 < data.len() {
-        if i + 3 < data.len() && data[i] == 0x00 && data[i + 1] == 0x00
-            && data[i + 2] == 0x00 && data[i + 3] == 0x01
+
+    // Start search from 'from', ensuring we have room to check for patterns
+    let search_start = from;
+    let search_data = &data[search_start..];
+
+    // Use memchr to find 0x00 bytes efficiently with SIMD acceleration
+    let mut offset = 0;
+    while let Some(pos) = memchr(0x00, &search_data[offset..]) {
+        let abs_pos = search_start + offset + pos;
+
+        // Check for 4-byte start code: 00 00 00 01
+        if abs_pos + 3 < data.len()
+            && data[abs_pos] == 0x00
+            && data[abs_pos + 1] == 0x00
+            && data[abs_pos + 2] == 0x00
+            && data[abs_pos + 3] == 0x01
         {
-            return Some((i, 4));
+            return Some((abs_pos, 4));
         }
-        if data[i] == 0x00 && data[i + 1] == 0x00 && data[i + 2] == 0x01 {
-            return Some((i, 3));
+
+        // Check for 3-byte start code: 00 00 01
+        if abs_pos + 2 < data.len()
+            && data[abs_pos] == 0x00
+            && data[abs_pos + 1] == 0x00
+            && data[abs_pos + 2] == 0x01
+        {
+            return Some((abs_pos, 3));
         }
-        i += 1;
+
+        // Move past this 0x00 to find the next candidate
+        offset = pos + 1;
+
+        // Prevent infinite loop and ensure we have room for patterns
+        if offset + 2 >= search_data.len() {
+            break;
+        }
     }
+
     None
 }
 pub(super) fn h264_nal_type(nal_data: &[u8]) -> Option<u8> {
-    if nal_data.len() >= 5 && nal_data[0] == 0x00 && nal_data[1] == 0x00
-        && nal_data[2] == 0x00 && nal_data[3] == 0x01
+    if nal_data.len() >= 5
+        && nal_data[0] == 0x00
+        && nal_data[1] == 0x00
+        && nal_data[2] == 0x00
+        && nal_data[3] == 0x01
     {
         return Some(nal_data[4] & 0x1f);
     }
-    if nal_data.len() >= 4 && nal_data[0] == 0x00 && nal_data[1] == 0x00
-        && nal_data[2] == 0x01
-    {
+    if nal_data.len() >= 4 && nal_data[0] == 0x00 && nal_data[1] == 0x00 && nal_data[2] == 0x01 {
         return Some(nal_data[3] & 0x1f);
     }
     None
@@ -108,13 +140,17 @@ pub fn check_encoder_available(encoder_name: &str) -> bool {
     let listed = match output {
         Ok(out) => {
             let output_str = format!(
-                "{}{}", String::from_utf8_lossy(& out.stdout), String::from_utf8_lossy(&
-                out.stderr)
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
             );
             output_str.contains(encoder_name)
         }
         Err(e) => {
-            warn!("Failed to check encoder listing for {}: {}", encoder_name, e);
+            warn!(
+                "Failed to check encoder listing for {}: {}",
+                encoder_name, e
+            );
             return false;
         }
     };

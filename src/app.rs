@@ -61,6 +61,50 @@ impl AppState {
         })
     }
 
+    /// Start audio capture and spawn forwarding thread
+    ///
+    /// Extracted to eliminate code duplication between hardware pull mode
+    /// and CPU capture mode audio setup.
+    fn start_audio_capture(&mut self, context: &str) -> Result<()> {
+        if !self.config.audio.capture_system && !self.config.audio.capture_mic {
+            return Ok(());
+        }
+
+        let mut audio_manager =
+            WasapiAudioManager::new().context("Failed to create audio manager")?;
+        audio_manager
+            .start(&self.config.audio)
+            .context("Failed to start audio capture")?;
+
+        let audio_packet_rx = audio_manager.packet_rx();
+        let buffer_clone = self.buffer.clone();
+        let context = context.to_string();
+
+        std::thread::spawn(move || {
+            let mut forwarded_packets = 0u64;
+            while let Ok(packet) = audio_packet_rx.recv() {
+                buffer_clone.push(packet);
+                forwarded_packets = forwarded_packets.saturating_add(1);
+
+                if forwarded_packets == 1 {
+                    info!(
+                        "Forwarded first audio packet to replay buffer ({})",
+                        context
+                    );
+                } else if forwarded_packets % 500 == 0 {
+                    info!(
+                        "Forwarded {} audio packets to replay buffer",
+                        forwarded_packets
+                    );
+                }
+            }
+        });
+
+        self.audio_manager = Some(audio_manager);
+        info!("Audio capture started");
+        Ok(())
+    }
+
     /// Start the recording pipeline
     pub async fn start_recording(&mut self) -> Result<()> {
         if self.is_recording {
@@ -78,36 +122,7 @@ impl AppState {
                 spawn_encoder(encoder_config, self.buffer.clone())
                     .context("Failed to spawn pull-mode encoder")?;
 
-            if self.config.audio.capture_system || self.config.audio.capture_mic {
-                let mut audio_manager =
-                    WasapiAudioManager::new().context("Failed to create audio manager")?;
-                audio_manager
-                    .start(&self.config.audio)
-                    .context("Failed to start audio capture")?;
-
-                let audio_packet_rx = audio_manager.packet_rx();
-                let buffer_clone = self.buffer.clone();
-
-                std::thread::spawn(move || {
-                    let mut forwarded_packets = 0u64;
-                    while let Ok(packet) = audio_packet_rx.recv() {
-                        buffer_clone.push(packet);
-                        forwarded_packets = forwarded_packets.saturating_add(1);
-
-                        if forwarded_packets == 1 {
-                            info!("Forwarded first audio packet to replay buffer (pull mode)");
-                        } else if forwarded_packets % 500 == 0 {
-                            info!(
-                                "Forwarded {} audio packets to replay buffer",
-                                forwarded_packets
-                            );
-                        }
-                    }
-                });
-
-                self.audio_manager = Some(audio_manager);
-                info!("Audio capture started");
-            }
+            self.start_audio_capture("pull mode")?;
 
             self.encoder_handle = Some(encoder_handle);
             self.capture = None;
@@ -117,39 +132,7 @@ impl AppState {
         }
 
         // Create and start audio capture first if enabled
-        if self.config.audio.capture_system || self.config.audio.capture_mic {
-            let mut audio_manager =
-                WasapiAudioManager::new().context("Failed to create audio manager")?;
-            audio_manager
-                .start(&self.config.audio)
-                .context("Failed to start audio capture")?;
-
-            // Spawn audio encoder thread
-            let audio_packet_rx = audio_manager.packet_rx();
-            let buffer_clone = self.buffer.clone();
-
-            std::thread::spawn(move || {
-                // In a real implementation, we would encode the audio packets here
-                // For now, we'll just forward them to the buffer
-                let mut forwarded_packets = 0u64;
-                while let Ok(packet) = audio_packet_rx.recv() {
-                    buffer_clone.push(packet);
-                    forwarded_packets = forwarded_packets.saturating_add(1);
-
-                    if forwarded_packets == 1 {
-                        info!("Forwarded first audio packet to replay buffer");
-                    } else if forwarded_packets % 500 == 0 {
-                        info!(
-                            "Forwarded {} audio packets to replay buffer",
-                            forwarded_packets
-                        );
-                    }
-                }
-            });
-
-            self.audio_manager = Some(audio_manager);
-            info!("Audio capture started");
-        }
+        self.start_audio_capture("capture mode")?;
 
         // Create and start video capture
         let mut capture = DxgiCapture::new().context("Failed to create DXGI capture")?;

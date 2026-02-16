@@ -4,27 +4,25 @@
 
 use std::sync::OnceLock;
 
-
 /// Cached QPC frequency (queried once, reused everywhere)
 pub fn qpc_frequency() -> i64 {
     static FREQ: OnceLock<i64> = OnceLock::new();
-    *FREQ
-        .get_or_init(|| {
-            let mut freq = 10_000_000i64;
-            unsafe {
-                windows::Win32::System::Performance::QueryPerformanceFrequency(&mut freq)
-                    .expect(
-                        "QueryPerformanceFrequency should never fail on supported Windows",
-                    );
-            }
-            freq
-        })
+    *FREQ.get_or_init(|| {
+        let mut freq = 10_000_000i64;
+        unsafe {
+            windows::Win32::System::Performance::QueryPerformanceFrequency(&mut freq)
+                .expect("QueryPerformanceFrequency should never fail on supported Windows");
+        }
+        freq
+    })
 }
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::encode::StreamType;
+    use crate::buffer::ring::types::ReplayBuffer;
+    use crate::encode::{EncodedPacket, StreamType};
     use bytes::Bytes;
+    use std::time::Duration;
+
     fn create_test_packet(pts: i64, is_keyframe: bool, size: usize) -> EncodedPacket {
         EncodedPacket {
             data: Bytes::from(vec![0u8; size]),
@@ -66,7 +64,7 @@ mod tests {
             buffer.push(packet);
         }
         let snapshot = buffer.snapshot_from(12_000_000).unwrap();
-        assert!(! snapshot.is_empty());
+        assert!(!snapshot.is_empty());
     }
     #[test]
     fn test_snapshot_cheap_clone() {
@@ -112,7 +110,7 @@ mod tests {
         assert!(buffer.packets.len() < 200);
         assert!(buffer.base_offset > 0);
         let snap = buffer.snapshot_from(last_keyframe_pts).unwrap();
-        assert!(! snap.is_empty());
+        assert!(!snap.is_empty());
         assert!(snap[0].pts <= last_keyframe_pts + 10_000_000);
     }
 }

@@ -8,8 +8,11 @@
 //!
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
+use super::functions::{
+    default_bitrate, default_codec, default_encoder, default_framerate, default_quality_preset,
+    default_quality_value, default_rate_control, default_resolution,
+};
 use super::types::VideoConfig;
-use super::functions::{default_bitrate, default_codec, default_encoder, default_framerate, default_quality_preset, default_quality_value, default_rate_control, default_resolution};
 
 impl Default for VideoConfig {
     fn default() -> Self {
@@ -25,4 +28,3 @@ impl Default for VideoConfig {
         }
     }
 }
-

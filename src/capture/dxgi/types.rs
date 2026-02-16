@@ -15,8 +15,8 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
 use windows::Win32::Graphics::Direct3D11::{
-    ID3D11Device, ID3D11DeviceContext, ID3D11Resource, ID3D11Texture2D,
-    D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ,
+    ID3D11Device, ID3D11DeviceContext, ID3D11Resource, ID3D11Texture2D, D3D11_MAPPED_SUBRESOURCE,
+    D3D11_MAP_READ,
 };
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIOutput1, IDXGIResource, DXGI_ERROR_ACCESS_DENIED,
@@ -25,7 +25,6 @@ use windows::Win32::Graphics::Dxgi::{
     DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTPUT_DESC,
 };
 use windows::Win32::System::Performance::QueryPerformanceCounter;
-
 
 /// DXGI capture state
 #[allow(dead_code)]
@@ -43,8 +42,7 @@ impl DxgiCaptureState {
     pub fn get_qpc_timestamp() -> i64 {
         unsafe {
             let mut qpc = 0i64;
-            QueryPerformanceCounter(&mut qpc)
-                .expect("QueryPerformanceCounter should never fail");
+            QueryPerformanceCounter(&mut qpc).expect("QueryPerformanceCounter should never fail");
             qpc
         }
     }
@@ -73,9 +71,7 @@ impl DxgiCapture {
     fn init_capture(output_index: u32) -> Result<DxgiCaptureState> {
         info!("Initializing DXGI capture for output {}", output_index);
         unsafe {
-            let factory = CreateDXGIFactory1::<
-                windows::Win32::Graphics::Dxgi::IDXGIFactory1,
-            >()
+            let factory = CreateDXGIFactory1::<windows::Win32::Graphics::Dxgi::IDXGIFactory1>()
                 .context("Failed to create DXGI factory")?;
             let mut adapter_index = 0u32;
             let mut selected_adapter = None;
@@ -94,31 +90,27 @@ impl DxgiCapture {
                     }
                 }
             }
-            let (adapter, output) = selected_adapter
-                .context("Failed to find adapter with requested output index")?;
+            let (adapter, output) =
+                selected_adapter.context("Failed to find adapter with requested output index")?;
             let output_desc = output
                 .GetDesc()
                 .context("Failed to get output description")?;
             info!(
-                "Using output: {}x{} attached to monitor {:?}", output_desc
-                .DesktopCoordinates.right - output_desc.DesktopCoordinates.left,
-                output_desc.DesktopCoordinates.bottom - output_desc.DesktopCoordinates
-                .top, output_desc.Monitor
+                "Using output: {}x{} attached to monitor {:?}",
+                output_desc.DesktopCoordinates.right - output_desc.DesktopCoordinates.left,
+                output_desc.DesktopCoordinates.bottom - output_desc.DesktopCoordinates.top,
+                output_desc.Monitor
             );
             let output1: IDXGIOutput1 = output
                 .cast()
                 .context("Failed to get IDXGIOutput1 interface")?;
-            let adapter_cast: windows::Win32::Graphics::Dxgi::IDXGIAdapter = adapter
-                .cast()
-                .context("Failed to cast adapter")?;
+            let adapter_cast: windows::Win32::Graphics::Dxgi::IDXGIAdapter =
+                adapter.cast().context("Failed to cast adapter")?;
             let mut d3d_device: Option<ID3D11Device> = None;
             let mut d3d_context: Option<ID3D11DeviceContext> = None;
-            let feature_levels = [
-                windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_0,
-            ];
-            let mut obtained_feature_level = windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL(
-                0,
-            );
+            let feature_levels = [windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_0];
+            let mut obtained_feature_level =
+                windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL(0);
             let result = windows::Win32::Graphics::Direct3D11::D3D11CreateDevice(
                 Some(&adapter_cast),
                 windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN,
@@ -162,10 +154,10 @@ impl DxgiCapture {
                         "Failed to duplicate output: {} (0x{:08X})", msg, code as u32
                     )
                 })?;
-            let frame_width = (output_desc.DesktopCoordinates.right
-                - output_desc.DesktopCoordinates.left) as u32;
-            let frame_height = (output_desc.DesktopCoordinates.bottom
-                - output_desc.DesktopCoordinates.top) as u32;
+            let frame_width =
+                (output_desc.DesktopCoordinates.right - output_desc.DesktopCoordinates.left) as u32;
+            let frame_height =
+                (output_desc.DesktopCoordinates.bottom - output_desc.DesktopCoordinates.top) as u32;
             info!("DXGI capture initialized: {}x{}", frame_width, frame_height);
             Ok(DxgiCaptureState {
                 d3d_device,
@@ -196,8 +188,8 @@ impl DxgiCapture {
                 },
                 Usage: windows::Win32::Graphics::Direct3D11::D3D11_USAGE_STAGING,
                 BindFlags: 0,
-                CPUAccessFlags: windows::Win32::Graphics::Direct3D11::D3D11_CPU_ACCESS_READ
-                    .0 as u32,
+                CPUAccessFlags: windows::Win32::Graphics::Direct3D11::D3D11_CPU_ACCESS_READ.0
+                    as u32,
                 MiscFlags: 0,
             };
             let mut texture = None;
@@ -208,7 +200,8 @@ impl DxgiCapture {
                 .context("Failed to create staging texture")?;
             state.staging_texture = texture;
             debug!(
-                "Created staging texture: {}x{}", state.frame_width, state.frame_height
+                "Created staging texture: {}x{}",
+                state.frame_width, state.frame_height
             );
             Ok(())
         }
@@ -221,9 +214,11 @@ impl DxgiCapture {
         unsafe {
             let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
             let mut desktop_resource: Option<IDXGIResource> = None;
-            let hr = state
-                .duplication
-                .AcquireNextFrame(timeout_ms, &mut frame_info, &mut desktop_resource);
+            let hr = state.duplication.AcquireNextFrame(
+                timeout_ms,
+                &mut frame_info,
+                &mut desktop_resource,
+            );
             match hr {
                 Ok(_) => {
                     let resource = desktop_resource.context("Desktop resource is null")?;
@@ -240,10 +235,7 @@ impl DxgiCapture {
                             .context("Failed to cast captured texture to resource")?;
                         state
                             .d3d_context
-                            .CopyResource(
-                                Some(&staging_resource),
-                                Some(&captured_resource),
-                            );
+                            .CopyResource(Some(&staging_resource), Some(&captured_resource));
                         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
                         state
                             .d3d_context
@@ -273,7 +265,9 @@ impl DxgiCapture {
                             state.d3d_context.Unmap(Some(&staging_resource), 0);
                             bail!(
                                 "Frame dimensions too large for safe copy: {}x{}, pitch={}",
-                                width, height, src_pitch
+                                width,
+                                height,
+                                src_pitch
                             );
                         }
                         let total_bytes = row_bytes * height;
@@ -401,7 +395,10 @@ impl DxgiCapture {
                 }
             }
         }
-        info!("DXGI capture thread stopped ({} frames captured)", frame_count);
+        info!(
+            "DXGI capture thread stopped ({} frames captured)",
+            frame_count
+        );
     }
     /// Get current QPC timestamp
     fn get_qpc_timestamp() -> i64 {
