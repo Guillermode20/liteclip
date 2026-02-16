@@ -107,7 +107,7 @@ fn register_single_hotkey(hwnd: HWND, id: i32, hotkey_str: &str) -> Result<()> {
     let hotkey = Hotkey::from_str(hotkey_str, id)?;
 
     unsafe {
-        if let Err(_) = RegisterHotKey(hwnd, hotkey.id, hotkey.modifiers, hotkey.key) {
+        if RegisterHotKey(hwnd, hotkey.id, hotkey.modifiers, hotkey.key).is_err() {
             let err = GetLastError();
             let code = err.0;
             let hint = if code == ERROR_HOTKEY_ALREADY_REGISTERED {

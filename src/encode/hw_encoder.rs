@@ -18,6 +18,13 @@ use tracing::{debug, enabled, error, info, trace, warn, Level};
 // Import the QPC frequency function from the buffer module
 use crate::buffer::ring::qpc_frequency;
 
+/// Frame metadata passed from encoder thread to output reader thread.
+/// Used to preserve original capture timestamps for A/V sync.
+struct FrameMetadata {
+    /// Original QPC timestamp from capture (10MHz units)
+    capture_timestamp: i64,
+}
+
 /// Convert BGRA to RGB24 format for FFmpeg input
 #[cfg(test)]
 fn bgra_to_rgb24(bgra: &[u8], width: u32, height: u32) -> Vec<u8> {
@@ -150,6 +157,8 @@ pub struct HardwareEncoderBase {
     stdout_thread: Option<thread::JoinHandle<()>>,
     /// JoinHandle for the stderr reader thread
     stderr_thread: Option<thread::JoinHandle<()>>,
+    /// Channel sender for frame metadata (timestamps) to output reader
+    frame_meta_tx: Option<Sender<FrameMetadata>>,
 }
 
 impl HardwareEncoderBase {
@@ -184,6 +193,7 @@ impl HardwareEncoderBase {
             height,
             stdout_thread: None,
             stderr_thread: None,
+            frame_meta_tx: None,
         })
     }
 
@@ -312,6 +322,10 @@ impl HardwareEncoderBase {
         self.width = out_w;
         self.height = out_h;
 
+        // Create channel for frame metadata (timestamps) to output reader
+        let (frame_meta_tx, frame_meta_rx) = bounded::<FrameMetadata>(256);
+        self.frame_meta_tx = Some(frame_meta_tx);
+
         // Start the output reader thread
         let packet_tx = self.packet_tx.clone();
         let stdout = self
@@ -330,7 +344,8 @@ impl HardwareEncoderBase {
             }
         };
 
-        let stdout_handle = self.spawn_output_reader(stdout, packet_tx, start_qpc);
+        let stdout_handle =
+            self.spawn_output_reader(stdout, packet_tx, frame_meta_rx, start_qpc);
         self.stdout_thread = Some(stdout_handle);
 
         // Spawn stderr reader to capture FFmpeg diagnostic output
@@ -524,6 +539,7 @@ impl HardwareEncoderBase {
         &self,
         stdout: std::process::ChildStdout,
         packet_tx: Sender<EncodedPacket>,
+        frame_meta_rx: Receiver<FrameMetadata>,
         start_qpc: i64,
     ) -> thread::JoinHandle<()> {
         let qpc_freq = qpc_frequency(); // Use the cached QPC frequency
@@ -577,20 +593,42 @@ impl HardwareEncoderBase {
                                 let is_frame_nal = matches!(nal_type, Some(1 | 5));
 
                                 let final_pts = if is_frame_nal {
-                                    // Timestamp actual frame NAL units from elapsed wall-clock
-                                    // time to keep video timeline aligned with captured audio.
-                                    let elapsed_qpc = (output_reader_start.elapsed().as_secs_f64()
-                                        * qpc_freq as f64)
-                                        as i64;
-                                    let pts = start_qpc.saturating_add(elapsed_qpc);
-                                    let normalized = if pts <= last_pts { last_pts + 1 } else { pts };
-                                    last_pts = normalized;
-                                    normalized
+                                    // Receive the next frame metadata to get original capture timestamp
+                                    match frame_meta_rx.try_recv() {
+                                    Ok(meta) => {
+                                        // Calculate PTS based on original capture timestamp
+                                            // This preserves A/V sync by using the same timeline as audio
+                                            let pts = meta.capture_timestamp;
+                                            let normalized = if pts <= last_pts {
+                                                last_pts + 1
+                                            } else {
+                                                pts
+                                            };
+                                            last_pts = normalized;
+                                            normalized
+                                        }
+                                        Err(_) => {
+                                            // No metadata available, fallback to elapsed time
+                                            // This can happen if FFmpeg outputs more NALs than frames sent
+                                            let elapsed_qpc = (output_reader_start.elapsed().as_secs_f64()
+                                                * qpc_freq as f64)
+                                                as i64;
+                                            let pts = start_qpc.saturating_add(elapsed_qpc);
+                                            let normalized = if pts <= last_pts {
+                                                last_pts + 1
+                                            } else {
+                                                pts
+                                            };
+                                            last_pts = normalized;
+                                            normalized
+                                        }
+                                    }
                                 } else if last_pts < start_qpc {
-                                    // Parameter-set NALs before first frame.
+                                    // Parameter-set NALs (SPS/PPS) before first frame.
                                     start_qpc
                                 } else {
-                                    // Keep non-frame NAL units on current timeline point.
+                                    // For non-frame NALs (AUD, SEI, etc.), use the current frame's timestamp
+                                    // or the last known timestamp to keep them aligned
                                     last_pts
                                 };
 
@@ -642,6 +680,17 @@ impl HardwareEncoderBase {
         if self.ffmpeg_process.is_none() {
             let (native_w, native_h) = frame.resolution;
             self.init_ffmpeg(native_w, native_h)?;
+        }
+
+        // Send frame metadata (timestamp) to output reader for A/V sync
+        if let Some(ref meta_tx) = self.frame_meta_tx {
+            let meta = FrameMetadata {
+                capture_timestamp: frame.timestamp,
+            };
+            // Use try_send to avoid blocking capture thread if reader is behind
+            if meta_tx.try_send(meta).is_err() && self.frame_count % 60 == 0 {
+                debug!("Frame metadata channel full, dropping timestamp for frame {}", self.frame_count);
+            }
         }
 
         if !self.config.use_cpu_readback {
