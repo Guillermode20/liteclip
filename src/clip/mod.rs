@@ -76,7 +76,7 @@ pub fn spawn_clip_saver(
         // Step 4: Create muxer and write packets
         let mut muxer = Muxer::new(&output_path, &config).context("Failed to create muxer")?;
 
-        // Step 5: Write video packets (Phase 1: audio is Phase 2)
+        // Step 5: Write video and audio packets
         let mut video_count = 0;
         let mut audio_count = 0;
 
@@ -89,24 +89,31 @@ pub fn spawn_clip_saver(
                     video_count += 1;
                 }
                 crate::encode::StreamType::SystemAudio | crate::encode::StreamType::Microphone => {
-                    // Audio is Phase 2 - skip for now
+                    muxer
+                        .write_audio_packet(packet)
+                        .context("Failed to write audio packet")?;
                     audio_count += 1;
                 }
             }
         }
 
-        debug!(
-            "Wrote {} video packets (skipped {} audio packets for Phase 2)",
+        info!(
+            "Prepared clip packet set: {} video packets, {} audio packets",
             video_count, audio_count
         );
+
+        if video_count == 0 {
+            bail!("No video packets in selected clip range");
+        }
 
         // Step 6: Finalize the MP4 file
         let final_path = muxer.finalize().context("Failed to finalize MP4")?;
 
         info!(
-            "Clip saved successfully: {:?} ({} packets, ~{} seconds)",
+            "Clip saved successfully: {:?} ({} video packets, {} audio packets, ~{} seconds)",
             final_path,
             video_count,
+            audio_count,
             duration.as_secs()
         );
 

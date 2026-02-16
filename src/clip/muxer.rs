@@ -12,7 +12,12 @@ use std::{
     io::Write,
     process::{Command, Stdio},
 };
-use tracing::{debug, error, info, trace};
+use tracing::{debug, error, info, trace, warn};
+
+#[cfg(feature = "ffmpeg")]
+const AUDIO_SAMPLE_RATE: u32 = 48_000;
+#[cfg(feature = "ffmpeg")]
+const AUDIO_CHANNELS: u16 = 2;
 
 /// Detect if packet data is H.264 format by looking for NAL start codes
 ///
@@ -68,6 +73,8 @@ pub struct MuxerConfig {
     pub output_path: PathBuf,
     /// Move moov atom to front for web playback
     pub faststart: bool,
+    /// If true, ensure the output contains an audio track even when no captured audio packets exist.
+    pub expect_audio: bool,
 }
 
 impl MuxerConfig {
@@ -80,6 +87,7 @@ impl MuxerConfig {
             fps,
             output_path: output_path.as_ref().to_path_buf(),
             faststart: true,
+            expect_audio: false,
         }
     }
 
@@ -92,6 +100,12 @@ impl MuxerConfig {
     /// Set faststart option
     pub fn with_faststart(mut self, faststart: bool) -> Self {
         self.faststart = faststart;
+        self
+    }
+
+    /// Mark whether the recorder expected audio input for this clip.
+    pub fn with_expect_audio(mut self, expect_audio: bool) -> Self {
+        self.expect_audio = expect_audio;
         self
     }
 }
@@ -113,6 +127,9 @@ pub struct Muxer {
     /// Buffered video packets used for MP4 generation at finalize()
     #[cfg(feature = "ffmpeg")]
     video_packets: Vec<EncodedPacket>,
+    /// Buffered audio packets (PCM S16LE) used for MP4 generation at finalize()
+    #[cfg(feature = "ffmpeg")]
+    audio_packets: Vec<EncodedPacket>,
 }
 
 impl Muxer {
@@ -133,6 +150,7 @@ impl Muxer {
                 output_path: path,
                 config: config.clone(),
                 video_packets: Vec::new(),
+                audio_packets: Vec::new(),
             })
         }
 
@@ -180,11 +198,24 @@ impl Muxer {
     /// Write audio packet to MP4
     ///
     /// Phase 2 feature - audio stream interleaving.
-    /// Currently a no-op for Phase 1.
-    pub fn write_audio_packet(&mut self, _packet: &EncodedPacket) -> Result<()> {
-        // Audio is Phase 2 - ignore for now
-        trace!("Audio packet skipped (Phase 2 feature)");
-        Ok(())
+    pub fn write_audio_packet(&mut self, packet: &EncodedPacket) -> Result<()> {
+        #[cfg(feature = "ffmpeg")]
+        {
+            self.audio_packets.push(packet.clone());
+            Ok(())
+        }
+
+        #[cfg(not(feature = "ffmpeg"))]
+        {
+            // Stub mode - just log
+            trace!(
+                "Stub: Received audio packet (size={}, pts={}, stream={:?})",
+                packet.data.len(),
+                packet.pts,
+                packet.stream
+            );
+            Ok(())
+        }
     }
 
     /// Finalize the MP4 file and close
@@ -220,6 +251,7 @@ impl Muxer {
         }
 
         self.video_packets.sort_by_key(|packet| packet.pts);
+        self.audio_packets.sort_by_key(|packet| packet.pts);
 
         // Detect if frames are already H.264 encoded
         let is_h264 = self
@@ -337,6 +369,8 @@ impl Muxer {
             }
         }
 
+        let audio_temp_path = self.write_audio_temp_pcm()?;
+
         // Use FFmpeg to remux H.264 to MP4 (no transcoding).
         // Do not pass rawvideo-specific options (e.g. video_size) to H.264 input.
         let mut command = Command::new(&ffmpeg_cmd);
@@ -347,10 +381,33 @@ impl Muxer {
             .arg("-r")
             .arg(format!("{:.6}", effective_fps))
             .arg("-i")
-            .arg(&h264_temp_path)
-            // Copy video stream
-            .arg("-c:v")
-            .arg("copy");
+            .arg(&h264_temp_path);
+
+        if let Some(ref audio_path) = audio_temp_path {
+            command
+                .arg("-f")
+                .arg("s16le")
+                .arg("-ar")
+                .arg(AUDIO_SAMPLE_RATE.to_string())
+                .arg("-ac")
+                .arg(AUDIO_CHANNELS.to_string())
+                .arg("-i")
+                .arg(audio_path);
+        }
+
+        command.arg("-map").arg("0:v:0").arg("-c:v").arg("copy");
+
+        if audio_temp_path.is_some() {
+            command
+                .arg("-map")
+                .arg("1:a:0")
+                .arg("-c:a")
+                .arg("aac")
+                .arg("-b:a")
+                .arg("192k");
+        } else {
+            command.arg("-an");
+        }
 
         if self.config.faststart {
             command.arg("-movflags").arg("+faststart");
@@ -365,6 +422,9 @@ impl Muxer {
 
         // Clean up temp file
         let _ = std::fs::remove_file(&h264_temp_path);
+        if let Some(ref audio_path) = audio_temp_path {
+            let _ = std::fs::remove_file(audio_path);
+        }
 
         let stderr = String::from_utf8_lossy(&output.stderr);
         if !output.status.success() {
@@ -402,6 +462,86 @@ impl Muxer {
         );
 
         Ok(self.output_path.clone())
+    }
+
+    #[cfg(feature = "ffmpeg")]
+    fn write_audio_temp_pcm(&self) -> Result<Option<PathBuf>> {
+        if self.audio_packets.is_empty() {
+            if self.config.expect_audio {
+                warn!(
+                    "No captured audio packets found for this clip; generating silent fallback track"
+                );
+                return self.write_silent_audio_temp_pcm();
+            }
+
+            return Ok(None);
+        }
+
+        let audio_temp_path = self.output_path.with_extension("pcm");
+        let mut audio_file = std::fs::File::create(&audio_temp_path)
+            .with_context(|| format!("Failed to create temp PCM file: {:?}", audio_temp_path))?;
+
+        let mut bytes_written = 0usize;
+        for packet in &self.audio_packets {
+            let data = packet.data.as_ref();
+            let aligned_len = data.len().saturating_sub(data.len() % 2);
+            if aligned_len == 0 {
+                continue;
+            }
+
+            audio_file
+                .write_all(&data[..aligned_len])
+                .context("Failed writing PCM audio data to temp file")?;
+            bytes_written += aligned_len;
+        }
+
+        if bytes_written == 0 {
+            let _ = std::fs::remove_file(&audio_temp_path);
+            return Ok(None);
+        }
+
+        info!(
+            "Prepared PCM audio input for muxing: {} packets, {} bytes",
+            self.audio_packets.len(),
+            bytes_written
+        );
+
+        Ok(Some(audio_temp_path))
+    }
+
+    #[cfg(feature = "ffmpeg")]
+    fn write_silent_audio_temp_pcm(&self) -> Result<Option<PathBuf>> {
+        let audio_temp_path = self.output_path.with_extension("pcm");
+        let mut audio_file = std::fs::File::create(&audio_temp_path)
+            .with_context(|| format!("Failed to create temp PCM file: {:?}", audio_temp_path))?;
+
+        // Keep this intentionally short to avoid extending clip duration when
+        // the video stream has sparse/implicit timestamps.
+        let duration_secs = 0.2f64;
+        let total_frames = (duration_secs * AUDIO_SAMPLE_RATE as f64).round() as usize;
+
+        let bytes_per_frame = AUDIO_CHANNELS as usize * 2;
+        let zero_chunk_frames = 2048usize;
+        let zero_chunk = vec![0u8; zero_chunk_frames * bytes_per_frame];
+
+        let mut remaining_frames = total_frames;
+        let mut bytes_written = 0usize;
+        while remaining_frames > 0 {
+            let chunk_frames = remaining_frames.min(zero_chunk_frames);
+            let chunk_bytes = chunk_frames * bytes_per_frame;
+            audio_file
+                .write_all(&zero_chunk[..chunk_bytes])
+                .context("Failed writing silent fallback PCM data")?;
+            bytes_written += chunk_bytes;
+            remaining_frames -= chunk_frames;
+        }
+
+        info!(
+            "Prepared silent PCM fallback for muxing: {:.3}s ({} bytes)",
+            duration_secs, bytes_written
+        );
+
+        Ok(Some(audio_temp_path))
     }
 
     /// Slow path: Transcode MJPEG frames to H.264 and mux to MP4
@@ -442,6 +582,8 @@ impl Muxer {
             self.video_packets.last().map(|p| p.pts).unwrap_or(0)
         );
 
+        let audio_temp_path = self.write_audio_temp_pcm()?;
+
         let mut command = Command::new(&ffmpeg_cmd);
         command
             .arg("-y")
@@ -450,7 +592,23 @@ impl Muxer {
             .arg("-f")
             .arg("mjpeg")
             .arg("-i")
-            .arg("pipe:0")
+            .arg("pipe:0");
+
+        if let Some(ref audio_path) = audio_temp_path {
+            command
+                .arg("-f")
+                .arg("s16le")
+                .arg("-ar")
+                .arg(AUDIO_SAMPLE_RATE.to_string())
+                .arg("-ac")
+                .arg(AUDIO_CHANNELS.to_string())
+                .arg("-i")
+                .arg(audio_path);
+        }
+
+        command
+            .arg("-map")
+            .arg("0:v:0")
             .arg("-c:v")
             .arg("libx264")
             .arg("-r")
@@ -463,6 +621,18 @@ impl Muxer {
             .arg("zerolatency")
             .arg("-pix_fmt")
             .arg("yuv420p");
+
+        if audio_temp_path.is_some() {
+            command
+                .arg("-map")
+                .arg("1:a:0")
+                .arg("-c:a")
+                .arg("aac")
+                .arg("-b:a")
+                .arg("192k");
+        } else {
+            command.arg("-an");
+        }
 
         if self.config.faststart {
             command.arg("-movflags").arg("+faststart");
@@ -525,6 +695,10 @@ impl Muxer {
         });
 
         let status = child.wait().context("Failed waiting for ffmpeg process")?;
+
+        if let Some(ref audio_path) = audio_temp_path {
+            let _ = std::fs::remove_file(audio_path);
+        }
 
         let _stdout_data = stdout_thread.join().unwrap_or_default();
         let stderr_data = stderr_thread.join().unwrap_or_default();

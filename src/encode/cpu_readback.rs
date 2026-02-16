@@ -21,7 +21,11 @@ impl CpuReadbackBuffer {
     pub fn new(width: u32, height: u32) -> Result<Self> {
         let size = (width * height * 4) as usize;
         let buffer = vec![0u8; size];
-        Ok(Self { width, height, buffer })
+        Ok(Self {
+            width,
+            height,
+            buffer,
+        })
     }
 
     /// Copy texture to CPU memory

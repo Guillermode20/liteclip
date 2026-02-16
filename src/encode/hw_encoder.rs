@@ -127,6 +127,13 @@ fn resolve_ffmpeg_command() -> String {
     "ffmpeg".to_string()
 }
 
+fn query_qpc() -> Result<i64> {
+    let mut qpc = 0i64;
+    unsafe { windows::Win32::System::Performance::QueryPerformanceCounter(&mut qpc) }
+        .context("QueryPerformanceCounter failed")?;
+    Ok(qpc)
+}
+
 /// Base hardware encoder using FFmpeg CLI
 pub struct HardwareEncoderBase {
     config: EncoderConfig,
@@ -231,10 +238,7 @@ impl HardwareEncoderBase {
 
             // ddagrab frames are D3D11 hardware surfaces; AMF path needs download
             // into system memory to avoid unsupported auto-scale graph initialization.
-            if matches!(
-                encoder_name,
-                "h264_amf" | "hevc_amf" | "av1_amf"
-            ) {
+            if matches!(encoder_name, "h264_amf" | "hevc_amf" | "av1_amf") {
                 video_filters.push("hwdownload,format=bgra".to_string());
             }
         }
@@ -273,9 +277,9 @@ impl HardwareEncoderBase {
             .arg("-pix_fmt")
             .arg("yuv420p")
             .arg("-r")
-            .arg(self.config.framerate.to_string())  // Explicit output frame rate
+            .arg(self.config.framerate.to_string()) // Explicit output frame rate
             .arg("-vsync")
-            .arg("cfr")  // Constant frame rate to maintain timing
+            .arg("cfr") // Constant frame rate to maintain timing
             .arg("-f")
             .arg("h264")
             .arg("pipe:1");
@@ -318,7 +322,15 @@ impl HardwareEncoderBase {
             .take()
             .context("Failed to take FFmpeg stdout")?;
 
-        let stdout_handle = self.spawn_output_reader(stdout, packet_tx);
+        let start_qpc = match query_qpc() {
+            Ok(qpc) => qpc,
+            Err(e) => {
+                warn!("Failed to query QPC for encoder timeline start: {e:#}");
+                0
+            }
+        };
+
+        let stdout_handle = self.spawn_output_reader(stdout, packet_tx, start_qpc);
         self.stdout_thread = Some(stdout_handle);
 
         // Spawn stderr reader to capture FFmpeg diagnostic output
@@ -388,15 +400,15 @@ impl HardwareEncoderBase {
                     cmd.arg("-cq");
                     cmd.arg(self.cq_value().to_string());
                 }
-                
+
                 // Optimize for performance/latency
                 cmd.arg("-delay");
                 cmd.arg("0"); // No delay for lowest latency
-                
+
                 // Use faster presets for higher framerates
                 cmd.arg("-tune");
                 cmd.arg("ull"); // Ultra-low latency mode
-                
+
                 // Reduce B-frame usage for lower latency
                 cmd.arg("-b_ref_mode");
                 cmd.arg("disabled");
@@ -415,7 +427,7 @@ impl HardwareEncoderBase {
                 // Ensure consistent frame rate
                 cmd.arg("-vsync");
                 cmd.arg("cfr");
-                
+
                 // Optimize for performance
                 cmd.arg("-usage");
                 cmd.arg("lowlatency");
@@ -424,7 +436,7 @@ impl HardwareEncoderBase {
                 // QSV specific: no look ahead for lower latency
                 cmd.arg("-look_ahead");
                 cmd.arg("0");
-                
+
                 // Optimize for performance
                 cmd.arg("-preset");
                 cmd.arg("faster"); // Use faster preset for higher framerates
@@ -512,10 +524,11 @@ impl HardwareEncoderBase {
         &self,
         stdout: std::process::ChildStdout,
         packet_tx: Sender<EncodedPacket>,
+        start_qpc: i64,
     ) -> thread::JoinHandle<()> {
         let framerate = self.config.framerate as f64;
         let qpc_freq = qpc_frequency(); // Use the cached QPC frequency
-        
+
         thread::spawn(move || {
             use std::io::Read;
 
@@ -523,7 +536,7 @@ impl HardwareEncoderBase {
             let mut buffer = [0u8; 65536]; // 64KB buffer
             let mut frame_buffer = BytesMut::with_capacity(1024 * 1024); // Pre-allocate 1MB
             let mut frame_count = 0u64;
-            let mut last_pts = 0i64;
+            let mut last_pts = start_qpc.saturating_sub(1);
 
             loop {
                 match reader.read(&mut buffer) {
@@ -564,16 +577,15 @@ impl HardwareEncoderBase {
                                 let is_keyframe = matches!(nal_type, Some(5 | 7 | 8));
 
                                 // Calculate PTS based on frame count and configured framerate
-                                // This ensures proper timing regardless of encoding speed
+                                // anchored to wall-clock QPC so it shares timestamp domain
+                                // with WASAPI audio packets.
                                 let pts_increment = (qpc_freq as f64 / framerate) as i64;
-                                let pts = ((frame_count as f64) * pts_increment as f64) as i64;
-                                
+                                let pts = start_qpc.saturating_add(
+                                    ((frame_count as f64) * pts_increment as f64) as i64,
+                                );
+
                                 // Ensure monotonically increasing timestamps
-                                let final_pts = if pts <= last_pts {
-                                    last_pts + 1
-                                } else {
-                                    pts
-                                };
+                                let final_pts = if pts <= last_pts { last_pts + 1 } else { pts };
                                 last_pts = final_pts;
                                 frame_count += 1;
 

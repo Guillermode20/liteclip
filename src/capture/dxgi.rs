@@ -341,14 +341,14 @@ impl DxgiCapture {
                             let dst_ptr = bgra_buffer.as_mut_ptr();
                             let mut src_row_offset = 0;
                             let mut dst_row_offset = 0;
-                            
+
                             for _row in 0..height {
                                 std::ptr::copy_nonoverlapping(
                                     src_ptr.add(src_row_offset),
                                     dst_ptr.add(dst_row_offset),
                                     row_bytes,
                                 );
-                                
+
                                 src_row_offset += src_pitch;
                                 dst_row_offset += row_bytes;
                             }
@@ -409,11 +409,11 @@ impl DxgiCapture {
         // naturally pace capture without introducing an additional software sleep.
         let timeout_ms = (1000u32 / config.target_fps.max(1)).max(1)
             + u32::from(!1000u32.is_multiple_of(config.target_fps.max(1)));
-        
+
         // Calculate the target interval between frames in nanoseconds
         let frame_interval_ns = 1_000_000_000u64 / config.target_fps.max(1) as u64;
         let mut last_frame_time = std::time::Instant::now();
-        
+
         let mut frame_count = 0u64;
         let mut error_count = 0u32;
         let max_errors = 10;
@@ -443,20 +443,21 @@ impl DxgiCapture {
                         let sleep_ns = frame_interval_ns - elapsed;
                         std::thread::sleep(Duration::from_nanos(sleep_ns));
                     }
-                    
+
                     // Update the last frame time to now
                     last_frame_time = std::time::Instant::now();
-                    
+
                     // Send frame to encoder
                     match frame_tx.send(frame) {
                         Ok(()) => {
                             frame_count += 1;
                             error_count = 0; // Reset error count on success
-                            
+
                             // Periodic logging to avoid impacting performance
                             if frame_count % LOG_INTERVAL == 0 {
                                 log_counter += 1;
-                                if log_counter % 10 == 0 { // Every 10 intervals (3000 frames)
+                                if log_counter % 10 == 0 {
+                                    // Every 10 intervals (3000 frames)
                                     info!("Captured {} frames", frame_count);
                                 } else {
                                     debug!("Captured {} frames", frame_count);

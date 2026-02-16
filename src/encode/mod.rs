@@ -390,20 +390,20 @@ pub fn spawn_encoder(
             // Main encode loop – dispatch every frame to parallel workers
             // and drain completed packets into the ring buffer.
             let mut packet_batch = Vec::with_capacity(16); // Batch packets for better performance
-            
+
             loop {
                 // First, drain any already-encoded packets into the buffer in batches
                 let mut count = 0;
                 while let Ok(packet) = packet_rx.try_recv() {
                     packet_batch.push(packet);
                     count += 1;
-                    
+
                     // Process in batches to reduce lock contention
                     if count >= 16 {
                         break;
                     }
                 }
-                
+
                 // Push batch to buffer
                 if !packet_batch.is_empty() {
                     for packet in packet_batch.drain(..) {
@@ -443,7 +443,7 @@ pub fn spawn_encoder(
             while let Ok(packet) = packet_rx.try_recv() {
                 final_packets.push(packet);
             }
-            
+
             // Push final packets in batch
             for packet in final_packets {
                 buffer.push(packet);
@@ -493,20 +493,20 @@ pub fn spawn_encoder_with_receiver(
             // Main encode loop – dispatch every frame to parallel workers
             // and drain completed packets into the ring buffer.
             let mut packet_batch = Vec::with_capacity(16); // Batch packets for better performance
-            
+
             loop {
                 // Drain completed packets into the buffer in batches
                 let mut count = 0;
                 while let Ok(packet) = packet_rx.try_recv() {
                     packet_batch.push(packet);
                     count += 1;
-                    
+
                     // Process in batches to reduce lock contention
                     if count >= 16 {
                         break;
                     }
                 }
-                
+
                 // Push batch to buffer
                 if !packet_batch.is_empty() {
                     for packet in packet_batch.drain(..) {
@@ -546,7 +546,7 @@ pub fn spawn_encoder_with_receiver(
             while let Ok(packet) = packet_rx.try_recv() {
                 final_packets.push(packet);
             }
-            
+
             // Push final packets in batch
             for packet in final_packets {
                 buffer.push(packet);

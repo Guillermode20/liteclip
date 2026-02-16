@@ -1,13 +1,16 @@
-//! Screen Capture Engine
+//! Screen and Audio Capture Engine
 //!
-//! Acquires raw frames from the desktop/game using DXGI Desktop Duplication.
+//! Acquires raw frames from the desktop/game using DXGI Desktop Duplication
+//! and captures audio using WASAPI.
 
 use crate::d3d::D3D11Texture;
+use crate::encode::EncodedPacket;
 use anyhow::Result;
 use bytes::Bytes;
 use crossbeam::channel::Receiver;
 use std::time::Duration;
 
+pub mod audio;
 pub mod dxgi;
 
 /// Configuration for screen capture
@@ -70,6 +73,21 @@ pub trait CaptureBackend: Send + 'static {
 
     /// Get receiver for captured frames
     fn frame_rx(&self) -> Receiver<CapturedFrame>;
+}
+
+/// Audio capture backend trait
+pub trait AudioCaptureBackend: Send + 'static {
+    /// Start capturing audio
+    fn start(&mut self, config: &crate::config::AudioConfig) -> Result<()>;
+
+    /// Stop capturing audio
+    fn stop(&mut self);
+
+    /// Get receiver for captured audio packets
+    fn packet_rx(&self) -> Receiver<EncodedPacket>;
+
+    /// Check if audio capture is running
+    fn is_running(&self) -> bool;
 }
 
 /// Calculate frame duration from target FPS

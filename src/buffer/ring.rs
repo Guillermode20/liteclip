@@ -184,13 +184,13 @@ impl ReplayBuffer {
                 break;
             }
             packets_to_evict += 1;
-            
+
             // Limit batch eviction to prevent long stalls
             if packets_to_evict >= 10 {
                 break;
             }
         }
-        
+
         // Perform batch eviction
         for _ in 0..packets_to_evict {
             if self.packets.is_empty() {
@@ -205,7 +205,7 @@ impl ReplayBuffer {
         while self.total_bytes + packet_size > self.max_memory_bytes && !self.packets.is_empty() {
             self.evict_oldest();
             memory_evictions += 1;
-            
+
             // Limit batch eviction to prevent long stalls
             if memory_evictions >= 10 {
                 break;

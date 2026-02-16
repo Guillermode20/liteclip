@@ -4,7 +4,9 @@
 
 use crate::{
     buffer::ring::SharedReplayBuffer,
-    capture::{dxgi::DxgiCapture, CaptureBackend, CaptureConfig, CapturedFrame},
+    capture::{
+        audio::WasapiAudioManager, dxgi::DxgiCapture, CaptureBackend, CaptureConfig, CapturedFrame,
+    },
     clip::{spawn_clip_saver, MuxerConfig},
     config::Config,
     encode::{spawn_encoder, spawn_encoder_with_receiver, EncoderConfig},
@@ -21,6 +23,7 @@ pub struct AppState {
     buffer: SharedReplayBuffer,
     encoder_handle: Option<crate::encode::EncoderHandle>,
     capture: Option<DxgiCapture>,
+    audio_manager: Option<WasapiAudioManager>,
     is_recording: bool,
 }
 
@@ -53,6 +56,7 @@ impl AppState {
             buffer,
             encoder_handle: None,
             capture: None,
+            audio_manager: None,
             is_recording: false,
         })
     }
@@ -73,6 +77,38 @@ impl AppState {
             let (encoder_handle, _unused_frame_tx) =
                 spawn_encoder(encoder_config, self.buffer.clone())
                     .context("Failed to spawn pull-mode encoder")?;
+
+            if self.config.audio.capture_system || self.config.audio.capture_mic {
+                let mut audio_manager =
+                    WasapiAudioManager::new().context("Failed to create audio manager")?;
+                audio_manager
+                    .start(&self.config.audio)
+                    .context("Failed to start audio capture")?;
+
+                let audio_packet_rx = audio_manager.packet_rx();
+                let buffer_clone = self.buffer.clone();
+
+                std::thread::spawn(move || {
+                    let mut forwarded_packets = 0u64;
+                    while let Ok(packet) = audio_packet_rx.recv() {
+                        buffer_clone.push(packet);
+                        forwarded_packets = forwarded_packets.saturating_add(1);
+
+                        if forwarded_packets == 1 {
+                            info!("Forwarded first audio packet to replay buffer (pull mode)");
+                        } else if forwarded_packets % 500 == 0 {
+                            info!(
+                                "Forwarded {} audio packets to replay buffer",
+                                forwarded_packets
+                            );
+                        }
+                    }
+                });
+
+                self.audio_manager = Some(audio_manager);
+                info!("Audio capture started");
+            }
+
             self.encoder_handle = Some(encoder_handle);
             self.capture = None;
             self.is_recording = true;
@@ -80,7 +116,42 @@ impl AppState {
             return Ok(());
         }
 
-        // Create and start capture first
+        // Create and start audio capture first if enabled
+        if self.config.audio.capture_system || self.config.audio.capture_mic {
+            let mut audio_manager =
+                WasapiAudioManager::new().context("Failed to create audio manager")?;
+            audio_manager
+                .start(&self.config.audio)
+                .context("Failed to start audio capture")?;
+
+            // Spawn audio encoder thread
+            let audio_packet_rx = audio_manager.packet_rx();
+            let buffer_clone = self.buffer.clone();
+
+            std::thread::spawn(move || {
+                // In a real implementation, we would encode the audio packets here
+                // For now, we'll just forward them to the buffer
+                let mut forwarded_packets = 0u64;
+                while let Ok(packet) = audio_packet_rx.recv() {
+                    buffer_clone.push(packet);
+                    forwarded_packets = forwarded_packets.saturating_add(1);
+
+                    if forwarded_packets == 1 {
+                        info!("Forwarded first audio packet to replay buffer");
+                    } else if forwarded_packets % 500 == 0 {
+                        info!(
+                            "Forwarded {} audio packets to replay buffer",
+                            forwarded_packets
+                        );
+                    }
+                }
+            });
+
+            self.audio_manager = Some(audio_manager);
+            info!("Audio capture started");
+        }
+
+        // Create and start video capture
         let mut capture = DxgiCapture::new().context("Failed to create DXGI capture")?;
         let capture_config = CaptureConfig::from(&self.config);
 
@@ -105,7 +176,7 @@ impl AppState {
         self.capture = Some(capture);
         self.is_recording = true;
 
-        info!("Recording pipeline started (capture + encoder)");
+        info!("Recording pipeline started (capture + encoder + audio)");
 
         Ok(())
     }
@@ -118,10 +189,16 @@ impl AppState {
 
         info!("Stopping recording pipeline...");
 
-        // Stop capture first (signals encoder to stop via channel close)
+        // Stop audio capture first
+        if let Some(audio_manager) = self.audio_manager.take() {
+            drop(audio_manager); // This calls stop() via Drop
+            info!("Audio capture stopped");
+        }
+
+        // Stop video capture (signals encoder to stop via channel close)
         if let Some(capture) = self.capture.take() {
             drop(capture); // This calls stop() via Drop
-            info!("Capture stopped");
+            info!("Video capture stopped");
         }
 
         // Wait for encoder thread to finish
@@ -162,7 +239,8 @@ impl AppState {
             });
         let fps = self.config.video.framerate as f64;
 
-        let muxer_config = MuxerConfig::new(width, height, fps, &output_path);
+        let muxer_config = MuxerConfig::new(width, height, fps, &output_path)
+            .with_expect_audio(self.config.audio.capture_system || self.config.audio.capture_mic);
 
         // Clone buffer for the clip saver task
         let buffer = self.buffer.clone();
@@ -220,6 +298,7 @@ impl Drop for AppState {
     fn drop(&mut self) {
         if self.is_recording {
             // Clean shutdown attempt in blocking context
+            drop(self.audio_manager.take());
             drop(self.capture.take());
             if let Some(handle) = self.encoder_handle.take() {
                 let crate::encode::EncoderHandle {
