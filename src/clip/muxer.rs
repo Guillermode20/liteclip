@@ -4,6 +4,8 @@
 //! Uses optional FFmpeg pipeline integration for MP4 container writing.
 
 use crate::encode::{EncodedPacket, StreamType};
+#[cfg(feature = "ffmpeg")]
+use crate::buffer::ring::qpc_frequency;
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 #[cfg(feature = "ffmpeg")]
@@ -18,6 +20,44 @@ use tracing::{debug, error, info, trace, warn};
 const AUDIO_SAMPLE_RATE: u32 = 48_000;
 #[cfg(feature = "ffmpeg")]
 const AUDIO_CHANNELS: u16 = 2;
+
+#[cfg(feature = "ffmpeg")]
+fn qpc_delta_to_aligned_pcm_bytes(
+    delta_qpc: i64,
+    qpc_freq: f64,
+    bytes_per_second: f64,
+    bytes_per_frame: usize,
+) -> i64 {
+    if qpc_freq <= 0.0 || bytes_per_second <= 0.0 || bytes_per_frame == 0 {
+        return 0;
+    }
+
+    let raw_bytes = ((delta_qpc as f64 / qpc_freq) * bytes_per_second).round() as i64;
+    let frame_size = bytes_per_frame as i64;
+
+    if raw_bytes >= 0 {
+        raw_bytes - (raw_bytes % frame_size)
+    } else {
+        raw_bytes + ((-raw_bytes) % frame_size)
+    }
+}
+
+#[cfg(feature = "ffmpeg")]
+fn write_silence_bytes(file: &mut std::fs::File, mut byte_count: usize) -> Result<()> {
+    if byte_count == 0 {
+        return Ok(());
+    }
+
+    let silence = [0u8; 8192];
+    while byte_count > 0 {
+        let chunk = byte_count.min(silence.len());
+        file.write_all(&silence[..chunk])
+            .context("Failed writing PCM silence padding")?;
+        byte_count -= chunk;
+    }
+
+    Ok(())
+}
 
 /// Detect if packet data is H.264 format by looking for NAL start codes
 ///
@@ -481,18 +521,64 @@ impl Muxer {
         let mut audio_file = std::fs::File::create(&audio_temp_path)
             .with_context(|| format!("Failed to create temp PCM file: {:?}", audio_temp_path))?;
 
+        let bytes_per_frame = AUDIO_CHANNELS as usize * 2; // S16LE interleaved
+        let bytes_per_second = AUDIO_SAMPLE_RATE as f64 * bytes_per_frame as f64;
+        let qpc_freq = qpc_frequency() as f64;
+        let video_start_pts = self.video_packets.first().map(|p| p.pts).unwrap_or(0);
+
         let mut bytes_written = 0usize;
+        let mut payload_bytes_written = 0usize;
+        let mut silence_padding_bytes = 0usize;
+        let mut trimmed_overlap_bytes = 0usize;
+
         for packet in &self.audio_packets {
             let data = packet.data.as_ref();
-            let aligned_len = data.len().saturating_sub(data.len() % 2);
+            let aligned_len = data.len().saturating_sub(data.len() % bytes_per_frame);
             if aligned_len == 0 {
                 continue;
             }
 
+            let mut packet_start_bytes = qpc_delta_to_aligned_pcm_bytes(
+                packet.pts.saturating_sub(video_start_pts),
+                qpc_freq,
+                bytes_per_second,
+                bytes_per_frame,
+            );
+
+            let mut skip_bytes = 0usize;
+
+            // Audio packet starts before video timeline origin: trim leading audio.
+            if packet_start_bytes < 0 {
+                let trim = ((-packet_start_bytes) as usize).min(aligned_len);
+                let trim_aligned = trim.saturating_sub(trim % bytes_per_frame);
+                skip_bytes = trim_aligned;
+                packet_start_bytes = 0;
+            }
+
+            let current_timeline_bytes = bytes_written as i64;
+            if packet_start_bytes > current_timeline_bytes {
+                let gap_bytes = (packet_start_bytes - current_timeline_bytes) as usize;
+                write_silence_bytes(&mut audio_file, gap_bytes)?;
+                bytes_written += gap_bytes;
+                silence_padding_bytes += gap_bytes;
+            } else if packet_start_bytes < current_timeline_bytes {
+                let overlap = (current_timeline_bytes - packet_start_bytes) as usize;
+                let overlap_aligned = overlap.saturating_sub(overlap % bytes_per_frame);
+                skip_bytes = skip_bytes.saturating_add(overlap_aligned).min(aligned_len);
+            }
+
+            if skip_bytes >= aligned_len {
+                trimmed_overlap_bytes = trimmed_overlap_bytes.saturating_add(aligned_len);
+                continue;
+            }
+
             audio_file
-                .write_all(&data[..aligned_len])
+                .write_all(&data[skip_bytes..aligned_len])
                 .context("Failed writing PCM audio data to temp file")?;
-            bytes_written += aligned_len;
+            let written = aligned_len - skip_bytes;
+            bytes_written += written;
+            payload_bytes_written += written;
+            trimmed_overlap_bytes += skip_bytes;
         }
 
         if bytes_written == 0 {
@@ -501,9 +587,12 @@ impl Muxer {
         }
 
         info!(
-            "Prepared PCM audio input for muxing: {} packets, {} bytes",
+            "Prepared PCM audio input for muxing: {} packets, {} bytes (payload={}, silence_padding={}, trimmed_overlap={})",
             self.audio_packets.len(),
-            bytes_written
+            bytes_written,
+            payload_bytes_written,
+            silence_padding_bytes,
+            trimmed_overlap_bytes
         );
 
         Ok(Some(audio_temp_path))
@@ -911,5 +1000,21 @@ mod tests {
         // Too short to be H.264
         let short_data = vec![0x00, 0x00];
         assert!(!is_h264_format(&short_data));
+    }
+
+    #[cfg(feature = "ffmpeg")]
+    #[test]
+    fn test_qpc_delta_to_aligned_pcm_bytes_positive() {
+        // 0.5s at 48kHz stereo S16LE => 96_000 bytes
+        let bytes = qpc_delta_to_aligned_pcm_bytes(5_000_000, 10_000_000.0, 192_000.0, 4);
+        assert_eq!(bytes, 96_000);
+    }
+
+    #[cfg(feature = "ffmpeg")]
+    #[test]
+    fn test_qpc_delta_to_aligned_pcm_bytes_negative_is_frame_aligned() {
+        let bytes = qpc_delta_to_aligned_pcm_bytes(-2_500_000, 10_000_000.0, 192_000.0, 4);
+        assert_eq!(bytes, -48_000);
+        assert_eq!(bytes % 4, 0);
     }
 }

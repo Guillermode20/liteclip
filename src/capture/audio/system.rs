@@ -186,14 +186,16 @@ impl WasapiSystemCapture {
                 let mut data_ptr = std::ptr::null_mut();
                 let mut frame_count = 0u32;
                 let mut flags = 0u32;
+                let mut device_position = 0u64;
+                let mut qpc_position = 0u64;
 
                 unsafe {
                     capture_client.GetBuffer(
                         &mut data_ptr,
                         &mut frame_count,
                         &mut flags,
-                        None,
-                        None,
+                        Some(&mut device_position),
+                        Some(&mut qpc_position),
                     )
                 }
                 .context("IAudioCaptureClient::GetBuffer failed")?;
@@ -214,7 +216,11 @@ impl WasapiSystemCapture {
                 unsafe { capture_client.ReleaseBuffer(frame_count) }
                     .context("IAudioCaptureClient::ReleaseBuffer failed")?;
 
-                let pts = start_qpc + ((total_frames as f64 / sample_rate) * qpc_freq) as i64;
+                let pts = if qpc_position > 0 {
+                    qpc_position.min(i64::MAX as u64) as i64
+                } else {
+                    start_qpc + ((total_frames as f64 / sample_rate) * qpc_freq) as i64
+                };
                 total_frames = total_frames.saturating_add(frame_count as u64);
 
                 let packet =
