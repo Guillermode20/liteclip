@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use bytes::{Buf, BytesMut};
 use crossbeam::channel::{bounded, Receiver, Sender};
 use std::io::{BufRead, BufReader, Write};
+use std::os::windows::process::CommandExt;
 use std::process::{ChildStdin, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -15,6 +16,8 @@ use tracing::{debug, enabled, error, info, warn, Level};
 
 use super::functions::{find_annexb_start_code, h264_nal_type, query_qpc, resolve_ffmpeg_command};
 use crate::buffer::ring::qpc_frequency;
+
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 /// Frame metadata passed from encoder thread to output reader thread.
 /// Used to preserve original capture timestamps for A/V sync.
@@ -258,6 +261,7 @@ impl HardwareEncoderBase {
             debug!("FFmpeg command: {}", args.join(" "));
         }
         let mut child = cmd
+            .creation_flags(CREATE_NO_WINDOW)
             .spawn()
             .with_context(|| format!("Failed to start FFmpeg ({})", encoder_name))?;
         let stdin = if self.config.use_cpu_readback {

@@ -61,6 +61,10 @@ pub struct SettingsApp {
     result_tx: Option<std::sync::mpsc::Sender<GuiResult>>,
     /// Whether the configuration was saved at least once
     was_saved: bool,
+    /// Last save error message (if any)
+    save_error: Option<String>,
+    /// Whether save is in progress
+    save_in_progress: bool,
 }
 
 /// Settings categories for navigation
@@ -108,6 +112,8 @@ impl SettingsApp {
             selected_tab: SettingsTab::General,
             result_tx: Some(result_tx),
             was_saved: false,
+            save_error: None,
+            save_in_progress: false,
         }
     }
 
@@ -489,6 +495,13 @@ impl SettingsApp {
         ui.heading("Audio Settings");
         ui.add_space(16.0);
 
+        // Warning about audio not fully implemented
+        ui.colored_label(
+            egui::Color32::YELLOW,
+            "Note: Audio capture is experimental. Clips may not include audio.",
+        );
+        ui.add_space(8.0);
+
         // System audio
         ui.group(|ui| {
             let mut changed = false;
@@ -751,27 +764,44 @@ impl SettingsApp {
     /// Show bottom action panel with save/reset buttons
     fn show_action_panel(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            // Save button
+            // Save button - disabled if dirty or save in progress
             let save_button = egui::Button::new("Save").min_size(egui::vec2(80.0, 32.0));
-            let save_response = ui.add_enabled(self.dirty, save_button);
+            let can_save = self.dirty && !self.save_in_progress;
+            let save_response = ui.add_enabled(can_save, save_button);
 
             if save_response.clicked() {
                 // Validate config before saving
                 self.config.validate();
+                self.save_in_progress = true;
+                self.save_error = None;
 
-                // Spawn save task
+                // Use channel to get result from spawned task
+                let (tx, rx) = std::sync::mpsc::channel();
                 let config = self.config.clone();
+
                 tokio::spawn(async move {
-                    if let Err(e) = config.save().await {
-                        error!("Failed to save config: {}", e);
-                    } else {
-                        info!("Configuration saved successfully");
-                    }
+                    let result = config.save().await;
+                    let _ = tx.send(result);
                 });
 
-                self.original_config = self.config.clone();
-                self.dirty = false;
-                self.was_saved = true;
+                // Check result immediately (will be ready on next frame)
+                match rx.try_recv() {
+                    Ok(Ok(())) => {
+                        self.original_config = self.config.clone();
+                        self.dirty = false;
+                        self.was_saved = true;
+                        self.save_in_progress = false;
+                        info!("Configuration saved successfully");
+                    }
+                    Ok(Err(e)) => {
+                        self.save_error = Some(e.to_string());
+                        self.save_in_progress = false;
+                        error!("Failed to save config: {}", self.save_error.as_ref().unwrap());
+                    }
+                    Err(_) => {
+                        // Result not ready yet - will check on next frame
+                    }
+                }
             }
 
             // Reset button
@@ -782,7 +812,11 @@ impl SettingsApp {
             ui.separator();
 
             // Status text
-            if self.dirty {
+            if self.save_in_progress {
+                ui.label("Saving...");
+            } else if let Some(ref err) = self.save_error {
+                ui.colored_label(egui::Color32::RED, &format!("Save failed: {}", err));
+            } else if self.dirty {
                 if self.restart_required {
                     ui.colored_label(
                         ui.visuals().warn_fg_color,

@@ -7,9 +7,8 @@ use anyhow::{Context, Result};
 use crossbeam::channel::Sender;
 use tracing::{debug, error, info, trace};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::{
-    Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
+    Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIF_INFO, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, LoadIconW, PostMessageW,
@@ -26,6 +25,8 @@ pub const WM_TRAY_CALLBACK: u32 = WM_APP + 1;
 const MENU_ITEM_SETTINGS: u32 = 1001;
 const MENU_ITEM_SAVE_CLIP: u32 = 1002;
 const MENU_ITEM_TOGGLE_RECORDING: u32 = 1003;
+const MENU_ITEM_START_RECORDING: u32 = 1005;
+const MENU_ITEM_STOP_RECORDING: u32 = 1006;
 const MENU_ITEM_EXIT: u32 = 1004;
 
 /// System tray manager
@@ -53,8 +54,11 @@ impl TrayManager {
 
         // SAFETY: NOTIFYICONDATAW is properly initialized
         unsafe {
-            let hinstance = GetModuleHandleW(None).context("Failed to get module handle")?;
-            let hicon = LoadIconW(hinstance, IDI_APPLICATION).context("Failed to load icon")?;
+            // For system icons like IDI_APPLICATION, hInstance must be NULL
+            let hicon = LoadIconW(
+                windows::Win32::Foundation::HINSTANCE(std::ptr::null_mut()),
+                IDI_APPLICATION
+            ).context("Failed to load icon")?;
 
             let tooltip: Vec<u16> = "LiteClip Replay".encode_utf16().chain(Some(0)).collect();
 
@@ -116,11 +120,12 @@ impl TrayManager {
         msg: u32,
         wparam: WPARAM,
         lparam: LPARAM,
+        is_recording: bool,
         event_tx: &Sender<AppEvent>,
     ) -> bool {
         // Check if it's a tray callback message
         if msg == WM_TRAY_CALLBACK {
-            self.handle_tray_callback(lparam, event_tx);
+            self.handle_tray_callback(lparam, is_recording, event_tx);
             return true;
         }
 
@@ -136,7 +141,13 @@ impl TrayManager {
     }
 
     /// Show the context menu at the specified screen coordinates
-    pub fn show_menu(&self, x: i32, y: i32, _event_tx: &Sender<AppEvent>) -> Result<()> {
+    pub fn show_menu(
+        &self,
+        x: i32,
+        y: i32,
+        is_recording: bool,
+        _event_tx: &Sender<AppEvent>,
+    ) -> Result<()> {
         // SAFETY: Menu operations are properly guarded
         unsafe {
             let hmenu = CreatePopupMenu().context("Failed to create popup menu")?;
@@ -144,7 +155,14 @@ impl TrayManager {
             // Add menu items
             Self::append_menu_string(hmenu, MENU_ITEM_SETTINGS, "Settings")?;
             Self::append_menu_string(hmenu, MENU_ITEM_SAVE_CLIP, "Save Clip")?;
-            Self::append_menu_string(hmenu, MENU_ITEM_TOGGLE_RECORDING, "Toggle Recording")?;
+
+            // Add dynamic recording control
+            if is_recording {
+                Self::append_menu_string(hmenu, MENU_ITEM_STOP_RECORDING, "Stop Recording")?;
+            } else {
+                Self::append_menu_string(hmenu, MENU_ITEM_START_RECORDING, "Start Recording")?;
+            }
+
             Self::append_menu_separator(hmenu)?;
             Self::append_menu_string(hmenu, MENU_ITEM_EXIT, "Exit")?;
 
@@ -198,6 +216,20 @@ impl TrayManager {
                 }
                 true
             }
+            MENU_ITEM_START_RECORDING => {
+                trace!("Tray: Start Recording menu selected");
+                if let Err(e) = event_tx.send(AppEvent::Tray(super::TrayEvent::StartRecording)) {
+                    error!("Failed to send start recording event: {}", e);
+                }
+                true
+            }
+            MENU_ITEM_STOP_RECORDING => {
+                trace!("Tray: Stop Recording menu selected");
+                if let Err(e) = event_tx.send(AppEvent::Tray(super::TrayEvent::StopRecording)) {
+                    error!("Failed to send stop recording event: {}", e);
+                }
+                true
+            }
             MENU_ITEM_EXIT => {
                 trace!("Tray: Exit menu selected");
                 if let Err(e) = event_tx.send(AppEvent::Tray(super::TrayEvent::Exit)) {
@@ -210,7 +242,7 @@ impl TrayManager {
     }
 
     /// Handle tray callback message (WM_LBUTTONUP, WM_RBUTTONUP)
-    fn handle_tray_callback(&self, lparam: LPARAM, event_tx: &Sender<AppEvent>) -> bool {
+    fn handle_tray_callback(&self, lparam: LPARAM, is_recording: bool, event_tx: &Sender<AppEvent>) -> bool {
         let msg = lparam.0 as u32;
 
         match msg {
@@ -224,7 +256,7 @@ impl TrayManager {
                     GetCursorPos(&mut pt).ok();
                 }
 
-                if let Err(e) = self.show_menu(pt.x, pt.y, event_tx) {
+                if let Err(e) = self.show_menu(pt.x, pt.y, is_recording, event_tx) {
                     error!("Failed to show tray menu: {}", e);
                 }
                 true
@@ -254,6 +286,43 @@ impl TrayManager {
         AppendMenuW(hmenu, MF_SEPARATOR, 0, windows::core::PCWSTR::null())
             .ok()
             .context("Failed to append menu separator")?;
+
+        Ok(())
+    }
+
+    /// Show a balloon notification from the tray icon
+    pub fn show_notification(&self, title: &str, message: &str) -> Result<()> {
+        if !self.is_visible {
+            return Ok(());
+        }
+
+        unsafe {
+            let title_wide: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
+            let message_wide: Vec<u16> = message.encode_utf16().chain(Some(0)).collect();
+
+            let mut nid = NOTIFYICONDATAW {
+                cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+                hWnd: self.hwnd,
+                uID: TRAY_ICON_ID,
+                uFlags: NIF_INFO,
+                szInfoTitle: [0u16; 64],
+                szInfo: [0u16; 256],
+                ..Default::default()
+            };
+
+            // Copy title (max 63 chars + null)
+            let title_len = std::cmp::min(title_wide.len().saturating_sub(1), 63);
+            nid.szInfoTitle[..title_len].copy_from_slice(&title_wide[..title_len]);
+            nid.szInfoTitle[title_len] = 0;
+
+            // Copy message (max 255 chars + null)
+            let msg_len = std::cmp::min(message_wide.len().saturating_sub(1), 255);
+            nid.szInfo[..msg_len].copy_from_slice(&message_wide[..msg_len]);
+            nid.szInfo[msg_len] = 0;
+
+            Shell_NotifyIconW(NIM_ADD, &nid).ok()
+                .context("Failed to show notification")?;
+        }
 
         Ok(())
     }

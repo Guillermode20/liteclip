@@ -2,6 +2,9 @@
 //!
 //! Application entry point with system tray integration and GUI settings.
 
+// Hide console window on Windows (app runs in system tray)
+#![windows_subsystem = "windows"]
+
 use anyhow::Result;
 use liteclip_replay::{
     app::AppState, config::Config, gui::run_settings_window_async, platform::PlatformHandle,
@@ -31,11 +34,6 @@ async fn main() -> Result<()> {
     let version = env!("CARGO_PKG_VERSION");
     println!("LiteClip Replay v{}", version);
     info!("LiteClip Replay {} starting", version);
-
-    #[cfg(not(feature = "ffmpeg"))]
-    warn!(
-        "Built without FFmpeg support. Saved clips cannot be muxed to playable MP4. Rebuild with `cargo run --features ffmpeg`."
-    );
 
     // Check for --gui flag
     let args: Vec<String> = env::args().collect();
@@ -81,13 +79,23 @@ async fn main() -> Result<()> {
         config.video.quality_value
     );
 
+    // Show welcome notification if not starting minimized
+    if !config.general.start_minimised {
+        info!("LiteClip Replay is running in the system tray");
+        info!("Right-click the tray icon to access settings");
+    } else {
+        info!("Started minimized to system tray");
+    }
+
     // Initialize application state
     let app_state = Arc::new(RwLock::new(AppState::new(config.clone())?));
 
     // Start the platform message loop for hotkeys and tray
     let hotkey_config = hotkey_config_from_config(&config);
+    println!("[DEBUG] Spawning platform thread...");
     let (platform_handle, event_rx) =
         liteclip_replay::platform::spawn_platform_thread(hotkey_config)?;
+    println!("[DEBUG] Platform thread spawned, handle created");
     let platform_handle = Arc::new(platform_handle);
 
     info!(
@@ -100,6 +108,8 @@ async fn main() -> Result<()> {
         let mut state = app_state.write().await;
         if let Err(e) = state.start_recording().await {
             error!("Failed to start recording: {}", e);
+        } else {
+            let _ = platform_handle.update_recording_state(true);
         }
     }
 
@@ -151,9 +161,17 @@ async fn main() -> Result<()> {
                                         match state.save_clip().await {
                                             Ok(path) => {
                                                 info!("Clip saved: {:?}", path);
+                                                let _ = platform_handle.show_notification(
+                                                    "Clip Saved",
+                                                    &format!("Saved to {:?}", path.file_name().unwrap_or_default()),
+                                                );
                                             }
                                             Err(e) => {
                                                 error!("Failed to save clip: {:#}", e);
+                                                let _ = platform_handle.show_notification(
+                                                    "Save Failed",
+                                                    &format!("{:#}", e),
+                                                );
                                             }
                                         }
                                     }
@@ -163,13 +181,38 @@ async fn main() -> Result<()> {
                                         if state.is_recording() {
                                             if let Err(e) = state.stop_recording().await {
                                                 error!("Failed to stop recording: {}", e);
+                                                let _ = platform_handle.show_notification(
+                                                    "Recording Error",
+                                                    &format!("Failed to stop: {}", e),
+                                                );
+                                            } else {
+                                                let _ = platform_handle.update_recording_state(false);
+                                                let _ = platform_handle.show_notification(
+                                                    "Recording Stopped",
+                                                    "Recording has been stopped",
+                                                );
                                             }
                                         } else if let Err(e) = state.start_recording().await {
                                             error!("Failed to start recording: {}", e);
+                                            let _ = platform_handle.show_notification(
+                                                "Recording Error",
+                                                &format!("Failed to start: {}", e),
+                                            );
+                                        } else {
+                                            let _ = platform_handle.update_recording_state(true);
+                                            let _ = platform_handle.show_notification(
+                                                "Recording Started",
+                                                "Now capturing replay buffer",
+                                            );
                                         }
                                     }
-                                    _ => {
-                                        info!("Unhandled hotkey action: {:?}", action);
+                                    liteclip_replay::platform::HotkeyAction::Screenshot => {
+                                        info!("Hotkey: screenshot (not implemented)");
+                                        warn!("Screenshot feature not yet implemented");
+                                    }
+                                    liteclip_replay::platform::HotkeyAction::OpenGallery => {
+                                        info!("Hotkey: open gallery (not implemented)");
+                                        warn!("Gallery feature not yet implemented");
                                     }
                                 }
                             }
@@ -190,9 +233,17 @@ async fn main() -> Result<()> {
                                         match state.save_clip().await {
                                             Ok(path) => {
                                                 info!("Clip saved: {:?}", path);
+                                                let _ = platform_handle.show_notification(
+                                                    "Clip Saved",
+                                                    &format!("Saved to {:?}", path.file_name().unwrap_or_default()),
+                                                );
                                             }
                                             Err(e) => {
                                                 error!("Failed to save clip: {:#}", e);
+                                                let _ = platform_handle.show_notification(
+                                                    "Save Failed",
+                                                    &format!("{:#}", e),
+                                                );
                                             }
                                         }
                                     }
@@ -202,9 +253,31 @@ async fn main() -> Result<()> {
                                         if state.is_recording() {
                                             if let Err(e) = state.stop_recording().await {
                                                 error!("Failed to stop recording: {}", e);
+                                            } else {
+                                                let _ = platform_handle.update_recording_state(false);
                                             }
                                         } else if let Err(e) = state.start_recording().await {
                                             error!("Failed to start recording: {}", e);
+                                        } else {
+                                            let _ = platform_handle.update_recording_state(true);
+                                        }
+                                    }
+                                    liteclip_replay::platform::TrayEvent::StartRecording => {
+                                        info!("Tray: Start Recording selected");
+                                        let mut state = app_state.write().await;
+                                        if let Err(e) = state.start_recording().await {
+                                            error!("Failed to start recording: {}", e);
+                                        } else {
+                                            let _ = platform_handle.update_recording_state(true);
+                                        }
+                                    }
+                                    liteclip_replay::platform::TrayEvent::StopRecording => {
+                                        info!("Tray: Stop Recording selected");
+                                        let mut state = app_state.write().await;
+                                        if let Err(e) = state.stop_recording().await {
+                                            error!("Failed to stop recording: {}", e);
+                                        } else {
+                                            let _ = platform_handle.update_recording_state(false);
                                         }
                                     }
                                     liteclip_replay::platform::TrayEvent::Exit => {
@@ -262,12 +335,14 @@ async fn handle_open_settings(
     app_state: Arc<RwLock<AppState>>,
     platform_handle: Arc<PlatformHandle>,
 ) {
-    // Check if GUI is already open
-    let is_open = *gui_open.read().await;
-    if is_open {
+    // Check if GUI is already open and set to true atomically
+    let mut is_open = gui_open.write().await;
+    if *is_open {
         warn!("Settings window already open");
         return;
     }
+    *is_open = true;
+    drop(is_open); // Release write lock
 
     // Clone values for the async task
     let gui_open_for_task = gui_open.clone();
@@ -276,9 +351,6 @@ async fn handle_open_settings(
     let platform_handle_for_reload = platform_handle.clone();
 
     tokio::spawn(async move {
-        // Mark GUI as open
-        *gui_open_for_task.write().await = true;
-
         // Run the settings window
         let result = run_settings_window_async(config_for_gui).await;
 

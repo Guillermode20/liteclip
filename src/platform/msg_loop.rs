@@ -13,7 +13,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, PostQuitMessage,
-    RegisterClassW, TranslateMessage, CS_HREDRAW, CS_VREDRAW, HMENU, HWND_MESSAGE, MSG, WM_DESTROY,
+    RegisterClassW, TranslateMessage, CS_HREDRAW, CS_VREDRAW, HMENU, MSG, WM_DESTROY,
     WM_HOTKEY, WNDCLASSW, WS_EX_NOACTIVATE, WS_OVERLAPPED,
 };
 
@@ -86,6 +86,9 @@ fn run_platform_loop(
         hwnd
     );
 
+    // Recording state - shared between command handler and tray menu
+    let mut is_recording = false;
+
     let mut msg = MSG::default();
     unsafe {
         // Message pump - GetMessageW blocks until a message is available
@@ -104,6 +107,16 @@ fn run_platform_loop(
                             info!("Hotkeys re-registered successfully");
                         }
                     }
+                    PlatformCommand::UpdateRecordingState(recording) => {
+                        is_recording = recording;
+                    }
+                    PlatformCommand::ShowNotification(title, message) => {
+                        if let Some(ref tray) = tray_manager {
+                            if let Err(e) = tray.show_notification(&title, &message) {
+                                error!("Failed to show notification: {}", e);
+                            }
+                        }
+                    }
                 }
             }
 
@@ -116,7 +129,7 @@ fn run_platform_loop(
             // Check if tray manager wants to handle this message
             let mut handled = false;
             if let Some(ref tray) = tray_manager {
-                handled = tray.handle_message(msg.message, msg.wParam, msg.lParam, &event_tx);
+                handled = tray.handle_message(msg.message, msg.wParam, msg.lParam, is_recording, &event_tx);
             }
 
             if handled {
@@ -185,11 +198,11 @@ fn create_hidden_window() -> Result<HWND> {
             windows::core::PCWSTR(class_name.as_ptr()),
             windows::core::PCWSTR::null(),
             WS_OVERLAPPED,
+            -1000, // Off-screen position
+            -1000,
             0,
             0,
-            0,
-            0,
-            HWND_MESSAGE, // Message-only window - doesn't receive broadcast messages
+            HWND::default(), // Regular window (not message-only) - required for tray menu focus
             HMENU::default(),
             hinstance,
             None,

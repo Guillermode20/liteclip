@@ -14,6 +14,10 @@ pub mod tray;
 pub enum PlatformCommand {
     /// Re-register hotkeys with new configuration
     ReRegisterHotkeys(HotkeyConfig),
+    /// Update recording state for tray menu
+    UpdateRecordingState(bool),
+    /// Show a notification
+    ShowNotification(String, String),
 }
 
 /// Hotkey actions that can be triggered by global hotkeys
@@ -38,6 +42,10 @@ pub enum TrayEvent {
     SaveClip,
     /// Toggle recording on/off
     ToggleRecording,
+    /// Start recording explicitly
+    StartRecording,
+    /// Stop recording explicitly
+    StopRecording,
     /// Exit the application
     Exit,
 }
@@ -83,6 +91,8 @@ pub struct PlatformHandle {
     thread: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
     /// Command sender for sending commands to the platform thread
     pub command_tx: Sender<PlatformCommand>,
+    /// Recording state for tray menu display
+    recording_state: std::sync::atomic::AtomicBool,
 }
 
 impl PlatformHandle {
@@ -91,7 +101,18 @@ impl PlatformHandle {
         Self {
             thread: std::sync::Mutex::new(Some(thread)),
             command_tx,
+            recording_state: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// Update recording state for tray menu display
+    pub fn set_recording_state(&self, is_recording: bool) {
+        self.recording_state.store(is_recording, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Get current recording state
+    pub fn is_recording(&self) -> bool {
+        self.recording_state.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Send a command to the platform thread
@@ -104,6 +125,22 @@ impl PlatformHandle {
     /// Re-register hotkeys with a new configuration
     pub fn re_register_hotkeys(&self, config: HotkeyConfig) -> Result<()> {
         self.send_command(PlatformCommand::ReRegisterHotkeys(config))
+    }
+
+    /// Update recording state for tray menu display
+    pub fn update_recording_state(&self, is_recording: bool) -> Result<()> {
+        // Update local state for quick reads
+        self.recording_state.store(is_recording, std::sync::atomic::Ordering::SeqCst);
+        // Notify platform thread
+        self.send_command(PlatformCommand::UpdateRecordingState(is_recording))
+    }
+
+    /// Show a notification to the user
+    pub fn show_notification(&self, title: &str, message: &str) -> Result<()> {
+        self.send_command(PlatformCommand::ShowNotification(
+            title.to_string(),
+            message.to_string(),
+        ))
     }
 
     /// Join the platform thread, waiting for it to complete

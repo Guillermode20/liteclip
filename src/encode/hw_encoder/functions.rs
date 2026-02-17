@@ -4,8 +4,11 @@
 
 use anyhow::{Context, Result};
 use memchr::memchr;
+use std::os::windows::process::CommandExt;
 use std::process::Command;
 use tracing::{debug, info, warn};
+
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 /// Find H.264 Annex B start code (00 00 01 or 00 00 00 01) using SIMD-accelerated search.
 ///
@@ -111,6 +114,7 @@ pub fn check_encoder_available(encoder_name: &str) -> bool {
         .arg("-encoders")
         .arg("-v")
         .arg("error")
+        .creation_flags(CREATE_NO_WINDOW)
         .output();
     let listed = match output {
         Ok(out) => {
@@ -162,7 +166,12 @@ pub fn check_encoder_available(encoder_name: &str) -> bool {
         _ => {}
     }
     debug!("Probing encoder {} with FFmpeg", encoder_name);
-    let probe = probe_cmd.arg("-f").arg("null").arg("-").output();
+    let probe = probe_cmd
+        .creation_flags(CREATE_NO_WINDOW)
+        .arg("-f")
+        .arg("null")
+        .arg("-")
+        .output();
     match probe {
         Ok(out) => {
             if out.status.success() {
