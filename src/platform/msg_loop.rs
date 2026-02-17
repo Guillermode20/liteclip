@@ -3,8 +3,10 @@
 //! Dedicated thread with GetMessage/DispatchMessage pump for hotkeys and tray.
 
 use super::{AppEvent, HotkeyAction, HotkeyConfig, PlatformCommand, PlatformHandle};
+use super::tray::{TrayManager, WM_TRAY_CALLBACK};
 use anyhow::{Context, Result};
 use crossbeam::channel::{Receiver, Sender};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::{debug, error, info, trace};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -12,14 +14,20 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, PostQuitMessage,
-    RegisterClassW, TranslateMessage, CS_HREDRAW, CS_VREDRAW, HMENU, MSG, WM_DESTROY,
-    WM_HOTKEY, WNDCLASSW, WS_EX_NOACTIVATE, WS_OVERLAPPED,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, GetWindowLongPtrW,
+    PostQuitMessage, RegisterClassW, SetWindowLongPtrW, TranslateMessage, CS_HREDRAW,
+    CS_VREDRAW, GWLP_USERDATA, HMENU, MSG, WM_COMMAND, WM_DESTROY, WM_HOTKEY, WNDCLASSW,
+    WS_EX_NOACTIVATE, WS_OVERLAPPED,
 };
 
-use super::tray::TrayManager;
-
 const CLASS_NAME: &str = "LiteClipReplay_HiddenWindow";
+
+/// Shared state accessible from window_proc via GWLP_USERDATA
+struct WndProcState {
+    tray_manager: Option<TrayManager>,
+    is_recording: AtomicBool,
+    event_tx: Sender<AppEvent>,
+}
 
 /// Hotkey ID constants - unique IDs for each hotkey
 const HOTKEY_ID_SAVE_CLIP: i32 = 1000;
@@ -86,8 +94,18 @@ fn run_platform_loop(
         hwnd
     );
 
-    // Recording state - shared between command handler and tray menu
-    let mut is_recording = false;
+    // Shared state for window_proc to access tray manager
+    let wnd_state = Box::new(WndProcState {
+        tray_manager,
+        is_recording: AtomicBool::new(false),
+        event_tx: event_tx.clone(),
+    });
+    let wnd_state_ptr = Box::into_raw(wnd_state);
+
+    // SAFETY: Store pointer in GWLP_USERDATA so window_proc can access tray state
+    unsafe {
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, wnd_state_ptr as isize);
+    }
 
     let mut msg = MSG::default();
     unsafe {
@@ -95,6 +113,7 @@ fn run_platform_loop(
         loop {
             // Check for commands from the main thread (non-blocking)
             if let Ok(cmd) = command_rx.try_recv() {
+                let state = &*wnd_state_ptr;
                 match cmd {
                     PlatformCommand::ReRegisterHotkeys(new_config) => {
                         info!("Re-registering hotkeys with new configuration");
@@ -108,10 +127,10 @@ fn run_platform_loop(
                         }
                     }
                     PlatformCommand::UpdateRecordingState(recording) => {
-                        is_recording = recording;
+                        state.is_recording.store(recording, Ordering::Relaxed);
                     }
                     PlatformCommand::ShowNotification(title, message) => {
-                        if let Some(ref tray) = tray_manager {
+                        if let Some(ref tray) = state.tray_manager {
                             if let Err(e) = tray.show_notification(&title, &message) {
                                 error!("Failed to show notification: {}", e);
                             }
@@ -120,20 +139,9 @@ fn run_platform_loop(
                 }
             }
 
-            // Peek message with timeout to allow command checking
             let result = GetMessageW(&mut msg, HWND::default(), 0, 0);
             if !result.as_bool() {
                 break; // WM_QUIT received
-            }
-
-            // Check if tray manager wants to handle this message
-            let mut handled = false;
-            if let Some(ref tray) = tray_manager {
-                handled = tray.handle_message(msg.message, msg.wParam, msg.lParam, is_recording, &event_tx);
-            }
-
-            if handled {
-                continue;
             }
 
             match msg.message {
@@ -159,8 +167,11 @@ fn run_platform_loop(
         }
     }
 
-    // Cleanup - drop tray manager first (removes icon)
-    drop(tray_manager);
+    // Cleanup - clear userdata, reclaim Box, drop tray manager
+    unsafe {
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+        drop(Box::from_raw(wnd_state_ptr));
+    }
 
     // Cleanup hotkeys before exit
     if let Err(e) = super::hotkeys::unregister_all_hotkeys(hwnd) {
@@ -215,12 +226,31 @@ fn create_hidden_window() -> Result<HWND> {
 
 /// Window procedure for the hidden window
 ///
-/// Handles WM_DESTROY to post quit message and tray messages, delegates others to DefWindowProcW
+/// Handles WM_DESTROY, WM_TRAY_CALLBACK (sent by Shell), and WM_COMMAND (from TrackPopupMenu).
+/// Tray state is accessed via GWLP_USERDATA pointer.
 extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_DESTROY => {
             unsafe { PostQuitMessage(0) };
             LRESULT(0)
+        }
+        WM_TRAY_CALLBACK | WM_COMMAND => {
+            // SAFETY: WndProcState pointer is set before message pump starts and cleared after.
+            // WM_TRAY_CALLBACK is sent (not posted) by Shell, so it only arrives here.
+            // WM_COMMAND from TrackPopupMenu is also sent directly to the window proc.
+            unsafe {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const WndProcState;
+                if !ptr.is_null() {
+                    let state = &*ptr;
+                    if let Some(ref tray) = state.tray_manager {
+                        let recording = state.is_recording.load(Ordering::Relaxed);
+                        if tray.handle_message(msg, wparam, lparam, recording, &state.event_tx) {
+                            return LRESULT(0);
+                        }
+                    }
+                }
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
         }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }

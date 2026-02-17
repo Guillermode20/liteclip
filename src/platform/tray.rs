@@ -8,12 +8,12 @@ use crossbeam::channel::Sender;
 use tracing::{debug, error, info, trace};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::Shell::{
-    Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIF_INFO, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
+    Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIF_INFO, NIF_SHOWTIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, LoadIconW, PostMessageW,
     SetForegroundWindow, TrackPopupMenu, HMENU, IDI_APPLICATION, MF_SEPARATOR, MF_STRING,
-    TPM_BOTTOMALIGN, TPM_LEFTALIGN, WM_APP, WM_COMMAND, WM_RBUTTONUP,
+    TPM_BOTTOMALIGN, TPM_LEFTALIGN, WM_APP, WM_COMMAND, WM_CONTEXTMENU, WM_LBUTTONUP, WM_RBUTTONUP,
 };
 
 use super::AppEvent;
@@ -52,9 +52,11 @@ impl TrayManager {
             return Ok(());
         }
 
+        debug!("Adding tray icon for hwnd: {:?}", self.hwnd);
+
         // SAFETY: NOTIFYICONDATAW is properly initialized
         unsafe {
-            // For system icons like IDI_APPLICATION, hInstance must be NULL
+            // System icons like IDI_APPLICATION require NULL hInstance
             let hicon = LoadIconW(
                 windows::Win32::Foundation::HINSTANCE(std::ptr::null_mut()),
                 IDI_APPLICATION
@@ -66,7 +68,7 @@ impl TrayManager {
                 cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
                 hWnd: self.hwnd,
                 uID: TRAY_ICON_ID,
-                uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP,
+                uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP,
                 uCallbackMessage: WM_TRAY_CALLBACK,
                 hIcon: hicon,
                 ..Default::default()
@@ -76,6 +78,9 @@ impl TrayManager {
             let tooltip_len = std::cmp::min(tooltip.len().saturating_sub(1), 127);
             nid.szTip[..tooltip_len].copy_from_slice(&tooltip[..tooltip_len]);
             nid.szTip[tooltip_len] = 0;
+
+            debug!("NOTIFYICONDATAW: cbSize={}, hWnd={:?}, uID={}, uFlags={:?}, uCallbackMessage={}",
+                   nid.cbSize, nid.hWnd, nid.uID, nid.uFlags, WM_TRAY_CALLBACK);
 
             Shell_NotifyIconW(NIM_ADD, &nid)
                 .ok()
@@ -246,7 +251,7 @@ impl TrayManager {
         let msg = lparam.0 as u32;
 
         match msg {
-            WM_RBUTTONUP => {
+            WM_RBUTTONUP | WM_CONTEXTMENU => {
                 // Right click - show context menu
                 trace!("Tray: Right button clicked, showing menu");
 
@@ -261,7 +266,23 @@ impl TrayManager {
                 }
                 true
             }
-            _ => false,
+            WM_LBUTTONUP => {
+                // Left click - could show menu or toggle window
+                trace!("Tray: Left button clicked");
+                // For now, same behavior as right click (show menu)
+                // Get cursor position
+                let mut pt = windows::Win32::Foundation::POINT::default();
+                unsafe {
+                    GetCursorPos(&mut pt).ok();
+                }
+                if let Err(e) = self.show_menu(pt.x, pt.y, is_recording, event_tx) {
+                    error!("Failed to show tray menu: {}", e);
+                }
+                true
+            }
+            _ => {
+                false
+            }
         }
     }
 
@@ -320,7 +341,7 @@ impl TrayManager {
             nid.szInfo[..msg_len].copy_from_slice(&message_wide[..msg_len]);
             nid.szInfo[msg_len] = 0;
 
-            Shell_NotifyIconW(NIM_ADD, &nid).ok()
+            Shell_NotifyIconW(NIM_MODIFY, &nid).ok()
                 .context("Failed to show notification")?;
         }
 
