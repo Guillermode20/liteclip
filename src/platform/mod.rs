@@ -18,6 +18,8 @@ pub enum PlatformCommand {
     UpdateRecordingState(bool),
     /// Show a notification
     ShowNotification(String, String),
+    /// Request the platform thread to stop its message loop and exit
+    Quit,
 }
 
 /// Hotkey actions that can be triggered by global hotkeys
@@ -107,12 +109,14 @@ impl PlatformHandle {
 
     /// Update recording state for tray menu display
     pub fn set_recording_state(&self, is_recording: bool) {
-        self.recording_state.store(is_recording, std::sync::atomic::Ordering::SeqCst);
+        self.recording_state
+            .store(is_recording, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Get current recording state
     pub fn is_recording(&self) -> bool {
-        self.recording_state.load(std::sync::atomic::Ordering::SeqCst)
+        self.recording_state
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Send a command to the platform thread
@@ -130,7 +134,8 @@ impl PlatformHandle {
     /// Update recording state for tray menu display
     pub fn update_recording_state(&self, is_recording: bool) -> Result<()> {
         // Update local state for quick reads
-        self.recording_state.store(is_recording, std::sync::atomic::Ordering::SeqCst);
+        self.recording_state
+            .store(is_recording, std::sync::atomic::Ordering::SeqCst);
         // Notify platform thread
         self.send_command(PlatformCommand::UpdateRecordingState(is_recording))
     }
@@ -141,6 +146,13 @@ impl PlatformHandle {
             title.to_string(),
             message.to_string(),
         ))
+    }
+
+    /// Signal the platform thread to quit its message loop
+    ///
+    /// Must be called before `join()` to avoid hanging forever.
+    pub fn quit(&self) -> Result<()> {
+        self.send_command(PlatformCommand::Quit)
     }
 
     /// Join the platform thread, waiting for it to complete

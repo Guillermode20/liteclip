@@ -61,10 +61,8 @@ chrono = "0.4"
 windows-core = "0.58"
 memchr = "2"
 
-# GUI
-egui = "0.29"
-eframe = { version = "0.29", default-features = false, features = ["wgpu", "accesskit"] }
-winit = "0.30"
+# Tray
+tray-icon = "0.19"
 
 [profile.release]
 codegen-units = 1

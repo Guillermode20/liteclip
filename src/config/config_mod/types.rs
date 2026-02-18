@@ -88,6 +88,19 @@ impl Config {
             .with_context(|| format!("Failed to write config to {:?}", config_path))?;
         Ok(())
     }
+
+    /// Save synchronously — used from the GUI thread which has no tokio runtime.
+    pub fn save_sync(&self) -> Result<()> {
+        let config_path = Self::config_path()?;
+        let parent = config_path
+            .parent()
+            .context("Config path has no parent directory")?;
+        std::fs::create_dir_all(parent).context("Failed to create config directory")?;
+        let content = toml::to_string_pretty(self)?;
+        std::fs::write(&config_path, &content)
+            .with_context(|| format!("Failed to write config to {:?}", config_path))?;
+        Ok(())
+    }
     /// Get the configuration file path
     pub fn config_path() -> Result<PathBuf> {
         let app_data = dirs::data_dir().context("Failed to get data directory")?;

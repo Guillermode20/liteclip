@@ -1,12 +1,11 @@
-//! Hidden HWND Message Loop
+//! Hidden-HWND Message Loop — hotkeys and tray.
 //!
-//! Dedicated thread with GetMessage/DispatchMessage pump for hotkeys and tray.
+//! Creates a minimal hidden Win32 window for registering and receiving
+//! `WM_HOTKEY` messages. Also manages the system tray icon using tray-icon.
 
 use super::{AppEvent, HotkeyAction, HotkeyConfig, PlatformCommand, PlatformHandle};
-use super::tray::{TrayManager, WM_TRAY_CALLBACK};
 use anyhow::{Context, Result};
 use crossbeam::channel::{Receiver, Sender};
-use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::{debug, error, info, trace};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -14,31 +13,20 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, GetWindowLongPtrW,
-    PostQuitMessage, RegisterClassW, SetWindowLongPtrW, TranslateMessage, CS_HREDRAW,
-    CS_VREDRAW, GWLP_USERDATA, HMENU, MSG, WM_COMMAND, WM_DESTROY, WM_HOTKEY, WNDCLASSW,
-    WS_EX_NOACTIVATE, WS_OVERLAPPED,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, PeekMessageW, PostQuitMessage,
+    RegisterClassW, TranslateMessage, CS_HREDRAW, CS_VREDRAW, HMENU, MSG, PM_REMOVE, WM_DESTROY,
+    WM_HOTKEY, WM_QUIT, WNDCLASSW, WS_EX_NOACTIVATE, WS_OVERLAPPED,
 };
 
-const CLASS_NAME: &str = "LiteClipReplay_HiddenWindow";
+const CLASS_NAME: &str = "LiteClipReplay_HotkeyWindow";
 
-/// Shared state accessible from window_proc via GWLP_USERDATA
-struct WndProcState {
-    tray_manager: Option<TrayManager>,
-    is_recording: AtomicBool,
-    event_tx: Sender<AppEvent>,
-}
-
-/// Hotkey ID constants - unique IDs for each hotkey
+/// Hotkey ID constants.
 const HOTKEY_ID_SAVE_CLIP: i32 = 1000;
 const HOTKEY_ID_TOGGLE_RECORDING: i32 = 1001;
 const HOTKEY_ID_SCREENSHOT: i32 = 1002;
 const HOTKEY_ID_OPEN_GALLERY: i32 = 1003;
 
-/// Spawn the platform thread with message loop
-///
-/// Creates a hidden window, registers hotkeys and tray icon, and runs the Win32 message pump
-/// in a dedicated thread. Events are sent to the main thread via crossbeam channel.
+/// Spawn the platform thread (hotkeys and tray).
 pub fn spawn_platform_thread(
     hotkey_config: HotkeyConfig,
 ) -> Result<(PlatformHandle, Receiver<AppEvent>)> {
@@ -51,141 +39,112 @@ pub fn spawn_platform_thread(
         }
     });
 
-    let platform_handle = PlatformHandle::new(handle, command_tx);
-
-    Ok((platform_handle, event_rx))
+    Ok((PlatformHandle::new(handle, command_tx), event_rx))
 }
 
-/// Run the platform message loop
-///
-/// Creates hidden window, registers hotkeys and tray, and processes Win32 messages
+/// Run the platform message loop (hotkeys + tray).
 fn run_platform_loop(
     event_tx: Sender<AppEvent>,
     command_rx: Receiver<PlatformCommand>,
     hotkey_config: HotkeyConfig,
 ) -> Result<()> {
-    debug!("Starting platform message loop");
+    debug!("Starting platform message loop (hotkeys + tray)");
 
     let hwnd = create_hidden_window()?;
 
-    // Create tray manager
-    let mut tray_manager: Option<TrayManager> = None;
-    match TrayManager::new(hwnd) {
-        Ok(mut tm) => {
-            if let Err(e) = tm.add_icon() {
-                error!("Failed to add tray icon: {}", e);
-            } else {
-                info!("System tray icon initialized");
-                tray_manager = Some(tm);
-            }
-        }
-        Err(e) => {
-            error!("Failed to create tray manager: {}", e);
-        }
-    }
-
-    // Register hotkeys from config
     if let Err(e) = super::hotkeys::register_hotkeys(hwnd, &hotkey_config) {
         error!("Failed to register hotkeys: {}", e);
     }
 
-    debug!(
-        "Hidden window created (hwnd: {:?}), hotkeys and tray registered",
-        hwnd
-    );
+    debug!("Hidden hotkey window created ({:?})", hwnd);
 
-    // Shared state for window_proc to access tray manager
-    let wnd_state = Box::new(WndProcState {
-        tray_manager,
-        is_recording: AtomicBool::new(false),
-        event_tx: event_tx.clone(),
-    });
-    let wnd_state_ptr = Box::into_raw(wnd_state);
-
-    // SAFETY: Store pointer in GWLP_USERDATA so window_proc can access tray state
-    unsafe {
-        SetWindowLongPtrW(hwnd, GWLP_USERDATA, wnd_state_ptr as isize);
-    }
+    // Create tray manager
+    let mut tray_manager = match super::tray::TrayManager::new(event_tx.clone()) {
+        Ok(tm) => {
+            info!("Tray icon created successfully");
+            Some(tm)
+        }
+        Err(e) => {
+            error!("Failed to create tray icon: {}", e);
+            None
+        }
+    };
 
     let mut msg = MSG::default();
     unsafe {
-        // Message pump - GetMessageW blocks until a message is available
         loop {
-            // Check for commands from the main thread (non-blocking)
-            if let Ok(cmd) = command_rx.try_recv() {
-                let state = &*wnd_state_ptr;
+            // Drain commands before blocking.
+            while let Ok(cmd) = command_rx.try_recv() {
                 match cmd {
-                    PlatformCommand::ReRegisterHotkeys(new_config) => {
-                        info!("Re-registering hotkeys with new configuration");
+                    PlatformCommand::ReRegisterHotkeys(new_cfg) => {
+                        info!(
+                            "Re-registering hotkeys: save={} toggle={} screenshot={} gallery={}",
+                            new_cfg.save_clip,
+                            new_cfg.toggle_recording,
+                            new_cfg.screenshot,
+                            new_cfg.open_gallery
+                        );
                         if let Err(e) = super::hotkeys::unregister_all_hotkeys(hwnd) {
-                            error!("Failed to unregister old hotkeys: {}", e);
+                            error!("Unregister hotkeys: {e}");
                         }
-                        if let Err(e) = super::hotkeys::register_hotkeys(hwnd, &new_config) {
-                            error!("Failed to register new hotkeys: {}", e);
+                        if let Err(e) = super::hotkeys::register_hotkeys(hwnd, &new_cfg) {
+                            error!("Register hotkeys: {e}");
                         } else {
-                            info!("Hotkeys re-registered successfully");
+                            info!("Hotkeys re-registered");
                         }
                     }
-                    PlatformCommand::UpdateRecordingState(recording) => {
-                        state.is_recording.store(recording, Ordering::Relaxed);
+                    PlatformCommand::UpdateRecordingState(_recording) => {
+                        // Recording state updates are no longer needed for the tray menu
+                        // since we removed the start/stop recording buttons
                     }
                     PlatformCommand::ShowNotification(title, message) => {
-                        if let Some(ref tray) = state.tray_manager {
-                            if let Err(e) = tray.show_notification(&title, &message) {
-                                error!("Failed to show notification: {}", e);
-                            }
+                        // Tray icon notifications are not supported by tray-icon crate directly
+                        // Logging the notification instead
+                        info!("Notification: {} - {}", title, message);
+                    }
+                    PlatformCommand::Quit => {
+                        info!("Platform: Quit received, posting WM_QUIT");
+                        PostQuitMessage(0);
+                    }
+                }
+            }
+
+            // Poll tray events
+            if let Some(ref mut tray) = tray_manager {
+                tray.poll_events();
+            }
+
+            if PeekMessageW(&mut msg, HWND::default(), 0, 0, PM_REMOVE).as_bool() {
+                if msg.message == WM_QUIT {
+                    break;
+                }
+                if msg.message == WM_HOTKEY {
+                    let id = msg.wParam.0 as i32;
+                    if let Some(action) = hotkey_id_to_action(id) {
+                        trace!("WM_HOTKEY id={} -> {:?}", id, action);
+                        if event_tx.send(AppEvent::Hotkey(action)).is_err() {
+                            break;
                         }
                     }
-                }
-            }
-
-            let result = GetMessageW(&mut msg, HWND::default(), 0, 0);
-            if !result.as_bool() {
-                break; // WM_QUIT received
-            }
-
-            match msg.message {
-                WM_HOTKEY => {
-                    let action = hotkey_id_to_action(msg.wParam.0 as i32);
-                    trace!(
-                        "WM_HOTKEY received: id={}, action={:?}",
-                        msg.wParam.0,
-                        action
-                    );
-
-                    if let Err(e) = event_tx.send(AppEvent::Hotkey(action)) {
-                        error!("Failed to send hotkey event: {}", e);
-                        // Channel closed - time to exit
-                        break;
-                    }
-                }
-                _ => {
+                } else {
                     let _ = TranslateMessage(&msg);
                     DispatchMessageW(&msg);
                 }
+            } else {
+                std::thread::sleep(std::time::Duration::from_millis(5));
             }
         }
     }
 
-    // Cleanup - clear userdata, reclaim Box, drop tray manager
-    unsafe {
-        SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
-        drop(Box::from_raw(wnd_state_ptr));
-    }
-
-    // Cleanup hotkeys before exit
     if let Err(e) = super::hotkeys::unregister_all_hotkeys(hwnd) {
-        error!("Failed to unregister hotkeys: {}", e);
+        error!("Unregister hotkeys on exit: {e}");
     }
 
     info!("Platform message loop exited");
     Ok(())
 }
 
-/// Create a hidden message-only window
-///
-/// Uses RegisterClassW + CreateWindowExW with HWND_MESSAGE parent
-/// to create a window that doesn't appear in the taskbar or desktop.
+/// Create a minimal hidden window for receiving `WM_HOTKEY`.
 fn create_hidden_window() -> Result<HWND> {
     let class_name: Vec<u16> = CLASS_NAME.encode_utf16().chain(Some(0)).collect();
 
@@ -199,9 +158,7 @@ fn create_hidden_window() -> Result<HWND> {
         ..Default::default()
     };
 
-    unsafe {
-        RegisterClassW(&wndclass);
-    }
+    unsafe { RegisterClassW(&wndclass) };
 
     let hwnd = unsafe {
         CreateWindowExW(
@@ -209,68 +166,43 @@ fn create_hidden_window() -> Result<HWND> {
             windows::core::PCWSTR(class_name.as_ptr()),
             windows::core::PCWSTR::null(),
             WS_OVERLAPPED,
-            -1000, // Off-screen position
+            -1000,
             -1000,
             0,
             0,
-            HWND::default(), // Regular window (not message-only) - required for tray menu focus
+            HWND::default(),
             HMENU::default(),
             hinstance,
             None,
         )?
     };
 
-    debug!("Hidden window created: {:?}", hwnd);
+    debug!("Hidden hotkey window: {:?}", hwnd);
     Ok(hwnd)
 }
 
-/// Window procedure for the hidden window
-///
-/// Handles WM_DESTROY, WM_TRAY_CALLBACK (sent by Shell), and WM_COMMAND (from TrackPopupMenu).
-/// Tray state is accessed via GWLP_USERDATA pointer.
 extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    match msg {
-        WM_DESTROY => {
-            unsafe { PostQuitMessage(0) };
-            LRESULT(0)
-        }
-        WM_TRAY_CALLBACK | WM_COMMAND => {
-            // SAFETY: WndProcState pointer is set before message pump starts and cleared after.
-            // WM_TRAY_CALLBACK is sent (not posted) by Shell, so it only arrives here.
-            // WM_COMMAND from TrackPopupMenu is also sent directly to the window proc.
-            unsafe {
-                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const WndProcState;
-                if !ptr.is_null() {
-                    let state = &*ptr;
-                    if let Some(ref tray) = state.tray_manager {
-                        let recording = state.is_recording.load(Ordering::Relaxed);
-                        if tray.handle_message(msg, wparam, lparam, recording, &state.event_tx) {
-                            return LRESULT(0);
-                        }
-                    }
-                }
-                DefWindowProcW(hwnd, msg, wparam, lparam)
-            }
-        }
-        _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    if msg == WM_DESTROY {
+        unsafe { PostQuitMessage(0) };
+        return LRESULT(0);
     }
+    unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
 }
 
-/// Map hotkey ID to action
-fn hotkey_id_to_action(id: i32) -> HotkeyAction {
+fn hotkey_id_to_action(id: i32) -> Option<HotkeyAction> {
     match id {
-        HOTKEY_ID_SAVE_CLIP => HotkeyAction::SaveClip,
-        HOTKEY_ID_TOGGLE_RECORDING => HotkeyAction::ToggleRecording,
-        HOTKEY_ID_SCREENSHOT => HotkeyAction::Screenshot,
-        HOTKEY_ID_OPEN_GALLERY => HotkeyAction::OpenGallery,
-        _ => HotkeyAction::SaveClip, // Default fallback
+        HOTKEY_ID_SAVE_CLIP => Some(HotkeyAction::SaveClip),
+        HOTKEY_ID_TOGGLE_RECORDING => Some(HotkeyAction::ToggleRecording),
+        HOTKEY_ID_SCREENSHOT => Some(HotkeyAction::Screenshot),
+        HOTKEY_ID_OPEN_GALLERY => Some(HotkeyAction::OpenGallery),
+        _ => {
+            debug!("WM_HOTKEY with unknown id={}", id);
+            None
+        }
     }
 }
 
-/// Parse hotkey string (e.g., "Alt+F9") into modifiers and virtual key code
-///
-/// Returns (modifiers, key) where modifiers is a combination of MOD_* flags
-/// and key is the Windows virtual key code.
+/// Parse hotkey string (e.g. "Alt+F9") into modifiers + virtual key code.
 pub fn parse_hotkey(hotkey: &str) -> Result<(HOT_KEY_MODIFIERS, u32)> {
     let parts: Vec<&str> = hotkey.split('+').map(|s| s.trim()).collect();
 
@@ -284,16 +216,13 @@ pub fn parse_hotkey(hotkey: &str) -> Result<(HOT_KEY_MODIFIERS, u32)> {
             "Shift" => modifiers.0 |= MOD_SHIFT.0,
             "Win" => modifiers.0 |= MOD_WIN.0,
             _ => {
-                // Parse function keys (F1-F24)
                 if part.len() >= 2 && part.starts_with('F') {
-                    if let Ok(fnum) = part[1..].parse::<u32>() {
-                        if (1..=24).contains(&fnum) {
-                            // VK_F1 = 0x70
-                            key = 0x6F + fnum;
+                    if let Ok(n) = part[1..].parse::<u32>() {
+                        if (1..=24).contains(&n) {
+                            key = 0x6F + n; // VK_F1 = 0x70
                         }
                     }
                 } else if part.len() == 1 {
-                    // Single character keys (A-Z, 0-9)
                     let ch = part.chars().next().unwrap().to_ascii_uppercase() as u32;
                     if (0x30..=0x39).contains(&ch) || (0x41..=0x5A).contains(&ch) {
                         key = ch;
@@ -307,12 +236,7 @@ pub fn parse_hotkey(hotkey: &str) -> Result<(HOT_KEY_MODIFIERS, u32)> {
         anyhow::bail!("Could not parse hotkey: {}", hotkey);
     }
 
-    trace!(
-        "Parsed hotkey '{}' -> modifiers={:?}, key={}",
-        hotkey,
-        modifiers,
-        key
-    );
+    trace!("Parsed '{}' -> mods={:?} key={}", hotkey, modifiers, key);
     Ok((modifiers, key))
 }
 
