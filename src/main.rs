@@ -169,6 +169,8 @@ async fn main() -> Result<()> {
         }
     }
 
+    let mut should_restart = false;
+
     // Main event loop
     loop {
         tokio::select! {
@@ -288,6 +290,11 @@ async fn main() -> Result<()> {
                                         info!("Tray: Exit selected");
                                         break;
                                     }
+                                    liteclip_replay::platform::TrayEvent::Restart => {
+                                        info!("Tray: Restart selected");
+                                        should_restart = true;
+                                        break;
+                                    }
                                     liteclip_replay::platform::TrayEvent::OpenSettings => {
                                         info!("Tray: Open Settings selected");
                                         match Config::config_path() {
@@ -323,6 +330,11 @@ async fn main() -> Result<()> {
                             }
                             liteclip_replay::platform::AppEvent::Quit => {
                                 info!("Quit signal received");
+                                break;
+                            }
+                            liteclip_replay::platform::AppEvent::Restart => {
+                                info!("Restart signal received");
+                                should_restart = true;
                                 break;
                             }
                         }
@@ -363,22 +375,71 @@ async fn main() -> Result<()> {
     }
 
     // Cleanup
-    info!("Shutting down");
-    {
-        let mut state = app_state.write().await;
-        if let Err(e) = state.stop_recording().await {
-            warn!("Error stopping recording: {}", e);
+    info!("Shutting down (should_restart={})", should_restart);
+
+    // For restart: spawn the new process IMMEDIATELY so the user sees it start
+    // right away while we do cleanup in the background.
+    if should_restart {
+        info!("Spawning new instance for restart...");
+        match std::env::current_exe() {
+            Ok(current_exe) => {
+                let args: Vec<String> = std::env::args().skip(1).collect();
+                match Command::new(&current_exe)
+                    .args(&args)
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .spawn()
+                {
+                    Ok(_) => info!("New instance spawned successfully"),
+                    Err(e) => error!("Failed to spawn new instance: {}", e),
+                }
+            }
+            Err(e) => error!("Failed to get current executable path for restart: {}", e),
         }
     }
 
-    // Signal platform thread to exit its message loop, then wait for it
+    // Signal platform thread to quit first — this drops the tray icon immediately
+    // giving the user instant visual feedback that Exit/Restart was acknowledged.
+    info!("Stopping platform thread (quit signal)...");
     if let Err(e) = platform_handle.quit() {
         warn!("Failed to send quit to platform thread: {}", e);
     }
+
+    // Watchdog: force-exit if cleanup hangs beyond 2 seconds total.
+    let (shutdown_done_tx, shutdown_done_rx) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        if shutdown_done_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .is_err()
+        {
+            error!("Shutdown timed out after 2s - forcing exit");
+            std::process::exit(0);
+        }
+    });
+
+    {
+        let mut state = app_state.write().await;
+        info!("Stopping recording pipeline...");
+        match tokio::time::timeout(
+            tokio::time::Duration::from_millis(1500),
+            state.stop_recording(),
+        )
+        .await
+        {
+            Ok(Ok(())) => info!("Recording pipeline stopped"),
+            Ok(Err(e)) => warn!("Error stopping recording: {}", e),
+            Err(_) => warn!("Timed out stopping recording pipeline"),
+        }
+    }
+
+    // Wait for platform thread (should be quick; we sent Quit above).
     platform_handle.join().ok();
+
+    let _ = shutdown_done_tx.send(());
     info!("LiteClip Replay stopped");
 
-    Ok(())
+    // Use process::exit for a clean, fast termination — avoids potential hangs
+    // in tokio runtime teardown or lingering async drop paths.
+    std::process::exit(0);
 }
 
 /// Convert Config to HotkeyConfig

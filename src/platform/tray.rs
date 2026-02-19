@@ -19,6 +19,7 @@ use super::{AppEvent, TrayEvent};
 /// Tray menu item IDs.
 const ID_SAVE_CLIP: &str = "tray_save_clip";
 const ID_OPEN_SETTINGS: &str = "tray_open_settings";
+const ID_RESTART: &str = "tray_restart";
 const ID_EXIT: &str = "tray_exit";
 
 /// Managed system-tray icon.
@@ -39,13 +40,15 @@ impl TrayManager {
 
         let item_save = MenuItem::with_id(ID_SAVE_CLIP, "Save Clip", true, None);
         let item_settings = MenuItem::with_id(ID_OPEN_SETTINGS, "Open Settings", true, None);
-        let separator = PredefinedMenuItem::separator();
+        let separator1 = PredefinedMenuItem::separator();
+        let item_restart = MenuItem::with_id(ID_RESTART, "Restart", true, None);
         let item_exit = MenuItem::with_id(ID_EXIT, "Exit", true, None);
 
         let menu = Menu::new();
         menu.append(&item_save).ok();
         menu.append(&item_settings).ok();
-        menu.append(&separator).ok();
+        menu.append(&separator1).ok();
+        menu.append(&item_restart).ok();
         menu.append(&item_exit).ok();
 
         let icon = load_tray_icon();
@@ -83,6 +86,7 @@ impl TrayManager {
                     let tray_event = match ev.id.0.as_str() {
                         ID_SAVE_CLIP => Some(TrayEvent::SaveClip),
                         ID_OPEN_SETTINGS => Some(TrayEvent::OpenSettings),
+                        ID_RESTART => Some(TrayEvent::Restart),
                         ID_EXIT => {
                             info!("Exit menu item clicked - sending Exit event");
                             Some(TrayEvent::Exit)

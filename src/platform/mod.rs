@@ -50,6 +50,8 @@ pub enum TrayEvent {
     StopRecording,
     /// Exit the application
     Exit,
+    /// Restart the application
+    Restart,
 }
 
 /// Application events from platform layer
@@ -61,6 +63,8 @@ pub enum AppEvent {
     Tray(TrayEvent),
     /// Quit application
     Quit,
+    /// Restart application
+    Restart,
 }
 
 /// Hotkey configuration for registration
