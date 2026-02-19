@@ -6,6 +6,10 @@ use crate::encode::{hw_encoder, sw_encoder};
 use anyhow::Result;
 use crossbeam::channel::{bounded, Receiver, Sender};
 use tracing::{debug, info, trace, warn};
+#[cfg(windows)]
+use windows::Win32::System::Threading::{
+    GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_ABOVE_NORMAL,
+};
 
 use super::types::{EncodedPacket, EncoderConfig, EncoderHandle, HardwareEncoder};
 /// Encoder trait
@@ -25,6 +29,18 @@ pub trait Encoder: Send + 'static {
     /// Check if encoder is still running
     fn is_running(&self) -> bool;
 }
+
+fn set_encoder_thread_priority() {
+    #[cfg(windows)]
+    {
+        unsafe {
+            if let Err(e) = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL) {
+                warn!("Failed to raise encoder thread priority: {}", e);
+            }
+        }
+    }
+}
+
 /// Detect available hardware encoder
 ///
 /// Priority order: NVENC → AMF → QSV → None (software)
@@ -142,6 +158,7 @@ pub fn spawn_encoder(
         .name("encoder".to_string())
         .stack_size(4 * 1024 * 1024)
         .spawn(move || {
+            set_encoder_thread_priority();
             debug!("Encoder thread started");
             let mut encoder = create_encoder(&config)?;
             encoder.init(&config)?;
@@ -170,7 +187,7 @@ pub fn spawn_encoder(
                         buffer.push(packet);
                     }
                 }
-                match frame_rx.recv_timeout(std::time::Duration::from_millis(10)) {
+                match frame_rx.recv_timeout(std::time::Duration::from_millis(1)) {
                     Ok(frame) => {
                         frames_encoded += 1;
                         if frames_encoded % 60 == 0 {
@@ -243,6 +260,7 @@ pub fn spawn_encoder_with_receiver(
         .name("encoder".to_string())
         .stack_size(4 * 1024 * 1024)
         .spawn(move || {
+            set_encoder_thread_priority();
             debug!("Encoder thread started");
             let mut encoder = create_encoder(&config)?;
             encoder.init(&config)?;
@@ -263,7 +281,7 @@ pub fn spawn_encoder_with_receiver(
                         buffer.push(packet);
                     }
                 }
-                match frame_rx.recv_timeout(std::time::Duration::from_millis(10)) {
+                match frame_rx.recv_timeout(std::time::Duration::from_millis(1)) {
                     Ok(frame) => {
                         if let Err(e) = encoder.encode_frame(&frame) {
                             warn!("Failed to encode frame: {}", e);

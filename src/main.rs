@@ -14,8 +14,45 @@ use std::process::Command;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
+#[cfg(windows)]
+use windows::Win32::Media::{timeBeginPeriod, timeEndPeriod, TIMERR_NOERROR};
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+#[cfg(windows)]
+struct TimerResolutionGuard {
+    active: bool,
+    period_ms: u32,
+}
+
+#[cfg(windows)]
+impl TimerResolutionGuard {
+    fn new(period_ms: u32) -> Self {
+        let result = unsafe { timeBeginPeriod(period_ms) };
+        let active = result == TIMERR_NOERROR;
+        if active {
+            info!("Enabled {}ms timer resolution", period_ms);
+        } else {
+            warn!(
+                "Failed to enable {}ms timer resolution (MMRESULT={})",
+                period_ms, result
+            );
+        }
+        Self { active, period_ms }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for TimerResolutionGuard {
+    fn drop(&mut self) {
+        if self.active {
+            let result = unsafe { timeEndPeriod(self.period_ms) };
+            if result != TIMERR_NOERROR {
+                warn!("Failed to restore timer resolution (MMRESULT={})", result);
+            }
+        }
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -29,6 +66,9 @@ async fn main() -> Result<()> {
         .with_level(true)
         .with_env_filter(filter)
         .init();
+
+    #[cfg(windows)]
+    let _timer_resolution_guard = TimerResolutionGuard::new(1);
 
     let version = env!("CARGO_PKG_VERSION");
     println!("LiteClip Replay v{}", version);

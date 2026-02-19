@@ -11,7 +11,7 @@ use crossbeam::channel::{bounded, Receiver, Sender};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 use windows::Win32::Graphics::Direct3D11::{
     ID3D11Device, ID3D11DeviceContext, ID3D11Resource, ID3D11Texture2D, D3D11_MAPPED_SUBRESOURCE,
@@ -24,76 +24,6 @@ use windows::Win32::Graphics::Dxgi::{
     DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTPUT_DESC,
 };
 use windows::Win32::System::Performance::QueryPerformanceCounter;
-
-struct FpsAdaptation {
-    current_divisor: u32,
-    consecutive_drops: u32,
-    consecutive_success: u32,
-    last_adaptation: std::time::Instant,
-}
-
-impl FpsAdaptation {
-    const ADAPT_COOLDOWN: Duration = Duration::from_secs(3);
-    const DROP_THRESHOLD: u32 = 10;
-    const SUCCESS_THRESHOLD: u32 = 100;
-
-    fn new() -> Self {
-        Self {
-            current_divisor: 0,
-            consecutive_drops: 0,
-            consecutive_success: 0,
-            last_adaptation: std::time::Instant::now()
-                - Self::ADAPT_COOLDOWN
-                - Duration::from_secs(1),
-        }
-    }
-
-    fn record_drop(&mut self) {
-        self.consecutive_drops += 1;
-        self.consecutive_success = 0;
-    }
-
-    fn record_success(&mut self) {
-        self.consecutive_success += 1;
-        self.consecutive_drops = 0;
-    }
-
-    fn should_adapt_down(&self) -> bool {
-        self.consecutive_drops >= Self::DROP_THRESHOLD
-            && self.current_divisor < 2
-            && self.last_adaptation.elapsed() > Self::ADAPT_COOLDOWN
-    }
-
-    fn should_adapt_up(&self) -> bool {
-        self.consecutive_success >= Self::SUCCESS_THRESHOLD
-            && self.current_divisor > 0
-            && self.last_adaptation.elapsed() > Self::ADAPT_COOLDOWN
-    }
-
-    fn adapt_down(&mut self) -> bool {
-        if self.current_divisor < 2 {
-            self.current_divisor += 1;
-            self.last_adaptation = std::time::Instant::now();
-            self.consecutive_drops = 0;
-            return true;
-        }
-        false
-    }
-
-    fn adapt_up(&mut self) -> bool {
-        if self.current_divisor > 0 {
-            self.current_divisor -= 1;
-            self.last_adaptation = std::time::Instant::now();
-            self.consecutive_success = 0;
-            return true;
-        }
-        false
-    }
-
-    fn effective_fps(&self, base_fps: u32) -> u32 {
-        base_fps / (self.current_divisor + 1)
-    }
-}
 
 /// DXGI capture state
 #[allow(dead_code)]
@@ -129,7 +59,7 @@ pub struct DxgiCapture {
 impl DxgiCapture {
     /// Create a new DXGI capture instance
     pub fn new() -> Result<Self> {
-        let (frame_tx, frame_rx) = bounded::<CapturedFrame>(16);
+        let (frame_tx, frame_rx) = bounded::<CapturedFrame>(32);
         Ok(Self {
             config: CaptureConfig::default(),
             running: Arc::new(AtomicBool::new(false)),
@@ -448,42 +378,23 @@ impl DxgiCapture {
         out_h: usize,
         dst: &mut [u8],
     ) {
-        let x_ratio = src_w as f64 / out_w as f64;
-        let y_ratio = src_h as f64 / out_h as f64;
+        let src_stride = src_w * 4;
+        let out_stride = out_w * 4;
 
-        for dst_y in 0..out_h {
-            let src_y_f = dst_y as f64 * y_ratio;
-            let src_y0 = src_y_f.floor() as usize;
-            let src_y1 = (src_y0 + 1).min(src_h - 1);
-            let y_frac = src_y_f - src_y0 as f64;
+        for out_y in 0..out_h {
+            let src_y = (out_y * src_h) / out_h;
+            let src_row = src_y * src_stride;
+            let out_row = out_y * out_stride;
 
-            let dst_row_base = dst_y * out_w * 4;
+            for out_x in 0..out_w {
+                let src_x = (out_x * src_w) / out_w;
+                let src_i = src_row + src_x * 4;
+                let out_i = out_row + out_x * 4;
 
-            for dst_x in 0..out_w {
-                let src_x_f = dst_x as f64 * x_ratio;
-                let src_x0 = src_x_f.floor() as usize;
-                let src_x1 = (src_x0 + 1).min(src_w - 1);
-                let x_frac = src_x_f - src_x0 as f64;
-
-                let i00 = (src_y0 * src_w + src_x0) * 4;
-                let i10 = (src_y0 * src_w + src_x1) * 4;
-                let i01 = (src_y1 * src_w + src_x0) * 4;
-                let i11 = (src_y1 * src_w + src_x1) * 4;
-
-                let di = dst_row_base + dst_x * 4;
-
-                for c in 0..4 {
-                    let v00 = src[i00 + c] as f64;
-                    let v10 = src[i10 + c] as f64;
-                    let v01 = src[i01 + c] as f64;
-                    let v11 = src[i11 + c] as f64;
-
-                    let v_top = v00 + (v10 - v00) * x_frac;
-                    let v_bot = v01 + (v11 - v01) * x_frac;
-                    let v = v_top + (v_bot - v_top) * y_frac;
-
-                    dst[di + c] = v.round().clamp(0.0, 255.0) as u8;
-                }
+                dst[out_i] = src[src_i];
+                dst[out_i + 1] = src[src_i + 1];
+                dst[out_i + 2] = src[src_i + 2];
+                dst[out_i + 3] = src[src_i + 3];
             }
         }
     }
@@ -493,18 +404,22 @@ impl DxgiCapture {
         frame_tx: Sender<CapturedFrame>,
         config: CaptureConfig,
     ) {
+        Self::set_capture_thread_priority();
         info!("DXGI capture thread started: {} FPS", config.target_fps);
         let perform_cpu_readback = config.perform_cpu_readback;
         let target_resolution = config.target_resolution;
         let base_fps = config.target_fps.max(1);
         let timeout_ms = (1000u32 / base_fps).max(1) + u32::from(!1000u32.is_multiple_of(base_fps));
-        let mut frame_interval_ns = 1_000_000_000u64 / base_fps as u64;
-        let mut last_frame_time = std::time::Instant::now();
+        let frame_interval = Duration::from_nanos(1_000_000_000u64 / base_fps as u64);
+        let mut next_frame_deadline = Instant::now();
         let mut frame_count = 0u64;
         let mut dropped_count = 0u64;
+        let mut last_frame: Option<CapturedFrame> = None;
+        let mut window_start = Instant::now();
+        let mut window_frames = 0u64;
+        let mut window_drops = 0u64;
         let mut error_count = 0u32;
         let max_errors = 10;
-        let mut fps_adaptation = FpsAdaptation::new();
         let mut state = match Self::init_capture(config.output_index) {
             Ok(state) => state,
             Err(e) => {
@@ -523,23 +438,19 @@ impl DxgiCapture {
                 target_resolution,
             ) {
                 Ok(Some(frame)) => {
-                    let elapsed = last_frame_time.elapsed().as_nanos() as u64;
-                    if elapsed < frame_interval_ns {
-                        let sleep_ns = frame_interval_ns - elapsed;
-                        std::thread::sleep(Duration::from_nanos(sleep_ns));
+                    last_frame = Some(frame.clone());
+                    let now = Instant::now();
+                    if now > next_frame_deadline + frame_interval {
+                        next_frame_deadline = now;
                     }
-                    last_frame_time = std::time::Instant::now();
+                    Self::wait_until_deadline(next_frame_deadline);
+                    next_frame_deadline += frame_interval;
+
                     match frame_tx.try_send(frame) {
                         Ok(()) => {
                             frame_count += 1;
+                            window_frames += 1;
                             error_count = 0;
-                            fps_adaptation.record_success();
-
-                            if fps_adaptation.should_adapt_up() && fps_adaptation.adapt_up() {
-                                let new_fps = fps_adaptation.effective_fps(base_fps);
-                                frame_interval_ns = 1_000_000_000u64 / new_fps as u64;
-                                info!("GPU recovered, increasing to {} FPS", new_fps);
-                            }
 
                             if frame_count % LOG_INTERVAL == 0 {
                                 log_counter += 1;
@@ -552,14 +463,8 @@ impl DxgiCapture {
                         }
                         Err(crossbeam::channel::TrySendError::Full(_)) => {
                             dropped_count += 1;
+                            window_drops += 1;
                             error_count = 0;
-                            fps_adaptation.record_drop();
-
-                            if fps_adaptation.should_adapt_down() && fps_adaptation.adapt_down() {
-                                let new_fps = fps_adaptation.effective_fps(base_fps);
-                                frame_interval_ns = 1_000_000_000u64 / new_fps as u64;
-                                warn!("GPU strain detected, reducing to {} FPS", new_fps);
-                            }
 
                             if dropped_count % 60 == 0 {
                                 warn!("Dropped {} frames (encoder behind)", dropped_count);
@@ -572,7 +477,40 @@ impl DxgiCapture {
                     }
                 }
                 Ok(None) => {
-                    std::thread::yield_now();
+                    let Some(mut frame) = last_frame.clone() else {
+                        std::thread::sleep(Duration::from_millis(1));
+                        continue;
+                    };
+
+                    frame.timestamp = Self::get_qpc_timestamp();
+
+                    let now = Instant::now();
+                    if now > next_frame_deadline + frame_interval {
+                        next_frame_deadline = now;
+                    }
+                    Self::wait_until_deadline(next_frame_deadline);
+                    next_frame_deadline += frame_interval;
+
+                    match frame_tx.try_send(frame) {
+                        Ok(()) => {
+                            frame_count += 1;
+                            window_frames += 1;
+                            error_count = 0;
+                        }
+                        Err(crossbeam::channel::TrySendError::Full(_)) => {
+                            dropped_count += 1;
+                            window_drops += 1;
+                            error_count = 0;
+
+                            if dropped_count % 60 == 0 {
+                                warn!("Dropped {} frames (encoder behind)", dropped_count);
+                            }
+                        }
+                        Err(crossbeam::channel::TrySendError::Disconnected(_)) => {
+                            info!("Frame channel closed, stopping capture");
+                            break;
+                        }
+                    }
                 }
                 Err(e) => {
                     error!("Capture error: {}", e);
@@ -595,6 +533,19 @@ impl DxgiCapture {
                     }
                 }
             }
+
+            if window_start.elapsed() >= Duration::from_secs(5) {
+                debug!(
+                    "Capture telemetry: target={}fps, actual={}fps, window_drops={}, total_drops={}",
+                    base_fps,
+                    window_frames / 5,
+                    window_drops,
+                    dropped_count
+                );
+                window_start = Instant::now();
+                window_frames = 0;
+                window_drops = 0;
+            }
         }
         info!(
             "DXGI capture thread stopped ({} frames captured, {} dropped)",
@@ -604,5 +555,38 @@ impl DxgiCapture {
     /// Get current QPC timestamp
     fn get_qpc_timestamp() -> i64 {
         DxgiCaptureState::get_qpc_timestamp()
+    }
+
+    fn wait_until_deadline(deadline: Instant) {
+        const SPIN_THRESHOLD: Duration = Duration::from_millis(1);
+        loop {
+            let now = Instant::now();
+            if now >= deadline {
+                break;
+            }
+
+            let remaining = deadline - now;
+            if remaining > SPIN_THRESHOLD {
+                std::thread::sleep(remaining - SPIN_THRESHOLD);
+            } else {
+                std::hint::spin_loop();
+            }
+        }
+    }
+
+    fn set_capture_thread_priority() {
+        #[cfg(windows)]
+        {
+            use windows::Win32::System::Threading::{
+                GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_ABOVE_NORMAL,
+            };
+
+            unsafe {
+                if let Err(e) = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL)
+                {
+                    warn!("Failed to raise capture thread priority: {}", e);
+                }
+            }
+        }
     }
 }
