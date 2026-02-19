@@ -16,6 +16,17 @@ pub fn qpc_frequency() -> i64 {
         freq
     })
 }
+
+pub(crate) fn h264_nal_type(data: &[u8]) -> Option<u8> {
+    if data.len() >= 5 && data[0..4] == [0x00, 0x00, 0x00, 0x01] {
+        return Some(data[4] & 0x1f);
+    }
+    if data.len() >= 4 && data[0..3] == [0x00, 0x00, 0x01] {
+        return Some(data[3] & 0x1f);
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use crate::buffer::ring::types::ReplayBuffer;
@@ -33,6 +44,7 @@ mod tests {
             resolution: None,
         }
     }
+
     #[test]
     fn test_buffer_push_and_snapshot() {
         let mut buffer = ReplayBuffer::with_params(Duration::from_secs(120), 512);
@@ -43,6 +55,7 @@ mod tests {
         let snapshot = buffer.snapshot().unwrap();
         assert_eq!(snapshot.len(), 10);
     }
+
     #[test]
     fn test_memory_budget_enforcement() {
         let mut buffer = ReplayBuffer::with_params(Duration::from_secs(120), 1);
@@ -53,6 +66,7 @@ mod tests {
         let stats = buffer.stats();
         assert!(stats.memory_usage_percent <= 100.0);
     }
+
     #[test]
     fn test_keyframe_seeking() {
         let mut buffer = ReplayBuffer::with_params(Duration::from_secs(120), 512);
@@ -64,6 +78,7 @@ mod tests {
         let snapshot = buffer.snapshot_from(12_000_000).unwrap();
         assert!(!snapshot.is_empty());
     }
+
     #[test]
     fn test_snapshot_cheap_clone() {
         let mut buffer = ReplayBuffer::with_params(Duration::from_secs(120), 512);
@@ -81,6 +96,7 @@ mod tests {
         assert_eq!(snapshot.len(), 1);
         assert_eq!(snapshot[0].data.len(), 1_000_000);
     }
+
     #[test]
     fn test_clear() {
         let mut buffer = ReplayBuffer::with_params(Duration::from_secs(120), 512);
@@ -93,6 +109,7 @@ mod tests {
         assert_eq!(stats.total_bytes, 0);
         assert_eq!(stats.keyframe_count, 0);
     }
+
     #[test]
     fn test_soft_clear_preserves_keyframes() {
         let mut buffer = ReplayBuffer::with_params(Duration::from_secs(120), 512);
@@ -133,6 +150,7 @@ mod tests {
             "Should have keyframes after adding new packets"
         );
     }
+
     #[test]
     fn test_eviction_keyframe_index_correctness() {
         let mut buffer = ReplayBuffer::with_params(Duration::from_secs(120), 1);
@@ -166,7 +184,7 @@ mod tests {
         let qpc = qpc_frequency() as i64;
         let fps = 30i64;
         let keyframe_every_n_frames = 60i64; // every 2 s at 30 fps
-                                             // Use a 5-second ring buffer with a generous memory cap (1 GB).
+        // Use a 5-second ring buffer with a generous memory cap (1 GB).
         let buffer_duration = Duration::from_secs(5);
         let mut buffer = ReplayBuffer::with_params(buffer_duration, 1024);
 

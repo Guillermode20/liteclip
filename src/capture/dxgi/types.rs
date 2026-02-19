@@ -2,8 +2,6 @@
 //!
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
-use windows_core::Interface;
-
 use crate::capture::{backpressure::BackpressureState, CaptureConfig, CapturedFrame};
 use anyhow::{bail, Context, Result};
 use bytes::{Bytes, BytesMut};
@@ -14,8 +12,8 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 use windows::Win32::Graphics::Direct3D11::{
-    ID3D11Device, ID3D11DeviceContext, ID3D11Resource, ID3D11Texture2D, D3D11_MAPPED_SUBRESOURCE,
-    D3D11_MAP_READ,
+    ID3D11Device, ID3D11DeviceContext, ID3D11Resource, ID3D11Texture2D,
+    D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ,
 };
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIOutput1, IDXGIResource, DXGI_ERROR_ACCESS_DENIED,
@@ -24,6 +22,8 @@ use windows::Win32::Graphics::Dxgi::{
     DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTPUT_DESC,
 };
 use windows::Win32::System::Performance::QueryPerformanceCounter;
+use windows_core::Interface;
+
 
 /// DXGI capture state
 #[allow(dead_code)]
@@ -43,7 +43,8 @@ impl DxgiCaptureState {
     pub fn get_qpc_timestamp() -> i64 {
         unsafe {
             let mut qpc = 0i64;
-            QueryPerformanceCounter(&mut qpc).expect("QueryPerformanceCounter should never fail");
+            QueryPerformanceCounter(&mut qpc)
+                .expect("QueryPerformanceCounter should never fail");
             qpc
         }
     }
@@ -73,25 +74,22 @@ impl DxgiCapture {
             capture_thread: None,
         })
     }
-
     pub fn try_recv_fatal(&self) -> Option<String> {
         self.fatal_rx.try_recv().ok()
     }
-
     pub fn is_running(&self) -> bool {
         self.running.load(Ordering::Relaxed)
     }
-
     pub fn is_capture_thread_finished(&self) -> bool {
-        self.capture_thread
-            .as_ref()
-            .is_some_and(|thread| thread.is_finished())
+        self.capture_thread.as_ref().is_some_and(|thread| thread.is_finished())
     }
     /// Initialize D3D11 device and DXGI duplication
     fn init_capture(output_index: u32) -> Result<DxgiCaptureState> {
         info!("Initializing DXGI capture for output {}", output_index);
         unsafe {
-            let factory = CreateDXGIFactory1::<windows::Win32::Graphics::Dxgi::IDXGIFactory1>()
+            let factory = CreateDXGIFactory1::<
+                windows::Win32::Graphics::Dxgi::IDXGIFactory1,
+            >()
                 .context("Failed to create DXGI factory")?;
             let mut adapter_index = 0u32;
             let mut selected_adapter = None;
@@ -110,27 +108,31 @@ impl DxgiCapture {
                     }
                 }
             }
-            let (adapter, output) =
-                selected_adapter.context("Failed to find adapter with requested output index")?;
+            let (adapter, output) = selected_adapter
+                .context("Failed to find adapter with requested output index")?;
             let output_desc = output
                 .GetDesc()
                 .context("Failed to get output description")?;
             info!(
-                "Using output: {}x{} attached to monitor {:?}",
-                output_desc.DesktopCoordinates.right - output_desc.DesktopCoordinates.left,
-                output_desc.DesktopCoordinates.bottom - output_desc.DesktopCoordinates.top,
-                output_desc.Monitor
+                "Using output: {}x{} attached to monitor {:?}", output_desc
+                .DesktopCoordinates.right - output_desc.DesktopCoordinates.left,
+                output_desc.DesktopCoordinates.bottom - output_desc.DesktopCoordinates
+                .top, output_desc.Monitor
             );
             let output1: IDXGIOutput1 = output
                 .cast()
                 .context("Failed to get IDXGIOutput1 interface")?;
-            let adapter_cast: windows::Win32::Graphics::Dxgi::IDXGIAdapter =
-                adapter.cast().context("Failed to cast adapter")?;
+            let adapter_cast: windows::Win32::Graphics::Dxgi::IDXGIAdapter = adapter
+                .cast()
+                .context("Failed to cast adapter")?;
             let mut d3d_device: Option<ID3D11Device> = None;
             let mut d3d_context: Option<ID3D11DeviceContext> = None;
-            let feature_levels = [windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_0];
-            let mut obtained_feature_level =
-                windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL(0);
+            let feature_levels = [
+                windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_0,
+            ];
+            let mut obtained_feature_level = windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL(
+                0,
+            );
             let result = windows::Win32::Graphics::Direct3D11::D3D11CreateDevice(
                 Some(&adapter_cast),
                 windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN,
@@ -174,10 +176,10 @@ impl DxgiCapture {
                         "Failed to duplicate output: {} (0x{:08X})", msg, code as u32
                     )
                 })?;
-            let frame_width =
-                (output_desc.DesktopCoordinates.right - output_desc.DesktopCoordinates.left) as u32;
-            let frame_height =
-                (output_desc.DesktopCoordinates.bottom - output_desc.DesktopCoordinates.top) as u32;
+            let frame_width = (output_desc.DesktopCoordinates.right
+                - output_desc.DesktopCoordinates.left) as u32;
+            let frame_height = (output_desc.DesktopCoordinates.bottom
+                - output_desc.DesktopCoordinates.top) as u32;
             info!("DXGI capture initialized: {}x{}", frame_width, frame_height);
             let native_size = (frame_width * frame_height * 4) as usize;
             let mut native_buffer = BytesMut::with_capacity(native_size);
@@ -213,8 +215,8 @@ impl DxgiCapture {
                 },
                 Usage: windows::Win32::Graphics::Direct3D11::D3D11_USAGE_STAGING,
                 BindFlags: 0,
-                CPUAccessFlags: windows::Win32::Graphics::Direct3D11::D3D11_CPU_ACCESS_READ.0
-                    as u32,
+                CPUAccessFlags: windows::Win32::Graphics::Direct3D11::D3D11_CPU_ACCESS_READ
+                    .0 as u32,
                 MiscFlags: 0,
             };
             let mut texture = None;
@@ -225,8 +227,7 @@ impl DxgiCapture {
                 .context("Failed to create staging texture")?;
             state.staging_texture = texture;
             debug!(
-                "Created staging texture: {}x{}",
-                state.frame_width, state.frame_height
+                "Created staging texture: {}x{}", state.frame_width, state.frame_height
             );
             Ok(())
         }
@@ -241,11 +242,9 @@ impl DxgiCapture {
         unsafe {
             let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
             let mut desktop_resource: Option<IDXGIResource> = None;
-            let hr = state.duplication.AcquireNextFrame(
-                timeout_ms,
-                &mut frame_info,
-                &mut desktop_resource,
-            );
+            let hr = state
+                .duplication
+                .AcquireNextFrame(timeout_ms, &mut frame_info, &mut desktop_resource);
             match hr {
                 Ok(_) => {
                     let timestamp = Self::get_qpc_timestamp();
@@ -274,7 +273,10 @@ impl DxgiCapture {
                             .context("Failed to cast captured texture to resource")?;
                         state
                             .d3d_context
-                            .CopyResource(Some(&staging_resource), Some(&captured_resource));
+                            .CopyResource(
+                                Some(&staging_resource),
+                                Some(&captured_resource),
+                            );
                         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
                         state
                             .d3d_context
@@ -304,9 +306,7 @@ impl DxgiCapture {
                             state.d3d_context.Unmap(Some(&staging_resource), 0);
                             bail!(
                                 "Frame dimensions too large for safe copy: {}x{}, pitch={}",
-                                src_w,
-                                src_h,
-                                src_pitch
+                                src_w, src_h, src_pitch
                             );
                         }
                         let src_ptr = mapped.pData as *const u8;
@@ -368,9 +368,10 @@ impl DxgiCapture {
                                     dst_row_offset += src_row_bytes;
                                 }
                             }
-                            // Zero-copy: split off the filled portion and freeze it into a Bytes
-                            let bgra = state.native_buffer.split_to(total_bytes).freeze();
-                            // Re-allocate capacity for the next frame to avoid reallocation
+                            let bgra = state
+                                .native_buffer
+                                .split_to(total_bytes)
+                                .freeze();
                             state.native_buffer.reserve(total_bytes);
                             state.native_buffer.resize(total_bytes, 0);
                             (src_w, src_h, bgra)
@@ -405,17 +406,14 @@ impl DxgiCapture {
     ) {
         let src_stride = src_w * 4;
         let out_stride = out_w * 4;
-
         for out_y in 0..out_h {
             let src_y = (out_y * src_h) / out_h;
             let src_row = src_y * src_stride;
             let out_row = out_y * out_stride;
-
             for out_x in 0..out_w {
                 let src_x = (out_x * src_w) / out_w;
                 let src_i = src_row + src_x * 4;
                 let out_i = out_row + out_x * 4;
-
                 dst[out_i] = src[src_i];
                 dst[out_i + 1] = src[src_i + 1];
                 dst[out_i + 2] = src[src_i + 2];
@@ -436,7 +434,8 @@ impl DxgiCapture {
         let perform_cpu_readback = config.perform_cpu_readback;
         let target_resolution = config.target_resolution;
         let base_fps = config.target_fps.max(1);
-        let timeout_ms = (1000u32 / base_fps).max(1) + u32::from(!1000u32.is_multiple_of(base_fps));
+        let timeout_ms = (1000u32 / base_fps).max(1)
+            + u32::from(!1000u32.is_multiple_of(base_fps));
         let frame_interval = Duration::from_nanos(1_000_000_000u64 / base_fps as u64);
         let mut next_frame_deadline = Instant::now();
         let mut frame_count = 0u64;
@@ -456,7 +455,8 @@ impl DxgiCapture {
             Ok(state) => state,
             Err(e) => {
                 error!("Failed to initialize DXGI capture: {}", e);
-                let _ = fatal_tx.try_send(format!("Failed to initialize DXGI capture: {}", e));
+                let _ = fatal_tx
+                    .try_send(format!("Failed to initialize DXGI capture: {}", e));
                 return;
             }
         };
@@ -478,7 +478,6 @@ impl DxgiCapture {
                     }
                     Self::wait_until_deadline(next_frame_deadline);
                     next_frame_deadline += frame_interval;
-
                     let fps_divisor = backpressure.current_fps_divisor();
                     if fps_divisor > 0 {
                         adaptive_skip_counter = adaptive_skip_counter.wrapping_add(1);
@@ -488,14 +487,12 @@ impl DxgiCapture {
                             continue;
                         }
                     }
-
                     match frame_tx.try_send(frame) {
                         Ok(()) => {
                             frame_count += 1;
                             window_frames += 1;
                             error_count = 0;
                             backpressure.set_encoder_overloaded(false);
-
                             if frame_count % LOG_INTERVAL == 0 {
                                 log_counter += 1;
                                 if log_counter % 10 == 0 {
@@ -510,7 +507,6 @@ impl DxgiCapture {
                             window_drops += 1;
                             error_count = 0;
                             backpressure.set_encoder_overloaded(true);
-
                             let mut dropped_oldest = false;
                             if overflow_rx.try_recv().is_ok() {
                                 dropped_oldest = true;
@@ -530,7 +526,6 @@ impl DxgiCapture {
                                     }
                                 }
                             }
-
                             if dropped_count % 60 == 0 {
                                 warn!(
                                     "Dropped {} frames (encoder behind, drop_oldest={})",
@@ -549,16 +544,13 @@ impl DxgiCapture {
                         std::thread::sleep(Duration::from_millis(1));
                         continue;
                     };
-
                     frame.timestamp = Self::get_qpc_timestamp();
-
                     let now = Instant::now();
                     if now > next_frame_deadline + Duration::from_millis(500) {
                         next_frame_deadline = now;
                     }
                     Self::wait_until_deadline(next_frame_deadline);
                     next_frame_deadline += frame_interval;
-
                     let fps_divisor = backpressure.current_fps_divisor();
                     if fps_divisor > 0 {
                         adaptive_skip_counter = adaptive_skip_counter.wrapping_add(1);
@@ -568,7 +560,6 @@ impl DxgiCapture {
                             continue;
                         }
                     }
-
                     match frame_tx.try_send(frame) {
                         Ok(()) => {
                             frame_count += 1;
@@ -581,7 +572,6 @@ impl DxgiCapture {
                             window_drops += 1;
                             error_count = 0;
                             backpressure.set_encoder_overloaded(true);
-
                             let mut dropped_oldest = false;
                             if overflow_rx.try_recv().is_ok() {
                                 dropped_oldest = true;
@@ -601,7 +591,6 @@ impl DxgiCapture {
                                     }
                                 }
                             }
-
                             if dropped_count % 60 == 0 {
                                 warn!(
                                     "Dropped {} frames (encoder behind, drop_oldest={})",
@@ -620,10 +609,13 @@ impl DxgiCapture {
                     error_count += 1;
                     if error_count >= max_errors {
                         error!("Too many capture errors, stopping");
-                        let _ = fatal_tx.try_send(format!(
-                            "Capture exceeded retry budget after {} consecutive errors",
-                            error_count
-                        ));
+                        let _ = fatal_tx
+                            .try_send(
+                                format!(
+                                    "Capture exceeded retry budget after {} consecutive errors",
+                                    error_count
+                                ),
+                            );
                         break;
                     }
                     warn!("Attempting to reinitialize capture...");
@@ -640,14 +632,12 @@ impl DxgiCapture {
                     }
                 }
             }
-
             if adaptive_adjust_tick.elapsed() >= Duration::from_secs(2) {
                 let queue_len = frame_tx.len() as u32;
                 let queue_cap = frame_tx.capacity().unwrap_or(32) as u32;
                 let high_watermark = queue_cap.saturating_mul(3) / 4;
                 let low_watermark = queue_cap / 4;
                 let mut fps_divisor = backpressure.current_fps_divisor();
-
                 if backpressure.is_encoder_overloaded() || queue_len >= high_watermark {
                     if fps_divisor < 3 {
                         fps_divisor += 1;
@@ -667,19 +657,13 @@ impl DxgiCapture {
                         fps_divisor, queue_len, queue_cap
                     );
                 }
-
                 adaptive_adjust_tick = Instant::now();
             }
-
             if window_start.elapsed() >= Duration::from_secs(5) {
                 debug!(
                     "Capture telemetry: target={}fps, actual={}fps, window_drops={}, window_drop_oldest={}, total_drops={}, adaptive_divisor={}, adaptive_changes={}",
-                    base_fps,
-                    window_frames / 5,
-                    window_drops,
-                    window_dropped_oldest,
-                    dropped_count,
-                    backpressure.current_fps_divisor(),
+                    base_fps, window_frames / 5, window_drops, window_dropped_oldest,
+                    dropped_count, backpressure.current_fps_divisor(),
                     adaptive_level_changes
                 );
                 window_start = Instant::now();
@@ -689,15 +673,14 @@ impl DxgiCapture {
             }
         }
         info!(
-            "DXGI capture thread stopped ({} frames captured, {} dropped)",
-            frame_count, dropped_count
+            "DXGI capture thread stopped ({} frames captured, {} dropped)", frame_count,
+            dropped_count
         );
     }
     /// Get current QPC timestamp
     fn get_qpc_timestamp() -> i64 {
         DxgiCaptureState::get_qpc_timestamp()
     }
-
     fn wait_until_deadline(deadline: Instant) {
         const SPIN_THRESHOLD: Duration = Duration::from_millis(1);
         loop {
@@ -705,7 +688,6 @@ impl DxgiCapture {
             if now >= deadline {
                 break;
             }
-
             let remaining = deadline - now;
             if remaining > SPIN_THRESHOLD {
                 std::thread::sleep(remaining - SPIN_THRESHOLD);
@@ -714,17 +696,17 @@ impl DxgiCapture {
             }
         }
     }
-
     fn set_capture_thread_priority() {
         #[cfg(windows)]
         {
             use windows::Win32::System::Threading::{
                 GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_ABOVE_NORMAL,
             };
-
             unsafe {
-                if let Err(e) = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL)
-                {
+                if let Err(e) = SetThreadPriority(
+                    GetCurrentThread(),
+                    THREAD_PRIORITY_ABOVE_NORMAL,
+                ) {
                     warn!("Failed to raise capture thread priority: {}", e);
                 }
             }

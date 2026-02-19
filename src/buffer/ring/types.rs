@@ -11,18 +11,70 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, trace};
 
-use super::functions::qpc_frequency;
+use super::functions::{h264_nal_type, qpc_frequency};
 
-fn h264_nal_type(data: &[u8]) -> Option<u8> {
-    if data.len() >= 5 && data[0..4] == [0x00, 0x00, 0x00, 0x01] {
-        return Some(data[4] & 0x1f);
-    }
-    if data.len() >= 4 && data[0..3] == [0x00, 0x00, 0x01] {
-        return Some(data[3] & 0x1f);
-    }
-    None
+/// Thread-safe wrapper around ReplayBuffer
+#[derive(Clone)]
+pub struct SharedReplayBuffer {
+    pub(super) inner: Arc<RwLock<ReplayBuffer>>,
 }
-
+impl SharedReplayBuffer {
+    /// Create a new shared replay buffer
+    pub fn new(config: &crate::config::Config) -> Result<Self> {
+        let inner = ReplayBuffer::new(config)?;
+        Ok(Self {
+            inner: Arc::new(RwLock::new(inner)),
+        })
+    }
+    /// Push a packet (acquires write lock)
+    /// Push a batch of new packets into the buffer (acquires write lock once)
+    pub fn push_batch(&self, packets: impl IntoIterator<Item = EncodedPacket>) {
+        self.inner.write().push_batch(packets);
+    }
+    pub fn push(&self, packet: EncodedPacket) {
+        self.inner.write().push(packet);
+    }
+    /// Get a snapshot of all packets (acquires read lock)
+    pub fn snapshot(&self) -> Result<Vec<EncodedPacket>> {
+        self.inner.read().snapshot()
+    }
+    /// Get packets from a specific timestamp
+    pub fn snapshot_from(&self, start_pts: i64) -> Result<Vec<EncodedPacket>> {
+        self.inner.read().snapshot_from(start_pts)
+    }
+    /// Clear all packets
+    pub fn clear(&self) {
+        self.inner.write().clear();
+    }
+    /// Soft clear - removes all packets but preserves keyframe tracking metadata
+    pub fn soft_clear(&self) {
+        self.inner.write().soft_clear();
+    }
+    /// Get current statistics
+    pub fn stats(&self) -> BufferStats {
+        self.inner.read().stats()
+    }
+    /// Check if buffer is full
+    pub fn is_full(&self) -> bool {
+        self.inner.read().is_full()
+    }
+    /// Get the oldest packet timestamp
+    pub fn oldest_pts(&self) -> Option<i64> {
+        self.inner.read().oldest_pts()
+    }
+    /// Get the newest packet timestamp
+    pub fn newest_pts(&self) -> Option<i64> {
+        self.inner.read().newest_pts()
+    }
+    /// Get the resolution from the first packet in the buffer
+    pub fn snapshot_first_packet_resolution(&self) -> Option<(u32, u32)> {
+        self.inner.read().first_packet_resolution()
+    }
+    /// Check if buffer contains at least one keyframe (required for valid H.264 clip)
+    pub fn has_keyframe(&self) -> bool {
+        self.inner.read().has_keyframe()
+    }
+}
 /// In-memory ring buffer for encoded packets
 pub struct ReplayBuffer {
     /// Packet queue (oldest at front)
@@ -47,12 +99,11 @@ impl ReplayBuffer {
     /// Create new replay buffer from configuration
     pub fn new(config: &crate::config::Config) -> Result<Self> {
         let duration = Duration::from_secs(config.general.replay_duration_secs as u64);
-        let max_memory_bytes =
-            (config.advanced.memory_limit_mb as usize).saturating_mul(1024 * 1024);
+        let max_memory_bytes = (config.advanced.memory_limit_mb as usize)
+            .saturating_mul(1024 * 1024);
         debug!(
-            "Creating ReplayBuffer: {} seconds, {} MB max",
-            duration.as_secs(),
-            config.advanced.memory_limit_mb
+            "Creating ReplayBuffer: {} seconds, {} MB max", duration.as_secs(), config
+            .advanced.memory_limit_mb
         );
         Ok(Self {
             packets: VecDeque::new(),
@@ -69,8 +120,7 @@ impl ReplayBuffer {
     pub fn with_params(duration: Duration, max_memory_mb: usize) -> Self {
         let max_memory_bytes = max_memory_mb.saturating_mul(1024 * 1024);
         debug!(
-            "Creating ReplayBuffer: {} seconds, {} MB max",
-            duration.as_secs(),
+            "Creating ReplayBuffer: {} seconds, {} MB max", duration.as_secs(),
             max_memory_mb
         );
         Self {
@@ -85,18 +135,16 @@ impl ReplayBuffer {
         }
     }
     /// Push a batch of new packets into the buffer
-    /// 
+    ///
     /// This is more efficient than calling push() multiple times, as it evaluates
     /// eviction criteria only once after all packets are added.
     pub fn push_batch(&mut self, packets: impl IntoIterator<Item = EncodedPacket>) {
         let mut added_count = 0;
-        let target_duration_qpc = (self.duration.as_secs_f64() * qpc_frequency() as f64) as i64;
-
+        let target_duration_qpc = (self.duration.as_secs_f64() * qpc_frequency() as f64)
+            as i64;
         for packet in packets {
             let packet_size = packet.data.len();
             added_count += 1;
-
-            // Cache SPS/PPS for H.264 stream recovery after buffer clear
             if matches!(packet.stream, StreamType::Video) {
                 match h264_nal_type(packet.data.as_ref()) {
                     Some(7) => {
@@ -110,27 +158,20 @@ impl ReplayBuffer {
                     _ => {}
                 }
             }
-
-            // Now safe to add the new packet
             if packet.is_keyframe {
                 let absolute_index = self.base_offset + self.packets.len();
                 self.keyframe_index.push_back((packet.pts, absolute_index));
                 trace!(
                     "Added keyframe to index: pts={}, abs_idx={}, total_keyframes={}",
-                    packet.pts,
-                    absolute_index,
-                    self.keyframe_index.len()
+                    packet.pts, absolute_index, self.keyframe_index.len()
                 );
             }
             self.total_bytes += packet_size;
             self.packets.push_back(packet);
         }
-
         if added_count == 0 {
             return;
         }
-
-        // Atomic eviction: check condition and evict in the same loop
         let newest_pts = self.packets.back().map(|p| p.pts).unwrap();
         while !self.packets.is_empty() {
             let oldest_pts = self.packets.front().map(|p| p.pts).unwrap();
@@ -140,22 +181,16 @@ impl ReplayBuffer {
             }
             self.evict_oldest();
         }
-
-        // Memory limit eviction - also atomic
         while self.total_bytes > self.max_memory_bytes && !self.packets.is_empty() {
             self.evict_oldest();
         }
-
         if self.packets.len() % 100 < added_count {
             trace!(
-                "Buffer: {} packets, {} bytes, {} keyframes",
-                self.packets.len(),
-                self.total_bytes,
-                self.keyframe_index.len()
+                "Buffer: {} packets, {} bytes, {} keyframes", self.packets.len(), self
+                .total_bytes, self.keyframe_index.len()
             );
         }
     }
-
     /// Push a new packet into the buffer (evicts old if needed based on duration)
     ///
     /// Uses atomic eviction - calculates and executes eviction in a single loop
@@ -163,11 +198,8 @@ impl ReplayBuffer {
     /// calculation and eviction.
     pub fn push(&mut self, packet: EncodedPacket) {
         let packet_size = packet.data.len();
-        let target_duration_qpc = (self.duration.as_secs_f64() * qpc_frequency() as f64) as i64;
-
-        // Atomic eviction: check condition and evict in the same loop
-        // This prevents race conditions where new packets could be added
-        // between calculation and eviction.
+        let target_duration_qpc = (self.duration.as_secs_f64() * qpc_frequency() as f64)
+            as i64;
         while !self.packets.is_empty() {
             let oldest_pts = self.packets.front().map(|p| p.pts).unwrap_or(packet.pts);
             let projected_span = packet.pts.saturating_sub(oldest_pts);
@@ -176,13 +208,11 @@ impl ReplayBuffer {
             }
             self.evict_oldest();
         }
-
-        // Memory limit eviction - also atomic
-        while self.total_bytes + packet_size > self.max_memory_bytes && !self.packets.is_empty() {
+        while self.total_bytes + packet_size > self.max_memory_bytes
+            && !self.packets.is_empty()
+        {
             self.evict_oldest();
         }
-
-        // Cache SPS/PPS for H.264 stream recovery after buffer clear
         if matches!(packet.stream, StreamType::Video) {
             match h264_nal_type(packet.data.as_ref()) {
                 Some(7) => {
@@ -196,27 +226,20 @@ impl ReplayBuffer {
                 _ => {}
             }
         }
-
-        // Now safe to add the new packet
         if packet.is_keyframe {
             let absolute_index = self.base_offset + self.packets.len();
             self.keyframe_index.push_back((packet.pts, absolute_index));
             trace!(
-                "Added keyframe to index: pts={}, abs_idx={}, total_keyframes={}",
-                packet.pts,
-                absolute_index,
-                self.keyframe_index.len()
+                "Added keyframe to index: pts={}, abs_idx={}, total_keyframes={}", packet
+                .pts, absolute_index, self.keyframe_index.len()
             );
         }
         self.total_bytes += packet_size;
         self.packets.push_back(packet);
-
         if self.packets.len() % 100 == 0 {
             trace!(
-                "Buffer: {} packets, {} bytes, {} keyframes",
-                self.packets.len(),
-                self.total_bytes,
-                self.keyframe_index.len()
+                "Buffer: {} packets, {} bytes, {} keyframes", self.packets.len(), self
+                .total_bytes, self.keyframe_index.len()
             );
         }
     }
@@ -227,17 +250,14 @@ impl ReplayBuffer {
             let packet_pts = packet.pts;
             self.total_bytes -= packet.data.len();
             self.base_offset += 1;
-
             trace!(
                 "evict_oldest: packet_pts={}, was_keyframe={}, base_offset={}, keyframe_index_len_before={}",
                 packet_pts, was_keyframe, self.base_offset - 1, self.keyframe_index.len()
             );
-
             while let Some(&(_, abs_idx)) = self.keyframe_index.front() {
                 if abs_idx < self.base_offset {
                     trace!(
-                        "  removing keyframe with abs_idx={} (base_offset={})",
-                        abs_idx,
+                        "  removing keyframe with abs_idx={} (base_offset={})", abs_idx,
                         self.base_offset
                     );
                     self.keyframe_index.pop_front();
@@ -245,11 +265,9 @@ impl ReplayBuffer {
                     break;
                 }
             }
-
             trace!(
-                "  after eviction: base_offset={}, keyframe_index_len_after={}",
-                self.base_offset,
-                self.keyframe_index.len()
+                "  after eviction: base_offset={}, keyframe_index_len_after={}", self
+                .base_offset, self.keyframe_index.len()
             );
         }
     }
@@ -259,8 +277,6 @@ impl ReplayBuffer {
     /// the H.264 stream is decodable.
     pub fn snapshot(&self) -> Result<Vec<EncodedPacket>> {
         let mut result = Vec::with_capacity(self.packets.len() + 2);
-
-        // Check if we need to prepend cached SPS/PPS
         let first_video_is_sps = self
             .packets
             .iter()
@@ -272,7 +288,6 @@ impl ReplayBuffer {
                 }
             })
             .unwrap_or(true);
-
         if !first_video_is_sps {
             let first_video_pts = self
                 .packets
@@ -285,31 +300,31 @@ impl ReplayBuffer {
                     }
                 })
                 .unwrap_or(0);
-
             if let Some(ref sps_data) = self.cached_sps {
-                result.push(EncodedPacket {
-                    data: sps_data.clone(),
-                    pts: first_video_pts,
-                    dts: first_video_pts,
-                    stream: StreamType::Video,
-                    is_keyframe: false,
-                    resolution: None,
-                });
+                result
+                    .push(EncodedPacket {
+                        data: sps_data.clone(),
+                        pts: first_video_pts,
+                        dts: first_video_pts,
+                        stream: StreamType::Video,
+                        is_keyframe: false,
+                        resolution: None,
+                    });
                 trace!("Prepended cached SPS to snapshot");
             }
             if let Some(ref pps_data) = self.cached_pps {
-                result.push(EncodedPacket {
-                    data: pps_data.clone(),
-                    pts: first_video_pts,
-                    dts: first_video_pts,
-                    stream: StreamType::Video,
-                    is_keyframe: false,
-                    resolution: None,
-                });
+                result
+                    .push(EncodedPacket {
+                        data: pps_data.clone(),
+                        pts: first_video_pts,
+                        dts: first_video_pts,
+                        stream: StreamType::Video,
+                        is_keyframe: false,
+                        resolution: None,
+                    });
                 trace!("Prepended cached PPS to snapshot");
             }
         }
-
         result.extend(self.packets.iter().cloned());
         Ok(result)
     }
@@ -319,16 +334,15 @@ impl ReplayBuffer {
     /// from that point forward. This ensures the video can be decoded properly.
     /// Prepends cached SPS/PPS if the buffer was cleared.
     pub fn snapshot_from(&self, start_pts: i64) -> Result<Vec<EncodedPacket>> {
-        // Find the last keyframe at or before start_pts using binary search
-        // keyframe_index is sorted by pts since packets are added in chronological order
         let start_index = self.find_keyframe_index_before(start_pts).unwrap_or(0);
         let remaining = self.packets.len().saturating_sub(start_index);
         let mut result = Vec::with_capacity(remaining + 2);
-
-        let packets_slice: Vec<EncodedPacket> =
-            self.packets.iter().skip(start_index).cloned().collect();
-
-        // Check if we need to prepend cached SPS/PPS
+        let packets_slice: Vec<EncodedPacket> = self
+            .packets
+            .iter()
+            .skip(start_index)
+            .cloned()
+            .collect();
         let first_video_is_sps = packets_slice
             .iter()
             .find_map(|p| {
@@ -339,7 +353,6 @@ impl ReplayBuffer {
                 }
             })
             .unwrap_or(true);
-
         if !first_video_is_sps {
             let first_video_pts = packets_slice
                 .iter()
@@ -351,76 +364,62 @@ impl ReplayBuffer {
                     }
                 })
                 .unwrap_or(0);
-
             if let Some(ref sps_data) = self.cached_sps {
-                result.push(EncodedPacket {
-                    data: sps_data.clone(),
-                    pts: first_video_pts,
-                    dts: first_video_pts,
-                    stream: StreamType::Video,
-                    is_keyframe: false,
-                    resolution: None,
-                });
+                result
+                    .push(EncodedPacket {
+                        data: sps_data.clone(),
+                        pts: first_video_pts,
+                        dts: first_video_pts,
+                        stream: StreamType::Video,
+                        is_keyframe: false,
+                        resolution: None,
+                    });
                 trace!("Prepended cached SPS to snapshot_from");
             }
             if let Some(ref pps_data) = self.cached_pps {
-                result.push(EncodedPacket {
-                    data: pps_data.clone(),
-                    pts: first_video_pts,
-                    dts: first_video_pts,
-                    stream: StreamType::Video,
-                    is_keyframe: false,
-                    resolution: None,
-                });
+                result
+                    .push(EncodedPacket {
+                        data: pps_data.clone(),
+                        pts: first_video_pts,
+                        dts: first_video_pts,
+                        stream: StreamType::Video,
+                        is_keyframe: false,
+                        resolution: None,
+                    });
                 trace!("Prepended cached PPS to snapshot_from");
             }
         }
-
         result.extend(packets_slice);
         Ok(result)
     }
-
     /// Find the relative index of the last keyframe at or before the given pts.
     /// Uses linear search from the end for correctness with VecDeque.
     fn find_keyframe_index_before(&self, target_pts: i64) -> Option<usize> {
         trace!(
             "find_keyframe_index_before: target_pts={}, base_offset={}, keyframe_index_len={}",
-            target_pts,
-            self.base_offset,
-            self.keyframe_index.len()
+            target_pts, self.base_offset, self.keyframe_index.len()
         );
-
-        // Debug: print all keyframe entries
         for (i, &(pts, abs_idx)) in self.keyframe_index.iter().enumerate() {
             trace!("  keyframe[{}]: pts={}, abs_idx={}", i, pts, abs_idx);
         }
-
-        // Linear search from the end to find the last keyframe with PTS <= target_pts
-        // This is correct for VecDeque and doesn't require mutability
         for &(pts, abs_idx) in self.keyframe_index.iter().rev() {
             if pts <= target_pts {
                 let relative_idx = abs_idx.saturating_sub(self.base_offset);
-                // Add bounds checking to prevent out-of-bounds access
                 if relative_idx < self.packets.len() {
                     trace!(
-                        "  found: pts={}, abs_idx={}, relative_idx={}",
-                        pts,
-                        abs_idx,
+                        "  found: pts={}, abs_idx={}, relative_idx={}", pts, abs_idx,
                         relative_idx
                     );
                     return Some(relative_idx);
                 } else {
                     trace!(
                         "  found but relative_idx={} out of bounds (packets_len={}), continuing search",
-                        relative_idx,
-                        self.packets.len()
+                        relative_idx, self.packets.len()
                     );
-                    // Don't return None here — continue searching earlier keyframes
                     continue;
                 }
             }
         }
-
         trace!("  no keyframe found at or before target_pts");
         None
     }
@@ -442,12 +441,10 @@ impl ReplayBuffer {
         self.base_offset = 0;
         self.total_bytes = 0;
         debug!(
-            "Buffer cleared (cached SPS: {}, cached PPS: {})",
-            self.cached_sps.is_some(),
+            "Buffer cleared (cached SPS: {}, cached PPS: {})", self.cached_sps.is_some(),
             self.cached_pps.is_some()
         );
     }
-
     /// Soft clear - removes all packets but preserves keyframe tracking metadata
     ///
     /// This is useful for replay buffer operations where you want to clear captured
@@ -458,9 +455,7 @@ impl ReplayBuffer {
         self.total_bytes = 0;
         debug!(
             "Buffer soft-cleared: preserved {} keyframe indices (cached SPS: {}, cached PPS: {})",
-            keyframe_count,
-            self.cached_sps.is_some(),
-            self.cached_pps.is_some()
+            keyframe_count, self.cached_sps.is_some(), self.cached_pps.is_some()
         );
     }
     /// Get current buffer statistics
@@ -492,7 +487,8 @@ impl ReplayBuffer {
         if self.packets.len() < 2 {
             return false;
         }
-        let target_duration_qpc = (self.duration.as_secs_f64() * qpc_frequency() as f64) as i64;
+        let target_duration_qpc = (self.duration.as_secs_f64() * qpc_frequency() as f64)
+            as i64;
         let first = self.packets.front().map(|p| p.pts).unwrap_or(0);
         let last = self.packets.back().map(|p| p.pts).unwrap_or(0);
         last.saturating_sub(first) >= target_duration_qpc
@@ -539,66 +535,4 @@ pub struct BufferStats {
     pub keyframe_count: usize,
     /// Memory usage percentage (0-100)
     pub memory_usage_percent: f32,
-}
-/// Thread-safe wrapper around ReplayBuffer
-pub struct SharedReplayBuffer {
-    pub(super) inner: Arc<RwLock<ReplayBuffer>>,
-}
-impl SharedReplayBuffer {
-    /// Create a new shared replay buffer
-    pub fn new(config: &crate::config::Config) -> Result<Self> {
-        let inner = ReplayBuffer::new(config)?;
-        Ok(Self {
-            inner: Arc::new(RwLock::new(inner)),
-        })
-    }
-    /// Push a packet (acquires write lock)
-    /// Push a batch of new packets into the buffer (acquires write lock once)
-    pub fn push_batch(&self, packets: impl IntoIterator<Item = EncodedPacket>) {
-        self.inner.write().push_batch(packets);
-    }
-    pub fn push(&self, packet: EncodedPacket) {
-        self.inner.write().push(packet);
-    }
-    /// Get a snapshot of all packets (acquires read lock)
-    pub fn snapshot(&self) -> Result<Vec<EncodedPacket>> {
-        self.inner.read().snapshot()
-    }
-    /// Get packets from a specific timestamp
-    pub fn snapshot_from(&self, start_pts: i64) -> Result<Vec<EncodedPacket>> {
-        self.inner.read().snapshot_from(start_pts)
-    }
-    /// Clear all packets
-    pub fn clear(&self) {
-        self.inner.write().clear();
-    }
-
-    /// Soft clear - removes all packets but preserves keyframe tracking metadata
-    pub fn soft_clear(&self) {
-        self.inner.write().soft_clear();
-    }
-    /// Get current statistics
-    pub fn stats(&self) -> BufferStats {
-        self.inner.read().stats()
-    }
-    /// Check if buffer is full
-    pub fn is_full(&self) -> bool {
-        self.inner.read().is_full()
-    }
-    /// Get the oldest packet timestamp
-    pub fn oldest_pts(&self) -> Option<i64> {
-        self.inner.read().oldest_pts()
-    }
-    /// Get the newest packet timestamp
-    pub fn newest_pts(&self) -> Option<i64> {
-        self.inner.read().newest_pts()
-    }
-    /// Get the resolution from the first packet in the buffer
-    pub fn snapshot_first_packet_resolution(&self) -> Option<(u32, u32)> {
-        self.inner.read().first_packet_resolution()
-    }
-    /// Check if buffer contains at least one keyframe (required for valid H.264 clip)
-    pub fn has_keyframe(&self) -> bool {
-        self.inner.read().has_keyframe()
-    }
 }
