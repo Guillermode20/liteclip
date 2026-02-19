@@ -3,11 +3,12 @@
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
 use crate::config::{QualityPreset, RateControl};
+use crate::encode::frame_writer::AsyncFrameWriter;
 use crate::encode::{EncodedPacket, EncoderConfig, StreamType};
 use anyhow::{Context, Result};
 use bytes::{Buf, BytesMut};
 use crossbeam::channel::{bounded, Receiver, Sender};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader};
 use std::os::windows::process::CommandExt;
 use std::process::{ChildStdin, Command, Stdio};
 use std::thread;
@@ -159,6 +160,10 @@ pub struct HardwareEncoderBase {
     height: u32,
     /// Channel sender for frame metadata (timestamps) to output reader
     frame_meta_tx: Option<Sender<FrameMetadata>>,
+    /// Async writer for non-blocking stdin writes (CPU readback mode)
+    async_writer: Option<AsyncFrameWriter>,
+    /// Dropped frame counter for async writer
+    dropped_frames: u64,
 }
 impl HardwareEncoderBase {
     /// Create new hardware encoder with FFmpeg CLI
@@ -185,6 +190,8 @@ impl HardwareEncoderBase {
             width,
             height,
             frame_meta_tx: None,
+            async_writer: None,
+            dropped_frames: 0,
         })
     }
     /// Initialize the FFmpeg process with hardware encoder settings
@@ -265,13 +272,16 @@ impl HardwareEncoderBase {
             .creation_flags(PROCESS_CREATION_FLAGS)
             .spawn()
             .with_context(|| format!("Failed to start FFmpeg ({})", encoder_name))?;
-        let stdin = if self.config.use_cpu_readback {
-            debug!("FFmpeg stdin captured (CPU readback mode)");
-            Some(child.stdin.take().context("Failed to take FFmpeg stdin")?)
+        let (stdin_for_process, async_writer) = if self.config.use_cpu_readback {
+            debug!("FFmpeg stdin captured (CPU readback mode with async writer)");
+            let stdin = child.stdin.take().context("Failed to take FFmpeg stdin")?;
+            let writer = AsyncFrameWriter::new(stdin, 16);
+            (None, Some(writer))
         } else {
             debug!("FFmpeg stdin not used (desktop-grab mode)");
-            None
+            (None, None)
         };
+        self.async_writer = async_writer;
         self.width = out_w;
         self.height = out_h;
         let (frame_meta_tx, frame_meta_rx) = bounded::<FrameMetadata>(32);
@@ -298,7 +308,7 @@ impl HardwareEncoderBase {
         // Create the managed process
         self.ffmpeg = Some(ManagedFfmpegProcess::new(
             child,
-            stdin,
+            stdin_for_process,
             stdout_handle,
             stderr_handle,
         ));
@@ -831,30 +841,46 @@ impl HardwareEncoderBase {
             self.frame_count += 1;
             return Ok(());
         }
-        if let Some(ref mut ffmpeg) = self.ffmpeg {
-            if let Some(stdin) = ffmpeg.stdin_mut() {
-                let data = &frame.bgra;
-                stdin
-                    .write_all(data)
-                    .context("Failed to write frame to FFmpeg stdin")?;
-                self.frame_count += 1;
-                if self.frame_count == 1 || self.frame_count % 600 == 0 {
-                    debug!(
-                        "Sent frame {} to FFmpeg ({} bytes)",
-                        self.frame_count,
-                        data.len()
-                    );
+        if let Some(ref async_writer) = self.async_writer {
+            use crate::encode::frame_writer::PendingFrame;
+            let pending = PendingFrame {
+                data: frame.bgra.clone(),
+                timestamp: frame.timestamp,
+            };
+            match async_writer.try_queue(pending) {
+                Ok(()) => {
+                    self.frame_count += 1;
+                    if self.frame_count == 1 || self.frame_count % 600 == 0 {
+                        debug!(
+                            "Queued frame {} for async write ({} bytes)",
+                            self.frame_count,
+                            frame.bgra.len()
+                        );
+                    }
                 }
-            } else {
-                warn!("No stdin available for FFmpeg");
+                Err(_) => {
+                    self.dropped_frames += 1;
+                    self.frame_count += 1;
+                    if self.dropped_frames % 60 == 0 {
+                        warn!(
+                            "Async writer queue full, dropped {} frames (total)",
+                            self.dropped_frames
+                        );
+                    }
+                }
             }
         } else {
-            warn!("FFmpeg process not initialized");
+            warn!("No async writer available for FFmpeg");
         }
         Ok(())
     }
     /// Flush remaining frames and close FFmpeg
     pub(crate) fn flush_internal(&mut self) -> Result<Vec<EncodedPacket>> {
+        // Drop async writer first - this signals EOF to FFmpeg stdin
+        if self.async_writer.take().is_some() {
+            debug!("Async frame writer stopped");
+        }
+
         // Drop the managed process - this triggers ManagedFfmpegProcess::Drop
         // which handles all cleanup (stdin close, process wait with timeout,
         // thread joins with timeouts)

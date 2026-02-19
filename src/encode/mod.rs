@@ -4,6 +4,7 @@
 
 pub mod cpu_readback;
 pub mod encoder_mod;
+pub mod frame_writer;
 pub mod hw_encoder;
 pub mod sw_encoder;
 

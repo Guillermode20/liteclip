@@ -14,6 +14,7 @@ pub mod clip;
 pub mod config;
 pub mod d3d;
 pub mod encode;
+pub mod metrics;
 pub mod platform;
 
 use std::sync::Arc;

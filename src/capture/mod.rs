@@ -10,6 +10,7 @@ use crossbeam::channel::Receiver;
 use std::time::Duration;
 
 pub mod audio;
+pub mod backpressure;
 pub mod dxgi;
 
 /// Configuration for screen capture

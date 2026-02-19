@@ -25,6 +25,76 @@ use windows::Win32::Graphics::Dxgi::{
 };
 use windows::Win32::System::Performance::QueryPerformanceCounter;
 
+struct FpsAdaptation {
+    current_divisor: u32,
+    consecutive_drops: u32,
+    consecutive_success: u32,
+    last_adaptation: std::time::Instant,
+}
+
+impl FpsAdaptation {
+    const ADAPT_COOLDOWN: Duration = Duration::from_secs(3);
+    const DROP_THRESHOLD: u32 = 10;
+    const SUCCESS_THRESHOLD: u32 = 100;
+
+    fn new() -> Self {
+        Self {
+            current_divisor: 0,
+            consecutive_drops: 0,
+            consecutive_success: 0,
+            last_adaptation: std::time::Instant::now()
+                - Self::ADAPT_COOLDOWN
+                - Duration::from_secs(1),
+        }
+    }
+
+    fn record_drop(&mut self) {
+        self.consecutive_drops += 1;
+        self.consecutive_success = 0;
+    }
+
+    fn record_success(&mut self) {
+        self.consecutive_success += 1;
+        self.consecutive_drops = 0;
+    }
+
+    fn should_adapt_down(&self) -> bool {
+        self.consecutive_drops >= Self::DROP_THRESHOLD
+            && self.current_divisor < 2
+            && self.last_adaptation.elapsed() > Self::ADAPT_COOLDOWN
+    }
+
+    fn should_adapt_up(&self) -> bool {
+        self.consecutive_success >= Self::SUCCESS_THRESHOLD
+            && self.current_divisor > 0
+            && self.last_adaptation.elapsed() > Self::ADAPT_COOLDOWN
+    }
+
+    fn adapt_down(&mut self) -> bool {
+        if self.current_divisor < 2 {
+            self.current_divisor += 1;
+            self.last_adaptation = std::time::Instant::now();
+            self.consecutive_drops = 0;
+            return true;
+        }
+        false
+    }
+
+    fn adapt_up(&mut self) -> bool {
+        if self.current_divisor > 0 {
+            self.current_divisor -= 1;
+            self.last_adaptation = std::time::Instant::now();
+            self.consecutive_success = 0;
+            return true;
+        }
+        false
+    }
+
+    fn effective_fps(&self, base_fps: u32) -> u32 {
+        base_fps / (self.current_divisor + 1)
+    }
+}
+
 /// DXGI capture state
 #[allow(dead_code)]
 struct DxgiCaptureState {
@@ -426,13 +496,15 @@ impl DxgiCapture {
         info!("DXGI capture thread started: {} FPS", config.target_fps);
         let perform_cpu_readback = config.perform_cpu_readback;
         let target_resolution = config.target_resolution;
-        let timeout_ms = (1000u32 / config.target_fps.max(1)).max(1)
-            + u32::from(!1000u32.is_multiple_of(config.target_fps.max(1)));
-        let frame_interval_ns = 1_000_000_000u64 / config.target_fps.max(1) as u64;
+        let base_fps = config.target_fps.max(1);
+        let timeout_ms = (1000u32 / base_fps).max(1) + u32::from(!1000u32.is_multiple_of(base_fps));
+        let mut frame_interval_ns = 1_000_000_000u64 / base_fps as u64;
         let mut last_frame_time = std::time::Instant::now();
         let mut frame_count = 0u64;
+        let mut dropped_count = 0u64;
         let mut error_count = 0u32;
         let max_errors = 10;
+        let mut fps_adaptation = FpsAdaptation::new();
         let mut state = match Self::init_capture(config.output_index) {
             Ok(state) => state,
             Err(e) => {
@@ -457,10 +529,18 @@ impl DxgiCapture {
                         std::thread::sleep(Duration::from_nanos(sleep_ns));
                     }
                     last_frame_time = std::time::Instant::now();
-                    match frame_tx.send(frame) {
+                    match frame_tx.try_send(frame) {
                         Ok(()) => {
                             frame_count += 1;
                             error_count = 0;
+                            fps_adaptation.record_success();
+
+                            if fps_adaptation.should_adapt_up() && fps_adaptation.adapt_up() {
+                                let new_fps = fps_adaptation.effective_fps(base_fps);
+                                frame_interval_ns = 1_000_000_000u64 / new_fps as u64;
+                                info!("GPU recovered, increasing to {} FPS", new_fps);
+                            }
+
                             if frame_count % LOG_INTERVAL == 0 {
                                 log_counter += 1;
                                 if log_counter % 10 == 0 {
@@ -470,7 +550,22 @@ impl DxgiCapture {
                                 }
                             }
                         }
-                        Err(crossbeam::channel::SendError(_)) => {
+                        Err(crossbeam::channel::TrySendError::Full(_)) => {
+                            dropped_count += 1;
+                            error_count = 0;
+                            fps_adaptation.record_drop();
+
+                            if fps_adaptation.should_adapt_down() && fps_adaptation.adapt_down() {
+                                let new_fps = fps_adaptation.effective_fps(base_fps);
+                                frame_interval_ns = 1_000_000_000u64 / new_fps as u64;
+                                warn!("GPU strain detected, reducing to {} FPS", new_fps);
+                            }
+
+                            if dropped_count % 60 == 0 {
+                                warn!("Dropped {} frames (encoder behind)", dropped_count);
+                            }
+                        }
+                        Err(crossbeam::channel::TrySendError::Disconnected(_)) => {
                             info!("Frame channel closed, stopping capture");
                             break;
                         }
@@ -502,8 +597,8 @@ impl DxgiCapture {
             }
         }
         info!(
-            "DXGI capture thread stopped ({} frames captured)",
-            frame_count
+            "DXGI capture thread stopped ({} frames captured, {} dropped)",
+            frame_count, dropped_count
         );
     }
     /// Get current QPC timestamp
