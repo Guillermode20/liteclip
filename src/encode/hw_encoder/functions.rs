@@ -80,6 +80,103 @@ pub(super) fn h264_nal_type(nal_data: &[u8]) -> Option<u8> {
     }
     None
 }
+
+struct BitReader<'a> {
+    data: &'a [u8],
+    bit_pos: usize,
+}
+
+impl<'a> BitReader<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self { data, bit_pos: 0 }
+    }
+
+    fn read_bit(&mut self) -> Option<u8> {
+        let byte_index = self.bit_pos / 8;
+        let bit_index = 7 - (self.bit_pos % 8);
+        let byte = *self.data.get(byte_index)?;
+        self.bit_pos += 1;
+        Some((byte >> bit_index) & 1)
+    }
+
+    fn read_ue(&mut self) -> Option<u32> {
+        let mut leading_zeros = 0usize;
+        while self.read_bit()? == 0 {
+            leading_zeros += 1;
+            if leading_zeros > 31 {
+                return None;
+            }
+        }
+
+        let mut suffix = 0u32;
+        for _ in 0..leading_zeros {
+            suffix = (suffix << 1) | (self.read_bit()? as u32);
+        }
+
+        Some((1u32 << leading_zeros) - 1 + suffix)
+    }
+}
+
+/// Returns true if an H.264 Annex-B NAL appears to be an intra-coded non-IDR slice.
+///
+/// This is a pragmatic fallback for encoders that emit GOP boundary keyframes as
+/// non-IDR NAL type 1 slices instead of NAL type 5 IDR slices.
+pub(super) fn h264_nonidr_is_intra_slice(nal_data: &[u8]) -> bool {
+    let (start_len, header_index) = if nal_data.len() >= 5 && nal_data[0..4] == [0, 0, 0, 1] {
+        (4usize, 4usize)
+    } else if nal_data.len() >= 4 && nal_data[0..3] == [0, 0, 1] {
+        (3usize, 3usize)
+    } else {
+        return false;
+    };
+
+    let nal_header = match nal_data.get(header_index) {
+        Some(v) => *v,
+        None => return false,
+    };
+    let nal_type = nal_header & 0x1f;
+    if nal_type != 1 {
+        return false;
+    }
+
+    if nal_data.len() <= start_len + 1 {
+        return false;
+    }
+
+    let mut rbsp = Vec::with_capacity(nal_data.len() - (start_len + 1));
+    let mut zeros_run = 0usize;
+    for &b in &nal_data[(start_len + 1)..] {
+        if zeros_run >= 2 && b == 0x03 {
+            zeros_run = 0;
+            continue;
+        }
+        rbsp.push(b);
+        if b == 0 {
+            zeros_run += 1;
+        } else {
+            zeros_run = 0;
+        }
+    }
+
+    if rbsp.is_empty() {
+        return false;
+    }
+
+    let mut br = BitReader::new(&rbsp);
+    // first_mb_in_slice
+    if br.read_ue().is_none() {
+        return false;
+    }
+    // slice_type
+    let Some(slice_type) = br.read_ue() else {
+        return false;
+    };
+
+    // H.264 slice_type modulo 5 mapping:
+    // 0=P,1=B,2=I,3=SP,4=SI ; 5..9 are the "all slices" variants
+    let normalized = slice_type % 5;
+    normalized == 2 || normalized == 4
+}
 /// Resolve FFmpeg command path
 pub(super) fn resolve_ffmpeg_command() -> String {
     if let Ok(custom) = std::env::var("LITECLIP_FFMPEG_PATH") {

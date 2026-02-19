@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 use tracing::{debug, enabled, error, info, warn, Level};
 
 use super::functions::{
-    find_annexb_start_code, h264_nal_type, query_qpc, resolve_ffmpeg_command,
-    PROCESS_CREATION_FLAGS,
+    find_annexb_start_code, h264_nal_type, h264_nonidr_is_intra_slice, query_qpc,
+    resolve_ffmpeg_command, PROCESS_CREATION_FLAGS,
 };
 use crate::buffer::ring::qpc_frequency;
 
@@ -248,8 +248,20 @@ impl HardwareEncoderBase {
         if encoder_name.starts_with("h264_") {
             cmd.arg("-bsf:v").arg("h264_mp4toannexb");
         }
+        let keyframe_interval_secs =
+            self.config.keyframe_interval_frames() as f64 / self.config.framerate.max(1) as f64;
+        debug!(
+            "Encoder keyframe policy: gop_frames={}, interval_secs={:.3}, force_key_frames=expr:gte(t,n_forced*{:.3})",
+            self.config.keyframe_interval_frames(),
+            keyframe_interval_secs,
+            keyframe_interval_secs
+        );
         cmd.arg("-g")
             .arg(self.config.keyframe_interval_frames().to_string())
+            // Additional time-based forcing to keep keyframe cadence stable even
+            // when some hardware encoder modes ignore plain GOP length under load.
+            .arg("-force_key_frames")
+            .arg(format!("expr:gte(t,n_forced*{keyframe_interval_secs:.3})"))
             .arg("-pix_fmt")
             .arg("yuv420p")
             .arg("-r")
@@ -370,6 +382,9 @@ impl HardwareEncoderBase {
                 cmd.arg("ull");
                 cmd.arg("-b_ref_mode");
                 cmd.arg("disabled");
+                // Force IDR frames (not just I-frames) at every GOP boundary.
+                cmd.arg("-strict_gop");
+                cmd.arg("1");
             }
             "h264_amf" | "hevc_amf" | "av1_amf" => {
                 cmd.arg("-quality");
@@ -380,10 +395,24 @@ impl HardwareEncoderBase {
                 cmd.arg("+aud");
                 cmd.arg("-usage");
                 cmd.arg("lowlatency");
+                // Disable adaptive mini-GOP so the encoder follows configured
+                // keyframe cadence instead of dynamically stretching GOPs.
+                cmd.arg("-pa_adaptive_mini_gop");
+                cmd.arg("0");
+                // Force real IDR frames (NAL type 5) at every GOP boundary.
+                // Without this, AMF produces regular I-frames (slice type, NAL=1)
+                // at GOP boundaries instead of IDR frames, so the keyframe detector
+                // never fires after the very first frame and the buffer ends up with
+                // 0 keyframes once the initial IDR is evicted.
+                cmd.arg("-forced_idr");
+                cmd.arg("1");
             }
             "h264_qsv" | "hevc_qsv" => {
                 cmd.arg("-look_ahead");
                 cmd.arg("0");
+                // Force IDR frames (not just regular I-frames) at every GOP boundary.
+                cmd.arg("-forced_idr");
+                cmd.arg("1");
             }
             _ => {}
         }
@@ -465,6 +494,10 @@ impl HardwareEncoderBase {
         frame_meta_rx: Receiver<FrameMetadata>,
         start_qpc: i64,
     ) -> thread::JoinHandle<()> {
+        let expected_keyframe_interval_secs = (self.config.keyframe_interval_frames() as f64
+            / self.config.framerate.max(1) as f64)
+            .max(1.0);
+        let min_frames_before_idr_warning = self.config.framerate.max(1) as u64;
         let qpc_freq = qpc_frequency();
         thread::spawn(move || {
             debug!("FFmpeg output reader started");
@@ -479,27 +512,34 @@ impl HardwareEncoderBase {
             let total_packets = Cell::new(0u64);
             let mut last_log_time = Instant::now();
             let mut bytes_received = 0u64;
-            let mut frame_nals_seen = 0u64;
+            let frame_nals_seen = Cell::new(0u64);
+            let idr_nals_seen = Cell::new(0u64);
+            let last_idr_packet_count = Cell::new(0u64);
+            let last_idr_wallclock_secs = Cell::new(0.0f64);
 
             // Helper function to process a NAL unit
-            let mut process_nal = |nal_data: bytes::Bytes,
-                                   is_last: bool,
-                                   last_pts: &mut i64,
-                                   frame_meta_rx: &Receiver<FrameMetadata>|
+            let process_nal = |nal_data: bytes::Bytes,
+                               is_last: bool,
+                               last_pts: &mut i64,
+                               frame_meta_rx: &Receiver<FrameMetadata>|
              -> bool {
                 if nal_data.is_empty() {
                     return true;
                 }
                 let nal_type = h264_nal_type(&nal_data);
-                let is_keyframe = matches!(nal_type, Some(5 | 7 | 8));
+                let is_nonidr_intra =
+                    matches!(nal_type, Some(1)) && h264_nonidr_is_intra_slice(&nal_data);
+                let is_keyframe = matches!(nal_type, Some(5)) || is_nonidr_intra;
                 let is_frame_nal = matches!(nal_type, Some(1 | 5));
                 if is_frame_nal {
-                    frame_nals_seen = frame_nals_seen.saturating_add(1);
+                    frame_nals_seen.set(frame_nals_seen.get().saturating_add(1));
                 }
 
                 let count = total_packets.get() + 1;
                 total_packets.set(count);
-                if count == 1 || count % 600 == 0 || is_last {
+
+                // Enhanced logging for keyframe debugging
+                if count == 1 || count % 600 == 0 || is_last || nal_type == Some(5) {
                     debug!(
                         "NAL packet {}: type={:?}, is_keyframe={}, is_frame_nal={}, size={} bytes",
                         count,
@@ -508,6 +548,24 @@ impl HardwareEncoderBase {
                         is_frame_nal,
                         nal_data.len()
                     );
+
+                    // Track IDR cadence for diagnostics.
+                    if nal_type == Some(5) {
+                        idr_nals_seen.set(idr_nals_seen.get().saturating_add(1));
+                        last_idr_packet_count.set(count);
+                        last_idr_wallclock_secs.set(output_reader_start.elapsed().as_secs_f64());
+                        debug!(
+                            "Detected IDR frame (type 5) at packet {} - total_idr_nals={}, frame_nals_seen={}",
+                            count,
+                            idr_nals_seen.get(),
+                            frame_nals_seen.get()
+                        );
+                    } else if is_nonidr_intra {
+                        debug!(
+                            "Detected non-IDR intra slice at packet {} - treating as keyframe fallback",
+                            count
+                        );
+                    }
                 }
 
                 let final_pts = if is_frame_nal {
@@ -577,12 +635,34 @@ impl HardwareEncoderBase {
                         // Periodic logging
                         if last_log_time.elapsed() >= Duration::from_secs(15) {
                             let count = total_packets.get();
+                            let now_secs = output_reader_start.elapsed().as_secs_f64();
+                            let last_idr_packet = last_idr_packet_count.get();
+                            let last_idr_secs = last_idr_wallclock_secs.get();
+                            let since_last_idr_secs = if last_idr_packet == 0 {
+                                now_secs
+                            } else {
+                                now_secs - last_idr_secs
+                            };
                             debug!(
-                                "FFmpeg output reader: {} bytes received, {} packets created, {} bytes in buffer",
+                                "FFmpeg output reader: {} bytes received, {} packets created, {} bytes in buffer, frame_nals={}, idr_nals={}, last_idr_packet={}, secs_since_last_idr={:.2}",
                                 bytes_received,
                                 count,
-                                frame_buffer.len()
+                                frame_buffer.len(),
+                                frame_nals_seen.get(),
+                                idr_nals_seen.get(),
+                                last_idr_packet,
+                                since_last_idr_secs
                             );
+
+                            if frame_nals_seen.get() > min_frames_before_idr_warning
+                                && since_last_idr_secs >= expected_keyframe_interval_secs * 3.0
+                            {
+                                warn!(
+                                    "No IDR seen for {:.2}s (expected interval ~{:.2}s). Encoder may be emitting non-IDR I-frames only",
+                                    since_last_idr_secs,
+                                    expected_keyframe_interval_secs
+                                );
+                            }
                             last_log_time = Instant::now();
                         }
 
@@ -784,7 +864,9 @@ impl HardwareEncoderBase {
             let count = total_packets.get();
             info!(
                 "Encoder output closed: {} bytes, {} packets, {} frame NALs",
-                bytes_received, count, frame_nals_seen
+                bytes_received,
+                count,
+                frame_nals_seen.get()
             );
         })
     }

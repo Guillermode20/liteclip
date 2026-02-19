@@ -129,6 +129,12 @@ impl ReplayBuffer {
         if packet.is_keyframe {
             let absolute_index = self.base_offset + self.packets.len();
             self.keyframe_index.push_back((packet.pts, absolute_index));
+            trace!(
+                "Added keyframe to index: pts={}, abs_idx={}, total_keyframes={}",
+                packet.pts,
+                absolute_index,
+                self.keyframe_index.len()
+            );
         }
         self.total_bytes += packet_size;
         self.packets.push_back(packet);
@@ -145,15 +151,34 @@ impl ReplayBuffer {
     /// Evict the oldest packet — O(1) operation
     fn evict_oldest(&mut self) {
         if let Some(packet) = self.packets.pop_front() {
+            let was_keyframe = packet.is_keyframe;
+            let packet_pts = packet.pts;
             self.total_bytes -= packet.data.len();
             self.base_offset += 1;
+
+            trace!(
+                "evict_oldest: packet_pts={}, was_keyframe={}, base_offset={}, keyframe_index_len_before={}",
+                packet_pts, was_keyframe, self.base_offset - 1, self.keyframe_index.len()
+            );
+
             while let Some(&(_, abs_idx)) = self.keyframe_index.front() {
                 if abs_idx < self.base_offset {
+                    trace!(
+                        "  removing keyframe with abs_idx={} (base_offset={})",
+                        abs_idx,
+                        self.base_offset
+                    );
                     self.keyframe_index.pop_front();
                 } else {
                     break;
                 }
             }
+
+            trace!(
+                "  after eviction: base_offset={}, keyframe_index_len_after={}",
+                self.base_offset,
+                self.keyframe_index.len()
+            );
         }
     }
     /// Get a snapshot of all packets (cheap clone via Bytes)
@@ -284,24 +309,47 @@ impl ReplayBuffer {
     }
 
     /// Find the relative index of the last keyframe at or before the given pts.
-    /// Uses binary search for O(log N) performance.
+    /// Uses linear search from the end for correctness with VecDeque.
     fn find_keyframe_index_before(&self, target_pts: i64) -> Option<usize> {
-        let (front, back) = self.keyframe_index.as_slices();
+        trace!(
+            "find_keyframe_index_before: target_pts={}, base_offset={}, keyframe_index_len={}",
+            target_pts,
+            self.base_offset,
+            self.keyframe_index.len()
+        );
 
-        if let Ok(idx) = back.binary_search_by(|&(pts, _)| pts.cmp(&target_pts)) {
-            let abs_idx = back[idx].1;
-            return Some(abs_idx.saturating_sub(self.base_offset));
-        } else if let Ok(idx) = front.binary_search_by(|&(pts, _)| pts.cmp(&target_pts)) {
-            let abs_idx = front[idx].1;
-            return Some(abs_idx.saturating_sub(self.base_offset));
+        // Debug: print all keyframe entries
+        for (i, &(pts, abs_idx)) in self.keyframe_index.iter().enumerate() {
+            trace!("  keyframe[{}]: pts={}, abs_idx={}", i, pts, abs_idx);
         }
 
+        // Linear search from the end to find the last keyframe with PTS <= target_pts
+        // This is correct for VecDeque and doesn't require mutability
         for &(pts, abs_idx) in self.keyframe_index.iter().rev() {
             if pts <= target_pts {
-                return Some(abs_idx.saturating_sub(self.base_offset));
+                let relative_idx = abs_idx.saturating_sub(self.base_offset);
+                // Add bounds checking to prevent out-of-bounds access
+                if relative_idx < self.packets.len() {
+                    trace!(
+                        "  found: pts={}, abs_idx={}, relative_idx={}",
+                        pts,
+                        abs_idx,
+                        relative_idx
+                    );
+                    return Some(relative_idx);
+                } else {
+                    trace!(
+                        "  found but relative_idx={} out of bounds (packets_len={}), continuing search",
+                        relative_idx,
+                        self.packets.len()
+                    );
+                    // Don't return None here — continue searching earlier keyframes
+                    continue;
+                }
             }
         }
 
+        trace!("  no keyframe found at or before target_pts");
         None
     }
     /// Get the last N seconds of packets based on duration
@@ -323,6 +371,22 @@ impl ReplayBuffer {
         self.total_bytes = 0;
         debug!(
             "Buffer cleared (cached SPS: {}, cached PPS: {})",
+            self.cached_sps.is_some(),
+            self.cached_pps.is_some()
+        );
+    }
+
+    /// Soft clear - removes all packets but preserves keyframe tracking metadata
+    ///
+    /// This is useful for replay buffer operations where you want to clear captured
+    /// frames but maintain keyframe indexing for subsequent clip saves.
+    pub fn soft_clear(&mut self) {
+        let keyframe_count = self.keyframe_index.len();
+        self.packets.clear();
+        self.total_bytes = 0;
+        debug!(
+            "Buffer soft-cleared: preserved {} keyframe indices (cached SPS: {}, cached PPS: {})",
+            keyframe_count,
             self.cached_sps.is_some(),
             self.cached_pps.is_some()
         );
@@ -431,6 +495,11 @@ impl SharedReplayBuffer {
     /// Clear all packets
     pub fn clear(&self) {
         self.inner.write().clear();
+    }
+
+    /// Soft clear - removes all packets but preserves keyframe tracking metadata
+    pub fn soft_clear(&self) {
+        self.inner.write().soft_clear();
     }
     /// Get current statistics
     pub fn stats(&self) -> BufferStats {
