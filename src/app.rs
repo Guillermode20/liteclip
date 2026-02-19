@@ -11,7 +11,7 @@ use crate::{
     config::Config,
     encode::{spawn_encoder, spawn_encoder_with_receiver, EncoderConfig},
 };
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use crossbeam::channel::Receiver;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -29,21 +29,31 @@ pub struct AppState {
 
 impl AppState {
     fn should_use_hardware_pull_mode(config: &Config) -> bool {
-        if config.advanced.use_cpu_readback {
-            return false;
-        }
-
         match config.video.encoder {
+            crate::config::EncoderType::Software => false,
             crate::config::EncoderType::Nvenc => {
+                if config.advanced.use_cpu_readback {
+                    return false;
+                }
                 crate::encode::hw_encoder::check_encoder_available("h264_nvenc")
             }
             crate::config::EncoderType::Amf => {
+                if config.advanced.use_cpu_readback {
+                    return false;
+                }
                 crate::encode::hw_encoder::check_encoder_available("h264_amf")
             }
             crate::config::EncoderType::Qsv => {
+                if config.advanced.use_cpu_readback {
+                    return false;
+                }
                 crate::encode::hw_encoder::check_encoder_available("h264_qsv")
             }
-            _ => false,
+            crate::config::EncoderType::Auto => {
+                crate::encode::hw_encoder::check_encoder_available("h264_nvenc")
+                    || crate::encode::hw_encoder::check_encoder_available("h264_amf")
+                    || crate::encode::hw_encoder::check_encoder_available("h264_qsv")
+            }
         }
     }
 
@@ -115,9 +125,10 @@ impl AppState {
 
         info!("Recording: starting pipeline");
 
-        let encoder_config = EncoderConfig::from(&self.config);
+        let mut encoder_config = EncoderConfig::from(&self.config);
 
         if Self::should_use_hardware_pull_mode(&self.config) {
+            encoder_config.use_cpu_readback = false;
             info!("Recording mode: hardware pull (FFmpeg desktop grab)");
             let (encoder_handle, _unused_frame_tx) =
                 spawn_encoder(encoder_config, self.buffer.clone())
@@ -137,7 +148,8 @@ impl AppState {
 
         // Create and start video capture
         let mut capture = DxgiCapture::new().context("Failed to create DXGI capture")?;
-        let capture_config = CaptureConfig::from(&self.config);
+        let mut capture_config = CaptureConfig::from(&self.config);
+        capture_config.perform_cpu_readback = true;
 
         capture
             .start(capture_config)
@@ -212,12 +224,29 @@ impl AppState {
 
         let output_path = self.generate_output_path()?;
 
-        // Get resolution from the first packet in buffer, or fall back to config
+        let stats = self.buffer.stats();
+        info!(
+            "Buffer stats before save: {} packets, {} bytes, {} keyframes",
+            stats.packet_count, stats.total_bytes, stats.keyframe_count
+        );
+
+        if stats.packet_count == 0 {
+            warn!("Buffer is empty - cannot save clip");
+            bail!("Buffer is empty - no frames to save");
+        }
+
+        if stats.keyframe_count == 0 {
+            warn!("No keyframe in buffer - cannot save clip yet");
+            bail!(
+                "No keyframe available - please wait a moment for the next keyframe before saving"
+            );
+        }
+
         let (width, height) = self
             .buffer
             .snapshot_first_packet_resolution()
             .unwrap_or(match self.config.video.resolution {
-                crate::config::Resolution::Native => (1920, 1080), // Fallback if no packets
+                crate::config::Resolution::Native => (1920, 1080),
                 crate::config::Resolution::P1080 => (1920, 1080),
                 crate::config::Resolution::P720 => (1280, 720),
                 crate::config::Resolution::P480 => (854, 480),
@@ -227,16 +256,18 @@ impl AppState {
         let muxer_config = MuxerConfig::new(width, height, fps, &output_path)
             .with_expect_audio(self.config.audio.capture_system || self.config.audio.capture_mic);
 
-        // Clone buffer for the clip saver task
         let buffer = self.buffer.clone();
         let duration = Duration::from_secs(self.config.general.replay_duration_secs as u64);
 
+        info!("Spawning clip saver task...");
         let handle = spawn_clip_saver(buffer, duration, output_path.clone(), muxer_config);
 
+        info!("Waiting for clip saver task to complete...");
         let result = handle.await.context("Clip saver task panicked")?;
         let final_path = result?;
 
-        info!("Clip: save complete ({:?})", final_path);
+        info!("Clip saver completed (buffer preserved for continuous replay)");
+
         Ok(final_path)
     }
 

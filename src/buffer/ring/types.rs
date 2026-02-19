@@ -2,8 +2,9 @@
 //!
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
-use crate::encode::EncodedPacket;
+use crate::encode::{EncodedPacket, StreamType};
 use anyhow::Result;
+use bytes::Bytes;
 use parking_lot::RwLock;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -11,6 +12,16 @@ use std::time::Duration;
 use tracing::{debug, trace};
 
 use super::functions::qpc_frequency;
+
+fn h264_nal_type(data: &[u8]) -> Option<u8> {
+    if data.len() >= 5 && data[0..4] == [0x00, 0x00, 0x00, 0x01] {
+        return Some(data[4] & 0x1f);
+    }
+    if data.len() >= 4 && data[0..3] == [0x00, 0x00, 0x01] {
+        return Some(data[3] & 0x1f);
+    }
+    None
+}
 
 /// In-memory ring buffer for encoded packets
 pub struct ReplayBuffer {
@@ -25,6 +36,10 @@ pub struct ReplayBuffer {
     pub(crate) keyframe_index: VecDeque<(i64, usize)>,
     /// Total bytes currently stored
     pub(crate) total_bytes: usize,
+    /// Cached SPS (NAL type 7) for H.264 stream recovery after clear
+    cached_sps: Option<Bytes>,
+    /// Cached PPS (NAL type 8) for H.264 stream recovery after clear
+    cached_pps: Option<Bytes>,
 }
 impl ReplayBuffer {
     /// Create new replay buffer from configuration
@@ -43,6 +58,8 @@ impl ReplayBuffer {
             max_memory_bytes,
             keyframe_index: VecDeque::new(),
             total_bytes: 0,
+            cached_sps: None,
+            cached_pps: None,
         })
     }
     /// Create a new replay buffer with explicit parameters
@@ -59,6 +76,8 @@ impl ReplayBuffer {
             max_memory_bytes,
             keyframe_index: VecDeque::new(),
             total_bytes: 0,
+            cached_sps: None,
+            cached_pps: None,
         }
     }
     /// Push a new packet into the buffer (evicts old if needed based on duration)
@@ -85,6 +104,21 @@ impl ReplayBuffer {
         // Memory limit eviction - also atomic
         while self.total_bytes + packet_size > self.max_memory_bytes && !self.packets.is_empty() {
             self.evict_oldest();
+        }
+
+        // Cache SPS/PPS for H.264 stream recovery after buffer clear
+        if matches!(packet.stream, StreamType::Video) {
+            match h264_nal_type(packet.data.as_ref()) {
+                Some(7) => {
+                    self.cached_sps = Some(packet.data.clone());
+                    trace!("Cached SPS ({} bytes)", packet.data.len());
+                }
+                Some(8) => {
+                    self.cached_pps = Some(packet.data.clone());
+                    trace!("Cached PPS ({} bytes)", packet.data.len());
+                }
+                _ => {}
+            }
         }
 
         // Now safe to add the new packet
@@ -122,8 +156,62 @@ impl ReplayBuffer {
         }
     }
     /// Get a snapshot of all packets (cheap clone via Bytes)
+    ///
+    /// If the buffer was cleared and has cached SPS/PPS, prepends them to ensure
+    /// the H.264 stream is decodable.
     pub fn snapshot(&self) -> Result<Vec<EncodedPacket>> {
-        let mut result = Vec::with_capacity(self.packets.len());
+        let mut result = Vec::with_capacity(self.packets.len() + 2);
+
+        // Check if we need to prepend cached SPS/PPS
+        let first_video_is_sps = self
+            .packets
+            .iter()
+            .find_map(|p| {
+                if matches!(p.stream, StreamType::Video) {
+                    Some(matches!(h264_nal_type(p.data.as_ref()), Some(7)))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(true);
+
+        if !first_video_is_sps {
+            let first_video_pts = self
+                .packets
+                .iter()
+                .find_map(|p| {
+                    if matches!(p.stream, StreamType::Video) {
+                        Some(p.pts)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(0);
+
+            if let Some(ref sps_data) = self.cached_sps {
+                result.push(EncodedPacket {
+                    data: sps_data.clone(),
+                    pts: first_video_pts,
+                    dts: first_video_pts,
+                    stream: StreamType::Video,
+                    is_keyframe: false,
+                    resolution: None,
+                });
+                trace!("Prepended cached SPS to snapshot");
+            }
+            if let Some(ref pps_data) = self.cached_pps {
+                result.push(EncodedPacket {
+                    data: pps_data.clone(),
+                    pts: first_video_pts,
+                    dts: first_video_pts,
+                    stream: StreamType::Video,
+                    is_keyframe: false,
+                    resolution: None,
+                });
+                trace!("Prepended cached PPS to snapshot");
+            }
+        }
+
         result.extend(self.packets.iter().cloned());
         Ok(result)
     }
@@ -131,13 +219,66 @@ impl ReplayBuffer {
     ///
     /// Finds the nearest keyframe at or before start_pts and returns all packets
     /// from that point forward. This ensures the video can be decoded properly.
+    /// Prepends cached SPS/PPS if the buffer was cleared.
     pub fn snapshot_from(&self, start_pts: i64) -> Result<Vec<EncodedPacket>> {
         // Find the last keyframe at or before start_pts using binary search
         // keyframe_index is sorted by pts since packets are added in chronological order
         let start_index = self.find_keyframe_index_before(start_pts).unwrap_or(0);
         let remaining = self.packets.len().saturating_sub(start_index);
-        let mut result = Vec::with_capacity(remaining);
-        result.extend(self.packets.iter().skip(start_index).cloned());
+        let mut result = Vec::with_capacity(remaining + 2);
+
+        let packets_slice: Vec<EncodedPacket> =
+            self.packets.iter().skip(start_index).cloned().collect();
+
+        // Check if we need to prepend cached SPS/PPS
+        let first_video_is_sps = packets_slice
+            .iter()
+            .find_map(|p| {
+                if matches!(p.stream, StreamType::Video) {
+                    Some(matches!(h264_nal_type(p.data.as_ref()), Some(7)))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(true);
+
+        if !first_video_is_sps {
+            let first_video_pts = packets_slice
+                .iter()
+                .find_map(|p| {
+                    if matches!(p.stream, StreamType::Video) {
+                        Some(p.pts)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(0);
+
+            if let Some(ref sps_data) = self.cached_sps {
+                result.push(EncodedPacket {
+                    data: sps_data.clone(),
+                    pts: first_video_pts,
+                    dts: first_video_pts,
+                    stream: StreamType::Video,
+                    is_keyframe: false,
+                    resolution: None,
+                });
+                trace!("Prepended cached SPS to snapshot_from");
+            }
+            if let Some(ref pps_data) = self.cached_pps {
+                result.push(EncodedPacket {
+                    data: pps_data.clone(),
+                    pts: first_video_pts,
+                    dts: first_video_pts,
+                    stream: StreamType::Video,
+                    is_keyframe: false,
+                    resolution: None,
+                });
+                trace!("Prepended cached PPS to snapshot_from");
+            }
+        }
+
+        result.extend(packets_slice);
         Ok(result)
     }
 
@@ -180,12 +321,16 @@ impl ReplayBuffer {
         let start_pts = (newest_pts - qpc_delta).max(0);
         self.snapshot_from(start_pts)
     }
-    /// Clear all packets
+    /// Clear all packets (preserves cached SPS/PPS for stream recovery)
     pub fn clear(&mut self) {
         self.packets.clear();
         self.keyframe_index.clear();
         self.total_bytes = 0;
-        debug!("Buffer cleared");
+        debug!(
+            "Buffer cleared (cached SPS: {}, cached PPS: {})",
+            self.cached_sps.is_some(),
+            self.cached_pps.is_some()
+        );
     }
     /// Get current buffer statistics
     pub fn stats(&self) -> BufferStats {
@@ -240,6 +385,10 @@ impl ReplayBuffer {
     /// Get number of keyframes in index
     pub fn keyframe_count(&self) -> usize {
         self.keyframe_index.len()
+    }
+    /// Check if buffer contains at least one keyframe (required for valid H.264 clip)
+    pub fn has_keyframe(&self) -> bool {
+        !self.keyframe_index.is_empty()
     }
     /// Get the resolution from the first packet in the buffer
     pub fn first_packet_resolution(&self) -> Option<(u32, u32)> {
@@ -307,5 +456,9 @@ impl SharedReplayBuffer {
     /// Get the resolution from the first packet in the buffer
     pub fn snapshot_first_packet_resolution(&self) -> Option<(u32, u32)> {
         self.inner.read().first_packet_resolution()
+    }
+    /// Check if buffer contains at least one keyframe (required for valid H.264 clip)
+    pub fn has_keyframe(&self) -> bool {
+        self.inner.read().has_keyframe()
     }
 }
