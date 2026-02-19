@@ -29,9 +29,11 @@ impl CaptureBackend for DxgiCapture {
         self.running.store(true, Ordering::Relaxed);
         let running = Arc::clone(&self.running);
         let frame_tx = self._frame_tx.clone();
+        let overflow_rx = self.frame_rx.clone();
+        let fatal_tx = self.fatal_tx.clone();
         let config = self.config.clone();
         self.capture_thread = Some(spawn(move || {
-            Self::capture_loop(running, frame_tx, config);
+            Self::capture_loop(running, frame_tx, overflow_rx, fatal_tx, config);
         }));
         Ok(())
     }

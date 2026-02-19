@@ -11,7 +11,9 @@ use windows::Win32::System::Threading::{
     GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_ABOVE_NORMAL,
 };
 
-use super::types::{EncodedPacket, EncoderConfig, EncoderHandle, HardwareEncoder};
+use super::types::{
+    EncodedPacket, EncoderConfig, EncoderHandle, EncoderHealthEvent, HardwareEncoder,
+};
 /// Encoder trait
 ///
 /// All encoders must be Send + 'static as they run on dedicated threads.
@@ -152,21 +154,39 @@ pub fn spawn_encoder(
     config: EncoderConfig,
     buffer: crate::buffer::ring::SharedReplayBuffer,
 ) -> Result<(EncoderHandle, Sender<crate::capture::CapturedFrame>)> {
+    const MAX_CONSECUTIVE_ENCODE_ERRORS: u32 = 8;
     let (frame_tx, frame_rx): (Sender<crate::capture::CapturedFrame>, _) = bounded(16);
     let frame_tx_clone = frame_tx.clone();
+    let (health_tx, health_rx) = bounded(8);
     let thread = std::thread::Builder::new()
         .name("encoder".to_string())
         .stack_size(4 * 1024 * 1024)
         .spawn(move || {
             set_encoder_thread_priority();
             debug!("Encoder thread started");
-            let mut encoder = create_encoder(&config)?;
-            encoder.init(&config)?;
+            let mut encoder = match create_encoder(&config) {
+                Ok(encoder) => encoder,
+                Err(e) => {
+                    let _ = health_tx.try_send(EncoderHealthEvent::Fatal(format!(
+                        "Failed to create encoder: {}",
+                        e
+                    )));
+                    return Err(e);
+                }
+            };
+            if let Err(e) = encoder.init(&config) {
+                let _ = health_tx.try_send(EncoderHealthEvent::Fatal(format!(
+                    "Failed to initialize encoder: {}",
+                    e
+                )));
+                return Err(e);
+            }
             debug!("Encoder initialized");
             let packet_rx = encoder.packet_rx();
             let mut packet_batch = Vec::with_capacity(16);
             let mut frames_encoded = 0u64;
             let mut packets_received = 0u64;
+            let mut consecutive_encode_errors = 0u32;
             loop {
                 let mut count = 0;
                 while let Ok(packet) = packet_rx.try_recv() {
@@ -199,6 +219,18 @@ pub fn spawn_encoder(
                         }
                         if let Err(e) = encoder.encode_frame(&frame) {
                             warn!("Failed to encode frame: {}", e);
+                            consecutive_encode_errors = consecutive_encode_errors.saturating_add(1);
+                            if consecutive_encode_errors >= MAX_CONSECUTIVE_ENCODE_ERRORS {
+                                let reason = format!(
+                                    "{} consecutive frame encode failures",
+                                    consecutive_encode_errors
+                                );
+                                let _ =
+                                    health_tx.try_send(EncoderHealthEvent::Fatal(reason.clone()));
+                                return Err(anyhow::anyhow!(reason));
+                            }
+                        } else {
+                            consecutive_encode_errors = 0;
                         }
                     }
                     Err(crossbeam::channel::RecvTimeoutError::Timeout) => {}
@@ -243,6 +275,7 @@ pub fn spawn_encoder(
         thread,
         frame_tx: frame_tx_clone.clone(),
         packet_rx: dummy_packet_rx,
+        health_rx,
     };
     Ok((handle, frame_tx_clone))
 }
@@ -256,17 +289,35 @@ pub fn spawn_encoder_with_receiver(
     buffer: crate::buffer::ring::SharedReplayBuffer,
     frame_rx: Receiver<crate::capture::CapturedFrame>,
 ) -> Result<EncoderHandle> {
+    const MAX_CONSECUTIVE_ENCODE_ERRORS: u32 = 8;
+    let (health_tx, health_rx) = bounded(8);
     let thread = std::thread::Builder::new()
         .name("encoder".to_string())
         .stack_size(4 * 1024 * 1024)
         .spawn(move || {
             set_encoder_thread_priority();
             debug!("Encoder thread started");
-            let mut encoder = create_encoder(&config)?;
-            encoder.init(&config)?;
+            let mut encoder = match create_encoder(&config) {
+                Ok(encoder) => encoder,
+                Err(e) => {
+                    let _ = health_tx.try_send(EncoderHealthEvent::Fatal(format!(
+                        "Failed to create encoder: {}",
+                        e
+                    )));
+                    return Err(e);
+                }
+            };
+            if let Err(e) = encoder.init(&config) {
+                let _ = health_tx.try_send(EncoderHealthEvent::Fatal(format!(
+                    "Failed to initialize encoder: {}",
+                    e
+                )));
+                return Err(e);
+            }
             debug!("Encoder initialized");
             let packet_rx = encoder.packet_rx();
             let mut packet_batch = Vec::with_capacity(16);
+            let mut consecutive_encode_errors = 0u32;
             loop {
                 let mut count = 0;
                 while let Ok(packet) = packet_rx.try_recv() {
@@ -285,6 +336,18 @@ pub fn spawn_encoder_with_receiver(
                     Ok(frame) => {
                         if let Err(e) = encoder.encode_frame(&frame) {
                             warn!("Failed to encode frame: {}", e);
+                            consecutive_encode_errors = consecutive_encode_errors.saturating_add(1);
+                            if consecutive_encode_errors >= MAX_CONSECUTIVE_ENCODE_ERRORS {
+                                let reason = format!(
+                                    "{} consecutive frame encode failures",
+                                    consecutive_encode_errors
+                                );
+                                let _ =
+                                    health_tx.try_send(EncoderHealthEvent::Fatal(reason.clone()));
+                                return Err(anyhow::anyhow!(reason));
+                            }
+                        } else {
+                            consecutive_encode_errors = 0;
                         }
                     }
                     Err(crossbeam::channel::RecvTimeoutError::Timeout) => {}
@@ -321,6 +384,7 @@ pub fn spawn_encoder_with_receiver(
         thread,
         frame_tx: dummy_frame_tx,
         packet_rx: dummy_packet_rx,
+        health_rx,
     };
     Ok(handle)
 }

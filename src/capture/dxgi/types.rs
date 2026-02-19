@@ -4,7 +4,7 @@
 
 use windows_core::Interface;
 
-use crate::capture::{CaptureConfig, CapturedFrame};
+use crate::capture::{backpressure::BackpressureState, CaptureConfig, CapturedFrame};
 use anyhow::{bail, Context, Result};
 use bytes::Bytes;
 use crossbeam::channel::{bounded, Receiver, Sender};
@@ -54,19 +54,38 @@ pub struct DxgiCapture {
     pub(super) running: Arc<AtomicBool>,
     pub(super) _frame_tx: Sender<CapturedFrame>,
     pub(super) frame_rx: Receiver<CapturedFrame>,
+    pub(super) fatal_tx: Sender<String>,
+    pub(super) fatal_rx: Receiver<String>,
     pub(super) capture_thread: Option<JoinHandle<()>>,
 }
 impl DxgiCapture {
     /// Create a new DXGI capture instance
     pub fn new() -> Result<Self> {
         let (frame_tx, frame_rx) = bounded::<CapturedFrame>(32);
+        let (fatal_tx, fatal_rx) = bounded::<String>(8);
         Ok(Self {
             config: CaptureConfig::default(),
             running: Arc::new(AtomicBool::new(false)),
             _frame_tx: frame_tx,
             frame_rx,
+            fatal_tx,
+            fatal_rx,
             capture_thread: None,
         })
+    }
+
+    pub fn try_recv_fatal(&self) -> Option<String> {
+        self.fatal_rx.try_recv().ok()
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.running.load(Ordering::Relaxed)
+    }
+
+    pub fn is_capture_thread_finished(&self) -> bool {
+        self.capture_thread
+            .as_ref()
+            .is_some_and(|thread| thread.is_finished())
     }
     /// Initialize D3D11 device and DXGI duplication
     fn init_capture(output_index: u32) -> Result<DxgiCaptureState> {
@@ -402,6 +421,8 @@ impl DxgiCapture {
     pub(crate) fn capture_loop(
         running: Arc<AtomicBool>,
         frame_tx: Sender<CapturedFrame>,
+        overflow_rx: Receiver<CapturedFrame>,
+        fatal_tx: Sender<String>,
         config: CaptureConfig,
     ) {
         Self::set_capture_thread_priority();
@@ -418,12 +439,18 @@ impl DxgiCapture {
         let mut window_start = Instant::now();
         let mut window_frames = 0u64;
         let mut window_drops = 0u64;
+        let mut window_dropped_oldest = 0u64;
         let mut error_count = 0u32;
         let max_errors = 10;
+        let backpressure = BackpressureState::new();
+        let mut adaptive_skip_counter = 0u32;
+        let mut adaptive_adjust_tick = Instant::now();
+        let mut adaptive_level_changes = 0u64;
         let mut state = match Self::init_capture(config.output_index) {
             Ok(state) => state,
             Err(e) => {
                 error!("Failed to initialize DXGI capture: {}", e);
+                let _ = fatal_tx.try_send(format!("Failed to initialize DXGI capture: {}", e));
                 return;
             }
         };
@@ -446,11 +473,22 @@ impl DxgiCapture {
                     Self::wait_until_deadline(next_frame_deadline);
                     next_frame_deadline += frame_interval;
 
+                    let fps_divisor = backpressure.current_fps_divisor();
+                    if fps_divisor > 0 {
+                        adaptive_skip_counter = adaptive_skip_counter.wrapping_add(1);
+                        if !adaptive_skip_counter.is_multiple_of(fps_divisor + 1) {
+                            dropped_count += 1;
+                            window_drops += 1;
+                            continue;
+                        }
+                    }
+
                     match frame_tx.try_send(frame) {
                         Ok(()) => {
                             frame_count += 1;
                             window_frames += 1;
                             error_count = 0;
+                            backpressure.set_encoder_overloaded(false);
 
                             if frame_count % LOG_INTERVAL == 0 {
                                 log_counter += 1;
@@ -461,13 +499,37 @@ impl DxgiCapture {
                                 }
                             }
                         }
-                        Err(crossbeam::channel::TrySendError::Full(_)) => {
+                        Err(crossbeam::channel::TrySendError::Full(frame)) => {
                             dropped_count += 1;
                             window_drops += 1;
                             error_count = 0;
+                            backpressure.set_encoder_overloaded(true);
+
+                            let mut dropped_oldest = false;
+                            if overflow_rx.try_recv().is_ok() {
+                                dropped_oldest = true;
+                                window_dropped_oldest += 1;
+                                match frame_tx.try_send(frame) {
+                                    Ok(()) => {
+                                        frame_count += 1;
+                                        window_frames += 1;
+                                    }
+                                    Err(crossbeam::channel::TrySendError::Full(_)) => {
+                                        dropped_count += 1;
+                                        window_drops += 1;
+                                    }
+                                    Err(crossbeam::channel::TrySendError::Disconnected(_)) => {
+                                        info!("Frame channel closed, stopping capture");
+                                        break;
+                                    }
+                                }
+                            }
 
                             if dropped_count % 60 == 0 {
-                                warn!("Dropped {} frames (encoder behind)", dropped_count);
+                                warn!(
+                                    "Dropped {} frames (encoder behind, drop_oldest={})",
+                                    dropped_count, dropped_oldest
+                                );
                             }
                         }
                         Err(crossbeam::channel::TrySendError::Disconnected(_)) => {
@@ -491,19 +553,54 @@ impl DxgiCapture {
                     Self::wait_until_deadline(next_frame_deadline);
                     next_frame_deadline += frame_interval;
 
+                    let fps_divisor = backpressure.current_fps_divisor();
+                    if fps_divisor > 0 {
+                        adaptive_skip_counter = adaptive_skip_counter.wrapping_add(1);
+                        if !adaptive_skip_counter.is_multiple_of(fps_divisor + 1) {
+                            dropped_count += 1;
+                            window_drops += 1;
+                            continue;
+                        }
+                    }
+
                     match frame_tx.try_send(frame) {
                         Ok(()) => {
                             frame_count += 1;
                             window_frames += 1;
                             error_count = 0;
+                            backpressure.set_encoder_overloaded(false);
                         }
-                        Err(crossbeam::channel::TrySendError::Full(_)) => {
+                        Err(crossbeam::channel::TrySendError::Full(frame)) => {
                             dropped_count += 1;
                             window_drops += 1;
                             error_count = 0;
+                            backpressure.set_encoder_overloaded(true);
+
+                            let mut dropped_oldest = false;
+                            if overflow_rx.try_recv().is_ok() {
+                                dropped_oldest = true;
+                                window_dropped_oldest += 1;
+                                match frame_tx.try_send(frame) {
+                                    Ok(()) => {
+                                        frame_count += 1;
+                                        window_frames += 1;
+                                    }
+                                    Err(crossbeam::channel::TrySendError::Full(_)) => {
+                                        dropped_count += 1;
+                                        window_drops += 1;
+                                    }
+                                    Err(crossbeam::channel::TrySendError::Disconnected(_)) => {
+                                        info!("Frame channel closed, stopping capture");
+                                        break;
+                                    }
+                                }
+                            }
 
                             if dropped_count % 60 == 0 {
-                                warn!("Dropped {} frames (encoder behind)", dropped_count);
+                                warn!(
+                                    "Dropped {} frames (encoder behind, drop_oldest={})",
+                                    dropped_count, dropped_oldest
+                                );
                             }
                         }
                         Err(crossbeam::channel::TrySendError::Disconnected(_)) => {
@@ -517,6 +614,10 @@ impl DxgiCapture {
                     error_count += 1;
                     if error_count >= max_errors {
                         error!("Too many capture errors, stopping");
+                        let _ = fatal_tx.try_send(format!(
+                            "Capture exceeded retry budget after {} consecutive errors",
+                            error_count
+                        ));
                         break;
                     }
                     warn!("Attempting to reinitialize capture...");
@@ -534,17 +635,51 @@ impl DxgiCapture {
                 }
             }
 
+            if adaptive_adjust_tick.elapsed() >= Duration::from_secs(2) {
+                let queue_len = frame_tx.len() as u32;
+                let queue_cap = frame_tx.capacity().unwrap_or(32) as u32;
+                let high_watermark = queue_cap.saturating_mul(3) / 4;
+                let low_watermark = queue_cap / 4;
+                let mut fps_divisor = backpressure.current_fps_divisor();
+
+                if backpressure.is_encoder_overloaded() || queue_len >= high_watermark {
+                    if fps_divisor < 3 {
+                        fps_divisor += 1;
+                        backpressure.set_fps_divisor(fps_divisor);
+                        adaptive_level_changes += 1;
+                        warn!(
+                            "Adaptive throttling increased: fps_divisor={} queue={}/{}",
+                            fps_divisor, queue_len, queue_cap
+                        );
+                    }
+                } else if queue_len <= low_watermark && fps_divisor > 0 {
+                    fps_divisor -= 1;
+                    backpressure.set_fps_divisor(fps_divisor);
+                    adaptive_level_changes += 1;
+                    info!(
+                        "Adaptive throttling reduced: fps_divisor={} queue={}/{}",
+                        fps_divisor, queue_len, queue_cap
+                    );
+                }
+
+                adaptive_adjust_tick = Instant::now();
+            }
+
             if window_start.elapsed() >= Duration::from_secs(5) {
                 debug!(
-                    "Capture telemetry: target={}fps, actual={}fps, window_drops={}, total_drops={}",
+                    "Capture telemetry: target={}fps, actual={}fps, window_drops={}, window_drop_oldest={}, total_drops={}, adaptive_divisor={}, adaptive_changes={}",
                     base_fps,
                     window_frames / 5,
                     window_drops,
-                    dropped_count
+                    window_dropped_oldest,
+                    dropped_count,
+                    backpressure.current_fps_divisor(),
+                    adaptive_level_changes
                 );
                 window_start = Instant::now();
                 window_frames = 0;
                 window_drops = 0;
+                window_dropped_oldest = 0;
             }
         }
         info!(

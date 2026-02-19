@@ -6,6 +6,11 @@ use anyhow::Result;
 use bytes::Bytes;
 use crossbeam::channel::{Receiver, Sender};
 
+#[derive(Debug, Clone)]
+pub enum EncoderHealthEvent {
+    Fatal(String),
+}
+
 /// Encoded packet data
 ///
 /// Uses `Bytes` for reference-counted data, making clones cheap (just a ref count bump).
@@ -157,4 +162,6 @@ pub struct EncoderHandle {
     pub frame_tx: Sender<crate::capture::CapturedFrame>,
     /// Channel receiver for packets
     pub packet_rx: Receiver<EncodedPacket>,
+    /// Health events emitted by encoder worker thread
+    pub health_rx: Receiver<EncoderHealthEvent>,
 }

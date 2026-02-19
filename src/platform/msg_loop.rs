@@ -14,8 +14,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, PeekMessageW, PostQuitMessage,
-    RegisterClassW, TranslateMessage, CS_HREDRAW, CS_VREDRAW, HMENU, MSG, PM_REMOVE, WM_DESTROY,
-    WM_HOTKEY, WM_QUIT, WNDCLASSW, WS_EX_NOACTIVATE, WS_OVERLAPPED,
+    RegisterClassW, TranslateMessage, CS_HREDRAW, CS_VREDRAW, HMENU, MSG, PM_NOREMOVE, PM_REMOVE,
+    WM_DESTROY, WM_HOTKEY, WM_QUIT, WNDCLASSW, WS_EX_NOACTIVATE, WS_OVERLAPPED,
 };
 
 const CLASS_NAME: &str = "LiteClipReplay_HotkeyWindow";
@@ -109,13 +109,18 @@ fn run_platform_loop(
                 }
             }
 
-            // Poll tray events
+            // Poll tray events - do this EVERY iteration, not just when no messages
             if let Some(ref mut tray) = tray_manager {
                 tray.poll_events();
             }
 
-            if PeekMessageW(&mut msg, HWND::default(), 0, 0, PM_REMOVE).as_bool() {
+            // Process ALL pending messages before potentially waiting
+            // This ensures tray events (which come via Windows messages) are handled promptly
+            let mut processed_any = false;
+            while PeekMessageW(&mut msg, HWND::default(), 0, 0, PM_REMOVE).as_bool() {
+                processed_any = true;
                 if msg.message == WM_QUIT {
+                    info!("WM_QUIT received in message loop");
                     break;
                 }
                 if msg.message == WM_HOTKEY {
@@ -130,8 +135,20 @@ fn run_platform_loop(
                     let _ = TranslateMessage(&msg);
                     DispatchMessageW(&msg);
                 }
-            } else {
-                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+
+            // Check for WM_QUIT after processing batch
+            if msg.message == WM_QUIT {
+                break;
+            }
+
+            // Only sleep if no messages were processed AND no commands pending
+            if !processed_any && command_rx.is_empty() {
+                // Use a short wait, but check if messages are pending first
+                // Peek with PM_NOREMOVE to check without removing
+                if !PeekMessageW(&mut msg, HWND::default(), 0, 0, PM_NOREMOVE).as_bool() {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
             }
         }
     }

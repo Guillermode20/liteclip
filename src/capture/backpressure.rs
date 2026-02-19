@@ -63,3 +63,54 @@ impl Default for BackpressureState {
 }
 
 pub type SharedBackpressure = Arc<BackpressureState>;
+
+#[cfg(test)]
+mod tests {
+    use super::BackpressureState;
+
+    #[test]
+    fn drop_threshold_respects_max_queue() {
+        let state = BackpressureState::new();
+        state
+            .max_queued_frames
+            .store(2, std::sync::atomic::Ordering::Relaxed);
+
+        assert!(!state.should_drop_frame());
+        state.on_frame_queued();
+        assert!(!state.should_drop_frame());
+        state.on_frame_queued();
+        assert!(state.should_drop_frame());
+    }
+
+    #[test]
+    fn queued_count_tracks_queue_events() {
+        let state = BackpressureState::new();
+        state.on_frame_queued();
+        state.on_frame_queued();
+        assert_eq!(state.queued_count(), 2);
+
+        state.on_frame_processed();
+        assert_eq!(state.queued_count(), 1);
+    }
+
+    #[test]
+    fn fps_divisor_round_trip() {
+        let state = BackpressureState::new();
+        assert_eq!(state.current_fps_divisor(), 0);
+
+        state.set_fps_divisor(3);
+        assert_eq!(state.current_fps_divisor(), 3);
+    }
+
+    #[test]
+    fn overload_flag_round_trip() {
+        let state = BackpressureState::new();
+        assert!(!state.is_encoder_overloaded());
+
+        state.set_encoder_overloaded(true);
+        assert!(state.is_encoder_overloaded());
+
+        state.set_encoder_overloaded(false);
+        assert!(!state.is_encoder_overloaded());
+    }
+}

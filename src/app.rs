@@ -17,6 +17,15 @@ use std::path::PathBuf;
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordingLifecycle {
+    Idle,
+    Starting,
+    Running,
+    Stopping,
+    Faulted,
+}
+
 /// Central application state
 pub struct AppState {
     config: Config,
@@ -24,7 +33,7 @@ pub struct AppState {
     encoder_handle: Option<crate::encode::EncoderHandle>,
     capture: Option<DxgiCapture>,
     audio_manager: Option<WasapiAudioManager>,
-    is_recording: bool,
+    lifecycle: RecordingLifecycle,
 }
 
 impl AppState {
@@ -67,8 +76,31 @@ impl AppState {
             encoder_handle: None,
             capture: None,
             audio_manager: None,
-            is_recording: false,
+            lifecycle: RecordingLifecycle::Idle,
         })
+    }
+
+    fn rollback_startup(&mut self) {
+        if let Some(audio_manager) = self.audio_manager.take() {
+            drop(audio_manager);
+        }
+        if let Some(capture) = self.capture.take() {
+            drop(capture);
+        }
+        if let Some(handle) = self.encoder_handle.take() {
+            let crate::encode::EncoderHandle {
+                thread,
+                frame_tx,
+                packet_rx: _,
+                health_rx: _,
+            } = handle;
+            drop(frame_tx);
+            match thread.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => warn!("Encoder thread returned error during rollback: {}", e),
+                Err(e) => warn!("Encoder thread panicked during rollback: {:?}", e),
+            }
+        }
     }
 
     /// Start audio capture and spawn forwarding thread
@@ -118,12 +150,18 @@ impl AppState {
 
     /// Start the recording pipeline
     pub async fn start_recording(&mut self) -> Result<()> {
-        if self.is_recording {
+        if matches!(
+            self.lifecycle,
+            RecordingLifecycle::Starting
+                | RecordingLifecycle::Running
+                | RecordingLifecycle::Stopping
+        ) {
             warn!("Recording already in progress");
             return Ok(());
         }
 
         info!("Recording: starting pipeline");
+        self.lifecycle = RecordingLifecycle::Starting;
 
         let mut encoder_config = EncoderConfig::from(&self.config);
 
@@ -131,29 +169,58 @@ impl AppState {
             encoder_config.use_cpu_readback = false;
             info!("Recording mode: hardware pull (FFmpeg desktop grab)");
             let (encoder_handle, _unused_frame_tx) =
-                spawn_encoder(encoder_config, self.buffer.clone())
-                    .context("Failed to spawn pull-mode encoder")?;
-
-            self.start_audio_capture("pull mode")?;
+                match spawn_encoder(encoder_config, self.buffer.clone())
+                    .context("Failed to spawn pull-mode encoder")
+                {
+                    Ok(v) => v,
+                    Err(e) => {
+                        self.rollback_startup();
+                        self.lifecycle = RecordingLifecycle::Idle;
+                        return Err(e);
+                    }
+                };
 
             self.encoder_handle = Some(encoder_handle);
+
+            if let Err(e) = self.start_audio_capture("pull mode") {
+                self.rollback_startup();
+                self.lifecycle = RecordingLifecycle::Idle;
+                return Err(e);
+            }
+
             self.capture = None;
-            self.is_recording = true;
+            self.lifecycle = RecordingLifecycle::Running;
             info!("Recording started");
             return Ok(());
         }
 
         // Create and start audio capture first if enabled
-        self.start_audio_capture("capture mode")?;
+        if let Err(e) = self.start_audio_capture("capture mode") {
+            self.rollback_startup();
+            self.lifecycle = RecordingLifecycle::Idle;
+            return Err(e);
+        }
 
         // Create and start video capture
-        let mut capture = DxgiCapture::new().context("Failed to create DXGI capture")?;
+        let mut capture = match DxgiCapture::new().context("Failed to create DXGI capture") {
+            Ok(capture) => capture,
+            Err(e) => {
+                self.rollback_startup();
+                self.lifecycle = RecordingLifecycle::Idle;
+                return Err(e);
+            }
+        };
         let mut capture_config = CaptureConfig::from(&self.config);
         capture_config.perform_cpu_readback = true;
 
-        capture
+        if let Err(e) = capture
             .start(capture_config)
-            .context("Failed to start capture")?;
+            .context("Failed to start capture")
+        {
+            self.rollback_startup();
+            self.lifecycle = RecordingLifecycle::Idle;
+            return Err(e);
+        }
 
         // Get the frame receiver from capture
         let frame_rx: Receiver<CapturedFrame> = capture.frame_rx();
@@ -164,13 +231,25 @@ impl AppState {
         // consume pushed BGRA frames (not FFmpeg desktop pull mode).
         capture_encoder_config.use_cpu_readback = true;
 
-        let encoder_handle =
-            spawn_encoder_with_receiver(capture_encoder_config, self.buffer.clone(), frame_rx)
-                .context("Failed to spawn encoder")?;
+        let encoder_handle = match spawn_encoder_with_receiver(
+            capture_encoder_config,
+            self.buffer.clone(),
+            frame_rx,
+        )
+        .context("Failed to spawn encoder")
+        {
+            Ok(handle) => handle,
+            Err(e) => {
+                drop(capture);
+                self.rollback_startup();
+                self.lifecycle = RecordingLifecycle::Idle;
+                return Err(e);
+            }
+        };
 
         self.encoder_handle = Some(encoder_handle);
         self.capture = Some(capture);
-        self.is_recording = true;
+        self.lifecycle = RecordingLifecycle::Running;
 
         info!("Recording mode: capture + encoder + audio");
         info!("Recording started");
@@ -180,11 +259,13 @@ impl AppState {
 
     /// Stop the recording pipeline
     pub async fn stop_recording(&mut self) -> Result<()> {
-        if !self.is_recording {
+        if matches!(self.lifecycle, RecordingLifecycle::Idle) {
             return Ok(());
         }
 
         info!("Recording: stopping pipeline");
+        self.lifecycle = RecordingLifecycle::Stopping;
+        let mut first_error: Option<anyhow::Error> = None;
 
         // Stop audio capture first
         if let Some(audio_manager) = self.audio_manager.take() {
@@ -204,18 +285,72 @@ impl AppState {
                 thread,
                 frame_tx,
                 packet_rx: _,
+                health_rx: _,
             } = handle;
             drop(frame_tx);
 
             match thread.join() {
-                Ok(_) => info!("Encoder thread stopped successfully"),
-                Err(e) => error!("Encoder thread panicked: {:?}", e),
+                Ok(Ok(())) => info!("Encoder thread stopped successfully"),
+                Ok(Err(e)) => {
+                    error!("Encoder thread returned error: {}", e);
+                    if first_error.is_none() {
+                        first_error = Some(e);
+                    }
+                }
+                Err(e) => {
+                    error!("Encoder thread panicked: {:?}", e);
+                    if first_error.is_none() {
+                        first_error = Some(anyhow::anyhow!("Encoder thread panicked"));
+                    }
+                }
             }
         }
 
-        self.is_recording = false;
+        self.lifecycle = RecordingLifecycle::Idle;
         info!("Recording stopped");
+        if let Some(e) = first_error {
+            return Err(e);
+        }
         Ok(())
+    }
+
+    pub async fn enforce_pipeline_health(&mut self) -> Result<Option<String>> {
+        if !matches!(self.lifecycle, RecordingLifecycle::Running) {
+            return Ok(None);
+        }
+
+        let mut fatal_reason = None;
+
+        if let Some(handle) = self.encoder_handle.as_ref() {
+            if let Ok(event) = handle.health_rx.try_recv() {
+                match event {
+                    crate::encode::EncoderHealthEvent::Fatal(reason) => {
+                        fatal_reason = Some(format!("Encoder fatal: {}", reason));
+                    }
+                }
+            } else if handle.thread.is_finished() {
+                fatal_reason = Some("Encoder thread exited unexpectedly".to_string());
+            }
+        }
+
+        if fatal_reason.is_none() {
+            if let Some(capture) = self.capture.as_ref() {
+                if let Some(reason) = capture.try_recv_fatal() {
+                    fatal_reason = Some(format!("Capture fatal: {}", reason));
+                } else if capture.is_running() && capture.is_capture_thread_finished() {
+                    fatal_reason = Some("Capture thread exited unexpectedly".to_string());
+                }
+            }
+        }
+
+        if let Some(reason) = fatal_reason {
+            error!("Fail-closed transition: {}", reason);
+            self.lifecycle = RecordingLifecycle::Faulted;
+            self.stop_recording().await?;
+            return Ok(Some(reason));
+        }
+
+        Ok(None)
     }
 
     /// Save the current buffer contents to a clip
@@ -291,7 +426,12 @@ impl AppState {
 
     /// Check if currently recording
     pub fn is_recording(&self) -> bool {
-        self.is_recording
+        matches!(self.lifecycle, RecordingLifecycle::Running)
+    }
+
+    /// Current recording lifecycle state
+    pub fn lifecycle(&self) -> RecordingLifecycle {
+        self.lifecycle
     }
 
     /// Handle hotkey action
@@ -363,8 +503,8 @@ impl AppState {
                 "Buffer: Replay duration changed from {}s to {}s (effective on next buffer creation)",
                 self.config.general.replay_duration_secs, new_config.general.replay_duration_secs
             );
-            // Note: The buffer uses this value dynamically, so it will take effect
-            // on the next buffer operation that references the duration
+            // Note: Existing replay buffer instances keep their original duration.
+            // This takes effect after buffer recreation (e.g., app restart).
         }
 
         // Update the stored configuration
@@ -387,7 +527,7 @@ impl AppState {
 
 impl Drop for AppState {
     fn drop(&mut self) {
-        if self.is_recording {
+        if !matches!(self.lifecycle, RecordingLifecycle::Idle) {
             // Clean shutdown attempt in blocking context
             drop(self.audio_manager.take());
             drop(self.capture.take());
@@ -396,11 +536,13 @@ impl Drop for AppState {
                     thread,
                     frame_tx,
                     packet_rx: _,
+                    health_rx: _,
                 } = handle;
                 drop(frame_tx);
 
                 match thread.join() {
-                    Ok(_) => {}
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => warn!("Encoder thread returned error during drop: {}", e),
                     Err(e) => warn!("Encoder thread panicked during drop: {:?}", e),
                 }
             }

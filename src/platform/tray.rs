@@ -73,26 +73,36 @@ impl TrayManager {
         // Left/right-click on the notification-area icon itself.
         while let Ok(ev) = TrayIconEvent::receiver().try_recv() {
             trace!("Tray-icon event received: {:?}", ev);
-            // Left-click now does nothing - no settings to open
         }
 
-        // Context-menu item selections.
-        while let Ok(ev) = MenuEvent::receiver().try_recv() {
-            info!("Tray menu selected: {}", ev.id.0);
-            let tray_event = match ev.id.0.as_str() {
-                ID_SAVE_CLIP => Some(TrayEvent::SaveClip),
-                ID_OPEN_SETTINGS => Some(TrayEvent::OpenSettings),
-                ID_EXIT => Some(TrayEvent::Exit),
-                other => {
-                    trace!("Unknown menu id: {other}");
-                    None
+        // Context-menu item selections - drain ALL pending events
+        loop {
+            match MenuEvent::receiver().try_recv() {
+                Ok(ev) => {
+                    info!("Tray menu selected: {}", ev.id.0);
+                    let tray_event = match ev.id.0.as_str() {
+                        ID_SAVE_CLIP => Some(TrayEvent::SaveClip),
+                        ID_OPEN_SETTINGS => Some(TrayEvent::OpenSettings),
+                        ID_EXIT => {
+                            info!("Exit menu item clicked - sending Exit event");
+                            Some(TrayEvent::Exit)
+                        }
+                        other => {
+                            trace!("Unknown menu id: {other}");
+                            None
+                        }
+                    };
+                    if let Some(te) = tray_event {
+                        if let Err(e) = self.event_tx.send(AppEvent::Tray(te)) {
+                            error!("Failed to send tray event: {e}");
+                        }
+                    }
                 }
-            };
-            if let Some(te) = tray_event {
-                let _ = self
-                    .event_tx
-                    .send(AppEvent::Tray(te))
-                    .map_err(|e| error!("Menu item send: {e}"));
+                Err(crossbeam::channel::TryRecvError::Empty) => break,
+                Err(crossbeam::channel::TryRecvError::Disconnected) => {
+                    warn!("Menu event channel disconnected");
+                    break;
+                }
             }
         }
     }

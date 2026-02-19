@@ -8,7 +8,7 @@
 use super::{EncodedPacket, Encoder, EncoderConfig};
 use anyhow::Result;
 use bytes::Bytes;
-use crossbeam::channel::{bounded, Receiver, Sender};
+use crossbeam::channel::{bounded, Receiver, Sender, TrySendError};
 use image::{codecs::jpeg::JpegEncoder, ExtendedColorType};
 use std::thread;
 use tracing::{debug, info, warn};
@@ -221,8 +221,11 @@ pub struct SoftwareEncoder {
     frame_count: u64,
     running: bool,
     worker_tx: Sender<WorkItem>,
+    worker_rx: Receiver<WorkItem>,
     #[allow(dead_code)]
     worker_threads: Vec<thread::JoinHandle<()>>,
+    dropped_oldest_count: u64,
+    dropped_newest_count: u64,
 }
 
 impl SoftwareEncoder {
@@ -303,7 +306,10 @@ impl SoftwareEncoder {
             frame_count: 0,
             running: false,
             worker_tx,
+            worker_rx,
             worker_threads,
+            dropped_oldest_count: 0,
+            dropped_newest_count: 0,
         })
     }
 }
@@ -332,10 +338,35 @@ impl Encoder for SoftwareEncoder {
             use_native_resolution: self.config.use_native_resolution,
         };
 
-        // Non-blocking send; if all workers are busy we drop the frame
-        // rather than stalling the capture pipeline.
-        if self.worker_tx.try_send(item).is_err() && self.frame_count % 60 == 0 {
-            debug!("Workers busy, dropping frame {}", self.frame_count);
+        // Non-blocking send; on saturation, prefer dropping oldest queued work.
+        match self.worker_tx.try_send(item) {
+            Ok(()) => {}
+            Err(TrySendError::Full(item)) => {
+                let mut dropped_oldest = false;
+                if self.worker_rx.try_recv().is_ok() {
+                    dropped_oldest = true;
+                    self.dropped_oldest_count = self.dropped_oldest_count.saturating_add(1);
+                }
+
+                if self.worker_tx.try_send(item).is_err() {
+                    self.dropped_newest_count = self.dropped_newest_count.saturating_add(1);
+                    if self.dropped_newest_count.is_multiple_of(60) {
+                        debug!(
+                            "Workers saturated, dropped newest={} dropped_oldest={}",
+                            self.dropped_newest_count, self.dropped_oldest_count
+                        );
+                    }
+                } else if dropped_oldest && self.dropped_oldest_count.is_multiple_of(60) {
+                    debug!(
+                        "Workers saturated, dropped oldest={} to keep recency",
+                        self.dropped_oldest_count
+                    );
+                }
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                self.dropped_newest_count = self.dropped_newest_count.saturating_add(1);
+                warn!("Software encoder worker queue disconnected");
+            }
         }
 
         self.frame_count += 1;

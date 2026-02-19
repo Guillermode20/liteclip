@@ -104,6 +104,18 @@ async fn main() -> Result<()> {
         config.video.quality_value
     );
 
+    if config.general.auto_start_with_windows {
+        warn!(
+            "Config: auto_start_with_windows=true, but startup registration is not implemented yet"
+        );
+    }
+    if config.general.auto_detect_game {
+        warn!("Config: auto_detect_game=true, but game detection is not implemented yet");
+    }
+    if config.advanced.overlay_enabled {
+        warn!("Config: overlay_enabled=true, but overlay rendering is not implemented yet");
+    }
+
     // Show welcome notification if not starting minimized
     if !config.general.start_minimised {
         info!("LiteClip Replay is running in the system tray");
@@ -173,52 +185,66 @@ async fn main() -> Result<()> {
                                     liteclip_replay::platform::HotkeyAction::SaveClip => {
                                         info!("Hotkey: save clip");
                                         let state = app_state.read().await;
+                                        let notifications_enabled = state.config().general.notifications;
                                         match state.save_clip().await {
                                             Ok(path) => {
                                                 info!("Clip saved: {:?}", path);
-                                                let _ = platform_handle.show_notification(
-                                                    "Clip Saved",
-                                                    &format!("Saved to {:?}", path.file_name().unwrap_or_default()),
-                                                );
+                                                if notifications_enabled {
+                                                    let _ = platform_handle.show_notification(
+                                                        "Clip Saved",
+                                                        &format!("Saved to {:?}", path.file_name().unwrap_or_default()),
+                                                    );
+                                                }
                                             }
                                             Err(e) => {
                                                 error!("Failed to save clip: {:#}", e);
-                                                let _ = platform_handle.show_notification(
-                                                    "Save Failed",
-                                                    &format!("{:#}", e),
-                                                );
+                                                if notifications_enabled {
+                                                    let _ = platform_handle.show_notification(
+                                                        "Save Failed",
+                                                        &format!("{:#}", e),
+                                                    );
+                                                }
                                             }
                                         }
                                     }
                                     liteclip_replay::platform::HotkeyAction::ToggleRecording => {
                                         info!("Hotkey: toggle recording");
                                         let mut state = app_state.write().await;
+                                        let notifications_enabled = state.config().general.notifications;
                                         if state.is_recording() {
                                             if let Err(e) = state.stop_recording().await {
                                                 error!("Failed to stop recording: {}", e);
-                                                let _ = platform_handle.show_notification(
-                                                    "Recording Error",
-                                                    &format!("Failed to stop: {}", e),
-                                                );
+                                                if notifications_enabled {
+                                                    let _ = platform_handle.show_notification(
+                                                        "Recording Error",
+                                                        &format!("Failed to stop: {}", e),
+                                                    );
+                                                }
                                             } else {
                                                 let _ = platform_handle.update_recording_state(false);
-                                                let _ = platform_handle.show_notification(
-                                                    "Recording Stopped",
-                                                    "Recording has been stopped",
-                                                );
+                                                if notifications_enabled {
+                                                    let _ = platform_handle.show_notification(
+                                                        "Recording Stopped",
+                                                        "Recording has been stopped",
+                                                    );
+                                                }
                                             }
                                         } else if let Err(e) = state.start_recording().await {
                                             error!("Failed to start recording: {}", e);
-                                            let _ = platform_handle.show_notification(
-                                                "Recording Error",
-                                                &format!("Failed to start: {}", e),
-                                            );
+                                            if notifications_enabled {
+                                                let _ = platform_handle.show_notification(
+                                                    "Recording Error",
+                                                    &format!("Failed to start: {}", e),
+                                                );
+                                            }
                                         } else {
                                             let _ = platform_handle.update_recording_state(true);
-                                            let _ = platform_handle.show_notification(
-                                                "Recording Started",
-                                                "Now capturing replay buffer",
-                                            );
+                                            if notifications_enabled {
+                                                let _ = platform_handle.show_notification(
+                                                    "Recording Started",
+                                                    "Now capturing replay buffer",
+                                                );
+                                            }
                                         }
                                     }
                                     liteclip_replay::platform::HotkeyAction::Screenshot => {
@@ -236,20 +262,25 @@ async fn main() -> Result<()> {
                                     liteclip_replay::platform::TrayEvent::SaveClip => {
                                         info!("Tray: Save Clip selected");
                                         let state = app_state.read().await;
+                                        let notifications_enabled = state.config().general.notifications;
                                         match state.save_clip().await {
                                             Ok(path) => {
                                                 info!("Clip saved: {:?}", path);
-                                                let _ = platform_handle.show_notification(
-                                                    "Clip Saved",
-                                                    &format!("Saved to {:?}", path.file_name().unwrap_or_default()),
-                                                );
+                                                if notifications_enabled {
+                                                    let _ = platform_handle.show_notification(
+                                                        "Clip Saved",
+                                                        &format!("Saved to {:?}", path.file_name().unwrap_or_default()),
+                                                    );
+                                                }
                                             }
                                             Err(e) => {
                                                 error!("Failed to save clip: {:#}", e);
-                                                let _ = platform_handle.show_notification(
-                                                    "Save Failed",
-                                                    &format!("{:#}", e),
-                                                );
+                                                if notifications_enabled {
+                                                    let _ = platform_handle.show_notification(
+                                                        "Save Failed",
+                                                        &format!("{:#}", e),
+                                                    );
+                                                }
                                             }
                                         }
                                     }
@@ -267,10 +298,16 @@ async fn main() -> Result<()> {
                                                     .spawn();
                                                 if let Err(e) = result {
                                                     error!("Failed to open settings file: {}", e);
-                                                    let _ = platform_handle.show_notification(
-                                                        "Error",
-                                                        &format!("Failed to open settings: {}", e),
-                                                    );
+                                                    let notifications_enabled = {
+                                                        let state = app_state.read().await;
+                                                        state.config().general.notifications
+                                                    };
+                                                    if notifications_enabled {
+                                                        let _ = platform_handle.show_notification(
+                                                            "Error",
+                                                            &format!("Failed to open settings: {}", e),
+                                                        );
+                                                    }
                                                 }
                                             }
                                             Err(e) => {
@@ -295,7 +332,24 @@ async fn main() -> Result<()> {
                         break;
                     }
                     Err(_) => {
-                        // Timeout - just loop again
+                        // Timeout tick: poll worker health and fail-closed when needed.
+                        let mut state = app_state.write().await;
+                        match state.enforce_pipeline_health().await {
+                            Ok(Some(reason)) => {
+                                error!("Recording stopped due to fatal pipeline error: {}", reason);
+                                let _ = platform_handle.update_recording_state(false);
+                                if state.config().general.notifications {
+                                    let _ = platform_handle.show_notification(
+                                        "Recording Stopped",
+                                        &format!("Pipeline error: {}", reason),
+                                    );
+                                }
+                            }
+                            Ok(None) => {}
+                            Err(e) => {
+                                error!("Failed to enforce pipeline health: {}", e);
+                            }
+                        }
                     }
                 }
             }

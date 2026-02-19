@@ -5,7 +5,7 @@
 //! encoder thread from stalling.
 
 use bytes::Bytes;
-use crossbeam::channel::{bounded, RecvTimeoutError, Sender, TrySendError};
+use crossbeam::channel::{bounded, Receiver, RecvTimeoutError, Sender, TrySendError};
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
@@ -20,6 +20,7 @@ pub struct PendingFrame {
 
 pub struct AsyncFrameWriter {
     frame_tx: Sender<PendingFrame>,
+    frame_rx_drop: Receiver<PendingFrame>,
     write_thread: Option<thread::JoinHandle<()>>,
     running: Arc<AtomicBool>,
     last_write_latency_ms: Arc<AtomicU32>,
@@ -28,6 +29,7 @@ pub struct AsyncFrameWriter {
 impl AsyncFrameWriter {
     pub fn new<W: Write + Send + 'static>(stdin: W, queue_size: usize) -> Self {
         let (frame_tx, frame_rx) = bounded::<PendingFrame>(queue_size);
+        let frame_rx_drop = frame_rx.clone();
         let running = Arc::new(AtomicBool::new(true));
         let last_write_latency_ms = Arc::new(AtomicU32::new(0));
 
@@ -83,6 +85,7 @@ impl AsyncFrameWriter {
 
         Self {
             frame_tx,
+            frame_rx_drop,
             write_thread: Some(write_thread),
             running,
             last_write_latency_ms,
@@ -90,7 +93,14 @@ impl AsyncFrameWriter {
     }
 
     pub fn try_queue(&self, frame: PendingFrame) -> Result<(), TrySendError<PendingFrame>> {
-        self.frame_tx.try_send(frame)
+        match self.frame_tx.try_send(frame) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(frame)) => {
+                let _ = self.frame_rx_drop.try_recv();
+                self.frame_tx.try_send(frame)
+            }
+            Err(TrySendError::Disconnected(frame)) => Err(TrySendError::Disconnected(frame)),
+        }
     }
 
     pub fn write_latency_ms(&self) -> u32 {
