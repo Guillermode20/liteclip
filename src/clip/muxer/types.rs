@@ -9,9 +9,13 @@ use std::path::{Path, PathBuf};
 use std::{
     ffi::OsString,
     io::Write,
+    os::windows::process::CommandExt,
     process::{Command, Stdio},
 };
 use tracing::{debug, error, info, trace, warn};
+
+#[cfg(feature = "ffmpeg")]
+use crate::encode::hw_encoder::PROCESS_CREATION_FLAGS;
 
 use super::functions::{
     h264_nal_type, is_h264_format, qpc_delta_to_aligned_pcm_bytes, write_silence_bytes,
@@ -285,6 +289,7 @@ impl Muxer {
             .arg(&self.output_path)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .creation_flags(PROCESS_CREATION_FLAGS)
             .output()
             .with_context(|| format!("Failed to run ffmpeg for H.264 remux: {:?}", ffmpeg_cmd))?;
         let _ = std::fs::remove_file(&h264_temp_path);
@@ -632,6 +637,7 @@ impl Muxer {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .creation_flags(PROCESS_CREATION_FLAGS)
             .spawn()
             .with_context(|| format!("Failed to launch ffmpeg command: {:?}", ffmpeg_cmd))?;
         let mut written_frames = 0usize;

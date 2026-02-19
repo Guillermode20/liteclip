@@ -164,9 +164,7 @@ impl Encoder for StubEncoder {
             self.config.resolution
         };
 
-        let data = bgra_to_jpeg(
-            frame, out_w, out_h, 92, // High quality JPEG
-        )?;
+        let data = bgra_to_jpeg(frame, out_w, out_h, 70)?;
 
         let mut packet = EncodedPacket::new(
             data,
@@ -239,14 +237,12 @@ impl SoftwareEncoder {
             num_workers
         );
 
-        let (packet_tx, packet_rx) = bounded(128);
-        // Bounded to 32 to allow more frames to queue before dropping.
-        // This prevents frame drops when workers are temporarily busy.
-        let (worker_tx, worker_rx) = bounded::<WorkItem>(32);
+        let (packet_tx, packet_rx) = bounded(32);
+        let (worker_tx, worker_rx) = bounded::<WorkItem>(16);
 
         let out_w = config.resolution.0;
         let out_h = config.resolution.1;
-        let quality = 92u8; // JPEG quality 0-100; 92 = high fidelity for screen content
+        let quality = 70u8;
 
         let mut worker_threads = Vec::with_capacity(num_workers);
         for id in 0..num_workers {

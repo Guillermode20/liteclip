@@ -9,6 +9,10 @@ use std::process::Command;
 use tracing::{debug, info, warn};
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
+/// Process creation flags to prevent console window from appearing.
+/// Note: CREATE_NO_WINDOW is ignored if combined with DETACHED_PROCESS,
+/// so we use only CREATE_NO_WINDOW to ensure the flag takes effect.
+pub const PROCESS_CREATION_FLAGS: u32 = CREATE_NO_WINDOW;
 
 /// Find H.264 Annex B start code (00 00 01 or 00 00 00 01) using SIMD-accelerated search.
 ///
@@ -114,7 +118,7 @@ pub fn check_encoder_available(encoder_name: &str) -> bool {
         .arg("-encoders")
         .arg("-v")
         .arg("error")
-        .creation_flags(CREATE_NO_WINDOW)
+        .creation_flags(PROCESS_CREATION_FLAGS)
         .output();
     let listed = match output {
         Ok(out) => {
@@ -167,7 +171,7 @@ pub fn check_encoder_available(encoder_name: &str) -> bool {
     }
     debug!("Probing encoder {} with FFmpeg", encoder_name);
     let probe = probe_cmd
-        .creation_flags(CREATE_NO_WINDOW)
+        .creation_flags(PROCESS_CREATION_FLAGS)
         .arg("-f")
         .arg("null")
         .arg("-")

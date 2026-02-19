@@ -7,6 +7,7 @@
 
 use anyhow::{Context, Result};
 use crossbeam::channel::Sender;
+use tracing::warn;
 use tracing::{debug, error, info, trace};
 use tray_icon::{
     menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
@@ -17,6 +18,7 @@ use super::{AppEvent, TrayEvent};
 
 /// Tray menu item IDs.
 const ID_SAVE_CLIP: &str = "tray_save_clip";
+const ID_OPEN_SETTINGS: &str = "tray_open_settings";
 const ID_EXIT: &str = "tray_exit";
 
 /// Managed system-tray icon.
@@ -36,11 +38,13 @@ impl TrayManager {
         debug!("Initialising tray-icon");
 
         let item_save = MenuItem::with_id(ID_SAVE_CLIP, "Save Clip", true, None);
+        let item_settings = MenuItem::with_id(ID_OPEN_SETTINGS, "Open Settings", true, None);
         let separator = PredefinedMenuItem::separator();
         let item_exit = MenuItem::with_id(ID_EXIT, "Exit", true, None);
 
         let menu = Menu::new();
         menu.append(&item_save).ok();
+        menu.append(&item_settings).ok();
         menu.append(&separator).ok();
         menu.append(&item_exit).ok();
 
@@ -77,6 +81,7 @@ impl TrayManager {
             info!("Tray menu selected: {}", ev.id.0);
             let tray_event = match ev.id.0.as_str() {
                 ID_SAVE_CLIP => Some(TrayEvent::SaveClip),
+                ID_OPEN_SETTINGS => Some(TrayEvent::OpenSettings),
                 ID_EXIT => Some(TrayEvent::Exit),
                 other => {
                     trace!("Unknown menu id: {other}");
@@ -117,12 +122,27 @@ fn load_tray_icon() -> tray_icon::Icon {
         }
     }
 
-    // Fallback: solid dodger-blue 32 × 32 square.
-    let size = 32usize;
+    // Fallback: solid dodger-blue 16 × 16 square (minimum recommended size for tray icons)
+    // Using smaller size to avoid potential icon dimension issues
+    let size = 16usize;
     let mut rgba = Vec::with_capacity(size * size * 4);
     for _ in 0..(size * size) {
         rgba.extend_from_slice(&[0x1E, 0x90, 0xFF, 0xFF]);
     }
-    tray_icon::Icon::from_rgba(rgba, size as u32, size as u32)
-        .expect("fallback tray icon is always valid")
+    match tray_icon::Icon::from_rgba(rgba, size as u32, size as u32) {
+        Ok(icon) => {
+            debug!("Tray: using fallback icon");
+            icon
+        }
+        Err(e) => {
+            warn!(
+                "Failed to create fallback icon: {}. Using default system icon.",
+                e
+            );
+            // Return a transparent 1x1 icon as last resort - tray-icon crate will handle this
+            let transparent = vec![0, 0, 0, 0];
+            tray_icon::Icon::from_rgba(transparent, 1, 1)
+                .expect("1x1 transparent icon must be valid")
+        }
+    }
 }

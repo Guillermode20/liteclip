@@ -3,7 +3,6 @@
 //! Acquires raw frames from the desktop/game using DXGI Desktop Duplication
 //! and captures audio using WASAPI.
 
-use crate::d3d::D3D11Texture;
 use crate::encode::EncodedPacket;
 use anyhow::Result;
 use bytes::Bytes;
@@ -18,6 +17,8 @@ pub mod dxgi;
 pub struct CaptureConfig {
     pub target_fps: u32,
     pub output_index: u32,
+    pub perform_cpu_readback: bool,
+    pub target_resolution: Option<(u32, u32)>,
 }
 
 impl Default for CaptureConfig {
@@ -25,23 +26,31 @@ impl Default for CaptureConfig {
         Self {
             target_fps: 60,
             output_index: 0,
+            perform_cpu_readback: true,
+            target_resolution: None,
         }
     }
 }
 
 impl From<&crate::config::Config> for CaptureConfig {
     fn from(config: &crate::config::Config) -> Self {
+        let target_resolution = match config.video.resolution {
+            crate::config::Resolution::Native => None,
+            crate::config::Resolution::P1080 => Some((1920, 1080)),
+            crate::config::Resolution::P720 => Some((1280, 720)),
+            crate::config::Resolution::P480 => Some((854, 480)),
+        };
         Self {
             target_fps: config.video.framerate,
             output_index: config.advanced.gpu_index,
+            perform_cpu_readback: config.advanced.use_cpu_readback,
+            target_resolution,
         }
     }
 }
 
 /// Captured frame data
 pub struct CapturedFrame {
-    /// GPU-resident texture (no CPU copy)
-    pub texture: D3D11Texture,
     /// CPU-readable BGRA frame bytes (packed, width*height*4).
     /// Uses `Bytes` for reference-counted sharing – cloning is O(1).
     pub bgra: Bytes,
@@ -51,11 +60,9 @@ pub struct CapturedFrame {
     pub resolution: (u32, u32),
 }
 
-// Manual Clone implementation because D3D11Texture may not implement Clone
 impl Clone for CapturedFrame {
     fn clone(&self) -> Self {
         Self {
-            texture: self.texture.clone(),
             bgra: self.bgra.clone(),
             timestamp: self.timestamp,
             resolution: self.resolution,

@@ -29,7 +29,7 @@ pub struct WasapiAudioManager {
 impl WasapiAudioManager {
     /// Create a new WASAPI audio manager
     pub fn new() -> Result<Self> {
-        let (packet_tx, packet_rx) = crossbeam::channel::bounded(256);
+        let (packet_tx, packet_rx) = crossbeam::channel::bounded(64);
 
         Ok(Self {
             system_capture: None,

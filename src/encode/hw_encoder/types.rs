@@ -14,10 +14,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tracing::{debug, enabled, error, info, warn, Level};
 
-use super::functions::{find_annexb_start_code, h264_nal_type, query_qpc, resolve_ffmpeg_command};
+use super::functions::{
+    find_annexb_start_code, h264_nal_type, query_qpc, resolve_ffmpeg_command,
+    PROCESS_CREATION_FLAGS,
+};
 use crate::buffer::ring::qpc_frequency;
-
-const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 /// Frame metadata passed from encoder thread to output reader thread.
 /// Used to preserve original capture timestamps for A/V sync.
@@ -261,7 +262,7 @@ impl HardwareEncoderBase {
             debug!("FFmpeg command: {}", args.join(" "));
         }
         let mut child = cmd
-            .creation_flags(CREATE_NO_WINDOW)
+            .creation_flags(PROCESS_CREATION_FLAGS)
             .spawn()
             .with_context(|| format!("Failed to start FFmpeg ({})", encoder_name))?;
         let stdin = if self.config.use_cpu_readback {
@@ -273,7 +274,7 @@ impl HardwareEncoderBase {
         };
         self.width = out_w;
         self.height = out_h;
-        let (frame_meta_tx, frame_meta_rx) = bounded::<FrameMetadata>(256);
+        let (frame_meta_tx, frame_meta_rx) = bounded::<FrameMetadata>(32);
         self.frame_meta_tx = Some(frame_meta_tx);
         let packet_tx = self.packet_tx.clone();
         let stdout = child

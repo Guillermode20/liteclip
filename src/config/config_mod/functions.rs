@@ -29,7 +29,7 @@ pub(super) fn default_save_directory() -> String {
         })
 }
 pub(super) fn default_resolution() -> Resolution {
-    Resolution::Native
+    Resolution::P1080
 }
 pub(super) fn default_framerate() -> u32 {
     60
@@ -44,7 +44,7 @@ pub(super) fn default_encoder() -> EncoderType {
     EncoderType::Auto
 }
 pub(super) fn default_quality_preset() -> QualityPreset {
-    QualityPreset::Balanced
+    QualityPreset::Performance
 }
 pub(super) fn default_rate_control() -> RateControl {
     RateControl::Vbr
@@ -87,7 +87,7 @@ pub(super) fn default_gpu_index() -> u32 {
     0
 }
 pub(super) fn default_keyframe_interval() -> u32 {
-    1
+    2
 }
 pub(super) fn default_overlay_position() -> OverlayPosition {
     OverlayPosition::TopLeft
@@ -103,7 +103,7 @@ mod tests {
         assert_eq!(config.general.replay_duration_secs, 120);
         assert_eq!(config.video.framerate, 60);
         assert_eq!(config.video.codec, Codec::H264);
-        assert_eq!(config.video.quality_preset, QualityPreset::Balanced);
+        assert_eq!(config.video.quality_preset, QualityPreset::Performance);
         assert_eq!(config.video.rate_control, RateControl::Vbr);
         assert_eq!(config.video.quality_value, None);
         assert!(config.audio.capture_system);

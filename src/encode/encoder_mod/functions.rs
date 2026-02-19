@@ -136,7 +136,7 @@ pub fn spawn_encoder(
     config: EncoderConfig,
     buffer: crate::buffer::ring::SharedReplayBuffer,
 ) -> Result<(EncoderHandle, Sender<crate::capture::CapturedFrame>)> {
-    let (frame_tx, frame_rx): (Sender<crate::capture::CapturedFrame>, _) = bounded(64);
+    let (frame_tx, frame_rx): (Sender<crate::capture::CapturedFrame>, _) = bounded(16);
     let frame_tx_clone = frame_tx.clone();
     let thread = std::thread::Builder::new()
         .name("encoder".to_string())

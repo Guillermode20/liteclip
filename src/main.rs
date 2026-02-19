@@ -9,9 +9,13 @@
 use anyhow::Result;
 use liteclip_replay::{app::AppState, config::Config};
 use std::env;
+use std::os::windows::process::CommandExt;
+use std::process::Command;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
+
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -213,9 +217,30 @@ async fn main() -> Result<()> {
                                         info!("Tray: Exit selected");
                                         break;
                                     }
+                                    liteclip_replay::platform::TrayEvent::OpenSettings => {
+                                        info!("Tray: Open Settings selected");
+                                        match Config::config_path() {
+                                            Ok(path) => {
+                                                let result = Command::new("cmd")
+                                                    .args(["/C", "start", "", &path.to_string_lossy()])
+                                                    .creation_flags(CREATE_NO_WINDOW)
+                                                    .spawn();
+                                                if let Err(e) = result {
+                                                    error!("Failed to open settings file: {}", e);
+                                                    let _ = platform_handle.show_notification(
+                                                        "Error",
+                                                        &format!("Failed to open settings: {}", e),
+                                                    );
+                                                }
+                                            }
+                                            Err(e) => {
+                                                error!("Failed to get config path: {}", e);
+                                            }
+                                        }
+                                    }
                                     _ => {
                                         // Other tray events are not used (StartRecording, StopRecording,
-                                        // ToggleRecording, OpenSettings removed)
+                                        // ToggleRecording)
                                     }
                                 }
                             }

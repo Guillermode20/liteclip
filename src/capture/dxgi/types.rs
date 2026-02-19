@@ -5,9 +5,8 @@
 use windows_core::Interface;
 
 use crate::capture::{CaptureConfig, CapturedFrame};
-use crate::d3d::D3D11Texture;
 use anyhow::{bail, Context, Result};
-use bytes::BytesMut;
+use bytes::Bytes;
 use crossbeam::channel::{bounded, Receiver, Sender};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -37,6 +36,8 @@ struct DxgiCaptureState {
     staging_texture: Option<ID3D11Texture2D>,
     frame_width: u32,
     frame_height: u32,
+    native_buffer: Vec<u8>,
+    output_buffer: Vec<u8>,
 }
 impl DxgiCaptureState {
     pub fn get_qpc_timestamp() -> i64 {
@@ -58,7 +59,7 @@ pub struct DxgiCapture {
 impl DxgiCapture {
     /// Create a new DXGI capture instance
     pub fn new() -> Result<Self> {
-        let (frame_tx, frame_rx) = bounded::<CapturedFrame>(256);
+        let (frame_tx, frame_rx) = bounded::<CapturedFrame>(16);
         Ok(Self {
             config: CaptureConfig::default(),
             running: Arc::new(AtomicBool::new(false)),
@@ -159,6 +160,7 @@ impl DxgiCapture {
             let frame_height =
                 (output_desc.DesktopCoordinates.bottom - output_desc.DesktopCoordinates.top) as u32;
             info!("DXGI capture initialized: {}x{}", frame_width, frame_height);
+            let native_size = (frame_width * frame_height * 4) as usize;
             Ok(DxgiCaptureState {
                 d3d_device,
                 d3d_context,
@@ -167,6 +169,8 @@ impl DxgiCapture {
                 staging_texture: None,
                 frame_width,
                 frame_height,
+                native_buffer: vec![0u8; native_size],
+                output_buffer: Vec::with_capacity(native_size),
             })
         }
     }
@@ -210,6 +214,8 @@ impl DxgiCapture {
     fn capture_frame(
         state: &mut DxgiCaptureState,
         timeout_ms: u32,
+        perform_cpu_readback: bool,
+        target_resolution: Option<(u32, u32)>,
     ) -> Result<Option<CapturedFrame>> {
         unsafe {
             let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
@@ -221,6 +227,18 @@ impl DxgiCapture {
             );
             match hr {
                 Ok(_) => {
+                    let timestamp = Self::get_qpc_timestamp();
+                    let native_res = (state.frame_width, state.frame_height);
+                    if !perform_cpu_readback {
+                        state.duplication.ReleaseFrame().ok();
+                        let output_res = target_resolution.unwrap_or(native_res);
+                        let frame = CapturedFrame {
+                            bgra: Bytes::new(),
+                            timestamp,
+                            resolution: output_res,
+                        };
+                        return Ok(Some(frame));
+                    }
                     let resource = desktop_resource.context("Desktop resource is null")?;
                     let captured_texture: ID3D11Texture2D = resource
                         .cast()
@@ -248,62 +266,96 @@ impl DxgiCapture {
                             )
                             .ok()
                             .context("Failed to map staging texture for readback")?;
-                        let width = state.frame_width as usize;
-                        let height = state.frame_height as usize;
-                        let row_bytes = width * 4;
+                        let src_w = state.frame_width as usize;
+                        let src_h = state.frame_height as usize;
+                        let src_row_bytes = src_w * 4;
                         let src_pitch = mapped.RowPitch as usize;
                         if mapped.pData.is_null() {
                             state.d3d_context.Unmap(Some(&staging_resource), 0);
                             bail!("Mapped staging texture has null data pointer");
                         }
-                        let total_src_bytes = (height.saturating_sub(1))
+                        let total_src_bytes = (src_h.saturating_sub(1))
                             .checked_mul(src_pitch)
-                            .and_then(|v| v.checked_add(row_bytes));
+                            .and_then(|v| v.checked_add(src_row_bytes));
                         if total_src_bytes.is_none()
                             || total_src_bytes.unwrap() > isize::MAX as usize
                         {
                             state.d3d_context.Unmap(Some(&staging_resource), 0);
                             bail!(
                                 "Frame dimensions too large for safe copy: {}x{}, pitch={}",
-                                width,
-                                height,
+                                src_w,
+                                src_h,
                                 src_pitch
                             );
                         }
-                        let total_bytes = row_bytes * height;
                         let src_ptr = mapped.pData as *const u8;
-                        let mut bgra_buffer = BytesMut::with_capacity(total_bytes);
-                        bgra_buffer.set_len(total_bytes);
-                        if src_pitch == row_bytes {
-                            std::ptr::copy_nonoverlapping(
-                                src_ptr,
-                                bgra_buffer.as_mut_ptr(),
-                                total_bytes,
-                            );
-                        } else {
-                            let dst_ptr = bgra_buffer.as_mut_ptr();
-                            let mut src_row_offset = 0;
-                            let mut dst_row_offset = 0;
-                            for _row in 0..height {
+                        let (out_w, out_h, bgra) = if let Some((tw, th)) = target_resolution {
+                            let out_w = tw as usize;
+                            let out_h = th as usize;
+                            let total_bytes = out_w * out_h * 4;
+                            if src_pitch == src_row_bytes {
                                 std::ptr::copy_nonoverlapping(
-                                    src_ptr.add(src_row_offset),
-                                    dst_ptr.add(dst_row_offset),
-                                    row_bytes,
+                                    src_ptr,
+                                    state.native_buffer.as_mut_ptr(),
+                                    src_w * src_h * 4,
                                 );
-                                src_row_offset += src_pitch;
-                                dst_row_offset += row_bytes;
+                            } else {
+                                let dst_ptr = state.native_buffer.as_mut_ptr();
+                                let mut src_row_offset = 0;
+                                let mut dst_row_offset = 0;
+                                for _row in 0..src_h {
+                                    std::ptr::copy_nonoverlapping(
+                                        src_ptr.add(src_row_offset),
+                                        dst_ptr.add(dst_row_offset),
+                                        src_row_bytes,
+                                    );
+                                    src_row_offset += src_pitch;
+                                    dst_row_offset += src_row_bytes;
+                                }
                             }
-                        }
-                        let bgra = bgra_buffer.freeze();
+                            state.output_buffer.resize(total_bytes, 0);
+                            Self::downscale_bgra_bilinear(
+                                &state.native_buffer,
+                                src_w,
+                                src_h,
+                                out_w,
+                                out_h,
+                                &mut state.output_buffer,
+                            );
+                            let bgra = Bytes::copy_from_slice(&state.output_buffer);
+                            (out_w, out_h, bgra)
+                        } else {
+                            let total_bytes = src_row_bytes * src_h;
+                            state.output_buffer.resize(total_bytes, 0);
+                            if src_pitch == src_row_bytes {
+                                std::ptr::copy_nonoverlapping(
+                                    src_ptr,
+                                    state.output_buffer.as_mut_ptr(),
+                                    total_bytes,
+                                );
+                            } else {
+                                let dst_ptr = state.output_buffer.as_mut_ptr();
+                                let mut src_row_offset = 0;
+                                let mut dst_row_offset = 0;
+                                for _row in 0..src_h {
+                                    std::ptr::copy_nonoverlapping(
+                                        src_ptr.add(src_row_offset),
+                                        dst_ptr.add(dst_row_offset),
+                                        src_row_bytes,
+                                    );
+                                    src_row_offset += src_pitch;
+                                    dst_row_offset += src_row_bytes;
+                                }
+                            }
+                            let bgra = Bytes::copy_from_slice(&state.output_buffer);
+                            (src_w, src_h, bgra)
+                        };
                         state.d3d_context.Unmap(Some(&staging_resource), 0);
                         state.duplication.ReleaseFrame().ok();
-                        let timestamp = Self::get_qpc_timestamp();
-                        let texture_to_send = D3D11Texture::new(staging.clone());
                         let frame = CapturedFrame {
-                            texture: texture_to_send,
                             bgra,
                             timestamp,
-                            resolution: (state.frame_width, state.frame_height),
+                            resolution: (out_w as u32, out_h as u32),
                         };
                         return Ok(Some(frame));
                     }
@@ -318,6 +370,53 @@ impl DxgiCapture {
             }
         }
     }
+    fn downscale_bgra_bilinear(
+        src: &[u8],
+        src_w: usize,
+        src_h: usize,
+        out_w: usize,
+        out_h: usize,
+        dst: &mut [u8],
+    ) {
+        let x_ratio = src_w as f64 / out_w as f64;
+        let y_ratio = src_h as f64 / out_h as f64;
+
+        for dst_y in 0..out_h {
+            let src_y_f = dst_y as f64 * y_ratio;
+            let src_y0 = src_y_f.floor() as usize;
+            let src_y1 = (src_y0 + 1).min(src_h - 1);
+            let y_frac = src_y_f - src_y0 as f64;
+
+            let dst_row_base = dst_y * out_w * 4;
+
+            for dst_x in 0..out_w {
+                let src_x_f = dst_x as f64 * x_ratio;
+                let src_x0 = src_x_f.floor() as usize;
+                let src_x1 = (src_x0 + 1).min(src_w - 1);
+                let x_frac = src_x_f - src_x0 as f64;
+
+                let i00 = (src_y0 * src_w + src_x0) * 4;
+                let i10 = (src_y0 * src_w + src_x1) * 4;
+                let i01 = (src_y1 * src_w + src_x0) * 4;
+                let i11 = (src_y1 * src_w + src_x1) * 4;
+
+                let di = dst_row_base + dst_x * 4;
+
+                for c in 0..4 {
+                    let v00 = src[i00 + c] as f64;
+                    let v10 = src[i10 + c] as f64;
+                    let v01 = src[i01 + c] as f64;
+                    let v11 = src[i11 + c] as f64;
+
+                    let v_top = v00 + (v10 - v00) * x_frac;
+                    let v_bot = v01 + (v11 - v01) * x_frac;
+                    let v = v_top + (v_bot - v_top) * y_frac;
+
+                    dst[di + c] = v.round().clamp(0.0, 255.0) as u8;
+                }
+            }
+        }
+    }
     /// Capture thread entry point
     pub(crate) fn capture_loop(
         running: Arc<AtomicBool>,
@@ -325,6 +424,8 @@ impl DxgiCapture {
         config: CaptureConfig,
     ) {
         info!("DXGI capture thread started: {} FPS", config.target_fps);
+        let perform_cpu_readback = config.perform_cpu_readback;
+        let target_resolution = config.target_resolution;
         let timeout_ms = (1000u32 / config.target_fps.max(1)).max(1)
             + u32::from(!1000u32.is_multiple_of(config.target_fps.max(1)));
         let frame_interval_ns = 1_000_000_000u64 / config.target_fps.max(1) as u64;
@@ -343,7 +444,12 @@ impl DxgiCapture {
         let mut log_counter = 0u64;
         const LOG_INTERVAL: u64 = 300;
         while running.load(Ordering::Relaxed) {
-            match Self::capture_frame(&mut state, timeout_ms) {
+            match Self::capture_frame(
+                &mut state,
+                timeout_ms,
+                perform_cpu_readback,
+                target_resolution,
+            ) {
                 Ok(Some(frame)) => {
                     let elapsed = last_frame_time.elapsed().as_nanos() as u64;
                     if elapsed < frame_interval_ns {
