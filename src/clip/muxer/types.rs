@@ -18,7 +18,7 @@ use tracing::{debug, error, info, trace, warn};
 use crate::encode::hw_encoder::PROCESS_CREATION_FLAGS;
 
 use super::functions::{
-    h264_nal_type, is_h264_format, qpc_delta_to_aligned_pcm_bytes, write_silence_bytes,
+    h264_nal_type, hevc_nal_type, is_h264_format, qpc_delta_to_aligned_pcm_bytes, write_silence_bytes,
     AUDIO_BITRATE, AUDIO_CHANNELS, AUDIO_SAMPLE_RATE,
 };
 #[cfg(feature = "ffmpeg")]
@@ -147,15 +147,36 @@ impl Muxer {
         }
         self.video_packets.sort_by_key(|packet| packet.pts);
         self.audio_packets.sort_by_key(|packet| packet.pts);
-        let is_h264 = self
+        let configured_codec = self.config.video_codec.to_ascii_lowercase();
+        if configured_codec == "h264" || configured_codec == "avc" {
+            info!("Configured codec is H.264 - using fast muxing path (no transcoding)");
+            return self.finalize_ffmpeg_h264_copy(ffmpeg_cmd, qpc_frequency_f64);
+        }
+        if configured_codec == "hevc" || configured_codec == "h265" {
+            info!("Configured codec is HEVC - using fast muxing path (no transcoding)");
+            return self.finalize_ffmpeg_hevc_copy(ffmpeg_cmd, qpc_frequency_f64);
+        }
+
+        let looks_like_h264 = self
             .video_packets
             .first()
-            .map(|p| is_h264_format(&p.data))
+            .map(|p| is_h264_format(&p.data) && h264_nal_type(&p.data).is_some())
             .unwrap_or(false);
-        if is_h264 {
+        if looks_like_h264 {
             info!("Detected H.264 format - using fast muxing path (no transcoding)");
             return self.finalize_ffmpeg_h264_copy(ffmpeg_cmd, qpc_frequency_f64);
         }
+
+        let looks_like_hevc = self
+            .video_packets
+            .first()
+            .map(|p| hevc_nal_type(&p.data).is_some())
+            .unwrap_or(false);
+        if looks_like_hevc {
+            info!("Detected HEVC format - using fast muxing path (no transcoding)");
+            return self.finalize_ffmpeg_hevc_copy(ffmpeg_cmd, qpc_frequency_f64);
+        }
+
         info!("Detected MJPEG format - using transcoding path");
         self.finalize_ffmpeg_mjpeg_transcode(ffmpeg_cmd, qpc_frequency_f64)
     }
@@ -324,6 +345,201 @@ impl Muxer {
         }
         info!(
             "H.264 fast mux complete: {:?} ({} frames)",
+            self.output_path,
+            self.video_packets.len()
+        );
+        Ok(self.output_path.clone())
+    }
+    /// Fast path: Mux pre-encoded HEVC frames directly to MP4 without transcoding
+    #[cfg(feature = "ffmpeg")]
+    fn finalize_ffmpeg_hevc_copy(
+        &self,
+        ffmpeg_cmd: OsString,
+        qpc_frequency_f64: f64,
+    ) -> Result<PathBuf> {
+        let frame_packets: Vec<&EncodedPacket> = self
+            .video_packets
+            .iter()
+            .filter(|packet| matches!(hevc_nal_type(packet.data.as_ref()), Some(0..=31)))
+            .collect();
+        if frame_packets.is_empty() {
+            bail!(
+                "Clip does not yet contain a decodable HEVC frame (no VCL NAL found). Try saving again after a short delay."
+            );
+        }
+        let effective_fps = if frame_packets.len() >= 2 {
+            let first_pts = frame_packets.first().map(|p| p.pts).unwrap_or(0);
+            let last_pts = frame_packets.last().map(|p| p.pts).unwrap_or(first_pts);
+            let span_qpc = (last_pts - first_pts).max(1) as f64;
+            let span_secs = span_qpc / qpc_frequency_f64;
+            if span_secs > 0.0 {
+                ((frame_packets.len().saturating_sub(1)) as f64 / span_secs)
+                    .clamp(0.1, self.config.fps.max(1.0))
+            } else {
+                self.config.fps.max(1.0)
+            }
+        } else {
+            self.config.fps.max(1.0)
+        };
+
+        info!(
+            "Muxing HEVC stream with FPS {:.3} (frame_nals={}, total_nals={})",
+            effective_fps,
+            frame_packets.len(),
+            self.video_packets.len()
+        );
+
+        let hevc_temp_path = self.output_path.with_extension("hevc");
+        {
+            let mut hevc_file = std::fs::File::create(&hevc_temp_path).with_context(|| {
+                format!("Failed to create temp HEVC file: {:?}", hevc_temp_path)
+            })?;
+
+            let mut first_irap_index: Option<usize> = None;
+            let mut has_vps_before_irap = false;
+            let mut has_sps_before_irap = false;
+            let mut has_pps_before_irap = false;
+            let mut first_vps: Option<&[u8]> = None;
+            let mut first_sps: Option<&[u8]> = None;
+            let mut first_pps: Option<&[u8]> = None;
+
+            for (index, packet) in self.video_packets.iter().enumerate() {
+                match hevc_nal_type(packet.data.as_ref()) {
+                    Some(32) => {
+                        if first_vps.is_none() {
+                            first_vps = Some(packet.data.as_ref());
+                        }
+                        if first_irap_index.is_none() {
+                            has_vps_before_irap = true;
+                        }
+                    }
+                    Some(33) => {
+                        if first_sps.is_none() {
+                            first_sps = Some(packet.data.as_ref());
+                        }
+                        if first_irap_index.is_none() {
+                            has_sps_before_irap = true;
+                        }
+                    }
+                    Some(34) => {
+                        if first_pps.is_none() {
+                            first_pps = Some(packet.data.as_ref());
+                        }
+                        if first_irap_index.is_none() {
+                            has_pps_before_irap = true;
+                        }
+                    }
+                    Some(16..=23) => {
+                        if first_irap_index.is_none() {
+                            first_irap_index = Some(index);
+                        }
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+
+            if first_irap_index.is_some() {
+                if !has_vps_before_irap {
+                    if let Some(vps) = first_vps {
+                        hevc_file
+                            .write_all(vps)
+                            .context("Failed to write VPS to temp HEVC file")?;
+                    }
+                }
+                if !has_sps_before_irap {
+                    if let Some(sps) = first_sps {
+                        hevc_file
+                            .write_all(sps)
+                            .context("Failed to write SPS to temp HEVC file")?;
+                    }
+                }
+                if !has_pps_before_irap {
+                    if let Some(pps) = first_pps {
+                        hevc_file
+                            .write_all(pps)
+                            .context("Failed to write PPS to temp HEVC file")?;
+                    }
+                }
+            }
+
+            for packet in &self.video_packets {
+                hevc_file
+                    .write_all(packet.data.as_ref())
+                    .context("Failed to write HEVC data to temp file")?;
+            }
+        }
+
+        let audio_tracks = self.write_audio_temp_pcm_tracks()?;
+        let mut command = Command::new(&ffmpeg_cmd);
+        command
+            .arg("-y")
+            .arg("-f")
+            .arg("hevc")
+            .arg("-r")
+            .arg(format!("{:.6}", effective_fps))
+            .arg("-i")
+            .arg(&hevc_temp_path);
+        for track in &audio_tracks {
+            command
+                .arg("-f")
+                .arg("s16le")
+                .arg("-ar")
+                .arg(AUDIO_SAMPLE_RATE.to_string())
+                .arg("-ac")
+                .arg(AUDIO_CHANNELS.to_string())
+                .arg("-i")
+                .arg(&track.path);
+        }
+        command.arg("-map").arg("0:v:0").arg("-c:v").arg("copy");
+        Self::append_ffmpeg_audio_track_mapping_args(&mut command, &audio_tracks);
+        if self.config.faststart {
+            command.arg("-movflags").arg("+faststart");
+        }
+
+        let output = command
+            .arg(&self.output_path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .creation_flags(PROCESS_CREATION_FLAGS)
+            .output()
+            .with_context(|| format!("Failed to run ffmpeg for HEVC remux: {:?}", ffmpeg_cmd))?;
+
+        let _ = std::fs::remove_file(&hevc_temp_path);
+        for track in &audio_tracks {
+            let _ = std::fs::remove_file(&track.path);
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !output.status.success() {
+            if self.output_path.exists() {
+                let _ = std::fs::remove_file(&self.output_path);
+            }
+            error!("FFmpeg HEVC remux stderr:\n{}", stderr);
+            bail!(
+                "ffmpeg failed to remux HEVC to MP4: status {}",
+                output.status
+            );
+        }
+        if !stderr.is_empty() {
+            debug!("FFmpeg HEVC remux output:\n{}", stderr);
+        }
+
+        let metadata = std::fs::metadata(&self.output_path).with_context(|| {
+            format!(
+                "Missing output MP4 after HEVC remux: {:?}",
+                self.output_path
+            )
+        })?;
+        if metadata.len() == 0 {
+            bail!(
+                "Generated MP4 is empty after HEVC remux: {:?}",
+                self.output_path
+            );
+        }
+
+        info!(
+            "HEVC fast mux complete: {:?} ({} frames)",
             self.output_path,
             self.video_packets.len()
         );

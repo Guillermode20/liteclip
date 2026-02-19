@@ -72,6 +72,16 @@ pub fn h264_nal_type(data: &[u8]) -> Option<u8> {
     }
     None
 }
+
+pub fn hevc_nal_type(data: &[u8]) -> Option<u8> {
+    if data.len() >= 6 && data[0..4] == [0x00, 0x00, 0x00, 0x01] {
+        return Some((data[4] >> 1) & 0x3f);
+    }
+    if data.len() >= 5 && data[0..3] == [0x00, 0x00, 0x01] {
+        return Some((data[3] >> 1) & 0x3f);
+    }
+    None
+}
 /// Calculate start timestamp for clip based on duration
 ///
 /// Returns the QPC timestamp to seek to (nearest keyframe at or before this time).
@@ -175,6 +185,12 @@ mod tests {
     fn test_is_h264_format_too_short() {
         let short_data = vec![0x00, 0x00];
         assert!(!is_h264_format(&short_data));
+    }
+    #[test]
+    fn test_hevc_nal_type_parsing() {
+        // 4-byte start code + HEVC NAL header where nal_unit_type = 32 (VPS)
+        let hevc_data = vec![0x00, 0x00, 0x00, 0x01, 0x40, 0x01];
+        assert_eq!(hevc_nal_type(&hevc_data), Some(32));
     }
     #[cfg(feature = "ffmpeg")]
     #[test]

@@ -81,6 +81,21 @@ pub(super) fn h264_nal_type(nal_data: &[u8]) -> Option<u8> {
     None
 }
 
+pub(super) fn hevc_nal_type(nal_data: &[u8]) -> Option<u8> {
+    if nal_data.len() >= 6
+        && nal_data[0] == 0x00
+        && nal_data[1] == 0x00
+        && nal_data[2] == 0x00
+        && nal_data[3] == 0x01
+    {
+        return Some((nal_data[4] >> 1) & 0x3f);
+    }
+    if nal_data.len() >= 5 && nal_data[0] == 0x00 && nal_data[1] == 0x00 && nal_data[2] == 0x01 {
+        return Some((nal_data[3] >> 1) & 0x3f);
+    }
+    None
+}
+
 struct BitReader<'a> {
     data: &'a [u8],
     bit_pos: usize,

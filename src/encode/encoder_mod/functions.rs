@@ -47,26 +47,35 @@ fn set_encoder_thread_priority() {
 ///
 /// Priority order: NVENC → AMF → QSV → None (software)
 #[cfg(feature = "ffmpeg")]
-pub fn detect_hardware_encoder() -> HardwareEncoder {
-    debug!("Detecting hardware encoders...");
-    if hw_encoder::check_encoder_available("h264_nvenc") {
+pub fn detect_hardware_encoder(codec: crate::config::Codec) -> HardwareEncoder {
+    debug!("Detecting hardware encoders for codec {:?}...", codec);
+
+    let (nvenc_name, amf_name, qsv_name) = match codec {
+        crate::config::Codec::H264 => ("h264_nvenc", "h264_amf", Some("h264_qsv")),
+        crate::config::Codec::H265 => ("hevc_nvenc", "hevc_amf", Some("hevc_qsv")),
+        crate::config::Codec::Av1 => ("av1_nvenc", "av1_amf", None),
+    };
+
+    if hw_encoder::check_encoder_available(nvenc_name) {
         info!("Using NVIDIA NVENC encoder");
         return HardwareEncoder::Nvenc;
     }
-    if hw_encoder::check_encoder_available("h264_amf") {
+    if hw_encoder::check_encoder_available(amf_name) {
         info!("Using AMD AMF encoder");
         return HardwareEncoder::Amf;
     }
-    if hw_encoder::check_encoder_available("h264_qsv") {
-        info!("Using Intel QSV encoder");
-        return HardwareEncoder::Qsv;
+    if let Some(qsv_name) = qsv_name {
+        if hw_encoder::check_encoder_available(qsv_name) {
+            info!("Using Intel QSV encoder");
+            return HardwareEncoder::Qsv;
+        }
     }
     info!("No hardware encoder, using software encoding");
     HardwareEncoder::None
 }
 /// Detect available hardware encoder (non-FFmpeg fallback)
 #[cfg(not(feature = "ffmpeg"))]
-pub fn detect_hardware_encoder() -> HardwareEncoder {
+pub fn detect_hardware_encoder(_codec: crate::config::Codec) -> HardwareEncoder {
     info!("FFmpeg not compiled in, using software encoding");
     HardwareEncoder::None
 }
@@ -87,7 +96,7 @@ pub fn create_encoder(config: &EncoderConfig) -> Result<Box<dyn Encoder>> {
     let encoder_type = config.encoder_type;
     let encoder: Box<dyn Encoder> = match encoder_type {
         crate::config::EncoderType::Auto => {
-            let hw = detect_hardware_encoder();
+            let hw = detect_hardware_encoder(config.codec);
             match hw {
                 HardwareEncoder::Nvenc => {
                     if let Ok(enc) = hw_encoder::NvencEncoder::new(config) {

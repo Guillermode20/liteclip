@@ -2,7 +2,7 @@
 //!
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
-use crate::config::{QualityPreset, RateControl};
+use crate::config::{Codec, QualityPreset, RateControl};
 use crate::encode::frame_writer::AsyncFrameWriter;
 use crate::encode::{EncodedPacket, EncoderConfig, StreamType};
 use anyhow::{Context, Result};
@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use tracing::{debug, enabled, error, info, warn, Level};
 
 use super::functions::{
-    find_annexb_start_code, h264_nal_type, h264_nonidr_is_intra_slice, query_qpc,
+    find_annexb_start_code, h264_nal_type, h264_nonidr_is_intra_slice, hevc_nal_type, query_qpc,
     resolve_ffmpeg_command, PROCESS_CREATION_FLAGS,
 };
 use crate::buffer::ring::qpc_frequency;
@@ -245,9 +245,15 @@ impl HardwareEncoderBase {
             cmd.arg("-tune").arg(tune);
         }
         self.add_rate_control_options(&mut cmd, encoder_name);
-        if encoder_name.starts_with("h264_") {
+        let output_format = if encoder_name.starts_with("h264_") {
             cmd.arg("-bsf:v").arg("h264_mp4toannexb");
-        }
+            "h264"
+        } else if encoder_name.starts_with("hevc_") {
+            cmd.arg("-bsf:v").arg("hevc_mp4toannexb");
+            "hevc"
+        } else {
+            "h264"
+        };
         let keyframe_interval_secs =
             self.config.keyframe_interval_frames() as f64 / self.config.framerate.max(1) as f64;
         debug!(
@@ -269,7 +275,7 @@ impl HardwareEncoderBase {
             .arg("-fps_mode")
             .arg("cfr")
             .arg("-f")
-            .arg("h264")
+            .arg(output_format)
             .arg("pipe:1");
         cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::piped());
@@ -494,6 +500,7 @@ impl HardwareEncoderBase {
         frame_meta_rx: Receiver<FrameMetadata>,
         start_qpc: i64,
     ) -> thread::JoinHandle<()> {
+        let is_hevc = matches!(self.config.codec, Codec::H265);
         let expected_keyframe_interval_secs = (self.config.keyframe_interval_frames() as f64
             / self.config.framerate.max(1) as f64)
             .max(1.0);
@@ -526,11 +533,19 @@ impl HardwareEncoderBase {
                 if nal_data.is_empty() {
                     return true;
                 }
-                let nal_type = h264_nal_type(&nal_data);
-                let is_nonidr_intra =
-                    matches!(nal_type, Some(1)) && h264_nonidr_is_intra_slice(&nal_data);
-                let is_keyframe = matches!(nal_type, Some(5)) || is_nonidr_intra;
-                let is_frame_nal = matches!(nal_type, Some(1 | 5));
+                let (nal_type, is_nonidr_intra, is_keyframe, is_frame_nal) = if is_hevc {
+                    let nal_type = hevc_nal_type(&nal_data);
+                    let is_frame_nal = matches!(nal_type, Some(0..=31));
+                    let is_keyframe = matches!(nal_type, Some(16..=23));
+                    (nal_type, false, is_keyframe, is_frame_nal)
+                } else {
+                    let nal_type = h264_nal_type(&nal_data);
+                    let is_nonidr_intra =
+                        matches!(nal_type, Some(1)) && h264_nonidr_is_intra_slice(&nal_data);
+                    let is_keyframe = matches!(nal_type, Some(5)) || is_nonidr_intra;
+                    let is_frame_nal = matches!(nal_type, Some(1 | 5));
+                    (nal_type, is_nonidr_intra, is_keyframe, is_frame_nal)
+                };
                 if is_frame_nal {
                     frame_nals_seen.set(frame_nals_seen.get().saturating_add(1));
                 }
@@ -550,15 +565,18 @@ impl HardwareEncoderBase {
                     );
 
                     // Track IDR cadence for diagnostics.
-                    if nal_type == Some(5) {
+                    if (!is_hevc && nal_type == Some(5))
+                        || (is_hevc && matches!(nal_type, Some(16..=23)))
+                    {
                         idr_nals_seen.set(idr_nals_seen.get().saturating_add(1));
                         last_idr_packet_count.set(count);
                         last_idr_wallclock_secs.set(output_reader_start.elapsed().as_secs_f64());
                         debug!(
-                            "Detected IDR frame (type 5) at packet {} - total_idr_nals={}, frame_nals_seen={}",
+                            "Detected keyframe NAL at packet {} - total_idr_nals={}, frame_nals_seen={}, codec={}",
                             count,
                             idr_nals_seen.get(),
-                            frame_nals_seen.get()
+                            frame_nals_seen.get(),
+                            if is_hevc { "hevc" } else { "h264" }
                         );
                     } else if is_nonidr_intra {
                         debug!(
@@ -986,7 +1004,12 @@ pub struct NvencEncoder {
 impl NvencEncoder {
     pub fn new(config: &EncoderConfig) -> Result<Self> {
         debug!("Creating NVENC encoder");
-        let base = HardwareEncoderBase::new(config, "h264_nvenc")?;
+        let encoder_name = match config.codec {
+            Codec::H264 => "h264_nvenc",
+            Codec::H265 => "hevc_nvenc",
+            Codec::Av1 => "av1_nvenc",
+        };
+        let base = HardwareEncoderBase::new(config, encoder_name)?;
         Ok(Self { base })
     }
 }
@@ -997,7 +1020,14 @@ pub struct QsvEncoder {
 impl QsvEncoder {
     pub fn new(config: &EncoderConfig) -> Result<Self> {
         debug!("Creating QSV encoder");
-        let base = HardwareEncoderBase::new(config, "h264_qsv")?;
+        let encoder_name = match config.codec {
+            Codec::H264 => "h264_qsv",
+            Codec::H265 => "hevc_qsv",
+            Codec::Av1 => {
+                anyhow::bail!("AV1 is not supported by QSV path in this build")
+            }
+        };
+        let base = HardwareEncoderBase::new(config, encoder_name)?;
         Ok(Self { base })
     }
 }
@@ -1008,7 +1038,12 @@ pub struct AmfEncoder {
 impl AmfEncoder {
     pub fn new(config: &EncoderConfig) -> Result<Self> {
         debug!("Creating AMF encoder");
-        let base = HardwareEncoderBase::new(config, "h264_amf")?;
+        let encoder_name = match config.codec {
+            Codec::H264 => "h264_amf",
+            Codec::H265 => "hevc_amf",
+            Codec::Av1 => "av1_amf",
+        };
+        let base = HardwareEncoderBase::new(config, encoder_name)?;
         Ok(Self { base })
     }
 }

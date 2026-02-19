@@ -388,7 +388,13 @@ impl AppState {
             });
         let fps = self.config.video.framerate as f64;
 
+        let muxer_video_codec = match self.config.video.codec {
+            crate::config::Codec::H264 => "h264",
+            crate::config::Codec::H265 => "hevc",
+            crate::config::Codec::Av1 => "av1",
+        };
         let muxer_config = MuxerConfig::new(width, height, fps, &output_path)
+            .with_video_codec(muxer_video_codec)
             .with_expect_audio(self.config.audio.capture_system || self.config.audio.capture_mic);
 
         let buffer = self.buffer.clone();
