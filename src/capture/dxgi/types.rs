@@ -473,7 +473,7 @@ impl DxgiCapture {
                 Ok(Some(frame)) => {
                     last_frame = Some(frame.clone());
                     let now = Instant::now();
-                    if now > next_frame_deadline + frame_interval {
+                    if now > next_frame_deadline + Duration::from_millis(500) {
                         next_frame_deadline = now;
                     }
                     Self::wait_until_deadline(next_frame_deadline);
@@ -553,7 +553,7 @@ impl DxgiCapture {
                     frame.timestamp = Self::get_qpc_timestamp();
 
                     let now = Instant::now();
-                    if now > next_frame_deadline + frame_interval {
+                    if now > next_frame_deadline + Duration::from_millis(500) {
                         next_frame_deadline = now;
                     }
                     Self::wait_until_deadline(next_frame_deadline);
