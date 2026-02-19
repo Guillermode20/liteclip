@@ -1,10 +1,10 @@
 # AGENTS.md
 
-This file provides guidance to agents when working with code in this repository.
+This file provides guidance to AI agents when working with code in this repository.
 
 ## Project Context
 
-LiteClip Replay is a Windows-only screen capture application using D3D11/DXGI Desktop Duplication. It captures desktop frames, encodes them using hardware encoders (NVENC/AMF/QSV) via FFmpeg CLI or software JPEG encoding, stores them in a memory-bounded ring buffer, and saves clips on hotkey trigger.
+LiteClip Replay is a Windows-only screen capture application using D3D11/DXGI Desktop Duplication or FFmpeg hardware pull modes. It captures desktop frames, encodes them using hardware encoders (NVENC/AMF/QSV) via FFmpeg CLI or software JPEG encoding, stores them in a memory-bounded ring buffer, and saves clips on hotkey trigger.
 
 ## Build Commands
 
@@ -17,7 +17,7 @@ cargo build --release --features ffmpeg
 # Run
 cargo run --features ffmpeg
 
-# Check (faster than build)
+# Check (faster than build - ALWAYS prefer this for validation)
 cargo check --features ffmpeg
 ```
 
@@ -67,7 +67,7 @@ cargo fmt -- --check
 - Group imports: `std`, external crates, then internal (`crate::`)
 - Use `use anyhow::Result;` for error handling
 - Use `use tracing::{debug, error, info, warn};` for logging
-- Prefer `Bytes` from `bytes` crate for ref-counted buffers
+- Prefer `Bytes` or `BytesMut` from `bytes` crate for zero-copy ref-counted buffers.
 
 ### Types
 - Use `i64` for QPC timestamps (10MHz units)
@@ -88,11 +88,6 @@ cargo fmt -- --check
 - Log recoverable errors with `warn!`/`error!` and continue
 - Validate config values in `Config::validate()` - clamp to safe ranges
 
-### Documentation
-- Use `//!` module-level docs at top of file
-- Use `///` for public items
-- Document panics, safety invariants, and examples
-
 ### Unsafe Code
 - Minimize unsafe blocks
 - Document safety invariants with `// SAFETY:` comments
@@ -100,74 +95,47 @@ cargo fmt -- --check
 
 ## Module Structure
 
-The codebase has been split using `splitrs` for better maintainability. Large files (>500 lines) are now organized into submodules:
+The codebase has been split using `splitrs` for better maintainability. Large files (>500 lines) are organized into submodules:
 
-### Split Modules
-
-| Module | Original File | New Structure |
-|--------|---------------|---------------|
-| **clip/muxer** | `src/clip/muxer.rs` (1268 lines) | `types.rs` + `functions.rs` |
-| **encode/hw_encoder** | `src/encode/hw_encoder.rs` (1152 lines) | `types.rs`, `functions.rs`, `amfencoder_traits.rs`, `nvencencoder_traits.rs`, `qsvencoder_traits.rs`, `hardwareencoderbase_traits.rs` |
-| **encode/encoder_mod** | `src/encode/mod.rs` (682 lines) | `types.rs`, `functions.rs`, `functions_2.rs`, `encodedpacket_traits.rs`, `encoderconfig_traits.rs` |
-| **capture/dxgi** | `src/capture/dxgi.rs` (577 lines) | `types.rs`, `functions.rs`, `dxgicapture_traits.rs` |
-| **config/config_mod** | `src/config.rs` (512 lines) | `types.rs`, `functions.rs`, 5 trait files (audio, video, general, advanced, hotkey config traits) |
-| **buffer/ring** | `src/buffer/ring.rs` (502 lines) | `types.rs`, `functions.rs`, `sharedreplaybuffer_traits.rs` |
+| Module | New Structure |
+|--------|---------------|
+| **clip/muxer** | `types.rs` + `functions.rs` |
+| **encode/hw_encoder** | `types.rs`, `functions.rs`, `*encoder_traits.rs` |
+| **encode/encoder_mod** | `types.rs`, `functions.rs`, `functions_2.rs`, `*_traits.rs` |
+| **capture/dxgi** | `types.rs`, `functions.rs`, `dxgicapture_traits.rs` |
+| **config/config_mod** | `types.rs`, `functions.rs`, 5 trait files |
+| **buffer/ring** | `types.rs`, `functions.rs`, `sharedreplaybuffer_traits.rs` |
 
 ### Import Patterns After Split
-
-When working with split modules:
 - Public items are re-exported via `mod.rs` using `pub use types::*` and `pub use functions::*`
 - Trait implementations are in separate `*_traits.rs` files
-- Default helper functions (for serde) are in `functions.rs` and marked `pub` or `pub(super)`
 - Cross-module access within a split directory uses `super::types::TypeName` or `super::functions::function_name`
 
-### Working with Split Files
+## Critical Code Patterns & Architecture
 
-```rust
-// Example: importing from split hw_encoder module
-use crate::encode::hw_encoder::{HardwareEncoderBase, NvencEncoder, AmfEncoder, QsvEncoder};
+### Core Pipeline Managers
+- **`AppState`** (`src/app.rs`): Lightweight coordinator holding Config, Buffer, and the Pipeline.
+- **`RecordingPipeline`** (`src/app.rs`): Encapsulates capture and encoder orchestration, audio routing, and recording lifecycle state machine.
+- **`ClipManager`** (`src/app.rs`): Handles taking snapshots of the buffer and spawning the async muxer task.
 
-// The types are re-exported from submodules
-use crate::encode::hw_encoder::types::HardwareEncoderBase;
-use crate::encode::hw_encoder::functions::resolve_ffmpeg_command;
-```
-
-## Critical Code Patterns
-
-### Hardware Encoder Selection
-Encoder selection happens in [`encode/mod.rs`](src/encode/mod.rs) but actual FFmpeg command building with encoder-specific flags is in [`encode/hw_encoder.rs`](src/encode/hw_encoder.rs). Each encoder requires different flags:
-
-- **h264_nvenc**: Uses `preset=p4`, `tune=ll` (low latency), `rc=vbr`, `cq=23`
-- **h264_amf`: **CRITICAL** - requires `-bf 0` (disable B-frames), `-sei +aud`, `-vsync cfr`. Missing B-frame disable produces unplayable output.
-- **h264_qsv**: Uses `preset=veryfast`
-
-Encoder initialization is lazy - happens on first frame, not at encoder creation.
+### Hardware Encoder Selection & Modes
+- **Hardware Pull Mode**: If hardware encoding (NVENC/AMF/QSV) is explicitly selected and `use_cpu_readback` is false, the application bypasses `DxgiCapture` and uses FFmpeg's `ddagrab` input directly.
+- **CPU Readback Mode**: Uses DXGI Desktop Duplication to copy frames to CPU memory (`BytesMut`), which are then piped into FFmpeg via stdin.
+- **FFmpeg Lifecycle**: Managed by `ManagedFfmpegProcess` to guarantee robust shutdown and prevent zombie FFmpeg processes upon app exit or restart.
 
 ### Frame Data Flow
-[`CapturedFrame`](src/capture/mod.rs) contains **both** a D3D11 texture handle AND CPU BGRA bytes. Even when using hardware encoding that only needs the GPU texture, CPU readback happens unconditionally (Phase 1 limitation). This means unnecessary memory copies.
+`CapturedFrame` (`src/capture/mod.rs`) uses `bytes::Bytes` for CPU memory. The DXGI capture thread splits and freezes chunks from a pre-allocated `BytesMut` pool to achieve zero-copy cloning when pushing to channels.
 
 ### Ring Buffer Eviction
-The [`ReplayBuffer`](src/buffer/ring.rs) evicts based on **duration**, with memory cap as a safety guard. The `duration` field controls how long of a rolling window is kept. The memory cap only kicks in if timestamps are invalid or the configured duration would exceed available memory.
+The `ReplayBuffer` (`src/buffer/ring/types.rs`) uses an `O(1)` eviction strategy. It maintains a `VecDeque<(i64, usize)>` for its keyframe index, avoiding O(N) tree rebuilds. It evicts strictly based on duration, using memory limit as a fallback safety guard.
 
-### Error Handling
-Many error paths log with `warn!`/`error!` and continue silently rather than propagating. The encoder thread may be dead but the application continues running. Always check thread join results.
+### A/V Sync
+Audio and Video timestamps use identical QPC (QueryPerformanceCounter) timelines. The `WasapiAudioManager` forwards both system and mic audio. The Muxer uses relative PTS alignment and silence insertion (`qpc_delta_to_aligned_pcm_bytes`) to ensure audio perfectly aligns with video without drift.
 
-### Configuration
-Config stored at `%APPDATA%/liteclip-replay/liteclip-replay.toml`. Resolution config is ignored if `use_native_resolution` is true - actual resolution comes from the first captured frame.
+## AI Agent Best Practices
 
-## Testing
-
-Hardware encoder tests require FFmpeg and compatible GPU. Most unit tests can run without FFmpeg:
-
-```powershell
-# Run tests without FFmpeg feature
-cargo test
-```
-
-## Dependencies
-
-- `windows` crate with many Win32 features enabled - see Cargo.toml for full list
-- `tokio` for async runtime
-- `crossbeam` for thread channels
-- `parking_lot` for synchronization primitives
-- `bytes` for ref-counted buffers (used throughout for cheap cloning)
+1. **Fast Verification**: ALWAYS use `cargo check --features ffmpeg` instead of `cargo build` to quickly verify compile errors.
+2. **Finding Files**: Use `code_search` or `find_by_name` when looking for implementations, as the `splitrs` pattern moves logic from `mod.rs` into `types.rs` and `functions.rs`.
+3. **Writing Edits**: When editing split modules, make sure you're editing `types.rs` for structs/enums and `functions.rs` for implementations.
+4. **Zero-Copy Rule**: When working with frames or packets, avoid `Vec<u8>` cloning. Use `Bytes::clone()` (which only increments a ref count) or `BytesMut::split()`.
+5. **No Blind Panics**: Always return `anyhow::Result` from worker threads and check the thread `.join()` result in Drop or Stop methods.
