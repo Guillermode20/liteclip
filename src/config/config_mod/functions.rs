@@ -5,6 +5,7 @@
 use super::types::{Codec, EncoderType, OverlayPosition, QualityPreset, RateControl, Resolution};
 
 pub const MAX_FRAMERATE: u32 = 240;
+pub const CURRENT_CONFIG_VERSION: u32 = 1;
 
 pub fn default_true() -> bool {
     true

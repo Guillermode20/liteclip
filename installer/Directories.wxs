@@ -1,0 +1,25 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Fragment>
+    <!-- Program Files (x64) install location -->
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="LiteClipFolder" Name="LiteClip">
+        <Directory Id="INSTALLDIR" Name="LiteClip Replay" />
+      </Directory>
+    </StandardDirectory>
+
+    <!-- Start Menu shortcuts -->
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ProgramMenuDir" Name="LiteClip">
+        <Directory Id="ProgramMenuShortcuts" Name="LiteClip Replay" />
+      </Directory>
+    </StandardDirectory>
+
+    <!-- Optional desktop shortcut -->
+    <StandardDirectory Id="DesktopFolder" />
+
+    <!-- ffmpeg sub-folder under application directory -->
+    <DirectoryRef Id="INSTALLDIR">
+      <Directory Id="FFMPEGDIR" Name="ffmpeg" />
+    </DirectoryRef>
+  </Fragment>
+</Wix>

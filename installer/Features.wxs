@@ -1,0 +1,21 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Fragment>
+    <!-- Feature definitions exposed in the UI -->
+    <Feature Id="CoreFeature" Title="Core application" Level="1">
+      <ComponentGroupRef Id="CoreComponents" />
+    </Feature>
+
+    <Feature Id="FFmpegFeature" Title="FFmpeg binaries" Level="1">
+      <ComponentGroupRef Id="FFmpegComponents" />
+    </Feature>
+
+    <Feature Id="Shortcuts" Title="Start Menu shortcuts" Level="1">
+      <ComponentRef Id="cmpStartMenuShortcut" />
+      <ComponentRef Id="cmpUninstallShortcut" />
+    </Feature>
+
+    <Feature Id="DesktopShortcutFeature" Title="Desktop shortcut" Level="0" Display="collapse">
+      <ComponentRef Id="cmpDesktopShortcut" />
+    </Feature>
+  </Fragment>
+</Wix>

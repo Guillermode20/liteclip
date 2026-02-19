@@ -31,9 +31,11 @@ pub struct ReplayBuffer {
     duration: Duration,
     /// Max memory budget in bytes
     max_memory_bytes: usize,
-    /// Keyframe index: VecDeque of (pts, relative_index) pairs for O(1) front/back ops
-    /// relative_index is the index within the current packets VecDeque
+    /// Keyframe index: VecDeque of (pts, absolute_index) pairs for O(1) front/back ops
+    /// absolute_index is the global index (base_offset + relative index in packets)
     pub(crate) keyframe_index: VecDeque<(i64, usize)>,
+    /// Number of packets evicted from front; used to compute relative indices
+    base_offset: usize,
     /// Total bytes currently stored
     pub(crate) total_bytes: usize,
     /// Cached SPS (NAL type 7) for H.264 stream recovery after clear
@@ -57,6 +59,7 @@ impl ReplayBuffer {
             duration,
             max_memory_bytes,
             keyframe_index: VecDeque::new(),
+            base_offset: 0,
             total_bytes: 0,
             cached_sps: None,
             cached_pps: None,
@@ -75,6 +78,7 @@ impl ReplayBuffer {
             duration,
             max_memory_bytes,
             keyframe_index: VecDeque::new(),
+            base_offset: 0,
             total_bytes: 0,
             cached_sps: None,
             cached_pps: None,
@@ -123,8 +127,8 @@ impl ReplayBuffer {
 
         // Now safe to add the new packet
         if packet.is_keyframe {
-            let relative_index = self.packets.len();
-            self.keyframe_index.push_back((packet.pts, relative_index));
+            let absolute_index = self.base_offset + self.packets.len();
+            self.keyframe_index.push_back((packet.pts, absolute_index));
         }
         self.total_bytes += packet_size;
         self.packets.push_back(packet);
@@ -142,16 +146,13 @@ impl ReplayBuffer {
     fn evict_oldest(&mut self) {
         if let Some(packet) = self.packets.pop_front() {
             self.total_bytes -= packet.data.len();
-            // Remove keyframe index entry if this was a keyframe
-            // The keyframe index stores relative indices, so we just pop_front
-            // if the oldest keyframe index refers to position 0
-            if packet.is_keyframe {
-                // Remove entries with relative_index == 0 (the evicted packet)
-                self.keyframe_index.retain(|&(_, rel_idx)| rel_idx > 0);
-            }
-            // Decrement all relative indices by 1
-            for (_, rel_idx) in self.keyframe_index.iter_mut() {
-                *rel_idx -= 1;
+            self.base_offset += 1;
+            while let Some(&(_, abs_idx)) = self.keyframe_index.front() {
+                if abs_idx < self.base_offset {
+                    self.keyframe_index.pop_front();
+                } else {
+                    break;
+                }
             }
         }
     }
@@ -285,26 +286,19 @@ impl ReplayBuffer {
     /// Find the relative index of the last keyframe at or before the given pts.
     /// Uses binary search for O(log N) performance.
     fn find_keyframe_index_before(&self, target_pts: i64) -> Option<usize> {
-        // Since keyframe_index is a VecDeque and pts values are monotonically increasing,
-        // we can binary search on the underlying slices.
-        // VecDeque::as_slices() returns (&[T], &[T]) - the logical contiguous slice
-        // may be split across the ring buffer boundary.
         let (front, back) = self.keyframe_index.as_slices();
 
-        // Try searching the back slice first (usually contains newer keyframes)
         if let Ok(idx) = back.binary_search_by(|&(pts, _)| pts.cmp(&target_pts)) {
-            // Exact match found in back slice
-            return Some(back[idx].1);
+            let abs_idx = back[idx].1;
+            return Some(abs_idx.saturating_sub(self.base_offset));
         } else if let Ok(idx) = front.binary_search_by(|&(pts, _)| pts.cmp(&target_pts)) {
-            // Exact match found in front slice
-            return Some(front[idx].1);
+            let abs_idx = front[idx].1;
+            return Some(abs_idx.saturating_sub(self.base_offset));
         }
 
-        // No exact match - find the closest keyframe before target_pts
-        // Search from the end backwards for efficiency (common case)
-        for &(pts, rel_idx) in self.keyframe_index.iter().rev() {
+        for &(pts, abs_idx) in self.keyframe_index.iter().rev() {
             if pts <= target_pts {
-                return Some(rel_idx);
+                return Some(abs_idx.saturating_sub(self.base_offset));
             }
         }
 
@@ -325,6 +319,7 @@ impl ReplayBuffer {
     pub fn clear(&mut self) {
         self.packets.clear();
         self.keyframe_index.clear();
+        self.base_offset = 0;
         self.total_bytes = 0;
         debug!(
             "Buffer cleared (cached SPS: {}, cached PPS: {})",

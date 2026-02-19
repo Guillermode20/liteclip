@@ -1,0 +1,22 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Fragment>
+    <!-- Main application binary component (one executable = one component) -->
+    <Component Id="cmpLiteClipExe" Guid="{A1F2C3D4-E5F6-4710-9ABC-DEF012345678}" Directory="INSTALLDIR">
+      <File Id="filLiteClipExe" Source="..\target\release\liteclip-replay.exe" KeyPath="yes" />
+    </Component>
+
+    <!-- Core component group contains required runtime components + shortcuts/registry (refs supplied below) -->
+    <ComponentGroup Id="CoreComponents">
+      <ComponentRef Id="cmpLiteClipExe" />
+      <ComponentRef Id="cmpStartMenuShortcut" />
+      <ComponentRef Id="cmpUninstallShortcut" />
+      <ComponentRef Id="cmpDesktopShortcut" />
+      <ComponentRef Id="cmpFileAssocHKLM" />
+      <ComponentRef Id="cmpFileAssocHKCU" />
+      <ComponentRef Id="cmpARP" />
+    </ComponentGroup>
+
+    <!-- FFmpeg components: harvested at build time into Generated\FFmpegFiles.wxs (ComponentGroup Id="FFmpegComponents") -->
+    <ComponentGroup Id="FFmpegComponents" />
+  </Fragment>
+</Wix>

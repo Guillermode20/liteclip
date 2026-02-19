@@ -1,0 +1,21 @@
+<!-- Harvest.targets: runs heat.exe to harvest binaries into WiX fragments before build -->
+<Project>
+  <Target Name="HarvestBinaries" BeforeTargets="Candle">
+    <Message Importance="high" Text="Running heat harvest for liteclip-replay.exe and ffmpeg folder (if present)..." />
+
+    <!-- ensure generated folder exists -->
+    <MakeDir Directories="$(MSBuildThisFileDirectory)Generated" />
+
+    <!-- harvest the main exe -->
+    <Exec Condition="Exists('..\target\release\liteclip-replay.exe')" Command="&quot;$(WixToolPath)\heat.exe&quot; file &quot;..\target\release\liteclip-replay.exe&quot; -ag -scom -sfrag -dr INSTALLDIR -cg CoreComponents -var BinariesDir -out &quot;Generated\AppFiles.wxs&quot;" />
+
+    <!-- harvest the ffmpeg directory (if present) into a separate component group) -->
+    <Exec Condition="Exists('..\ffmpeg\bin')" Command="&quot;$(WixToolPath)\heat.exe&quot; dir &quot;..\ffmpeg\bin&quot; -ag -scom -sfrag -dr INSTALLDIR\ffmpeg -cg FFmpegComponents -out &quot;Generated\FFmpegFiles.wxs&quot;" />
+
+    <!-- include the generated fragments in the compilation -->
+    <ItemGroup>
+      <Wix Include="Generated\AppFiles.wxs" Condition="Exists('Generated\AppFiles.wxs')" />
+      <Wix Include="Generated\FFmpegFiles.wxs" Condition="Exists('Generated\FFmpegFiles.wxs')" />
+    </ItemGroup>
+  </Target>
+</Project>

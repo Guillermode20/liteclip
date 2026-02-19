@@ -166,6 +166,24 @@ impl Config {
             warn!("Config: keyframe_interval_secs was 0, clamping to 1");
             self.advanced.keyframe_interval_secs = 1;
         }
+        if !self.video.use_native_resolution
+            && matches!(self.video.resolution, Resolution::Native)
+        {
+            warn!(
+                "Config: use_native_resolution is false but resolution is 'native' - \
+                 setting use_native_resolution to true"
+            );
+            self.video.use_native_resolution = true;
+        }
+        if self.video.use_native_resolution
+            && !matches!(self.video.resolution, Resolution::Native)
+        {
+            warn!(
+                "Config: use_native_resolution is true but resolution is set to {:?} - \
+                 resolution setting will be ignored",
+                self.video.resolution
+            );
+        }
     }
 }
 /// Rate control mode preference
@@ -221,6 +239,22 @@ pub struct VideoConfig {
     pub rate_control: RateControl,
     #[serde(default = "default_quality_value")]
     pub quality_value: Option<u8>,
+    #[serde(default = "default_true")]
+    pub use_native_resolution: bool,
+}
+
+impl VideoConfig {
+    pub fn target_resolution(&self) -> Option<(u32, u32)> {
+        if self.use_native_resolution {
+            return None;
+        }
+        match self.resolution {
+            Resolution::Native => None,
+            Resolution::P1080 => Some((1920, 1080)),
+            Resolution::P720 => Some((1280, 720)),
+            Resolution::P480 => Some((854, 480)),
+        }
+    }
 }
 /// Video codec options
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

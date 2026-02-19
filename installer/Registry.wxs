@@ -1,0 +1,28 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Fragment>
+    <!-- Per-machine file association (writes to HKCR) -->
+    <Component Id="cmpFileAssocHKLM" Guid="{D4F5C6E7-F8A9-4A10-9ABC-DEF012345671}" Directory="INSTALLDIR" Condition="ALLUSERS = '1'">
+      <RegistryValue Root="HKCR" Key=".lcr" Type="string" Value="LiteClipReplay.Document" KeyPath="yes" />
+      <RegistryValue Root="HKCR" Key="LiteClipReplay.Document" Type="string" Value="LiteClip Replay Recording" />
+      <RegistryValue Root="HKCR" Key="LiteClipReplay.Document\DefaultIcon" Type="string" Value="[INSTALLDIR]liteclip-replay.exe,0" />
+      <RegistryValue Root="HKCR" Key="LiteClipReplay.Document\shell\open\command" Type="string" Value="&quot;[INSTALLDIR]liteclip-replay.exe&quot; &quot;%1&quot;" />
+    </Component>
+
+    <!-- Per-user file association (writes to HKCU) -->
+    <Component Id="cmpFileAssocHKCU" Guid="{E5F6D7C8-A9B0-4B10-9ABC-DEF012345672}" Directory="INSTALLDIR" Condition="ALLUSERS &lt;&gt; '1'">
+      <RegistryValue Root="HKCU" Key="Software\Classes\.lcr" Type="string" Value="LiteClipReplay.Document" KeyPath="yes" />
+      <RegistryValue Root="HKCU" Key="Software\Classes\LiteClipReplay.Document" Type="string" Value="LiteClip Replay Recording" />
+      <RegistryValue Root="HKCU" Key="Software\Classes\LiteClipReplay.Document\DefaultIcon" Type="string" Value="[INSTALLDIR]liteclip-replay.exe,0" />
+      <RegistryValue Root="HKCU" Key="Software\Classes\LiteClipReplay.Document\shell\open\command" Type="string" Value="&quot;[INSTALLDIR]liteclip-replay.exe&quot; &quot;%1&quot;" />
+    </Component>
+
+    <!-- ARP (Add/Remove Programs) registry entries (primary key path here) -->
+    <Component Id="cmpARP" Guid="{18A9B0C2-D3E4-4F10-9ABC-DEF012345676}" Directory="INSTALLDIR">
+      <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\$(var.ProductName)" Name="DisplayName" Type="string" Value="$(var.ProductName)" KeyPath="yes" />
+      <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\$(var.ProductName)" Name="DisplayVersion" Type="string" Value="$(var.ProductVersion)" />
+      <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\$(var.ProductName)" Name="Publisher" Type="string" Value="$(var.Manufacturer)" />
+      <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\$(var.ProductName)" Name="InstallLocation" Type="string" Value="[INSTALLDIR]" />
+      <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\$(var.ProductName)" Name="EstimatedSize" Type="integer" Value="10240" />
+    </Component>
+  </Fragment>
+</Wix>

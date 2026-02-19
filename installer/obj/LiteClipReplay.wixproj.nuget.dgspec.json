@@ -1,0 +1,51 @@
+{
+  "format": 1,
+  "restore": {
+    "C:\\Coding\\liteclip-recorder\\installer\\LiteClipReplay.wixproj": {}
+  },
+  "projects": {
+    "C:\\Coding\\liteclip-recorder\\installer\\LiteClipReplay.wixproj": {
+      "version": "1.0.0",
+      "restore": {
+        "projectUniqueName": "C:\\Coding\\liteclip-recorder\\installer\\LiteClipReplay.wixproj",
+        "projectName": "LiteClipReplay",
+        "projectPath": "C:\\Coding\\liteclip-recorder\\installer\\LiteClipReplay.wixproj",
+        "packagesPath": "C:\\Users\\willi\\.nuget\\packages\\",
+        "outputPath": "C:\\Coding\\liteclip-recorder\\installer\\obj\\",
+        "projectStyle": "PackageReference",
+        "UsingMicrosoftNETSdk": false,
+        "configFilePaths": [
+          "C:\\Users\\willi\\AppData\\Roaming\\NuGet\\NuGet.Config"
+        ],
+        "originalTargetFrameworks": [
+          "native"
+        ],
+        "sources": {
+          "https://api.nuget.org/v3/index.json": {}
+        },
+        "frameworks": {
+          "native": {
+            "targetAlias": "native",
+            "projectReferences": {}
+          }
+        },
+        "restoreAuditProperties": {
+          "enableAudit": "true",
+          "auditLevel": "low",
+          "auditMode": "direct"
+        }
+      },
+      "frameworks": {
+        "native": {
+          "targetAlias": "native",
+          "dependencies": {
+            "WixToolset.UI.wixext": {
+              "target": "Package",
+              "version": "[4.0.0, )"
+            }
+          }
+        }
+      }
+    }
+  }
+}

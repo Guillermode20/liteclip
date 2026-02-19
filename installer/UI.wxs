@@ -1,0 +1,18 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <Fragment>
+    <!-- Use the standard InstallDir UI and insert our small scope/license/feature flow -->
+    <UI>
+      <!-- Standard Wix UI (InstallDir) provides welcome, license, feature selection, progress and exit dialogs -->
+      <ui:WixUI Id="WixUI_InstallDir" />
+
+      <!-- Insert our custom InstallScope dialog into the flow (defined in Dialogs/) -->
+      <DialogRef Id="InstallScopeDlg" />
+
+      <!-- Re-route Welcome -> InstallScope -> CustomizeDlg -> Progress -> Exit -->
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="InstallScopeDlg" />
+      <Publish Dialog="InstallScopeDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" />
+      <Publish Dialog="InstallScopeDlg" Control="Next" Event="NewDialog" Value="CustomizeDlg" />
+    </UI>
+  </Fragment>
+</Wix>

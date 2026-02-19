@@ -10,7 +10,7 @@
 
 use super::functions::{
     default_bitrate, default_codec, default_encoder, default_framerate, default_quality_preset,
-    default_quality_value, default_rate_control, default_resolution,
+    default_quality_value, default_rate_control, default_resolution, default_true,
 };
 use super::types::VideoConfig;
 
@@ -25,6 +25,7 @@ impl Default for VideoConfig {
             quality_preset: default_quality_preset(),
             rate_control: default_rate_control(),
             quality_value: default_quality_value(),
+            use_native_resolution: default_true(),
         }
     }
 }

@@ -35,12 +35,7 @@ impl Default for CaptureConfig {
 
 impl From<&crate::config::Config> for CaptureConfig {
     fn from(config: &crate::config::Config) -> Self {
-        let target_resolution = match config.video.resolution {
-            crate::config::Resolution::Native => None,
-            crate::config::Resolution::P1080 => Some((1920, 1080)),
-            crate::config::Resolution::P720 => Some((1280, 720)),
-            crate::config::Resolution::P480 => Some((854, 480)),
-        };
+        let target_resolution = config.video.target_resolution();
         Self {
             target_fps: config.video.framerate,
             output_index: config.advanced.gpu_index,

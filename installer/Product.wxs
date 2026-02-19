@@ -1,0 +1,18 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+    Name="$(var.ProductName)"
+    Manufacturer="$(var.Manufacturer)"
+    Version="$(var.ProductVersion)"
+    UpgradeCode="{6A9F2B9F-8C31-4C0A-9A4B-2F3A5E4D6B7C}">
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of LiteClip Replay is already installed." Schedule="afterInstallValidate" AllowSameVersionUpgrades="no" />
+    <MediaTemplate />
+    <Property Id="ARPNOREMOVE" Value="0" />
+
+    <!-- Feature tree references component groups declared elsewhere -->
+    <Feature Id="ProductFeature" Title="$(var.ProductName)" Level="1">
+      <ComponentGroupRef Id="CoreComponents" />
+      <ComponentGroupRef Id="FFmpegComponents" />
+    </Feature>
+  </Package>
+</Wix>
