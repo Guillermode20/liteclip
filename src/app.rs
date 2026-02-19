@@ -125,18 +125,32 @@ impl AppState {
 
         std::thread::spawn(move || {
             let mut forwarded_packets = 0u64;
+            let mut packet_batch = Vec::with_capacity(32);
+            
             while let Ok(packet) = audio_packet_rx.recv() {
-                buffer_clone.push(packet);
+                packet_batch.push(packet);
                 forwarded_packets = forwarded_packets.saturating_add(1);
+                
+                // Drain any immediately available packets up to batch size
+                while packet_batch.len() < 32 {
+                    if let Ok(p) = audio_packet_rx.try_recv() {
+                        packet_batch.push(p);
+                        forwarded_packets = forwarded_packets.saturating_add(1);
+                    } else {
+                        break;
+                    }
+                }
+                
+                buffer_clone.push_batch(packet_batch.drain(..));
 
-                if forwarded_packets == 1 {
+                if forwarded_packets <= 32 { // Account for batching on first log
                     debug!(
-                        "Forwarded first audio packet to replay buffer ({})",
+                        "Forwarded first audio packets to replay buffer ({})",
                         context_for_thread
                     );
-                } else if forwarded_packets % 500 == 0 {
+                } else if forwarded_packets % 500 < 32 { // Approximate logging due to batching
                     debug!(
-                        "Forwarded {} audio packets to replay buffer",
+                        "Forwarded ~{} audio packets to replay buffer",
                         forwarded_packets
                     );
                 }

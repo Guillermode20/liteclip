@@ -6,7 +6,7 @@ use windows_core::Interface;
 
 use crate::capture::{backpressure::BackpressureState, CaptureConfig, CapturedFrame};
 use anyhow::{bail, Context, Result};
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use crossbeam::channel::{bounded, Receiver, Sender};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -36,7 +36,7 @@ struct DxgiCaptureState {
     staging_texture: Option<ID3D11Texture2D>,
     frame_width: u32,
     frame_height: u32,
-    native_buffer: Vec<u8>,
+    native_buffer: BytesMut,
     output_buffer: Vec<u8>,
 }
 impl DxgiCaptureState {
@@ -180,6 +180,8 @@ impl DxgiCapture {
                 (output_desc.DesktopCoordinates.bottom - output_desc.DesktopCoordinates.top) as u32;
             info!("DXGI capture initialized: {}x{}", frame_width, frame_height);
             let native_size = (frame_width * frame_height * 4) as usize;
+            let mut native_buffer = BytesMut::with_capacity(native_size);
+            native_buffer.resize(native_size, 0);
             Ok(DxgiCaptureState {
                 d3d_device,
                 d3d_context,
@@ -188,7 +190,7 @@ impl DxgiCapture {
                 staging_texture: None,
                 frame_width,
                 frame_height,
-                native_buffer: vec![0u8; native_size],
+                native_buffer,
                 output_buffer: Vec::with_capacity(native_size),
             })
         }
@@ -345,15 +347,15 @@ impl DxgiCapture {
                             (out_w, out_h, bgra)
                         } else {
                             let total_bytes = src_row_bytes * src_h;
-                            state.output_buffer.resize(total_bytes, 0);
+                            state.native_buffer.resize(total_bytes, 0);
                             if src_pitch == src_row_bytes {
                                 std::ptr::copy_nonoverlapping(
                                     src_ptr,
-                                    state.output_buffer.as_mut_ptr(),
+                                    state.native_buffer.as_mut_ptr(),
                                     total_bytes,
                                 );
                             } else {
-                                let dst_ptr = state.output_buffer.as_mut_ptr();
+                                let dst_ptr = state.native_buffer.as_mut_ptr();
                                 let mut src_row_offset = 0;
                                 let mut dst_row_offset = 0;
                                 for _row in 0..src_h {
@@ -366,7 +368,11 @@ impl DxgiCapture {
                                     dst_row_offset += src_row_bytes;
                                 }
                             }
-                            let bgra = Bytes::copy_from_slice(&state.output_buffer);
+                            // Zero-copy: split off the filled portion and freeze it into a Bytes
+                            let bgra = state.native_buffer.split_to(total_bytes).freeze();
+                            // Re-allocate capacity for the next frame to avoid reallocation
+                            state.native_buffer.reserve(total_bytes);
+                            state.native_buffer.resize(total_bytes, 0);
                             (src_w, src_h, bgra)
                         };
                         state.d3d_context.Unmap(Some(&staging_resource), 0);

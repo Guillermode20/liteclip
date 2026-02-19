@@ -3,7 +3,7 @@
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
 use anyhow::{Context, Result};
-use memchr::memchr;
+use memchr::memmem;
 use std::os::windows::process::CommandExt;
 use std::process::Command;
 use tracing::{debug, info, warn};
@@ -27,44 +27,17 @@ pub(super) fn find_annexb_start_code(data: &[u8], from: usize) -> Option<(usize,
         return None;
     }
 
-    // Start search from 'from', ensuring we have room to check for patterns
-    let search_start = from;
-    let search_data = &data[search_start..];
-
-    // Use memchr to find 0x00 bytes efficiently with SIMD acceleration
-    let mut offset = 0;
-    while let Some(pos) = memchr(0x00, &search_data[offset..]) {
-        let abs_pos = search_start + offset + pos;
-
-        // Check for 4-byte start code: 00 00 00 01
-        if abs_pos + 3 < data.len()
-            && data[abs_pos] == 0x00
-            && data[abs_pos + 1] == 0x00
-            && data[abs_pos + 2] == 0x00
-            && data[abs_pos + 3] == 0x01
-        {
-            return Some((abs_pos, 4));
+    let search_data = &data[from..];
+    if let Some(pos) = memmem::find(search_data, b"\x00\x00\x01") {
+        let abs_pos = from + pos;
+        if abs_pos > from && data[abs_pos - 1] == 0x00 {
+            Some((abs_pos - 1, 4))
+        } else {
+            Some((abs_pos, 3))
         }
-
-        // Check for 3-byte start code: 00 00 01
-        if abs_pos + 2 < data.len()
-            && data[abs_pos] == 0x00
-            && data[abs_pos + 1] == 0x00
-            && data[abs_pos + 2] == 0x01
-        {
-            return Some((abs_pos, 3));
-        }
-
-        // Move past this 0x00 to find the next candidate
-        offset += pos + 1;
-
-        // Prevent infinite loop and ensure we have room for patterns
-        if offset + 2 >= search_data.len() {
-            break;
-        }
+    } else {
+        None
     }
-
-    None
 }
 pub(super) fn h264_nal_type(nal_data: &[u8]) -> Option<u8> {
     if nal_data.len() >= 5

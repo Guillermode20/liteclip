@@ -84,6 +84,78 @@ impl ReplayBuffer {
             cached_pps: None,
         }
     }
+    /// Push a batch of new packets into the buffer
+    /// 
+    /// This is more efficient than calling push() multiple times, as it evaluates
+    /// eviction criteria only once after all packets are added.
+    pub fn push_batch(&mut self, packets: impl IntoIterator<Item = EncodedPacket>) {
+        let mut added_count = 0;
+        let target_duration_qpc = (self.duration.as_secs_f64() * qpc_frequency() as f64) as i64;
+
+        for packet in packets {
+            let packet_size = packet.data.len();
+            added_count += 1;
+
+            // Cache SPS/PPS for H.264 stream recovery after buffer clear
+            if matches!(packet.stream, StreamType::Video) {
+                match h264_nal_type(packet.data.as_ref()) {
+                    Some(7) => {
+                        self.cached_sps = Some(packet.data.clone());
+                        trace!("Cached SPS ({} bytes)", packet.data.len());
+                    }
+                    Some(8) => {
+                        self.cached_pps = Some(packet.data.clone());
+                        trace!("Cached PPS ({} bytes)", packet.data.len());
+                    }
+                    _ => {}
+                }
+            }
+
+            // Now safe to add the new packet
+            if packet.is_keyframe {
+                let absolute_index = self.base_offset + self.packets.len();
+                self.keyframe_index.push_back((packet.pts, absolute_index));
+                trace!(
+                    "Added keyframe to index: pts={}, abs_idx={}, total_keyframes={}",
+                    packet.pts,
+                    absolute_index,
+                    self.keyframe_index.len()
+                );
+            }
+            self.total_bytes += packet_size;
+            self.packets.push_back(packet);
+        }
+
+        if added_count == 0 {
+            return;
+        }
+
+        // Atomic eviction: check condition and evict in the same loop
+        let newest_pts = self.packets.back().map(|p| p.pts).unwrap();
+        while !self.packets.is_empty() {
+            let oldest_pts = self.packets.front().map(|p| p.pts).unwrap();
+            let projected_span = newest_pts.saturating_sub(oldest_pts);
+            if projected_span <= target_duration_qpc {
+                break;
+            }
+            self.evict_oldest();
+        }
+
+        // Memory limit eviction - also atomic
+        while self.total_bytes > self.max_memory_bytes && !self.packets.is_empty() {
+            self.evict_oldest();
+        }
+
+        if self.packets.len() % 100 < added_count {
+            trace!(
+                "Buffer: {} packets, {} bytes, {} keyframes",
+                self.packets.len(),
+                self.total_bytes,
+                self.keyframe_index.len()
+            );
+        }
+    }
+
     /// Push a new packet into the buffer (evicts old if needed based on duration)
     ///
     /// Uses atomic eviction - calculates and executes eviction in a single loop
@@ -481,6 +553,10 @@ impl SharedReplayBuffer {
         })
     }
     /// Push a packet (acquires write lock)
+    /// Push a batch of new packets into the buffer (acquires write lock once)
+    pub fn push_batch(&self, packets: impl IntoIterator<Item = EncodedPacket>) {
+        self.inner.write().push_batch(packets);
+    }
     pub fn push(&self, packet: EncodedPacket) {
         self.inner.write().push(packet);
     }

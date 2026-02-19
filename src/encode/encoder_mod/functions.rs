@@ -212,9 +212,7 @@ pub fn spawn_encoder(
                         packet_batch.len(),
                         packets_received
                     );
-                    for packet in packet_batch.drain(..) {
-                        buffer.push(packet);
-                    }
+                    buffer.push_batch(packet_batch.drain(..));
                 }
                 match frame_rx.recv_timeout(std::time::Duration::from_millis(1)) {
                     Ok(frame) => {
@@ -257,9 +255,7 @@ pub fn spawn_encoder(
             match encoder.flush() {
                 Ok(packets) => {
                     info!("Flushed {} packets from encoder", packets.len());
-                    for packet in packets {
-                        buffer.push(packet);
-                    }
+                    buffer.push_batch(packets);
                 }
                 Err(e) => {
                     warn!("Failed to flush encoder: {}", e);
@@ -273,9 +269,7 @@ pub fn spawn_encoder(
                 "Drained {} final packets from encoder channel",
                 final_packets.len()
             );
-            for packet in final_packets {
-                buffer.push(packet);
-            }
+            buffer.push_batch(final_packets);
             debug!("Encoder thread stopped");
             Ok(())
         })?;
@@ -337,9 +331,7 @@ pub fn spawn_encoder_with_receiver(
                     }
                 }
                 if !packet_batch.is_empty() {
-                    for packet in packet_batch.drain(..) {
-                        buffer.push(packet);
-                    }
+                    buffer.push_batch(packet_batch.drain(..));
                 }
                 match frame_rx.recv_timeout(std::time::Duration::from_millis(1)) {
                     Ok(frame) => {
@@ -369,9 +361,7 @@ pub fn spawn_encoder_with_receiver(
             debug!("Encoder thread shutting down");
             match encoder.flush() {
                 Ok(packets) => {
-                    for packet in packets {
-                        buffer.push(packet);
-                    }
+                    buffer.push_batch(packets);
                 }
                 Err(e) => {
                     warn!("Failed to flush encoder: {}", e);
@@ -381,9 +371,7 @@ pub fn spawn_encoder_with_receiver(
             while let Ok(packet) = packet_rx.try_recv() {
                 final_packets.push(packet);
             }
-            for packet in final_packets {
-                buffer.push(packet);
-            }
+            buffer.push_batch(final_packets);
             debug!("Encoder thread stopped");
             Ok(())
         })?;
