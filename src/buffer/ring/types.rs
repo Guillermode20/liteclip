@@ -99,11 +99,12 @@ impl ReplayBuffer {
     /// Create new replay buffer from configuration
     pub fn new(config: &crate::config::Config) -> Result<Self> {
         let duration = Duration::from_secs(config.general.replay_duration_secs as u64 + 1); // +1s for corrupted frame padding
-        let max_memory_bytes = (config.advanced.memory_limit_mb as usize)
-            .saturating_mul(1024 * 1024);
+        let max_memory_bytes =
+            (config.advanced.memory_limit_mb as usize).saturating_mul(1024 * 1024);
         debug!(
-            "Creating ReplayBuffer: {} seconds, {} MB max", duration.as_secs(), config
-            .advanced.memory_limit_mb
+            "Creating ReplayBuffer: {} seconds, {} MB max",
+            duration.as_secs(),
+            config.advanced.memory_limit_mb
         );
         Ok(Self {
             packets: VecDeque::new(),
@@ -120,7 +121,8 @@ impl ReplayBuffer {
     pub fn with_params(duration: Duration, max_memory_mb: usize) -> Self {
         let max_memory_bytes = max_memory_mb.saturating_mul(1024 * 1024);
         debug!(
-            "Creating ReplayBuffer: {} seconds, {} MB max", duration.as_secs(),
+            "Creating ReplayBuffer: {} seconds, {} MB max",
+            duration.as_secs(),
             max_memory_mb
         );
         Self {
@@ -140,8 +142,7 @@ impl ReplayBuffer {
     /// eviction criteria only once after all packets are added.
     pub fn push_batch(&mut self, packets: impl IntoIterator<Item = EncodedPacket>) {
         let mut added_count = 0;
-        let target_duration_qpc = (self.duration.as_secs_f64() * qpc_frequency() as f64)
-            as i64;
+        let target_duration_qpc = (self.duration.as_secs_f64() * qpc_frequency() as f64) as i64;
         for packet in packets {
             let packet_size = packet.data.len();
             added_count += 1;
@@ -163,7 +164,9 @@ impl ReplayBuffer {
                 self.keyframe_index.push_back((packet.pts, absolute_index));
                 trace!(
                     "Added keyframe to index: pts={}, abs_idx={}, total_keyframes={}",
-                    packet.pts, absolute_index, self.keyframe_index.len()
+                    packet.pts,
+                    absolute_index,
+                    self.keyframe_index.len()
                 );
             }
             self.total_bytes += packet_size;
@@ -186,8 +189,10 @@ impl ReplayBuffer {
         }
         if self.packets.len() % 100 < added_count {
             trace!(
-                "Buffer: {} packets, {} bytes, {} keyframes", self.packets.len(), self
-                .total_bytes, self.keyframe_index.len()
+                "Buffer: {} packets, {} bytes, {} keyframes",
+                self.packets.len(),
+                self.total_bytes,
+                self.keyframe_index.len()
             );
         }
     }
@@ -198,8 +203,7 @@ impl ReplayBuffer {
     /// calculation and eviction.
     pub fn push(&mut self, packet: EncodedPacket) {
         let packet_size = packet.data.len();
-        let target_duration_qpc = (self.duration.as_secs_f64() * qpc_frequency() as f64)
-            as i64;
+        let target_duration_qpc = (self.duration.as_secs_f64() * qpc_frequency() as f64) as i64;
         while !self.packets.is_empty() {
             let oldest_pts = self.packets.front().map(|p| p.pts).unwrap_or(packet.pts);
             let projected_span = packet.pts.saturating_sub(oldest_pts);
@@ -208,9 +212,7 @@ impl ReplayBuffer {
             }
             self.evict_oldest();
         }
-        while self.total_bytes + packet_size > self.max_memory_bytes
-            && !self.packets.is_empty()
-        {
+        while self.total_bytes + packet_size > self.max_memory_bytes && !self.packets.is_empty() {
             self.evict_oldest();
         }
         if matches!(packet.stream, StreamType::Video) {
@@ -230,16 +232,20 @@ impl ReplayBuffer {
             let absolute_index = self.base_offset + self.packets.len();
             self.keyframe_index.push_back((packet.pts, absolute_index));
             trace!(
-                "Added keyframe to index: pts={}, abs_idx={}, total_keyframes={}", packet
-                .pts, absolute_index, self.keyframe_index.len()
+                "Added keyframe to index: pts={}, abs_idx={}, total_keyframes={}",
+                packet.pts,
+                absolute_index,
+                self.keyframe_index.len()
             );
         }
         self.total_bytes += packet_size;
         self.packets.push_back(packet);
         if self.packets.len() % 100 == 0 {
             trace!(
-                "Buffer: {} packets, {} bytes, {} keyframes", self.packets.len(), self
-                .total_bytes, self.keyframe_index.len()
+                "Buffer: {} packets, {} bytes, {} keyframes",
+                self.packets.len(),
+                self.total_bytes,
+                self.keyframe_index.len()
             );
         }
     }
@@ -257,7 +263,8 @@ impl ReplayBuffer {
             while let Some(&(_, abs_idx)) = self.keyframe_index.front() {
                 if abs_idx < self.base_offset {
                     trace!(
-                        "  removing keyframe with abs_idx={} (base_offset={})", abs_idx,
+                        "  removing keyframe with abs_idx={} (base_offset={})",
+                        abs_idx,
                         self.base_offset
                     );
                     self.keyframe_index.pop_front();
@@ -266,8 +273,9 @@ impl ReplayBuffer {
                 }
             }
             trace!(
-                "  after eviction: base_offset={}, keyframe_index_len_after={}", self
-                .base_offset, self.keyframe_index.len()
+                "  after eviction: base_offset={}, keyframe_index_len_after={}",
+                self.base_offset,
+                self.keyframe_index.len()
             );
         }
     }
@@ -301,27 +309,25 @@ impl ReplayBuffer {
                 })
                 .unwrap_or(0);
             if let Some(ref sps_data) = self.cached_sps {
-                result
-                    .push(EncodedPacket {
-                        data: sps_data.clone(),
-                        pts: first_video_pts,
-                        dts: first_video_pts,
-                        stream: StreamType::Video,
-                        is_keyframe: false,
-                        resolution: None,
-                    });
+                result.push(EncodedPacket {
+                    data: sps_data.clone(),
+                    pts: first_video_pts,
+                    dts: first_video_pts,
+                    stream: StreamType::Video,
+                    is_keyframe: false,
+                    resolution: None,
+                });
                 trace!("Prepended cached SPS to snapshot");
             }
             if let Some(ref pps_data) = self.cached_pps {
-                result
-                    .push(EncodedPacket {
-                        data: pps_data.clone(),
-                        pts: first_video_pts,
-                        dts: first_video_pts,
-                        stream: StreamType::Video,
-                        is_keyframe: false,
-                        resolution: None,
-                    });
+                result.push(EncodedPacket {
+                    data: pps_data.clone(),
+                    pts: first_video_pts,
+                    dts: first_video_pts,
+                    stream: StreamType::Video,
+                    is_keyframe: false,
+                    resolution: None,
+                });
                 trace!("Prepended cached PPS to snapshot");
             }
         }
@@ -337,12 +343,8 @@ impl ReplayBuffer {
         let start_index = self.find_keyframe_index_before(start_pts).unwrap_or(0);
         let remaining = self.packets.len().saturating_sub(start_index);
         let mut result = Vec::with_capacity(remaining + 2);
-        let packets_slice: Vec<EncodedPacket> = self
-            .packets
-            .iter()
-            .skip(start_index)
-            .cloned()
-            .collect();
+        let packets_slice: Vec<EncodedPacket> =
+            self.packets.iter().skip(start_index).cloned().collect();
         let first_video_is_sps = packets_slice
             .iter()
             .find_map(|p| {
@@ -365,27 +367,25 @@ impl ReplayBuffer {
                 })
                 .unwrap_or(0);
             if let Some(ref sps_data) = self.cached_sps {
-                result
-                    .push(EncodedPacket {
-                        data: sps_data.clone(),
-                        pts: first_video_pts,
-                        dts: first_video_pts,
-                        stream: StreamType::Video,
-                        is_keyframe: false,
-                        resolution: None,
-                    });
+                result.push(EncodedPacket {
+                    data: sps_data.clone(),
+                    pts: first_video_pts,
+                    dts: first_video_pts,
+                    stream: StreamType::Video,
+                    is_keyframe: false,
+                    resolution: None,
+                });
                 trace!("Prepended cached SPS to snapshot_from");
             }
             if let Some(ref pps_data) = self.cached_pps {
-                result
-                    .push(EncodedPacket {
-                        data: pps_data.clone(),
-                        pts: first_video_pts,
-                        dts: first_video_pts,
-                        stream: StreamType::Video,
-                        is_keyframe: false,
-                        resolution: None,
-                    });
+                result.push(EncodedPacket {
+                    data: pps_data.clone(),
+                    pts: first_video_pts,
+                    dts: first_video_pts,
+                    stream: StreamType::Video,
+                    is_keyframe: false,
+                    resolution: None,
+                });
                 trace!("Prepended cached PPS to snapshot_from");
             }
         }
@@ -393,13 +393,15 @@ impl ReplayBuffer {
         Ok(result)
     }
     /// Find the relative index of the last keyframe at or before the given pts.
-    /// Uses linear search from the end for correctness with VecDeque.
+    /// Uses linear search from the end for correctness with VecDeque and non-monotonic PTS.
     fn find_keyframe_index_before(&self, target_pts: i64) -> Option<usize> {
         trace!(
             "find_keyframe_index_before: target_pts={}, base_offset={}, keyframe_index_len={}",
-            target_pts, self.base_offset, self.keyframe_index.len()
+            target_pts,
+            self.base_offset,
+            self.keyframe_index.len()
         );
-        for (i, &(pts, abs_idx)) in self.keyframe_index.iter().enumerate() {
+        for (i, &(pts, abs_idx)) in self.keyframe_index.iter().enumerate().rev() {
             trace!("  keyframe[{}]: pts={}, abs_idx={}", i, pts, abs_idx);
         }
         for &(pts, abs_idx) in self.keyframe_index.iter().rev() {
@@ -407,14 +409,17 @@ impl ReplayBuffer {
                 let relative_idx = abs_idx.saturating_sub(self.base_offset);
                 if relative_idx < self.packets.len() {
                     trace!(
-                        "  found: pts={}, abs_idx={}, relative_idx={}", pts, abs_idx,
+                        "  found: pts={}, abs_idx={}, relative_idx={}",
+                        pts,
+                        abs_idx,
                         relative_idx
                     );
                     return Some(relative_idx);
                 } else {
                     trace!(
                         "  found but relative_idx={} out of bounds (packets_len={}), continuing search",
-                        relative_idx, self.packets.len()
+                        relative_idx,
+                        self.packets.len()
                     );
                     continue;
                 }
@@ -441,7 +446,8 @@ impl ReplayBuffer {
         self.base_offset = 0;
         self.total_bytes = 0;
         debug!(
-            "Buffer cleared (cached SPS: {}, cached PPS: {})", self.cached_sps.is_some(),
+            "Buffer cleared (cached SPS: {}, cached PPS: {})",
+            self.cached_sps.is_some(),
             self.cached_pps.is_some()
         );
     }
@@ -450,12 +456,14 @@ impl ReplayBuffer {
     /// This is useful for replay buffer operations where you want to clear captured
     /// frames but maintain keyframe indexing for subsequent clip saves.
     pub fn soft_clear(&mut self) {
-        let keyframe_count = self.keyframe_index.len();
         self.packets.clear();
+        self.keyframe_index.clear();
+        self.base_offset = 0;
         self.total_bytes = 0;
         debug!(
-            "Buffer soft-cleared: preserved {} keyframe indices (cached SPS: {}, cached PPS: {})",
-            keyframe_count, self.cached_sps.is_some(), self.cached_pps.is_some()
+            "Buffer soft-cleared: base_offset reset, keyframe_index cleared (cached SPS: {}, cached PPS: {})",
+            self.cached_sps.is_some(),
+            self.cached_pps.is_some()
         );
     }
     /// Get current buffer statistics
@@ -487,8 +495,7 @@ impl ReplayBuffer {
         if self.packets.len() < 2 {
             return false;
         }
-        let target_duration_qpc = (self.duration.as_secs_f64() * qpc_frequency() as f64)
-            as i64;
+        let target_duration_qpc = (self.duration.as_secs_f64() * qpc_frequency() as f64) as i64;
         let first = self.packets.front().map(|p| p.pts).unwrap_or(0);
         let last = self.packets.back().map(|p| p.pts).unwrap_or(0);
         last.saturating_sub(first) >= target_duration_qpc

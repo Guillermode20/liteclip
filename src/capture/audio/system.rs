@@ -112,6 +112,7 @@ impl WasapiSystemCapture {
         processed_samples: Arc<AtomicU64>,
         config: WasapiSystemConfig,
     ) -> Result<()> {
+        Self::set_audio_thread_priority();
         debug!("Starting WASAPI system capture loop");
 
         let _com = ComApartment::initialize()?;
@@ -211,9 +212,8 @@ impl WasapiSystemCapture {
 
                 let byte_count = frame_count as usize * block_align as usize;
                 let mut audio_data = vec![0u8; byte_count];
-
-                if flags & (AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) == 0 && !data_ptr.is_null() {
-                    unsafe {
+                unsafe {
+                    if flags & (AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) == 0 && !data_ptr.is_null() {
                         std::ptr::copy_nonoverlapping(
                             data_ptr,
                             audio_data.as_mut_ptr(),
@@ -299,6 +299,23 @@ impl Drop for ComApartment {
 impl Drop for WasapiSystemCapture {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+impl WasapiSystemCapture {
+    fn set_audio_thread_priority() {
+        #[cfg(windows)]
+        {
+            use windows::Win32::System::Threading::{
+                GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_ABOVE_NORMAL,
+            };
+            unsafe {
+                if let Err(e) = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL)
+                {
+                    warn!("Failed to set system audio thread priority: {}", e);
+                }
+            }
+        }
     }
 }
 

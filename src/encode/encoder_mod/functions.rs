@@ -192,7 +192,7 @@ pub fn spawn_encoder(
             }
             debug!("Encoder initialized");
             let packet_rx = encoder.packet_rx();
-            let mut packet_batch = Vec::with_capacity(16);
+            let mut packet_batch = Vec::with_capacity(64);
             let mut frames_encoded = 0u64;
             let mut packets_received = 0u64;
             let mut consecutive_encode_errors = 0u32;
@@ -202,7 +202,7 @@ pub fn spawn_encoder(
                     packet_batch.push(packet);
                     count += 1;
                     packets_received += 1;
-                    if count >= 16 {
+                    if count >= 64 {
                         break;
                     }
                 }
@@ -319,14 +319,14 @@ pub fn spawn_encoder_with_receiver(
             }
             debug!("Encoder initialized");
             let packet_rx = encoder.packet_rx();
-            let mut packet_batch = Vec::with_capacity(16);
+            let mut packet_batch = Vec::with_capacity(64);
             let mut consecutive_encode_errors = 0u32;
             loop {
                 let mut count = 0;
                 while let Ok(packet) = packet_rx.try_recv() {
                     packet_batch.push(packet);
                     count += 1;
-                    if count >= 16 {
+                    if count >= 64 {
                         break;
                     }
                 }

@@ -30,7 +30,7 @@ pub struct WasapiMicConfig {
     pub bits_per_sample: u16,
     pub buffer_duration: Duration,
     pub device_id: Option<String>, // None for default device
-    pub noise_reduction: bool, // Enable AI noise reduction (nnnoiseless)
+    pub noise_reduction: bool,     // Enable AI noise reduction (nnnoiseless)
 }
 
 impl Default for WasapiMicConfig {
@@ -139,6 +139,8 @@ impl WasapiMicCapture {
 
         let _com = ComApartment::initialize()?;
 
+        Self::set_audio_thread_priority();
+
         if config.device_id.is_some() {
             warn!("Microphone custom device_id is not implemented yet; using default capture endpoint");
         }
@@ -203,7 +205,10 @@ impl WasapiMicCapture {
         let sample_rate = config.sample_rate.max(1) as f64;
         let mut total_frames: u64 = 0;
 
-        let mut noise_processor = if config.noise_reduction && config.sample_rate == 48000 && config.bits_per_sample == 16 {
+        let mut noise_processor = if config.noise_reduction
+            && config.sample_rate == 48000
+            && config.bits_per_sample == 16
+        {
             Some(NoiseSuppressor::new(config.channels as usize))
         } else {
             None
@@ -238,23 +243,22 @@ impl WasapiMicCapture {
 
                 let byte_count = frame_count as usize * block_align as usize;
                 let mut audio_data = vec![0u8; byte_count];
-
-                if flags & (AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) == 0 && !data_ptr.is_null() {
-                    unsafe {
+                unsafe {
+                    if flags & (AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) == 0 && !data_ptr.is_null() {
                         std::ptr::copy_nonoverlapping(
                             data_ptr,
                             audio_data.as_mut_ptr(),
                             byte_count,
                         );
                     }
-
-                    if let Some(processor) = &mut noise_processor {
-                        processor.process(&mut audio_data);
-                    }
                 }
 
                 unsafe { capture_client.ReleaseBuffer(frame_count) }
                     .context("IAudioCaptureClient::ReleaseBuffer failed")?;
+
+                if let Some(processor) = &mut noise_processor {
+                    processor.process(&mut audio_data);
+                }
 
                 let pts = if qpc_position > 0 {
                     qpc_position.min(i64::MAX as u64) as i64
@@ -317,6 +321,23 @@ impl Drop for ComApartment {
 impl Drop for WasapiMicCapture {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+impl WasapiMicCapture {
+    fn set_audio_thread_priority() {
+        #[cfg(windows)]
+        {
+            use windows::Win32::System::Threading::{
+                GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_ABOVE_NORMAL,
+            };
+            unsafe {
+                if let Err(e) = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL)
+                {
+                    warn!("Failed to set microphone audio thread priority: {}", e);
+                }
+            }
+        }
     }
 }
 
@@ -390,6 +411,7 @@ impl NoiseSuppressor {
     /// DC blocking filter coefficient (HPF at ~20 Hz for 48 kHz).
     const DC_COEFF: f32 = 0.9975;
 
+    #[allow(clippy::needless_range_loop)]
     fn new(channels: usize) -> Self {
         let mut states = Vec::with_capacity(channels);
         for _ in 0..channels {
@@ -454,6 +476,7 @@ impl NoiseSuppressor {
         }
     }
 
+    #[allow(clippy::needless_range_loop)]
     fn process(&mut self, data: &mut [u8]) {
         if data.len() % (self.channels * 2) != 0 {
             return;
@@ -464,8 +487,7 @@ impl NoiseSuppressor {
         };
 
         // Append incoming i16 → f32 to the input accumulator
-        self.in_buf
-            .extend(samples.iter().map(|&s| s as f32));
+        self.in_buf.extend(samples.iter().map(|&s| s as f32));
 
         // --- Overlap-add processing with 50% hop ---
         //
@@ -517,7 +539,8 @@ impl NoiseSuppressor {
                 for i in 0..Self::FRAME_SIZE {
                     let denoised = channel_denoised[i] * self.gain[ch];
                     // Add comfort noise scaled by (1 - gain) so it only appears in quiet parts
-                    let comfort = self.next_noise() * Self::COMFORT_NOISE_AMP * (1.0 - self.gain[ch]);
+                    let comfort =
+                        self.next_noise() * Self::COMFORT_NOISE_AMP * (1.0 - self.gain[ch]);
                     cur_windowed[i] = (denoised + comfort) * self.window[i];
                 }
 

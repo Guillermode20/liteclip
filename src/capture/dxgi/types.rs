@@ -12,8 +12,8 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 use windows::Win32::Graphics::Direct3D11::{
-    ID3D11Device, ID3D11DeviceContext, ID3D11Resource, ID3D11Texture2D,
-    D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ,
+    ID3D11Device, ID3D11DeviceContext, ID3D11Resource, ID3D11Texture2D, D3D11_MAPPED_SUBRESOURCE,
+    D3D11_MAP_READ,
 };
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIOutput1, IDXGIResource, DXGI_ERROR_ACCESS_DENIED,
@@ -23,7 +23,6 @@ use windows::Win32::Graphics::Dxgi::{
 };
 use windows::Win32::System::Performance::QueryPerformanceCounter;
 use windows_core::Interface;
-
 
 /// DXGI capture state
 #[allow(dead_code)]
@@ -43,8 +42,7 @@ impl DxgiCaptureState {
     pub fn get_qpc_timestamp() -> i64 {
         unsafe {
             let mut qpc = 0i64;
-            QueryPerformanceCounter(&mut qpc)
-                .expect("QueryPerformanceCounter should never fail");
+            QueryPerformanceCounter(&mut qpc).expect("QueryPerformanceCounter should never fail");
             qpc
         }
     }
@@ -81,15 +79,15 @@ impl DxgiCapture {
         self.running.load(Ordering::Relaxed)
     }
     pub fn is_capture_thread_finished(&self) -> bool {
-        self.capture_thread.as_ref().is_some_and(|thread| thread.is_finished())
+        self.capture_thread
+            .as_ref()
+            .is_some_and(|thread| thread.is_finished())
     }
     /// Initialize D3D11 device and DXGI duplication
     fn init_capture(output_index: u32) -> Result<DxgiCaptureState> {
         info!("Initializing DXGI capture for output {}", output_index);
         unsafe {
-            let factory = CreateDXGIFactory1::<
-                windows::Win32::Graphics::Dxgi::IDXGIFactory1,
-            >()
+            let factory = CreateDXGIFactory1::<windows::Win32::Graphics::Dxgi::IDXGIFactory1>()
                 .context("Failed to create DXGI factory")?;
             let mut adapter_index = 0u32;
             let mut selected_adapter = None;
@@ -108,31 +106,27 @@ impl DxgiCapture {
                     }
                 }
             }
-            let (adapter, output) = selected_adapter
-                .context("Failed to find adapter with requested output index")?;
+            let (adapter, output) =
+                selected_adapter.context("Failed to find adapter with requested output index")?;
             let output_desc = output
                 .GetDesc()
                 .context("Failed to get output description")?;
             info!(
-                "Using output: {}x{} attached to monitor {:?}", output_desc
-                .DesktopCoordinates.right - output_desc.DesktopCoordinates.left,
-                output_desc.DesktopCoordinates.bottom - output_desc.DesktopCoordinates
-                .top, output_desc.Monitor
+                "Using output: {}x{} attached to monitor {:?}",
+                output_desc.DesktopCoordinates.right - output_desc.DesktopCoordinates.left,
+                output_desc.DesktopCoordinates.bottom - output_desc.DesktopCoordinates.top,
+                output_desc.Monitor
             );
             let output1: IDXGIOutput1 = output
                 .cast()
                 .context("Failed to get IDXGIOutput1 interface")?;
-            let adapter_cast: windows::Win32::Graphics::Dxgi::IDXGIAdapter = adapter
-                .cast()
-                .context("Failed to cast adapter")?;
+            let adapter_cast: windows::Win32::Graphics::Dxgi::IDXGIAdapter =
+                adapter.cast().context("Failed to cast adapter")?;
             let mut d3d_device: Option<ID3D11Device> = None;
             let mut d3d_context: Option<ID3D11DeviceContext> = None;
-            let feature_levels = [
-                windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_0,
-            ];
-            let mut obtained_feature_level = windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL(
-                0,
-            );
+            let feature_levels = [windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_0];
+            let mut obtained_feature_level =
+                windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL(0);
             let result = windows::Win32::Graphics::Direct3D11::D3D11CreateDevice(
                 Some(&adapter_cast),
                 windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN,
@@ -176,10 +170,10 @@ impl DxgiCapture {
                         "Failed to duplicate output: {} (0x{:08X})", msg, code as u32
                     )
                 })?;
-            let frame_width = (output_desc.DesktopCoordinates.right
-                - output_desc.DesktopCoordinates.left) as u32;
-            let frame_height = (output_desc.DesktopCoordinates.bottom
-                - output_desc.DesktopCoordinates.top) as u32;
+            let frame_width =
+                (output_desc.DesktopCoordinates.right - output_desc.DesktopCoordinates.left) as u32;
+            let frame_height =
+                (output_desc.DesktopCoordinates.bottom - output_desc.DesktopCoordinates.top) as u32;
             info!("DXGI capture initialized: {}x{}", frame_width, frame_height);
             let native_size = (frame_width * frame_height * 4) as usize;
             let mut native_buffer = BytesMut::with_capacity(native_size);
@@ -215,8 +209,8 @@ impl DxgiCapture {
                 },
                 Usage: windows::Win32::Graphics::Direct3D11::D3D11_USAGE_STAGING,
                 BindFlags: 0,
-                CPUAccessFlags: windows::Win32::Graphics::Direct3D11::D3D11_CPU_ACCESS_READ
-                    .0 as u32,
+                CPUAccessFlags: windows::Win32::Graphics::Direct3D11::D3D11_CPU_ACCESS_READ.0
+                    as u32,
                 MiscFlags: 0,
             };
             let mut texture = None;
@@ -227,7 +221,8 @@ impl DxgiCapture {
                 .context("Failed to create staging texture")?;
             state.staging_texture = texture;
             debug!(
-                "Created staging texture: {}x{}", state.frame_width, state.frame_height
+                "Created staging texture: {}x{}",
+                state.frame_width, state.frame_height
             );
             Ok(())
         }
@@ -242,9 +237,11 @@ impl DxgiCapture {
         unsafe {
             let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
             let mut desktop_resource: Option<IDXGIResource> = None;
-            let hr = state
-                .duplication
-                .AcquireNextFrame(timeout_ms, &mut frame_info, &mut desktop_resource);
+            let hr = state.duplication.AcquireNextFrame(
+                timeout_ms,
+                &mut frame_info,
+                &mut desktop_resource,
+            );
             match hr {
                 Ok(_) => {
                     let timestamp = Self::get_qpc_timestamp();
@@ -273,10 +270,7 @@ impl DxgiCapture {
                             .context("Failed to cast captured texture to resource")?;
                         state
                             .d3d_context
-                            .CopyResource(
-                                Some(&staging_resource),
-                                Some(&captured_resource),
-                            );
+                            .CopyResource(Some(&staging_resource), Some(&captured_resource));
                         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
                         state
                             .d3d_context
@@ -306,7 +300,9 @@ impl DxgiCapture {
                             state.d3d_context.Unmap(Some(&staging_resource), 0);
                             bail!(
                                 "Frame dimensions too large for safe copy: {}x{}, pitch={}",
-                                src_w, src_h, src_pitch
+                                src_w,
+                                src_h,
+                                src_pitch
                             );
                         }
                         let src_ptr = mapped.pData as *const u8;
@@ -369,10 +365,7 @@ impl DxgiCapture {
                                     dst_row_offset += src_row_bytes;
                                 }
                             }
-                            let bgra = state
-                                .native_buffer
-                                .split_to(total_bytes)
-                                .freeze();
+                            let bgra = state.native_buffer.split_to(total_bytes).freeze();
                             state.native_buffer.reserve(total_bytes);
                             state.native_buffer.resize(total_bytes, 0);
                             (src_w, src_h, bgra)
@@ -405,20 +398,54 @@ impl DxgiCapture {
         out_h: usize,
         dst: &mut [u8],
     ) {
+        if src_w == 0 || src_h == 0 || out_w == 0 || out_h == 0 {
+            return;
+        }
+        debug_assert!(src.len() >= src_w * src_h * 4);
+        debug_assert!(dst.len() >= out_w * out_h * 4);
+
         let src_stride = src_w * 4;
         let out_stride = out_w * 4;
+
+        const FRAC_BITS: i32 = 16;
+        let x_scale = ((src_w as i64) << FRAC_BITS) / (out_w as i64);
+        let y_scale = ((src_h as i64) << FRAC_BITS) / (out_h as i64);
+
         for out_y in 0..out_h {
-            let src_y = (out_y * src_h) / out_h;
-            let src_row = src_y * src_stride;
+            let src_y_q = (out_y as i64) * y_scale;
+            let src_y0 = (src_y_q >> FRAC_BITS) as usize;
+            let src_y1 = (src_y0 + 1).min(src_h - 1);
+            let y_frac = (src_y_q & 0xFFFF) as u32;
+
             let out_row = out_y * out_stride;
+            let src_row0 = src_y0 * src_stride;
+            let src_row1 = src_y1 * src_stride;
+
             for out_x in 0..out_w {
-                let src_x = (out_x * src_w) / out_w;
-                let src_i = src_row + src_x * 4;
+                let src_x_q = (out_x as i64) * x_scale;
+                let src_x0 = (src_x_q >> FRAC_BITS) as usize;
+                let src_x1 = (src_x0 + 1).min(src_w - 1);
+                let x_frac = (src_x_q & 0xFFFF) as u32;
+
+                let src_i00 = src_row0 + src_x0 * 4;
+                let src_i10 = src_row0 + src_x1 * 4;
+                let src_i01 = src_row1 + src_x0 * 4;
+                let src_i11 = src_row1 + src_x1 * 4;
+
                 let out_i = out_row + out_x * 4;
-                dst[out_i] = src[src_i];
-                dst[out_i + 1] = src[src_i + 1];
-                dst[out_i + 2] = src[src_i + 2];
-                dst[out_i + 3] = src[src_i + 3];
+
+                for c in 0..4 {
+                    let v00 = src[src_i00 + c] as u32;
+                    let v10 = src[src_i10 + c] as u32;
+                    let v01 = src[src_i01 + c] as u32;
+                    let v11 = src[src_i11 + c] as u32;
+
+                    let v_top = v00 as i32 + (((v10 as i32 - v00 as i32) * x_frac as i32) >> 16);
+                    let v_bot = v01 as i32 + (((v11 as i32 - v01 as i32) * x_frac as i32) >> 16);
+                    let v = v_top + (((v_bot - v_top) * y_frac as i32) >> 16);
+
+                    dst[out_i + c] = v.clamp(0, 255) as u8;
+                }
             }
         }
     }
@@ -435,8 +462,7 @@ impl DxgiCapture {
         let perform_cpu_readback = config.perform_cpu_readback;
         let target_resolution = config.target_resolution;
         let base_fps = config.target_fps.max(1);
-        let timeout_ms = (1000u32 / base_fps).max(1)
-            + u32::from(!1000u32.is_multiple_of(base_fps));
+        let timeout_ms = (1000u32 / base_fps).max(1) + u32::from(!1000u32.is_multiple_of(base_fps));
         let frame_interval = Duration::from_nanos(1_000_000_000u64 / base_fps as u64);
         let mut next_frame_deadline = Instant::now();
         let mut frame_count = 0u64;
@@ -448,6 +474,8 @@ impl DxgiCapture {
         let mut window_dropped_oldest = 0u64;
         let mut error_count = 0u32;
         let max_errors = 10;
+        let mut reinit_backoff_ms = 100u64;
+        const MAX_BACKOFF_MS: u64 = 5000;
         let backpressure = BackpressureState::new();
         let mut adaptive_skip_counter = 0u32;
         let mut adaptive_adjust_tick = Instant::now();
@@ -456,8 +484,7 @@ impl DxgiCapture {
             Ok(state) => state,
             Err(e) => {
                 error!("Failed to initialize DXGI capture: {}", e);
-                let _ = fatal_tx
-                    .try_send(format!("Failed to initialize DXGI capture: {}", e));
+                let _ = fatal_tx.try_send(format!("Failed to initialize DXGI capture: {}", e));
                 return;
             }
         };
@@ -541,11 +568,10 @@ impl DxgiCapture {
                     }
                 }
                 Ok(None) => {
-                    let Some(mut frame) = last_frame.clone() else {
+                    let Some(ref last) = last_frame else {
                         std::thread::sleep(Duration::from_millis(1));
                         continue;
                     };
-                    frame.timestamp = Self::get_qpc_timestamp();
                     let now = Instant::now();
                     if now > next_frame_deadline + Duration::from_millis(500) {
                         next_frame_deadline = now;
@@ -561,6 +587,11 @@ impl DxgiCapture {
                             continue;
                         }
                     }
+                    let frame = CapturedFrame {
+                        bgra: last.bgra.clone(),
+                        timestamp: Self::get_qpc_timestamp(),
+                        resolution: last.resolution,
+                    };
                     match frame_tx.try_send(frame) {
                         Ok(()) => {
                             frame_count += 1;
@@ -610,13 +641,10 @@ impl DxgiCapture {
                     error_count += 1;
                     if error_count >= max_errors {
                         error!("Too many capture errors, stopping");
-                        let _ = fatal_tx
-                            .try_send(
-                                format!(
-                                    "Capture exceeded retry budget after {} consecutive errors",
-                                    error_count
-                                ),
-                            );
+                        let _ = fatal_tx.try_send(format!(
+                            "Capture exceeded retry budget after {} consecutive errors",
+                            error_count
+                        ));
                         break;
                     }
                     warn!("Attempting to reinitialize capture...");
@@ -624,11 +652,13 @@ impl DxgiCapture {
                         Ok(new_state) => {
                             state = new_state;
                             error_count = 0;
+                            reinit_backoff_ms = 100;
                             info!("Reinitialization successful");
                         }
                         Err(e) => {
                             error!("Reinitialization failed: {}", e);
-                            std::thread::sleep(Duration::from_millis(100));
+                            std::thread::sleep(Duration::from_millis(reinit_backoff_ms));
+                            reinit_backoff_ms = (reinit_backoff_ms * 2).min(MAX_BACKOFF_MS);
                         }
                     }
                 }
@@ -674,8 +704,8 @@ impl DxgiCapture {
             }
         }
         info!(
-            "DXGI capture thread stopped ({} frames captured, {} dropped)", frame_count,
-            dropped_count
+            "DXGI capture thread stopped ({} frames captured, {} dropped)",
+            frame_count, dropped_count
         );
     }
     /// Get current QPC timestamp
@@ -704,10 +734,8 @@ impl DxgiCapture {
                 GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_ABOVE_NORMAL,
             };
             unsafe {
-                if let Err(e) = SetThreadPriority(
-                    GetCurrentThread(),
-                    THREAD_PRIORITY_ABOVE_NORMAL,
-                ) {
+                if let Err(e) = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL)
+                {
                     warn!("Failed to raise capture thread priority: {}", e);
                 }
             }

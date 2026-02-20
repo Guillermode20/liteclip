@@ -50,23 +50,27 @@ fn bgra_to_jpeg_reuse(
             dst[2] = src[0]; // B
         }
     } else {
-        // Bilinear downscaling for better quality
-        let x_ratio = src_w as f64 / out_w as f64;
-        let y_ratio = src_h as f64 / out_h as f64;
+        // Fixed-point bilinear downscaling (Q16.16 format)
+        const FRAC_BITS: i32 = 16;
+        const FRAC_MASK: i64 = (1i64 << FRAC_BITS) - 1;
+
+        // Scale factors in Q16.16 format
+        let x_ratio_q16 = ((src_w as i64) << FRAC_BITS) / (out_w as i64);
+        let y_ratio_q16 = ((src_h as i64) << FRAC_BITS) / (out_h as i64);
 
         for dst_y in 0..out_h {
-            let src_y_f = dst_y as f64 * y_ratio;
-            let src_y0 = src_y_f.floor() as usize;
+            let src_y_q16 = (dst_y as i64) * y_ratio_q16;
+            let src_y0 = (src_y_q16 >> FRAC_BITS) as usize;
             let src_y1 = (src_y0 + 1).min(src_h - 1);
-            let y_frac = src_y_f - src_y0 as f64;
+            let y_frac = (src_y_q16 & FRAC_MASK) as u32;
 
             let dst_row_base = dst_y * out_w * 3;
 
             for dst_x in 0..out_w {
-                let src_x_f = dst_x as f64 * x_ratio;
-                let src_x0 = src_x_f.floor() as usize;
+                let src_x_q16 = (dst_x as i64) * x_ratio_q16;
+                let src_x0 = (src_x_q16 >> FRAC_BITS) as usize;
                 let src_x1 = (src_x0 + 1).min(src_w - 1);
-                let x_frac = src_x_f - src_x0 as f64;
+                let x_frac = (src_x_q16 & FRAC_MASK) as u32;
 
                 // Get the four neighboring pixels in BGRA
                 let i00 = (src_y0 * src_w + src_x0) * 4;
@@ -76,19 +80,23 @@ fn bgra_to_jpeg_reuse(
 
                 let di = dst_row_base + dst_x * 3;
 
-                // Bilinear interpolation for each channel (B, G, R)
+                // Bilinear interpolation using fixed-point arithmetic
                 for c in 0..3 {
                     let src_c = 2 - c; // Map RGB (0,1,2) to BGRA (2,1,0)
-                    let v00 = bgra[i00 + src_c] as f64;
-                    let v10 = bgra[i10 + src_c] as f64;
-                    let v01 = bgra[i01 + src_c] as f64;
-                    let v11 = bgra[i11 + src_c] as f64;
 
-                    let v_top = v00 + (v10 - v00) * x_frac;
-                    let v_bot = v01 + (v11 - v01) * x_frac;
-                    let v = v_top + (v_bot - v_top) * y_frac;
+                    let v00 = bgra[i00 + src_c] as u32;
+                    let v10 = bgra[i10 + src_c] as u32;
+                    let v01 = bgra[i01 + src_c] as u32;
+                    let v11 = bgra[i11 + src_c] as u32;
 
-                    rgb_buf[di + c] = v.round().clamp(0.0, 255.0) as u8;
+                    // Interpolate x first, then y
+                    let v_top =
+                        v00 as i32 + (((v10 as i32 - v00 as i32) * x_frac as i32) >> FRAC_BITS);
+                    let v_bot =
+                        v01 as i32 + (((v11 as i32 - v01 as i32) * x_frac as i32) >> FRAC_BITS);
+                    let v = v_top + (((v_bot - v_top) * y_frac as i32) >> FRAC_BITS);
+
+                    rgb_buf[di + c] = v.clamp(0, 255) as u8;
                 }
             }
         }
@@ -164,7 +172,7 @@ impl Encoder for StubEncoder {
             self.config.resolution
         };
 
-        let data = bgra_to_jpeg(frame, out_w, out_h, 70)?;
+        let data = bgra_to_jpeg(frame, out_w, out_h, 85)?;
 
         let mut packet = EncodedPacket::new(
             data,
@@ -245,7 +253,7 @@ impl SoftwareEncoder {
 
         let out_w = config.resolution.0;
         let out_h = config.resolution.1;
-        let quality = 70u8;
+        let quality = 85u8;
 
         let mut worker_threads = Vec::with_capacity(num_workers);
         for id in 0..num_workers {

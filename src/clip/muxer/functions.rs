@@ -149,7 +149,7 @@ mod tests {
         let newest_pts = 100_000_000i64;
         let duration = std::time::Duration::from_secs(5);
         let start_pts = calculate_clip_start_pts(newest_pts, duration);
-        assert_eq!(start_pts, 50_000_000);
+        assert_eq!(start_pts, 60_000_000); // 100_000_000 - 50_000_000 + 10_000_000 (1s skip)
     }
     #[test]
     fn test_generate_output_filename() {

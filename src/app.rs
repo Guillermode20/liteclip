@@ -34,6 +34,12 @@ pub struct RecordingPipeline {
     lifecycle: RecordingLifecycle,
 }
 
+impl Default for RecordingPipeline {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RecordingPipeline {
     pub fn new() -> Self {
         Self {
