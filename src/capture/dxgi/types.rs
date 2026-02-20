@@ -37,7 +37,7 @@ struct DxgiCaptureState {
     frame_width: u32,
     frame_height: u32,
     native_buffer: BytesMut,
-    output_buffer: Vec<u8>,
+    output_buffer: BytesMut,
 }
 impl DxgiCaptureState {
     pub fn get_qpc_timestamp() -> i64 {
@@ -193,7 +193,7 @@ impl DxgiCapture {
                 frame_width,
                 frame_height,
                 native_buffer,
-                output_buffer: Vec::with_capacity(native_size),
+                output_buffer: BytesMut::with_capacity(native_size),
             })
         }
     }
@@ -334,6 +334,7 @@ impl DxgiCapture {
                                     dst_row_offset += src_row_bytes;
                                 }
                             }
+                            state.output_buffer.reserve(total_bytes);
                             state.output_buffer.resize(total_bytes, 0);
                             Self::downscale_bgra_bilinear(
                                 &state.native_buffer,
@@ -343,7 +344,7 @@ impl DxgiCapture {
                                 out_h,
                                 &mut state.output_buffer,
                             );
-                            let bgra = Bytes::copy_from_slice(&state.output_buffer);
+                            let bgra = state.output_buffer.split_to(total_bytes).freeze();
                             (out_w, out_h, bgra)
                         } else {
                             let total_bytes = src_row_bytes * src_h;

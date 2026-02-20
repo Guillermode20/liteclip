@@ -724,12 +724,17 @@ impl HardwareEncoderBase {
                                     }
                                     if nal_len <= 10 * 1024 * 1024 {
                                         if frame_buffer.len() >= avcc_nal_length_size + nal_len {
-                                            let avcc_nal = frame_buffer
+                                            let mut avcc_nal = frame_buffer
                                                 .split_to(avcc_nal_length_size + nal_len);
-                                            let mut annexb_nal = BytesMut::with_capacity(4 + nal_len);
-                                            annexb_nal.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
-                                            annexb_nal
-                                                .extend_from_slice(&avcc_nal[avcc_nal_length_size..]);
+                                            let annexb_nal = if avcc_nal_length_size == 4 {
+                                                avcc_nal[0..4].copy_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+                                                avcc_nal
+                                            } else {
+                                                let mut annexb_nal = BytesMut::with_capacity(4 + nal_len);
+                                                annexb_nal.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+                                                annexb_nal.extend_from_slice(&avcc_nal[avcc_nal_length_size..]);
+                                                annexb_nal
+                                            };
                                             if !process_nal(
                                                 annexb_nal.freeze(),
                                                 false,
