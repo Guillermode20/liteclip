@@ -96,11 +96,42 @@ impl AsyncFrameWriter {
         match self.frame_tx.try_send(frame) {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(frame)) => {
-                let _ = self.frame_rx_drop.try_recv();
-                self.frame_tx.try_send(frame)
+                // Try to make room by dropping oldest frame
+                match self.frame_rx_drop.try_recv() {
+                    Ok(_) => {
+                        // Successfully dropped oldest, now retry
+                        match self.frame_tx.try_send(frame) {
+                            Ok(()) => Ok(()),
+                            Err(TrySendError::Full(f)) => {
+                                warn!(
+                                    "Async writer: queue still full after dropping oldest (len={}/{}).                                      Write latency={}ms may be too high for capture rate",
+                                    self.frame_tx.len(),
+                                    self.frame_tx.capacity().unwrap_or(0),
+                                    self.write_latency_ms()
+                                );
+                                Err(TrySendError::Full(f))
+                            }
+                            Err(TrySendError::Disconnected(f)) => Err(TrySendError::Disconnected(f)),
+                        }
+                    }
+                    Err(_) => {
+                        warn!(
+                            "Async writer: queue full but nothing to drop (len={}/{}).                              Write latency={}ms",
+                            self.frame_tx.len(),
+                            self.frame_tx.capacity().unwrap_or(0),
+                            self.write_latency_ms()
+                        );
+                        Err(TrySendError::Full(frame))
+                    }
+                }
             }
             Err(TrySendError::Disconnected(frame)) => Err(TrySendError::Disconnected(frame)),
         }
+    }
+
+    /// Get current queue length
+    pub fn queue_len(&self) -> usize {
+        self.frame_tx.len()
     }
 
     pub fn write_latency_ms(&self) -> u32 {

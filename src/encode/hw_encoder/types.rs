@@ -147,6 +147,8 @@ impl HardwareEncoderBase {
         };
         let mut cmd = Command::new(&ffmpeg_cmd);
         cmd.arg("-y");
+        // Discard corrupted frames (gray frames at startup from ddagrab initialization)
+        cmd.arg("-fflags").arg("+discardcorrupt");
         let mut video_filters: Vec<String> = Vec::new();
         if self.config.use_cpu_readback {
             cmd.arg("-f")
@@ -162,6 +164,10 @@ impl HardwareEncoderBase {
         } else {
             cmd.arg("-f")
                 .arg("lavfi")
+                .arg("-probesize")
+                .arg("5M")
+                .arg("-analyzeduration")
+                .arg("500000")
                 .arg("-i")
                 .arg(
                     format!(
@@ -173,6 +179,9 @@ impl HardwareEncoderBase {
                 video_filters.push("hwdownload,format=bgra".to_string());
             }
         }
+        // Apply light sharpening to improve perceived quality
+        video_filters.push("unsharp=lx=3:ly=3:la=0.5".to_string());
+
         if out_w != width || out_h != height {
             video_filters.push(format!("scale={}:{}", out_w, out_h));
         }
@@ -234,7 +243,7 @@ impl HardwareEncoderBase {
         let (stdin_for_process, async_writer) = if self.config.use_cpu_readback {
             debug!("FFmpeg stdin captured (CPU readback mode with async writer)");
             let stdin = child.stdin.take().context("Failed to take FFmpeg stdin")?;
-            let writer = AsyncFrameWriter::new(stdin, 16);
+            let writer = AsyncFrameWriter::new(stdin, 128); // Increased from 16 to reduce frame drops
             (None, Some(writer))
         } else {
             debug!("FFmpeg stdin not used (desktop-grab mode)");
@@ -853,6 +862,7 @@ impl HardwareEncoderBase {
         }
         if let Some(ref async_writer) = self.async_writer {
             use crate::encode::frame_writer::PendingFrame;
+use crossbeam::channel::TrySendError;
             let pending = PendingFrame {
                 data: frame.bgra.clone(),
                 timestamp: frame.timestamp,
@@ -867,15 +877,32 @@ impl HardwareEncoderBase {
                         );
                     }
                 }
-                Err(_) => {
+                Err(TrySendError::Full(_)) => {
                     self.dropped_frames += 1;
                     self.frame_count += 1;
-                    if self.dropped_frames % 60 == 0 {
+                    let queue_len = async_writer.queue_len();
+                    let queue_cap = async_writer.queue_capacity();
+                    let latency = async_writer.write_latency_ms();
+                    
+                    // Log first drop and then every 500 drops with diagnostics
+                    if self.dropped_frames == 1 || self.dropped_frames % 500 == 0 {
                         warn!(
-                            "Async writer queue full, dropped {} frames (total)", self
-                            .dropped_frames
+                            "Dropped {} frames (total). Queue: {}/{} ({}%), write latency: {}ms.                              FFmpeg stdin write is slower than capture rate - consider lowering FPS or resolution",
+                            self.dropped_frames,
+                            queue_len,
+                            queue_cap,
+                            (queue_len * 100) / queue_cap.max(1),
+                            latency
                         );
                     }
+                }
+                Err(TrySendError::Disconnected(_)) => {
+                    self.dropped_frames += 1;
+                    self.frame_count += 1;
+                    warn!(
+                        "Async writer channel disconnected, dropped frame {} (total {} dropped)",
+                        self.frame_count, self.dropped_frames
+                    );
                 }
             }
         } else {

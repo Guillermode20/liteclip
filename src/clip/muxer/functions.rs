@@ -91,10 +91,12 @@ pub fn calculate_clip_start_pts(newest_pts: i64, duration: std::time::Duration) 
         let _ = windows::Win32::System::Performance::QueryPerformanceFrequency(&mut qpc_freq);
     }
     let duration_qpc = (duration.as_secs_f64() * qpc_freq as f64) as i64;
-    let start_pts = (newest_pts - duration_qpc).max(0);
+    // Skip first 1 second to avoid corrupted frames from encoder initialization
+    let skip_qpc = qpc_freq; // 1 second worth of QPC units
+    let start_pts = (newest_pts - duration_qpc + skip_qpc).max(skip_qpc);
     debug!(
-        "Clip window: newest_pts={}, duration_qpc={}, start_pts={}",
-        newest_pts, duration_qpc, start_pts
+        "Clip window: newest_pts={}, duration_qpc={}, skip_qpc={}, start_pts={}",
+        newest_pts, duration_qpc, skip_qpc, start_pts
     );
     start_pts
 }
