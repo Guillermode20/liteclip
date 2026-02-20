@@ -223,6 +223,8 @@ pub struct AudioConfig {
     pub mic_volume: u8,
     #[serde(default = "default_system_volume")]
     pub system_volume: u8,
+    #[serde(default = "default_false")]
+    pub mic_noise_reduction: bool,
 }
 /// Global hotkey bindings
 #[derive(Debug, Clone, Serialize, Deserialize)]

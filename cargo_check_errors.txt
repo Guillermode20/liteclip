@@ -1,0 +1,90 @@
+﻿cargo :     Checking liteclip-replay v0.2.0 
+(C:\Coding\liteclip-recorder)
+At line:1 char:1
++ cargo check 2>&1 | Out-File -Encoding utf8 
+cargo_check_errors.txt
++ ~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Checkin 
+   g li...eclip-recorder):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+error[E0308]: mismatched types
+   --> src\capture\audio\mic.rs:341:13
+    |
+336 |             
+states.push(nnnoiseless::DenoiseState::new());
+    |             ------      
+-------------------------------- this argument has type 
+`Box<DenoiseState<'_>>`...
+    |             |
+    |             ... which causes `states` to have type 
+`std::vec::Vec<Box<DenoiseState<'_>>>`
+...
+341 |             states,
+    |             ^^^^^^ expected 
+`Vec<DenoiseState<'_>>`, found 
+`Vec<Box<DenoiseState<'_>>>`
+    |
+    = note: expected struct 
+`std::vec::Vec<DenoiseState<'static>>`
+               found struct 
+`std::vec::Vec<Box<DenoiseState<'_>>>`
+help: consider unboxing the value
+    |
+336 |             
+states.push(*nnnoiseless::DenoiseState::new());
+    |                         +
+
+error[E0061]: this method takes 2 arguments but 1 
+argument was supplied
+   --> src\capture\audio\mic.rs:384:33
+    |
+384 |                 self.states[ch].process_frame(&mut 
+channel_data);
+    |                                 
+^^^^^^^^^^^^^------------------- argument #2 of type 
+`&[f32]` is missing
+    |
+note: method defined here
+   --> C:\Users\willi\.cargo\registry\src\index.crates.io
+-1949cf8c6b5b557f\nnnoiseless-0.5.2\src\denoise.rs:95:12
+    |
+95  |     pub fn process_frame(&mut self, output: &mut 
+[f32], input: &[f32]) -> f32 {
+    |            ^^^^^^^^^^^^^
+help: provide the argument
+    |
+384 |                 self.states[ch].process_frame(&mut 
+channel_data, /* &[f32] */);
+    |                                                    
+            ++++++++++++++
+
+error[E0061]: this method takes 2 arguments but 1 
+argument was supplied
+   --> src\capture\audio\mic.rs:409:33
+    |
+409 |                 self.states[ch].process_frame(&mut 
+channel_data);
+    |                                 
+^^^^^^^^^^^^^------------------- argument #2 of type 
+`&[f32]` is missing
+    |
+note: method defined here
+   --> C:\Users\willi\.cargo\registry\src\index.crates.io
+-1949cf8c6b5b557f\nnnoiseless-0.5.2\src\denoise.rs:95:12
+    |
+95  |     pub fn process_frame(&mut self, output: &mut 
+[f32], input: &[f32]) -> f32 {
+    |            ^^^^^^^^^^^^^
+help: provide the argument
+    |
+409 |                 self.states[ch].process_frame(&mut 
+channel_data, /* &[f32] */);
+    |                                                    
+            ++++++++++++++
+
+Some errors have detailed explanations: E0061, E0308.
+For more information about an error, try `rustc 
+--explain E0061`.
+error: could not compile `liteclip-replay` (lib) due to 
+3 previous errors

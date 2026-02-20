@@ -21,6 +21,7 @@ impl Default for AudioConfig {
             mic_device: default_mic_device(),
             mic_volume: default_mic_volume(),
             system_volume: default_system_volume(),
+            mic_noise_reduction: default_true(),
         }
     }
 }

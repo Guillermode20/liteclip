@@ -141,6 +141,7 @@ impl eframe::App for SettingsApp {
                     ui.checkbox(&mut self.config.audio.capture_mic, "Capture Microphone");
                     ui.text_edit_singleline(&mut self.config.audio.mic_device);
                     ui.add(egui::Slider::new(&mut self.config.audio.mic_volume, 0..=200).text("Mic Volume %"));
+                    ui.checkbox(&mut self.config.audio.mic_noise_reduction, "Mic Noise Reduction (AI)");
                 });
 
                 // Hotkey Settings

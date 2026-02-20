@@ -78,6 +78,7 @@ impl WasapiAudioManager {
                 } else {
                     Some(config.mic_device.clone())
                 },
+                noise_reduction: config.mic_noise_reduction,
             };
 
             mic_capture.start(mic_config)?;

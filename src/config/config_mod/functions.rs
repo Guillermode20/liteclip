@@ -109,6 +109,7 @@ mod tests {
         assert_eq!(config.video.quality_value, None);
         assert!(config.audio.capture_system);
         assert!(config.audio.capture_mic);
+        assert!(config.audio.mic_noise_reduction);
     }
     #[test]
     fn test_validate_quality_value_clamps() {

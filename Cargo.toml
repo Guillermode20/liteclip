@@ -68,6 +68,7 @@ eframe = "0.33.3"
 egui = "0.33.3"
 rfd = "0.17.2"
 winit = "0.30"
+nnnoiseless = "0.5.2"
 
 [profile.release]
 codegen-units = 1
