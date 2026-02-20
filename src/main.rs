@@ -297,30 +297,7 @@ async fn main() -> Result<()> {
                                     }
                                     liteclip_replay::platform::TrayEvent::OpenSettings => {
                                         info!("Tray: Open Settings selected");
-                                        match Config::config_path() {
-                                            Ok(path) => {
-                                                let result = Command::new("cmd")
-                                                    .args(["/C", "start", "", &path.to_string_lossy()])
-                                                    .creation_flags(CREATE_NO_WINDOW)
-                                                    .spawn();
-                                                if let Err(e) = result {
-                                                    error!("Failed to open settings file: {}", e);
-                                                    let notifications_enabled = {
-                                                        let state = app_state.read().await;
-                                                        state.config().general.notifications
-                                                    };
-                                                    if notifications_enabled {
-                                                        let _ = platform_handle.show_notification(
-                                                            "Error",
-                                                            &format!("Failed to open settings: {}", e),
-                                                        );
-                                                    }
-                                                }
-                                            }
-                                            Err(e) => {
-                                                error!("Failed to get config path: {}", e);
-                                            }
-                                        }
+                                        liteclip_replay::gui::run_settings_gui(tokio_tx.clone());
                                     }
                                     _ => {
                                         // Other tray events are not used (StartRecording, StopRecording,

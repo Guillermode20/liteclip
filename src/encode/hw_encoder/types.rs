@@ -343,7 +343,9 @@ impl HardwareEncoderBase {
                 cmd.arg("lowlatency");
                 cmd.arg("-pa_adaptive_mini_gop");
                 cmd.arg("0");
-                cmd.arg("-forced_idr");
+                cmd.arg("-header_insertion_mode");
+                cmd.arg("idr");
+                cmd.arg("-gops_per_idr");
                 cmd.arg("1");
             }
             "h264_qsv" | "hevc_qsv" => {
@@ -483,7 +485,7 @@ impl HardwareEncoderBase {
                 }
                 let count = total_packets.get() + 1;
                 total_packets.set(count);
-                if count == 1 || count % 600 == 0 || is_last || nal_type == Some(5) {
+                if count == 1 || count % 600 == 0 || is_last || is_keyframe {
                     debug!(
                         "NAL packet {}: type={:?}, is_keyframe={}, is_frame_nal={}, size={} bytes",
                         count, nal_type, is_keyframe, is_frame_nal, nal_data.len()

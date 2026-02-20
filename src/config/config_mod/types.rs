@@ -101,6 +101,22 @@ impl Config {
             .with_context(|| format!("Failed to write config to {:?}", config_path))?;
         Ok(())
     }
+
+    /// Load synchronously — used from the GUI thread which has no tokio runtime.
+    pub fn load_sync() -> Result<Self> {
+        let config_path = Self::config_path()?;
+        if config_path.exists() {
+            let content = std::fs::read_to_string(&config_path)
+                .with_context(|| format!("Failed to read config from {:?}", config_path))?;
+            let mut config: Self = toml::from_str(&content)
+                .with_context(|| format!("Failed to parse config from {:?}", config_path))?;
+            config.validate();
+            Ok(config)
+        } else {
+            Ok(Self::default())
+        }
+    }
+
     /// Get the configuration file path
     pub fn config_path() -> Result<PathBuf> {
         let app_data = dirs::data_dir().context("Failed to get data directory")?;

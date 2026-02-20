@@ -14,6 +14,7 @@ pub mod clip;
 pub mod config;
 pub mod d3d;
 pub mod encode;
+pub mod gui;
 pub mod metrics;
 pub mod platform;
 
