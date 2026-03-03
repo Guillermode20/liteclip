@@ -97,7 +97,7 @@ async fn main() -> Result<()> {
                 );
                 let _ = AssignProcessToJobObject(job, GetCurrentProcess());
                 // We purposefully leak the job handle so it lives as long as the process.
-                std::mem::forget(job);
+                let _ = job;
             } else {
                 warn!("Failed to create Job Object. Child processes won't be grouped in Task Manager.");
             }
