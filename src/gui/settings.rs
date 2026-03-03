@@ -31,6 +31,14 @@ pub fn run_settings_gui(event_tx: Sender<AppEvent>) {
             viewport: egui::ViewportBuilder::default()
                 .with_inner_size([600.0, 700.0])
                 .with_title("LiteClip Replay Settings"),
+            // Allow EventLoop creation on non-main thread (required for Windows)
+            event_loop_builder: Some(Box::new(|builder| {
+                #[cfg(target_os = "windows")]
+                {
+                    use winit::platform::windows::EventLoopBuilderExtWindows;
+                    builder.with_any_thread(true);
+                }
+            })),
             ..Default::default()
         };
 
