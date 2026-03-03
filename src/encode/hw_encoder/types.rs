@@ -184,7 +184,7 @@ impl HardwareEncoderBase {
         video_filters.push("unsharp=lx=3:ly=3:la=0.5".to_string());
 
         if out_w != width || out_h != height {
-            video_filters.push(format!("scale={}:{}", out_w, out_h));
+            video_filters.push(format!("scale={}:{}:flags=lanczos", out_w, out_h));
         }
         if !video_filters.is_empty() {
             cmd.arg("-vf").arg(video_filters.join(","));
