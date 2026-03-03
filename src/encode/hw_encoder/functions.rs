@@ -173,20 +173,20 @@ pub(super) fn resolve_ffmpeg_command() -> String {
         }
     }
     if let Ok(cwd) = std::env::current_dir() {
-        let candidate = cwd.join("ffmpeg").join("bin").join("ffmpeg.exe");
+        let candidate = cwd.join("ffmpeg").join("bin").join("liteclip-replay-ffmpeg.exe");
         if candidate.exists() {
             return candidate.to_string_lossy().to_string();
         }
     }
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(exe_dir) = exe_path.parent() {
-            let candidate = exe_dir.join("ffmpeg").join("bin").join("ffmpeg.exe");
+            let candidate = exe_dir.join("ffmpeg").join("bin").join("liteclip-replay-ffmpeg.exe");
             if candidate.exists() {
                 return candidate.to_string_lossy().to_string();
             }
         }
     }
-    "ffmpeg".to_string()
+    "liteclip-replay-ffmpeg".to_string()
 }
 pub(super) fn query_qpc() -> Result<i64> {
     let mut qpc = 0i64;

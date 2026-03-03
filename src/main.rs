@@ -71,6 +71,39 @@ async fn main() -> Result<()> {
     #[cfg(windows)]
     let _timer_resolution_guard = TimerResolutionGuard::new(1);
 
+    // Create a job object and assign the current process to it.
+    // This ensures any child processes like ffmpeg are grouped under
+    // the main app in Windows Task Manager and automatically killed
+    // when the main application exits.
+    #[cfg(windows)]
+    {
+        use windows::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            SetInformationJobObject,
+        };
+        use windows::Win32::System::Threading::GetCurrentProcess;
+        use windows::core::PCWSTR;
+
+        unsafe {
+            if let Ok(job) = CreateJobObjectW(None, PCWSTR::null()) {
+                let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+                info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                let _ = SetInformationJobObject(
+                    job,
+                    JobObjectExtendedLimitInformation,
+                    &info as *const _ as *const _,
+                    std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                );
+                let _ = AssignProcessToJobObject(job, GetCurrentProcess());
+                // We purposefully leak the job handle so it lives as long as the process.
+                std::mem::forget(job);
+            } else {
+                warn!("Failed to create Job Object. Child processes won't be grouped in Task Manager.");
+            }
+        }
+    }
+
     let version = env!("CARGO_PKG_VERSION");
     println!("LiteClip Replay v{}", version);
     info!("LiteClip Replay {} starting", version);

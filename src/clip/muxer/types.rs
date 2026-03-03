@@ -951,20 +951,20 @@ impl Muxer {
             }
         }
         if let Ok(cwd) = std::env::current_dir() {
-            let candidate = cwd.join("ffmpeg").join("bin").join("ffmpeg.exe");
+            let candidate = cwd.join("ffmpeg").join("bin").join("liteclip-replay-ffmpeg.exe");
             if candidate.exists() {
                 return candidate.into_os_string();
             }
         }
         if let Ok(exe_path) = std::env::current_exe() {
             if let Some(exe_dir) = exe_path.parent() {
-                let candidate = exe_dir.join("ffmpeg").join("bin").join("ffmpeg.exe");
+                let candidate = exe_dir.join("ffmpeg").join("bin").join("liteclip-replay-ffmpeg.exe");
                 if candidate.exists() {
                     return candidate.into_os_string();
                 }
             }
         }
-        OsString::from("ffmpeg")
+        OsString::from("liteclip-replay-ffmpeg")
     }
     #[cfg(not(feature = "ffmpeg"))]
     fn create_stub_mp4(&self) -> Result<PathBuf> {
