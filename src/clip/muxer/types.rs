@@ -200,20 +200,9 @@ impl Muxer {
                 "Clip does not yet contain a decodable H.264 frame (no NAL type 1/5 found). Try saving again after a short delay."
             );
         }
-        let effective_fps = if frame_packets.len() >= 2 {
-            let first_pts = frame_packets.first().map(|p| p.pts).unwrap_or(0);
-            let last_pts = frame_packets.last().map(|p| p.pts).unwrap_or(first_pts);
-            let span_qpc = (last_pts - first_pts).max(1) as f64;
-            let span_secs = span_qpc / qpc_frequency_f64;
-            if span_secs > 0.0 {
-                ((frame_packets.len().saturating_sub(1)) as f64 / span_secs)
-                    .clamp(0.1, self.config.fps.max(1.0))
-            } else {
-                self.config.fps.max(1.0)
-            }
-        } else {
-            self.config.fps.max(1.0)
-        };
+        // Force exactly the configured FPS to avoid jitter from pipe delivery times.
+        // H.264 elementary streams from our encoder are CFR.
+        let effective_fps = self.config.fps.max(1.0);
         info!(
             "Muxing H.264 stream with FPS {:.3} (frame_nals={}, total_nals={})",
             effective_fps,
@@ -366,20 +355,8 @@ impl Muxer {
                 "Clip does not yet contain a decodable HEVC frame (no VCL NAL found). Try saving again after a short delay."
             );
         }
-        let effective_fps = if frame_packets.len() >= 2 {
-            let first_pts = frame_packets.first().map(|p| p.pts).unwrap_or(0);
-            let last_pts = frame_packets.last().map(|p| p.pts).unwrap_or(first_pts);
-            let span_qpc = (last_pts - first_pts).max(1) as f64;
-            let span_secs = span_qpc / qpc_frequency_f64;
-            if span_secs > 0.0 {
-                ((frame_packets.len().saturating_sub(1)) as f64 / span_secs)
-                    .clamp(0.1, self.config.fps.max(1.0))
-            } else {
-                self.config.fps.max(1.0)
-            }
-        } else {
-            self.config.fps.max(1.0)
-        };
+        // Force exactly the configured FPS to avoid jitter from pipe delivery times.
+        let effective_fps = self.config.fps.max(1.0);
         info!(
             "Muxing HEVC stream with FPS {:.3} (frame_nals={}, total_nals={})",
             effective_fps,
@@ -766,28 +743,8 @@ impl Muxer {
         qpc_frequency_f64: f64,
     ) -> Result<PathBuf> {
         const FFMPEG_TRANSCODE_TIMEOUT_SECS: u64 = 120;
-        let effective_fps = if self.video_packets.len() >= 2 {
-            let first_pts = self
-                .video_packets
-                .first()
-                .map(|packet| packet.pts)
-                .unwrap_or(0);
-            let last_pts = self
-                .video_packets
-                .last()
-                .map(|packet| packet.pts)
-                .unwrap_or(first_pts);
-            let span_qpc = (last_pts - first_pts).max(1) as f64;
-            let span_secs = span_qpc / qpc_frequency_f64;
-            if span_secs > 0.0 {
-                ((self.video_packets.len().saturating_sub(1)) as f64 / span_secs)
-                    .clamp(0.1, self.config.fps.max(1.0))
-            } else {
-                self.config.fps.max(1.0)
-            }
-        } else {
-            self.config.fps.max(1.0)
-        };
+        // Force exactly the configured FPS to avoid jitter.
+        let effective_fps = self.config.fps.max(1.0);
         info!(
             "Muxing {} frames with effective input FPS {:.3} (target {:.3}). PPS range: {} - {}",
             self.video_packets.len(),
