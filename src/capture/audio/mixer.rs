@@ -42,6 +42,7 @@ pub struct AudioMixer {
     packet_tx: Sender<EncodedPacket>,
     packet_rx: Receiver<EncodedPacket>,
     mixed_samples: Arc<AtomicU64>,
+    mix_thread: Option<thread::JoinHandle<()>>,
 }
 
 impl AudioMixer {
@@ -56,6 +57,7 @@ impl AudioMixer {
             packet_tx,
             packet_rx,
             mixed_samples: Arc::new(AtomicU64::new(0)),
+            mix_thread: None,
         })
     }
 
@@ -84,13 +86,13 @@ impl AudioMixer {
         let mixed_samples = Arc::clone(&self.mixed_samples);
 
         // Spawn the mixing thread
-        thread::spawn(move || {
+        self.mix_thread = Some(thread::spawn(move || {
             if let Err(e) =
                 Self::mix_loop(running, system_rx, mic_rx, packet_tx, mixed_samples, config)
             {
                 error!("Audio mixer error: {}", e);
             }
-        });
+        }));
 
         debug!("Audio mixer started");
         Ok(())
@@ -99,6 +101,11 @@ impl AudioMixer {
     /// Stop the audio mixer
     pub fn stop(&mut self) {
         self.running.store(false, Ordering::SeqCst);
+        if let Some(handle) = self.mix_thread.take() {
+            if handle.join().is_err() {
+                error!("Audio mixer thread panicked");
+            }
+        }
         debug!("Audio mixer stopped");
     }
 

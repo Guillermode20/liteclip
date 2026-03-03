@@ -12,8 +12,8 @@ use super::types::EncoderConfig;
 
 impl From<&crate::config::Config> for EncoderConfig {
     fn from(config: &crate::config::Config) -> Self {
-        let use_native_resolution =
-            matches!(config.video.resolution, crate::config::Resolution::Native);
+        let use_native_resolution = config.video.use_native_resolution
+            || matches!(config.video.resolution, crate::config::Resolution::Native);
         Self {
             codec: config.video.codec,
             bitrate_mbps: config.video.bitrate_mbps,

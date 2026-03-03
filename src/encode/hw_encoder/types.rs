@@ -103,7 +103,7 @@ pub struct HardwareEncoderBase {
     /// Channel sender for frame metadata (timestamps) to output reader
     frame_meta_tx: Option<Sender<FrameMetadata>>,
     /// Async writer for non-blocking stdin writes (CPU readback mode)
-    async_writer: Option<AsyncFrameWriter>,
+    pub(crate) async_writer: Option<AsyncFrameWriter>,
     /// Dropped frame counter for async writer
     dropped_frames: u64,
 }
@@ -904,11 +904,11 @@ impl HardwareEncoderBase {
     }
     /// Flush remaining frames and close FFmpeg
     pub(crate) fn flush_internal(&mut self) -> Result<Vec<EncodedPacket>> {
-        if self.async_writer.take().is_some() {
-            debug!("Async frame writer stopped");
-        }
         if self.ffmpeg.take().is_some() {
             debug!("FFmpeg process cleaned up via ManagedFfmpegProcess::Drop");
+        }
+        if self.async_writer.take().is_some() {
+            debug!("Async frame writer stopped");
         }
         self.running = false;
         let mut packets = Vec::new();

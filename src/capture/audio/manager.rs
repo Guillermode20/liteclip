@@ -60,7 +60,10 @@ impl WasapiAudioManager {
                 device_id: None, // Use default device
             };
 
-            system_capture.start(system_config)?;
+            if let Err(e) = system_capture.start(system_config) {
+                self.running.store(false, Ordering::SeqCst);
+                return Err(e);
+            }
             self.system_capture = Some(system_capture);
             debug!("System audio capture started");
         }
@@ -81,7 +84,13 @@ impl WasapiAudioManager {
                 noise_reduction: config.mic_noise_reduction,
             };
 
-            mic_capture.start(mic_config)?;
+            if let Err(e) = mic_capture.start(mic_config) {
+                if let Some(mut system_capture) = self.system_capture.take() {
+                    system_capture.stop();
+                }
+                self.running.store(false, Ordering::SeqCst);
+                return Err(e);
+            }
             self.mic_capture = Some(mic_capture);
             debug!("Microphone audio capture started");
         }

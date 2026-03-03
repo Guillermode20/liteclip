@@ -6,9 +6,6 @@
     <ProductVersion Condition="'$(ProductVersion)'==''">1.0.0.0</ProductVersion>
     <OutputPath>$(MSBuildThisFileDirectory)output\</OutputPath>
 
-    <!-- Suppress ICE validation errors for now (can be fixed later) -->
-    <SuppressIces>ICE03;ICE38;ICE43;ICE64</SuppressIces>
-
     <!-- WiX preprocessor variables available to .wxs files -->
     <DefineConstants>ProductVersion=$(ProductVersion);Manufacturer=LiteClip;ProductName=LiteClip Replay;BinariesDir=$(MSBuildThisFileDirectory)..\target\release</DefineConstants>
   </PropertyGroup>

@@ -18,6 +18,7 @@ use std::{
     io::Write,
     os::windows::process::CommandExt,
     process::{Command, Stdio},
+    time::{Duration, Instant},
 };
 use tracing::{debug, error, info, trace, warn};
 
@@ -764,6 +765,7 @@ impl Muxer {
         ffmpeg_cmd: OsString,
         qpc_frequency_f64: f64,
     ) -> Result<PathBuf> {
+        const FFMPEG_TRANSCODE_TIMEOUT_SECS: u64 = 120;
         let effective_fps = if self.video_packets.len() >= 2 {
             let first_pts = self
                 .video_packets
@@ -880,13 +882,46 @@ impl Muxer {
             }
             buf
         });
-        let status = child.wait().context("Failed waiting for ffmpeg process")?;
+        let wait_start = Instant::now();
+        let mut timed_out = false;
+        let status = loop {
+            if let Some(status) = child
+                .try_wait()
+                .context("Failed polling ffmpeg process status")?
+            {
+                break status;
+            }
+
+            if wait_start.elapsed() >= Duration::from_secs(FFMPEG_TRANSCODE_TIMEOUT_SECS) {
+                timed_out = true;
+                warn!(
+                    "FFmpeg transcode timed out after {}s, terminating process",
+                    FFMPEG_TRANSCODE_TIMEOUT_SECS
+                );
+                let _ = child.kill();
+                break child
+                    .wait()
+                    .context("Failed waiting for ffmpeg after timeout kill")?;
+            }
+
+            std::thread::sleep(Duration::from_millis(50));
+        };
         for track in &audio_tracks {
             let _ = std::fs::remove_file(&track.path);
         }
         let _stdout_data = stdout_thread.join().unwrap_or_default();
         let stderr_data = stderr_thread.join().unwrap_or_default();
         let stderr_str = String::from_utf8_lossy(&stderr_data);
+        if timed_out {
+            if self.output_path.exists() {
+                let _ = std::fs::remove_file(&self.output_path);
+            }
+            error!("FFmpeg stderr before timeout:\n{}", stderr_str);
+            bail!(
+                "ffmpeg timed out after {} seconds while generating MP4",
+                FFMPEG_TRANSCODE_TIMEOUT_SECS
+            );
+        }
         if !status.success() {
             if self.output_path.exists() {
                 let _ = std::fs::remove_file(&self.output_path);

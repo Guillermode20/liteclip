@@ -42,7 +42,7 @@ impl AsyncFrameWriter {
                 let mut frames_written = 0u64;
                 let frames_dropped = 0u64;
                 let mut stdin = stdin;
-                
+
                 while running_clone.load(Ordering::Relaxed) {
                     match frame_rx.recv_timeout(Duration::from_millis(50)) {
                         Ok(frame) => {
@@ -52,7 +52,7 @@ impl AsyncFrameWriter {
                                     frames_written += 1;
                                     let latency_ms = start.elapsed().as_millis() as u32;
                                     latency_clone.store(latency_ms, Ordering::Relaxed);
-                                    
+
                                     if frames_written % 300 == 0 {
                                         debug!(
                                             "Async writer: {} frames written, {} dropped, latency={}ms",
@@ -75,7 +75,7 @@ impl AsyncFrameWriter {
                         }
                     }
                 }
-                
+
                 debug!(
                     "Async writer stopped: {} frames written, {} dropped",
                     frames_written, frames_dropped
@@ -111,7 +111,9 @@ impl AsyncFrameWriter {
                                 );
                                 Err(TrySendError::Full(f))
                             }
-                            Err(TrySendError::Disconnected(f)) => Err(TrySendError::Disconnected(f)),
+                            Err(TrySendError::Disconnected(f)) => {
+                                Err(TrySendError::Disconnected(f))
+                            }
                         }
                     }
                     Err(_) => {

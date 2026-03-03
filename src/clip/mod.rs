@@ -171,13 +171,13 @@ pub fn spawn_clip_saver_with_defaults(
     width: u32,
     height: u32,
     fps: f64,
-) -> JoinHandle<Result<PathBuf>> {
-    let output_path =
-        muxer::generate_output_path(&save_directory).expect("Failed to generate output path");
+) -> Result<JoinHandle<Result<PathBuf>>> {
+    let output_path = muxer::generate_output_path(&save_directory)
+        .context("Failed to generate clip output path")?;
 
     let config = MuxerConfig::new(width, height, fps, &output_path);
 
-    spawn_clip_saver(buffer, duration, output_path, config)
+    Ok(spawn_clip_saver(buffer, duration, output_path, config))
 }
 
 #[cfg(test)]

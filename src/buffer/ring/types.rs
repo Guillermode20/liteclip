@@ -9,7 +9,7 @@ use parking_lot::RwLock;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
 
 use super::functions::{h264_nal_type, qpc_frequency};
 
@@ -203,6 +203,13 @@ impl ReplayBuffer {
     /// calculation and eviction.
     pub fn push(&mut self, packet: EncodedPacket) {
         let packet_size = packet.data.len();
+        if packet_size > self.max_memory_bytes {
+            warn!(
+                "Dropping oversized packet ({} bytes) exceeding buffer memory cap ({} bytes)",
+                packet_size, self.max_memory_bytes
+            );
+            return;
+        }
         let target_duration_qpc = (self.duration.as_secs_f64() * qpc_frequency() as f64) as i64;
         while !self.packets.is_empty() {
             let oldest_pts = self.packets.front().map(|p| p.pts).unwrap_or(packet.pts);

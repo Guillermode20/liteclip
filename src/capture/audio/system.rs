@@ -51,6 +51,7 @@ pub struct WasapiSystemCapture {
     packet_tx: Sender<EncodedPacket>,
     packet_rx: Receiver<EncodedPacket>,
     processed_samples: Arc<AtomicU64>,
+    capture_thread: Option<thread::JoinHandle<()>>,
 }
 
 impl WasapiSystemCapture {
@@ -63,6 +64,7 @@ impl WasapiSystemCapture {
             packet_tx,
             packet_rx,
             processed_samples: Arc::new(AtomicU64::new(0)),
+            capture_thread: None,
         })
     }
 
@@ -79,11 +81,11 @@ impl WasapiSystemCapture {
         let processed_samples = Arc::clone(&self.processed_samples);
 
         // Spawn the capture thread
-        thread::spawn(move || {
+        self.capture_thread = Some(thread::spawn(move || {
             if let Err(e) = Self::capture_loop(running, packet_tx, processed_samples, config) {
                 error!("System audio capture error: {}", e);
             }
-        });
+        }));
 
         debug!("WASAPI system audio capture started");
         Ok(())
@@ -92,6 +94,11 @@ impl WasapiSystemCapture {
     /// Stop capturing system audio
     pub fn stop(&mut self) {
         self.running.store(false, Ordering::SeqCst);
+        if let Some(handle) = self.capture_thread.take() {
+            if handle.join().is_err() {
+                error!("System audio capture thread panicked");
+            }
+        }
         debug!("WASAPI system audio capture stopped");
     }
 

@@ -107,7 +107,7 @@ pub fn calculate_clip_start_pts(newest_pts: i64, duration: std::time::Duration) 
 /// Phase 3: Will include game name in path
 pub fn generate_output_filename() -> String {
     let timestamp = chrono::Local::now();
-    format!("{}.mp4", timestamp.format("%Y-%m-%d_%H-%M-%S"))
+    format!("{}.mp4", timestamp.format("%Y-%m-%d_%H-%M-%S_%3f"))
 }
 /// Generate full output path for clip
 ///

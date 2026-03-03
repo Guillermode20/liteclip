@@ -183,12 +183,33 @@ pub fn spawn_encoder(
                     return Err(e);
                 }
             };
-            if let Err(e) = encoder.init(&config) {
-                let _ = health_tx.try_send(EncoderHealthEvent::Fatal(format!(
-                    "Failed to initialize encoder: {}",
-                    e
-                )));
-                return Err(e);
+            if let Err(init_error) = encoder.init(&config) {
+                if config.use_cpu_readback {
+                    warn!(
+                        "Primary encoder init failed: {}. Falling back to software encoder",
+                        init_error
+                    );
+                    let mut fallback_config = config.clone();
+                    fallback_config.encoder_type = crate::config::EncoderType::Software;
+                    fallback_config.use_cpu_readback = true;
+                    let mut fallback_encoder: Box<dyn Encoder> =
+                        Box::new(sw_encoder::SoftwareEncoder::new(&fallback_config)?);
+                    if let Err(fallback_error) = fallback_encoder.init(&fallback_config) {
+                        let _ = health_tx.try_send(EncoderHealthEvent::Fatal(format!(
+                            "Failed to initialize encoder and software fallback: primary={}, fallback={}",
+                            init_error, fallback_error
+                        )));
+                        return Err(fallback_error);
+                    }
+                    encoder = fallback_encoder;
+                    info!("Software fallback encoder initialized successfully");
+                } else {
+                    let _ = health_tx.try_send(EncoderHealthEvent::Fatal(format!(
+                        "Failed to initialize encoder: {}",
+                        init_error
+                    )));
+                    return Err(init_error);
+                }
             }
             debug!("Encoder initialized");
             let packet_rx = encoder.packet_rx();
@@ -310,12 +331,33 @@ pub fn spawn_encoder_with_receiver(
                     return Err(e);
                 }
             };
-            if let Err(e) = encoder.init(&config) {
-                let _ = health_tx.try_send(EncoderHealthEvent::Fatal(format!(
-                    "Failed to initialize encoder: {}",
-                    e
-                )));
-                return Err(e);
+            if let Err(init_error) = encoder.init(&config) {
+                if config.use_cpu_readback {
+                    warn!(
+                        "Primary encoder init failed: {}. Falling back to software encoder",
+                        init_error
+                    );
+                    let mut fallback_config = config.clone();
+                    fallback_config.encoder_type = crate::config::EncoderType::Software;
+                    fallback_config.use_cpu_readback = true;
+                    let mut fallback_encoder: Box<dyn Encoder> =
+                        Box::new(sw_encoder::SoftwareEncoder::new(&fallback_config)?);
+                    if let Err(fallback_error) = fallback_encoder.init(&fallback_config) {
+                        let _ = health_tx.try_send(EncoderHealthEvent::Fatal(format!(
+                            "Failed to initialize encoder and software fallback: primary={}, fallback={}",
+                            init_error, fallback_error
+                        )));
+                        return Err(fallback_error);
+                    }
+                    encoder = fallback_encoder;
+                    info!("Software fallback encoder initialized successfully");
+                } else {
+                    let _ = health_tx.try_send(EncoderHealthEvent::Fatal(format!(
+                        "Failed to initialize encoder: {}",
+                        init_error
+                    )));
+                    return Err(init_error);
+                }
             }
             debug!("Encoder initialized");
             let packet_rx = encoder.packet_rx();

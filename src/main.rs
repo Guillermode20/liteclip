@@ -11,6 +11,7 @@ use liteclip_replay::{app::AppState, config::Config};
 use std::env;
 use std::os::windows::process::CommandExt;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
@@ -170,6 +171,7 @@ async fn main() -> Result<()> {
     }
 
     let mut should_restart = false;
+    let save_in_progress = Arc::new(AtomicBool::new(false));
 
     // Main event loop
     loop {
@@ -186,28 +188,52 @@ async fn main() -> Result<()> {
                                 match action {
                                     liteclip_replay::platform::HotkeyAction::SaveClip => {
                                         info!("Hotkey: save clip");
-                                        let state = app_state.read().await;
-                                        let notifications_enabled = state.config().general.notifications;
-                                        match state.save_clip().await {
-                                            Ok(path) => {
-                                                info!("Clip saved: {:?}", path);
-                                                if notifications_enabled {
-                                                    let _ = platform_handle.show_notification(
-                                                        "Clip Saved",
-                                                        &format!("Saved to {:?}", path.file_name().unwrap_or_default()),
-                                                    );
-                                                }
-                                            }
-                                            Err(e) => {
-                                                error!("Failed to save clip: {:#}", e);
-                                                if notifications_enabled {
-                                                    let _ = platform_handle.show_notification(
-                                                        "Save Failed",
-                                                        &format!("{:#}", e),
-                                                    );
-                                                }
-                                            }
+                                        if save_in_progress
+                                            .compare_exchange(
+                                                false,
+                                                true,
+                                                Ordering::SeqCst,
+                                                Ordering::SeqCst,
+                                            )
+                                            .is_err()
+                                        {
+                                            info!("Save request ignored: clip save already in progress");
+                                            continue;
                                         }
+                                        let (config, buffer, notifications_enabled) =
+                                            app_state.read().await.save_context();
+                                        let platform_handle_clone = platform_handle.clone();
+                                        let save_in_progress_clone = save_in_progress.clone();
+                                        tokio::spawn(async move {
+                                            let result = liteclip_replay::app::ClipManager::save_clip(
+                                                &config, &buffer,
+                                            )
+                                            .await;
+                                            match result {
+                                                Ok(path) => {
+                                                    info!("Clip saved: {:?}", path);
+                                                    if notifications_enabled {
+                                                        let _ = platform_handle_clone.show_notification(
+                                                            "Clip Saved",
+                                                            &format!(
+                                                                "Saved to {:?}",
+                                                                path.file_name().unwrap_or_default()
+                                                            ),
+                                                        );
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    error!("Failed to save clip: {:#}", e);
+                                                    if notifications_enabled {
+                                                        let _ = platform_handle_clone.show_notification(
+                                                            "Save Failed",
+                                                            &format!("{:#}", e),
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                            save_in_progress_clone.store(false, Ordering::SeqCst);
+                                        });
                                     }
                                     liteclip_replay::platform::HotkeyAction::ToggleRecording => {
                                         info!("Hotkey: toggle recording");
@@ -263,28 +289,52 @@ async fn main() -> Result<()> {
                                 match tray_event {
                                     liteclip_replay::platform::TrayEvent::SaveClip => {
                                         info!("Tray: Save Clip selected");
-                                        let state = app_state.read().await;
-                                        let notifications_enabled = state.config().general.notifications;
-                                        match state.save_clip().await {
-                                            Ok(path) => {
-                                                info!("Clip saved: {:?}", path);
-                                                if notifications_enabled {
-                                                    let _ = platform_handle.show_notification(
-                                                        "Clip Saved",
-                                                        &format!("Saved to {:?}", path.file_name().unwrap_or_default()),
-                                                    );
-                                                }
-                                            }
-                                            Err(e) => {
-                                                error!("Failed to save clip: {:#}", e);
-                                                if notifications_enabled {
-                                                    let _ = platform_handle.show_notification(
-                                                        "Save Failed",
-                                                        &format!("{:#}", e),
-                                                    );
-                                                }
-                                            }
+                                        if save_in_progress
+                                            .compare_exchange(
+                                                false,
+                                                true,
+                                                Ordering::SeqCst,
+                                                Ordering::SeqCst,
+                                            )
+                                            .is_err()
+                                        {
+                                            info!("Save request ignored: clip save already in progress");
+                                            continue;
                                         }
+                                        let (config, buffer, notifications_enabled) =
+                                            app_state.read().await.save_context();
+                                        let platform_handle_clone = platform_handle.clone();
+                                        let save_in_progress_clone = save_in_progress.clone();
+                                        tokio::spawn(async move {
+                                            let result = liteclip_replay::app::ClipManager::save_clip(
+                                                &config, &buffer,
+                                            )
+                                            .await;
+                                            match result {
+                                                Ok(path) => {
+                                                    info!("Clip saved: {:?}", path);
+                                                    if notifications_enabled {
+                                                        let _ = platform_handle_clone.show_notification(
+                                                            "Clip Saved",
+                                                            &format!(
+                                                                "Saved to {:?}",
+                                                                path.file_name().unwrap_or_default()
+                                                            ),
+                                                        );
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    error!("Failed to save clip: {:#}", e);
+                                                    if notifications_enabled {
+                                                        let _ = platform_handle_clone.show_notification(
+                                                            "Save Failed",
+                                                            &format!("{:#}", e),
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                            save_in_progress_clone.store(false, Ordering::SeqCst);
+                                        });
                                     }
                                     liteclip_replay::platform::TrayEvent::Exit => {
                                         info!("Tray: Exit selected");

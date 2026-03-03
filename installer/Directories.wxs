@@ -19,7 +19,9 @@
 
     <!-- ffmpeg sub-folder under application directory -->
     <DirectoryRef Id="INSTALLDIR">
-      <Directory Id="FFMPEGDIR" Name="ffmpeg" />
+      <Directory Id="FFMPEGDIR" Name="ffmpeg">
+        <Directory Id="FFMPEGBINDIR" Name="bin" />
+      </Directory>
     </DirectoryRef>
   </Fragment>
 </Wix>

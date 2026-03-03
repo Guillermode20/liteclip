@@ -12,11 +12,21 @@
       <ComponentRef Id="cmpUninstallShortcut" />
       <ComponentRef Id="cmpDesktopShortcut" />
       <ComponentRef Id="cmpFileAssocHKLM" />
-      <ComponentRef Id="cmpFileAssocHKCU" />
       <ComponentRef Id="cmpARP" />
+      <ComponentGroupRef Id="AppHarvestedComponents" />
     </ComponentGroup>
 
-    <!-- FFmpeg components: harvested at build time into Generated\FFmpegFiles.wxs (ComponentGroup Id="FFmpegComponents") -->
-    <ComponentGroup Id="FFmpegComponents" />
+    <!-- Baseline FFmpeg payload + optional harvested binaries -->
+    <Component Id="cmpFfmpegExe" Guid="{A3D9F4C5-8AAE-4D4C-9412-24A64684E179}" Directory="FFMPEGBINDIR">
+      <File Id="filFfmpegExe" Source="..\ffmpeg\bin\ffmpeg.exe" KeyPath="yes" />
+    </Component>
+
+    <ComponentGroup Id="FFmpegComponents">
+      <ComponentRef Id="cmpFfmpegExe" />
+      <ComponentGroupRef Id="FFmpegHarvestedComponents" />
+    </ComponentGroup>
+
+    <ComponentGroup Id="AppHarvestedComponents" />
+    <ComponentGroup Id="FFmpegHarvestedComponents" />
   </Fragment>
 </Wix>

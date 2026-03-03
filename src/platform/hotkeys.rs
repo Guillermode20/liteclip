@@ -50,6 +50,7 @@ const HOTKEY_ID_OPEN_GALLERY: i32 = 1003;
 /// Logs errors but continues registering other hotkeys on failure.
 pub fn register_hotkeys(hwnd: HWND, config: &HotkeyConfig) -> Result<()> {
     info!("Registering hotkeys...");
+    let mut success_count = 0usize;
 
     // Register save clip hotkey (default: Alt+F9)
     if let Err(e) = register_single_hotkey(hwnd, HOTKEY_ID_SAVE_CLIP, &config.save_clip) {
@@ -59,6 +60,7 @@ pub fn register_hotkeys(hwnd: HWND, config: &HotkeyConfig) -> Result<()> {
         );
     } else {
         debug!("Registered save clip hotkey: {}", config.save_clip);
+        success_count += 1;
     }
 
     // Register toggle recording hotkey (default: Alt+F10)
@@ -74,6 +76,7 @@ pub fn register_hotkeys(hwnd: HWND, config: &HotkeyConfig) -> Result<()> {
             "Registered toggle recording hotkey: {}",
             config.toggle_recording
         );
+        success_count += 1;
     }
 
     // Register screenshot hotkey (default: Alt+F8)
@@ -84,6 +87,7 @@ pub fn register_hotkeys(hwnd: HWND, config: &HotkeyConfig) -> Result<()> {
         );
     } else {
         debug!("Registered screenshot hotkey: {}", config.screenshot);
+        success_count += 1;
     }
 
     // Register open gallery hotkey (default: Ctrl+Shift+S)
@@ -94,6 +98,11 @@ pub fn register_hotkeys(hwnd: HWND, config: &HotkeyConfig) -> Result<()> {
         );
     } else {
         debug!("Registered open gallery hotkey: {}", config.open_gallery);
+        success_count += 1;
+    }
+
+    if success_count == 0 {
+        anyhow::bail!("Failed to register all configured hotkeys");
     }
 
     info!("Hotkey registration complete");

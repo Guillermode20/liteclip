@@ -53,6 +53,7 @@ pub struct WasapiMicCapture {
     packet_tx: Sender<EncodedPacket>,
     packet_rx: Receiver<EncodedPacket>,
     processed_samples: Arc<AtomicU64>,
+    capture_thread: Option<thread::JoinHandle<()>>,
 }
 
 impl WasapiMicCapture {
@@ -66,6 +67,7 @@ impl WasapiMicCapture {
             packet_tx,
             packet_rx,
             processed_samples: Arc::new(AtomicU64::new(0)),
+            capture_thread: None,
         })
     }
 
@@ -84,13 +86,13 @@ impl WasapiMicCapture {
         let processed_samples = Arc::clone(&self.processed_samples);
 
         // Spawn the capture thread
-        thread::spawn(move || {
+        self.capture_thread = Some(thread::spawn(move || {
             if let Err(e) =
                 Self::capture_loop(running, initialized, packet_tx, processed_samples, config)
             {
                 error!("Microphone audio capture error: {}", e);
             }
-        });
+        }));
 
         // Wait briefly for the capture thread to initialize WASAPI and report status
         thread::sleep(Duration::from_millis(500));
@@ -109,6 +111,11 @@ impl WasapiMicCapture {
     /// Stop capturing microphone audio
     pub fn stop(&mut self) {
         self.running.store(false, Ordering::SeqCst);
+        if let Some(handle) = self.capture_thread.take() {
+            if handle.join().is_err() {
+                error!("Microphone audio capture thread panicked");
+            }
+        }
         debug!("WASAPI microphone audio capture stopped");
     }
 

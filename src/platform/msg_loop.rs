@@ -222,35 +222,53 @@ fn hotkey_id_to_action(id: i32) -> Option<HotkeyAction> {
 /// Parse hotkey string (e.g. "Alt+F9") into modifiers + virtual key code.
 pub fn parse_hotkey(hotkey: &str) -> Result<(HOT_KEY_MODIFIERS, u32)> {
     let parts: Vec<&str> = hotkey.split('+').map(|s| s.trim()).collect();
+    if parts.is_empty() || parts.iter().any(|part| part.is_empty()) {
+        anyhow::bail!("Invalid hotkey format: '{}'", hotkey);
+    }
 
     let mut modifiers = HOT_KEY_MODIFIERS(0);
     let mut key = 0u32;
+    let mut seen_key = false;
 
     for part in &parts {
-        match *part {
-            "Alt" => modifiers.0 |= MOD_ALT.0,
-            "Ctrl" | "Control" => modifiers.0 |= MOD_CONTROL.0,
-            "Shift" => modifiers.0 |= MOD_SHIFT.0,
-            "Win" => modifiers.0 |= MOD_WIN.0,
+        let normalized = part.to_ascii_lowercase();
+        match normalized.as_str() {
+            "alt" => modifiers.0 |= MOD_ALT.0,
+            "ctrl" | "control" => modifiers.0 |= MOD_CONTROL.0,
+            "shift" => modifiers.0 |= MOD_SHIFT.0,
+            "win" => modifiers.0 |= MOD_WIN.0,
             _ => {
-                if part.len() >= 2 && part.starts_with('F') {
-                    if let Ok(n) = part[1..].parse::<u32>() {
+                let mut parsed_key = None;
+                if normalized.len() >= 2 && normalized.starts_with('f') {
+                    if let Ok(n) = normalized[1..].parse::<u32>() {
                         if (1..=24).contains(&n) {
-                            key = 0x6F + n; // VK_F1 = 0x70
+                            parsed_key = Some(0x6F + n); // VK_F1 = 0x70
                         }
                     }
-                } else if part.len() == 1 {
-                    let ch = part.chars().next().unwrap().to_ascii_uppercase() as u32;
+                } else if normalized.len() == 1 {
+                    let ch = normalized.chars().next().unwrap().to_ascii_uppercase() as u32;
                     if (0x30..=0x39).contains(&ch) || (0x41..=0x5A).contains(&ch) {
-                        key = ch;
+                        parsed_key = Some(ch);
                     }
                 }
+
+                let Some(parsed_key) = parsed_key else {
+                    anyhow::bail!("Unsupported hotkey token '{}' in '{}'", part, hotkey);
+                };
+                if seen_key {
+                    anyhow::bail!("Hotkey '{}' contains multiple key tokens", hotkey);
+                }
+                key = parsed_key;
+                seen_key = true;
             }
         }
     }
 
     if key == 0 {
         anyhow::bail!("Could not parse hotkey: {}", hotkey);
+    }
+    if modifiers.0 == 0 {
+        anyhow::bail!("Hotkey '{}' must include at least one modifier", hotkey);
     }
 
     trace!("Parsed '{}' -> mods={:?} key={}", hotkey, modifiers, key);
@@ -273,5 +291,25 @@ mod tests {
         let (mods, key) = parse_hotkey("Ctrl+Shift+S").unwrap();
         assert!(mods.0 > 0);
         assert_eq!(key, 0x53); // VK_S
+    }
+
+    #[test]
+    fn test_parse_hotkey_rejects_unknown_token() {
+        assert!(parse_hotkey("Alt+Mouse4").is_err());
+    }
+
+    #[test]
+    fn test_parse_hotkey_rejects_multiple_keys() {
+        assert!(parse_hotkey("Alt+F9+F10").is_err());
+    }
+
+    #[test]
+    fn test_parse_hotkey_requires_modifier() {
+        assert!(parse_hotkey("F9").is_err());
+    }
+
+    #[test]
+    fn test_parse_hotkey_rejects_empty_token() {
+        assert!(parse_hotkey("Alt++F9").is_err());
     }
 }

@@ -5,8 +5,7 @@ This folder contains a WiX Toolset v4 installer project for LiteClip Replay.
 ## What is included
 - `LiteClipReplay.wixproj` — MSBuild-based WiX v4 project (x64, Debug/Release support)
 - `Product.wxs`, `Directories.wxs`, `Components.wxs`, `Features.wxs`, `Shortcuts.wxs`, `Registry.wxs`, `UI.wxs` — WiX fragments
-- `Dialogs/InstallScope.wxs` — small custom dialog to choose per-user vs per-machine
-- `Harvest.targets` — runs `heat.exe` to harvest `liteclip-replay.exe` and `ffmpeg/bin/*` into WiX fragments
+- `Harvest.targets` — runs `heat.exe` to harvest optional `ffmpeg/bin/*` files into WiX fragments
 - `Bundle.wxs` — bootstrapper (Burn) stub chaining prerequisites + MSI
 - `License.rtf` — license placeholder (MIT)
 - `en-US.wxl`, `Variables.wxs` — localization / variables
@@ -28,8 +27,9 @@ Or use the convenience script in `installer/`:
 
 ## Notes & validation checklist
 - All component GUIDs are explicit and unique.
-- FFmpeg binaries are harvested into `installer/Generated/FFmpegFiles.wxs` at build time.
-- File association `.lcr` is registered per-user or per-machine depending on installation scope.
+- Installer scope is per-machine only.
+- FFmpeg payload: `ffmpeg.exe` is always included from `..\ffmpeg\bin\ffmpeg.exe`; if `heat.exe` is available, additional files from `ffmpeg\bin` are harvested into `installer/Generated/FFmpegFiles.wxs`.
+- File association `.lcr` is registered per-machine.
 - Desktop shortcut is optional (feature-controlled).
 
 If you want, I can:

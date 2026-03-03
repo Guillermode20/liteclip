@@ -52,7 +52,8 @@ impl Drop for ManagedFfmpegProcess {
             while !stdout_reader.is_finished() {
                 if start.elapsed() > thread_timeout {
                     warn!(
-                        "stdout reader thread did not finish within {:?}", thread_timeout
+                        "stdout reader thread did not finish within {:?}",
+                        thread_timeout
                     );
                     break;
                 }
@@ -67,7 +68,8 @@ impl Drop for ManagedFfmpegProcess {
             while !stderr_reader.is_finished() {
                 if start.elapsed() > thread_timeout {
                     warn!(
-                        "stderr reader thread did not finish within {:?}", thread_timeout
+                        "stderr reader thread did not finish within {:?}",
+                        thread_timeout
                     );
                     break;
                 }
@@ -79,4 +81,3 @@ impl Drop for ManagedFfmpegProcess {
         }
     }
 }
-

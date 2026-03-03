@@ -110,7 +110,12 @@ impl RecordingPipeline {
         }
     }
 
-    fn start_audio_capture(&mut self, config: &Config, buffer: &SharedReplayBuffer, context: &str) -> Result<()> {
+    fn start_audio_capture(
+        &mut self,
+        config: &Config,
+        buffer: &SharedReplayBuffer,
+        context: &str,
+    ) -> Result<()> {
         if !config.audio.capture_system && !config.audio.capture_mic {
             return Ok(());
         }
@@ -129,11 +134,11 @@ impl RecordingPipeline {
         std::thread::spawn(move || {
             let mut forwarded_packets = 0u64;
             let mut packet_batch = Vec::with_capacity(32);
-            
+
             while let Ok(packet) = audio_packet_rx.recv() {
                 packet_batch.push(packet);
                 forwarded_packets = forwarded_packets.saturating_add(1);
-                
+
                 while packet_batch.len() < 32 {
                     if let Ok(p) = audio_packet_rx.try_recv() {
                         packet_batch.push(p);
@@ -142,7 +147,7 @@ impl RecordingPipeline {
                         break;
                     }
                 }
-                
+
                 buffer_clone.push_batch(packet_batch.drain(..));
 
                 if forwarded_packets <= 32 {
@@ -240,21 +245,18 @@ impl RecordingPipeline {
         let mut capture_encoder_config = encoder_config;
         capture_encoder_config.use_cpu_readback = true;
 
-        let encoder_handle = match spawn_encoder_with_receiver(
-            capture_encoder_config,
-            buffer.clone(),
-            frame_rx,
-        )
-        .context("Failed to spawn encoder")
-        {
-            Ok(handle) => handle,
-            Err(e) => {
-                drop(capture);
-                self.rollback_startup();
-                self.lifecycle = RecordingLifecycle::Idle;
-                return Err(e);
-            }
-        };
+        let encoder_handle =
+            match spawn_encoder_with_receiver(capture_encoder_config, buffer.clone(), frame_rx)
+                .context("Failed to spawn encoder")
+            {
+                Ok(handle) => handle,
+                Err(e) => {
+                    drop(capture);
+                    self.rollback_startup();
+                    self.lifecycle = RecordingLifecycle::Idle;
+                    return Err(e);
+                }
+            };
 
         self.encoder_handle = Some(encoder_handle);
         self.capture = Some(capture);
@@ -410,14 +412,15 @@ impl ClipManager {
             );
         }
 
-        let (width, height) = buffer
-            .snapshot_first_packet_resolution()
-            .unwrap_or(match config.video.resolution {
-                crate::config::Resolution::Native => (1920, 1080),
-                crate::config::Resolution::P1080 => (1920, 1080),
-                crate::config::Resolution::P720 => (1280, 720),
-                crate::config::Resolution::P480 => (854, 480),
-            });
+        let (width, height) =
+            buffer
+                .snapshot_first_packet_resolution()
+                .unwrap_or(match config.video.resolution {
+                    crate::config::Resolution::Native => (1920, 1080),
+                    crate::config::Resolution::P1080 => (1920, 1080),
+                    crate::config::Resolution::P720 => (1280, 720),
+                    crate::config::Resolution::P480 => (854, 480),
+                });
         let fps = config.video.framerate as f64;
 
         let muxer_video_codec = match config.video.codec {
@@ -447,7 +450,7 @@ impl ClipManager {
     fn generate_output_path(config: &Config) -> Result<PathBuf> {
         use chrono::Local;
 
-        let timestamp = Local::now().format("%Y-%m-%d_%H-%M-%S");
+        let timestamp = Local::now().format("%Y-%m-%d_%H-%M-%S_%3f");
         let filename = format!("clip_{}.mp4", timestamp);
 
         let save_dir = PathBuf::from(&config.general.save_directory);
@@ -489,6 +492,14 @@ impl AppState {
 
     pub async fn save_clip(&self) -> Result<PathBuf> {
         ClipManager::save_clip(&self.config, &self.buffer).await
+    }
+
+    pub fn save_context(&self) -> (Config, SharedReplayBuffer, bool) {
+        (
+            self.config.clone(),
+            self.buffer.clone(),
+            self.config.general.notifications,
+        )
     }
 
     pub fn buffer_stats(&self) -> crate::buffer::BufferStats {

@@ -184,7 +184,7 @@ mod tests {
         let qpc = qpc_frequency() as i64;
         let fps = 30i64;
         let keyframe_every_n_frames = 60i64; // every 2 s at 30 fps
-        // Use a 5-second ring buffer with a generous memory cap (1 GB).
+                                             // Use a 5-second ring buffer with a generous memory cap (1 GB).
         let buffer_duration = Duration::from_secs(5);
         let mut buffer = ReplayBuffer::with_params(buffer_duration, 1024);
 

@@ -67,10 +67,12 @@ impl Config {
             let content = tokio::fs::read_to_string(&config_path)
                 .await
                 .with_context(|| format!("Failed to read config from {:?}", config_path))?;
-            let config: Config = toml::from_str(&content)?;
+            let mut config: Config = toml::from_str(&content)?;
+            config.validate();
             Ok(config)
         } else {
-            let config = Config::default();
+            let mut config = Config::default();
+            config.validate();
             config.save().await?;
             Ok(config)
         }
@@ -182,8 +184,7 @@ impl Config {
             warn!("Config: keyframe_interval_secs was 0, clamping to 1");
             self.advanced.keyframe_interval_secs = 1;
         }
-        if !self.video.use_native_resolution
-            && matches!(self.video.resolution, Resolution::Native)
+        if !self.video.use_native_resolution && matches!(self.video.resolution, Resolution::Native)
         {
             warn!(
                 "Config: use_native_resolution is false but resolution is 'native' - \
@@ -191,8 +192,7 @@ impl Config {
             );
             self.video.use_native_resolution = true;
         }
-        if self.video.use_native_resolution
-            && !matches!(self.video.resolution, Resolution::Native)
+        if self.video.use_native_resolution && !matches!(self.video.resolution, Resolution::Native)
         {
             warn!(
                 "Config: use_native_resolution is true but resolution is set to {:?} - \

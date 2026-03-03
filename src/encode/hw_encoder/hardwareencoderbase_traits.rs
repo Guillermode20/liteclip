@@ -20,5 +20,8 @@ impl Drop for HardwareEncoderBase {
         if self.ffmpeg.take().is_some() {
             // ManagedFfmpegProcess::Drop handles the cleanup
         }
+        // Drop async writer after process teardown so blocking stdin writes are
+        // released before joining the writer thread.
+        let _ = self.async_writer.take();
     }
 }
