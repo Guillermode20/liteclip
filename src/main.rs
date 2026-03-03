@@ -19,6 +19,7 @@ use tracing::{error, info, warn};
 use windows::Win32::Media::{timeBeginPeriod, timeEndPeriod, TIMERR_NOERROR};
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
+const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x01000000;
 
 #[cfg(windows)]
 struct TimerResolutionGuard {
@@ -79,8 +80,8 @@ async fn main() -> Result<()> {
     {
         use windows::Win32::System::JobObjects::{
             AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-            SetInformationJobObject,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_BREAKAWAY_OK,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, SetInformationJobObject,
         };
         use windows::Win32::System::Threading::GetCurrentProcess;
         use windows::core::PCWSTR;
@@ -88,7 +89,8 @@ async fn main() -> Result<()> {
         unsafe {
             if let Ok(job) = CreateJobObjectW(None, PCWSTR::null()) {
                 let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-                info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                info.BasicLimitInformation.LimitFlags =
+                    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK;
                 let _ = SetInformationJobObject(
                     job,
                     JobObjectExtendedLimitInformation,
@@ -437,25 +439,7 @@ async fn main() -> Result<()> {
     // Cleanup
     info!("Shutting down (should_restart={})", should_restart);
 
-    // For restart: spawn the new process IMMEDIATELY so the user sees it start
-    // right away while we do cleanup in the background.
-    if should_restart {
-        info!("Spawning new instance for restart...");
-        match std::env::current_exe() {
-            Ok(current_exe) => {
-                let args: Vec<String> = std::env::args().skip(1).collect();
-                match Command::new(&current_exe)
-                    .args(&args)
-                    .creation_flags(CREATE_NO_WINDOW)
-                    .spawn()
-                {
-                    Ok(_) => info!("New instance spawned successfully"),
-                    Err(e) => error!("Failed to spawn new instance: {}", e),
-                }
-            }
-            Err(e) => error!("Failed to get current executable path for restart: {}", e),
-        }
-    }
+    // Restart logic moved to the very end to ensure all resources are released.
 
     // Signal platform thread to quit first — this drops the tray icon immediately
     // giving the user instant visual feedback that Exit/Restart was acknowledged.
@@ -496,6 +480,26 @@ async fn main() -> Result<()> {
 
     let _ = shutdown_done_tx.send(());
     info!("LiteClip Replay stopped");
+
+    // For restart: spawn the new process after everything else is cleaned up
+    // to avoid resource conflicts (GPU, Audio, Tray icon, etc.)
+    if should_restart {
+        info!("Spawning new instance for restart...");
+        match std::env::current_exe() {
+            Ok(current_exe) => {
+                let args: Vec<String> = std::env::args().skip(1).collect();
+                match Command::new(&current_exe)
+                    .args(&args)
+                    .creation_flags(CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB)
+                    .spawn()
+                {
+                    Ok(_) => info!("New instance spawned successfully"),
+                    Err(e) => error!("Failed to spawn new instance: {}", e),
+                }
+            }
+            Err(e) => error!("Failed to get current executable path for restart: {}", e),
+        }
+    }
 
     // Use process::exit for a clean, fast termination — avoids potential hangs
     // in tokio runtime teardown or lingering async drop paths.
