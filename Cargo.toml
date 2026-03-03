@@ -11,7 +11,7 @@ ffmpeg = []
 [dependencies]
 # Ref-counted byte buffers
 bytes = "1"
-image = { version = "0.25", default-features = false, features = ["jpeg"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "ico"] }
 
 # Async
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "fs"] }
@@ -55,3 +55,6 @@ codegen-units = 1
 lto = "fat"
 panic = "abort"
 strip = true
+
+[build-dependencies]
+winres = "0.1"

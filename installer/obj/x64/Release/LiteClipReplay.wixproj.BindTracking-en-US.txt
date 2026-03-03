@@ -2,7 +2,8 @@ BuiltContentOutput	C:\Coding\liteclip-recorder\installer\obj\x64\Release\en-US\c
 BuiltContentOutput	C:\Coding\liteclip-recorder\installer\obj\x64\Release\en-US\cab2.cab
 BuiltPdbOutput	C:\Coding\liteclip-recorder\installer\obj\x64\Release\en-US\LiteClipReplay.wixpdb
 BuiltTargetOutput	C:\Coding\liteclip-recorder\installer\obj\x64\Release\en-US\LiteClipReplay.msi
-Input	..\ffmpeg\bin\ffmpeg.exe
+Input	..\app.ico
+Input	..\ffmpeg\bin\liteclip-replay-ffmpeg.exe
 Input	..\target\release\liteclip-replay.exe
 Intermediate	C:\Coding\liteclip-recorder\installer\obj\x64\Release\en-US\cab1.cab
 Intermediate	C:\Coding\liteclip-recorder\installer\obj\x64\Release\en-US\cab2.cab

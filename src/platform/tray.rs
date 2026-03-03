@@ -114,25 +114,13 @@ impl TrayManager {
 
 /// Load the tray icon, falling back to a solid-colour square if no file is found.
 fn load_tray_icon() -> tray_icon::Icon {
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()));
-
-    for name in &["liteclip.ico", "icon.ico", "assets/icon.ico"] {
-        let path = exe_dir
-            .as_ref()
-            .map(|d| d.join(name))
-            .unwrap_or_else(|| std::path::PathBuf::from(name));
-
-        if path.exists() {
-            if let Ok(img) = image::open(&path) {
-                let rgba = img.into_rgba8();
-                let (w, h) = (rgba.width(), rgba.height());
-                if let Ok(icon) = tray_icon::Icon::from_rgba(rgba.into_raw(), w, h) {
-                    debug!("Tray: loaded icon from {:?}", path);
-                    return icon;
-                }
-            }
+    let icon_data = include_bytes!("../../app.png");
+    if let Ok(img) = image::load_from_memory(icon_data) {
+        let rgba = img.into_rgba8();
+        let (w, h) = (rgba.width(), rgba.height());
+        if let Ok(icon) = tray_icon::Icon::from_rgba(rgba.into_raw(), w, h) {
+            debug!("Tray: loaded baked icon");
+            return icon;
         }
     }
 

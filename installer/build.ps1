@@ -12,8 +12,8 @@ Push-Location $PSScriptRoot
 Write-Host "1) Building Rust release (ffmpeg feature)"
 cargo build --release --features ffmpeg
 
-if (-not (Test-Path "..\\ffmpeg\\bin\\ffmpeg.exe")) {
-  throw "Missing ..\\ffmpeg\\bin\\ffmpeg.exe. Installer build requires bundled FFmpeg binaries."
+if (-not (Test-Path "..\\ffmpeg\\bin\\liteclip-replay-ffmpeg.exe")) {
+  throw "Missing ..\\ffmpeg\\bin\\liteclip-replay-ffmpeg.exe. Installer build requires bundled FFmpeg binaries."
 }
 
 Write-Host "2) Restoring NuGet packages for WiX project"

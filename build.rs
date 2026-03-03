@@ -12,6 +12,10 @@ fn main() {
 
         // GDI32 for graphics functions
         println!("cargo:rustc-link-lib=gdi32");
+
+        let mut res = winres::WindowsResource::new();
+        res.set_icon("app.ico");
+        res.compile().unwrap();
     }
 
     // Re-run if build.rs changes
