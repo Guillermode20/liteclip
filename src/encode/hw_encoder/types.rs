@@ -340,14 +340,27 @@ impl HardwareEncoderBase {
                 cmd.arg(self.amf_quality_mode());
 
                 // CRITICAL: B-frames disabled for replay buffer compatibility
+                // (Set to 2 or 3 if your replay buffer properly handles PTS/DTS sync for significant file size savings)
                 cmd.arg("-bf").arg("0");
 
-                // Usage mode: lowlatency_high_quality offers better quality than plain lowlatency
-                // for replay buffer use cases where we're not live streaming
-                cmd.arg("-usage").arg("lowlatency_high_quality");
+                // Usage mode: high_quality allows the encoder to take its time and maximize compression
+                // efficiency without the strict real-time flushing constraints of low-latency modes.
+                cmd.arg("-usage").arg("high_quality");
+
+                // === CODING EFFICIENCY ===
+                // CABAC is ~10-15% more efficient than CAVLC for H.264
+                if encoder_name == "h264_amf" {
+                    cmd.arg("-coder").arg("cabac");
+                }
+                // HEVC profile tier - high tier allows better encoding tools
+                if encoder_name == "hevc_amf" {
+                    cmd.arg("-profile_tier").arg("high");
+                }
 
                 // === PREANALYSIS - Core quality optimizations ===
                 cmd.arg("-preanalysis").arg("1");
+                // Pre-encode assisted rate control (different from preanalysis)
+                cmd.arg("-preencode").arg("1");
                 // Full YUV analysis for better decisions (not just luma)
                 cmd.arg("-pa_activity_type").arg("yuv");
                 // Scene change detection - high sensitivity for gaming content
@@ -363,7 +376,8 @@ impl HardwareEncoderBase {
                 // Temporal Adaptive Quantization - consistency across frames
                 cmd.arg("-pa_taq_mode").arg("2");
                 // Lookahead buffer for better rate control decisions
-                cmd.arg("-pa_lookahead_buffer_depth").arg("8");
+                // Increased to 32 for much better bit allocation padding during fast shooter motion
+                cmd.arg("-pa_lookahead_buffer_depth").arg("32");
 
                 // === ADAPTIVE QUANTIZATION ===
                 cmd.arg("-vbaq").arg("1"); // Variance-based AQ
@@ -374,11 +388,14 @@ impl HardwareEncoderBase {
                 // High motion quality boost - critical for gaming content
                 cmd.arg("-high_motion_quality_boost_enable").arg("1");
 
-                // === QP BOUNDS - Prevent quality drops on complex scenes ===
+                // === QP BOUNDS ===
+                // Max limits relaxed (up to 51) to allow the rate control algorithm to breathe 
+                // and compress heavily during chaotic, unperceivable fast-motion scenes (shooters),
+                // completely preventing gigantic bitrate spikes without hurting visible quality.
                 cmd.arg("-min_qp_i").arg("18");
-                cmd.arg("-max_qp_i").arg("40");
+                cmd.arg("-max_qp_i").arg("51");
                 cmd.arg("-min_qp_p").arg("20");
-                cmd.arg("-max_qp_p").arg("42");
+                cmd.arg("-max_qp_p").arg("51");
 
                 // === STREAM STRUCTURE ===
                 cmd.arg("-aud").arg("1"); // AU delimiter for clean seeking
@@ -495,8 +512,8 @@ impl HardwareEncoderBase {
             .quality_value
             .unwrap_or(match self.config.quality_preset {
                 QualityPreset::Performance => 28,
-                QualityPreset::Balanced => 23,
-                QualityPreset::Quality => 19,
+                QualityPreset::Balanced => 25,
+                QualityPreset::Quality => 22,
             })
     }
     /// Spawn thread to read FFmpeg output — returns JoinHandle for cleanup
