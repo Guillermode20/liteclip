@@ -235,7 +235,7 @@ pub fn spawn_encoder(
                     );
                     buffer.push_batch(packet_batch.drain(..));
                 }
-                match frame_rx.recv_timeout(std::time::Duration::from_millis(1)) {
+                match frame_rx.recv_timeout(std::time::Duration::from_millis(15)) {
                     Ok(frame) => {
                         frames_encoded += 1;
                         if frames_encoded % 1800 == 0 {
@@ -375,7 +375,7 @@ pub fn spawn_encoder_with_receiver(
                 if !packet_batch.is_empty() {
                     buffer.push_batch(packet_batch.drain(..));
                 }
-                match frame_rx.recv_timeout(std::time::Duration::from_millis(1)) {
+                match frame_rx.recv_timeout(std::time::Duration::from_millis(15)) {
                     Ok(frame) => {
                         if let Err(e) = encoder.encode_frame(&frame) {
                             warn!("Failed to encode frame: {}", e);

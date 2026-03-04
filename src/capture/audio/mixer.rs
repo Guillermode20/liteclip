@@ -3,6 +3,7 @@
 //! Combines system audio and microphone audio streams with volume controls.
 
 use anyhow::Result;
+use bytes::BytesMut;
 use crossbeam::channel::{bounded, Receiver, Sender, TryRecvError};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -72,7 +73,10 @@ impl AudioMixer {
     }
 
     /// Start the audio mixer
-    pub fn start(&mut self, config: AudioMixerConfig) -> Result<()> {
+    pub fn start(&mut self, mut config: AudioMixerConfig) -> Result<()> {
+        config.system_volume = config.system_volume.clamp(0.0, 1.0);
+        config.mic_volume = config.mic_volume.clamp(0.0, 1.0);
+
         if self.running.load(Ordering::SeqCst) {
             return Ok(());
         }
@@ -140,6 +144,7 @@ impl AudioMixer {
         let mut output_packets: u64 = 0;
         let mut seen_system_input = false;
         let mut seen_mic_input = false;
+        let mut mix_buf = BytesMut::with_capacity(8192);
 
         // Main mixing loop
         while running.load(Ordering::SeqCst) {
@@ -194,6 +199,7 @@ impl AudioMixer {
                     mic_packet,
                     config.system_volume,
                     config.mic_volume,
+                    &mut mix_buf,
                 )?;
                 let sample_count = (mixed.data.len() / 2) as u64;
 
@@ -218,7 +224,7 @@ impl AudioMixer {
 
             if let Some((packet, ts)) = pending_system.take() {
                 if mic_rx.is_none() || now.duration_since(ts) >= pending_timeout {
-                    let adjusted = apply_volume_to_packet(packet, config.system_volume)?;
+                    let adjusted = apply_volume_to_packet(packet, config.system_volume, &mut mix_buf)?;
                     let sample_count = (adjusted.data.len() / 2) as u64;
 
                     if packet_tx.send(adjusted).is_err() {
@@ -243,7 +249,7 @@ impl AudioMixer {
 
             if let Some((packet, ts)) = pending_mic.take() {
                 if system_rx.is_none() || now.duration_since(ts) >= pending_timeout {
-                    let adjusted = apply_volume_to_packet(packet, config.mic_volume)?;
+                    let adjusted = apply_volume_to_packet(packet, config.mic_volume, &mut mix_buf)?;
                     let sample_count = (adjusted.data.len() / 2) as u64;
 
                     if packet_tx.send(adjusted).is_err() {
@@ -273,10 +279,8 @@ impl AudioMixer {
 }
 
 /// Apply volume adjustment to an audio packet
-fn apply_volume_to_packet(packet: EncodedPacket, volume: f32) -> Result<EncodedPacket> {
-    let volume_multiplier = volume.clamp(0.0, 1.0);
-
-    if (volume_multiplier - 1.0).abs() < f32::EPSILON {
+fn apply_volume_to_packet(packet: EncodedPacket, volume: f32, buf: &mut BytesMut) -> Result<EncodedPacket> {
+    if (volume - 1.0).abs() < f32::EPSILON {
         return Ok(packet);
     }
 
@@ -284,11 +288,12 @@ fn apply_volume_to_packet(packet: EncodedPacket, volume: f32) -> Result<EncodedP
         return Ok(packet);
     }
 
-    let mut data = packet.data.to_vec();
+    buf.clear();
+    buf.extend_from_slice(&packet.data);
 
-    for chunk in data.chunks_exact_mut(2) {
+    for chunk in buf.chunks_exact_mut(2) {
         let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
-        let scaled = (sample as f32 * volume_multiplier)
+        let scaled = (sample as f32 * volume)
             .round()
             .clamp(i16::MIN as f32, i16::MAX as f32) as i16;
         let bytes = scaled.to_le_bytes();
@@ -297,7 +302,7 @@ fn apply_volume_to_packet(packet: EncodedPacket, volume: f32) -> Result<EncodedP
     }
 
     Ok(EncodedPacket::new(
-        data,
+        buf.split().freeze(),
         packet.pts,
         packet.dts,
         packet.is_keyframe,
@@ -308,8 +313,9 @@ fn apply_volume_to_packet(packet: EncodedPacket, volume: f32) -> Result<EncodedP
 fn mix_packets(
     system_packet: EncodedPacket,
     mic_packet: EncodedPacket,
-    system_volume: f32,
-    mic_volume: f32,
+    sys_gain: f32,
+    mic_gain: f32,
+    buf: &mut BytesMut,
 ) -> Result<EncodedPacket> {
     let system_data = system_packet.data.as_ref();
     let mic_data = mic_packet.data.as_ref();
@@ -326,10 +332,8 @@ fn mix_packets(
     }
 
     let len_aligned = max_len - (max_len % 2);
-    let mut mixed = vec![0u8; len_aligned];
-
-    let sys_gain = system_volume.clamp(0.0, 1.0);
-    let mic_gain = mic_volume.clamp(0.0, 1.0);
+    buf.clear();
+    buf.resize(len_aligned, 0);
 
     for i in (0..len_aligned).step_by(2) {
         let sys = if i + 1 < system_data.len() {
@@ -349,12 +353,12 @@ fn mix_packets(
             .clamp(i16::MIN as f32, i16::MAX as f32) as i16;
 
         let bytes = sample.to_le_bytes();
-        mixed[i] = bytes[0];
-        mixed[i + 1] = bytes[1];
+        buf[i] = bytes[0];
+        buf[i + 1] = bytes[1];
     }
 
     Ok(EncodedPacket::new(
-        mixed,
+        buf.split().freeze(),
         system_packet.pts.min(mic_packet.pts),
         system_packet.dts.min(mic_packet.dts),
         false,

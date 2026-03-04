@@ -86,10 +86,7 @@ pub fn hevc_nal_type(data: &[u8]) -> Option<u8> {
 ///
 /// Returns the QPC timestamp to seek to (nearest keyframe at or before this time).
 pub fn calculate_clip_start_pts(newest_pts: i64, duration: std::time::Duration) -> i64 {
-    let mut qpc_freq = 10_000_000i64;
-    unsafe {
-        let _ = windows::Win32::System::Performance::QueryPerformanceFrequency(&mut qpc_freq);
-    }
+    let qpc_freq = crate::buffer::ring::functions::qpc_frequency();
     let duration_qpc = (duration.as_secs_f64() * qpc_freq as f64) as i64;
     // Skip first 1 second to avoid corrupted frames from encoder initialization
     let skip_qpc = qpc_freq; // 1 second worth of QPC units
