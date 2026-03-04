@@ -335,27 +335,58 @@ impl HardwareEncoderBase {
                 cmd.arg("1");
             }
             "h264_amf" | "hevc_amf" | "av1_amf" => {
+                // Quality preset (speed/balanced/quality)
                 cmd.arg("-quality");
                 cmd.arg(self.amf_quality_mode());
-                // CRITICAL: B-frames must stay disabled for h264_amf compatibility
-                cmd.arg("-bf");
-                cmd.arg("0");
-                // Quality enhancement features (supported in this FFmpeg build)
-                cmd.arg("-preanalysis");
-                cmd.arg("1"); // Motion estimation for better encoding decisions
-                cmd.arg("-vbaq");
-                cmd.arg("1"); // Variance-based adaptive quantization
-                // AUD NAL units for cleaner seeking (direct boolean form)
-                cmd.arg("-aud");
-                cmd.arg("1");
-                // Header configuration for clean seeks
-                cmd.arg("-header_insertion_mode");
-                cmd.arg("idr");
-                cmd.arg("-gops_per_idr");
-                cmd.arg("1");
-                // Low latency mode for replay buffer
-                cmd.arg("-usage");
-                cmd.arg("lowlatency");
+
+                // CRITICAL: B-frames disabled for replay buffer compatibility
+                cmd.arg("-bf").arg("0");
+
+                // Usage mode: lowlatency_high_quality offers better quality than plain lowlatency
+                // for replay buffer use cases where we're not live streaming
+                cmd.arg("-usage").arg("lowlatency_high_quality");
+
+                // === PREANALYSIS - Core quality optimizations ===
+                cmd.arg("-preanalysis").arg("1");
+                // Full YUV analysis for better decisions (not just luma)
+                cmd.arg("-pa_activity_type").arg("yuv");
+                // Scene change detection - high sensitivity for gaming content
+                cmd.arg("-pa_scene_change_detection_enable").arg("1");
+                cmd.arg("-pa_scene_change_detection_sensitivity").arg("high");
+                // Static scene detection - save bits on still images/menus
+                cmd.arg("-pa_static_scene_detection_enable").arg("1");
+                cmd.arg("-pa_static_scene_detection_sensitivity").arg("high");
+                // Content Adaptive Quantization - allocate bits where needed
+                cmd.arg("-pa_caq_strength").arg("high");
+                // Perceptual Adaptive Quantization - psycho-visual optimization
+                cmd.arg("-pa_paq_mode").arg("caq");
+                // Temporal Adaptive Quantization - consistency across frames
+                cmd.arg("-pa_taq_mode").arg("2");
+                // Lookahead buffer for better rate control decisions
+                cmd.arg("-pa_lookahead_buffer_depth").arg("8");
+
+                // === ADAPTIVE QUANTIZATION ===
+                cmd.arg("-vbaq").arg("1"); // Variance-based AQ
+
+                // === MOTION ESTIMATION ===
+                cmd.arg("-me_half_pel").arg("1");
+                cmd.arg("-me_quarter_pel").arg("1");
+                // High motion quality boost - critical for gaming content
+                cmd.arg("-high_motion_quality_boost_enable").arg("1");
+
+                // === QP BOUNDS - Prevent quality drops on complex scenes ===
+                cmd.arg("-min_qp_i").arg("18");
+                cmd.arg("-max_qp_i").arg("40");
+                cmd.arg("-min_qp_p").arg("20");
+                cmd.arg("-max_qp_p").arg("42");
+
+                // === STREAM STRUCTURE ===
+                cmd.arg("-aud").arg("1"); // AU delimiter for clean seeking
+                cmd.arg("-header_insertion_mode").arg("idr");
+                cmd.arg("-gops_per_idr").arg("1");
+
+                // === EFFICIENCY ===
+                cmd.arg("-filler_data").arg("0"); // Don't waste bits on padding
             }
             "h264_qsv" | "hevc_qsv" => {
                 cmd.arg("-look_ahead");
@@ -370,6 +401,40 @@ impl HardwareEncoderBase {
     fn add_rate_control_options(&self, cmd: &mut Command, encoder_name: &str) {
         let bitrate_mbps = self.config.bitrate_mbps.max(1);
         let bitrate = format!("{}M", bitrate_mbps);
+
+        // AMF has special high-quality rate control modes (hqvbr, hqcbr, qvbr)
+        // that provide better compression efficiency than standard modes
+        if matches!(encoder_name, "h264_amf" | "hevc_amf" | "av1_amf") {
+            match self.config.rate_control {
+                RateControl::Cbr => {
+                    // High Quality CBR - better quality at same bitrate
+                    cmd.arg("-rc").arg("hqcbr");
+                    cmd.arg("-b:v").arg(&bitrate);
+                    cmd.arg("-maxrate").arg(&bitrate);
+                    cmd.arg("-bufsize").arg(&bitrate);
+                }
+                RateControl::Vbr => {
+                    // High Quality VBR - significant efficiency gains
+                    let peak_mbps = bitrate_mbps.saturating_mul(2).max(1);
+                    cmd.arg("-rc").arg("hqvbr");
+                    cmd.arg("-b:v").arg(&bitrate);
+                    cmd.arg("-maxrate").arg(format!("{}M", peak_mbps));
+                    cmd.arg("-bufsize").arg(&bitrate);
+                }
+                RateControl::Cq => {
+                    // Quality VBR with explicit quality level
+                    cmd.arg("-rc").arg("qvbr");
+                    cmd.arg("-qvbr_quality_level").arg(self.cq_value().to_string());
+                    // Still need bitrate bounds for QVBR
+                    let peak_mbps = bitrate_mbps.saturating_mul(2).max(1);
+                    cmd.arg("-b:v").arg(&bitrate);
+                    cmd.arg("-maxrate").arg(format!("{}M", peak_mbps));
+                    cmd.arg("-bufsize").arg(&bitrate);
+                }
+            }
+            return;
+        }
+
         match self.config.rate_control {
             RateControl::Cbr => {
                 let bufsize = format!("{}M", bitrate_mbps);
