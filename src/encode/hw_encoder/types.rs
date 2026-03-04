@@ -343,9 +343,10 @@ impl HardwareEncoderBase {
                 // (Set to 2 or 3 if your replay buffer properly handles PTS/DTS sync for significant file size savings)
                 cmd.arg("-bf").arg("0");
 
-                // Usage mode: high_quality allows the encoder to take its time and maximize compression
-                // efficiency without the strict real-time flushing constraints of low-latency modes.
-                cmd.arg("-usage").arg("high_quality");
+                // Usage mode: lowlatency is mandatory for real-time capture.
+                // high_quality reserves maximum GPU resources for the encoder, causing
+                // GPU contention with the game/desktop compositor and lagging the whole system.
+                cmd.arg("-usage").arg("lowlatency");
 
                 // === CODING EFFICIENCY ===
                 // CABAC is ~10-15% more efficient than CAVLC for H.264
@@ -419,31 +420,28 @@ impl HardwareEncoderBase {
         let bitrate_mbps = self.config.bitrate_mbps.max(1);
         let bitrate = format!("{}M", bitrate_mbps);
 
-        // AMF has special high-quality rate control modes (hqvbr, hqcbr, qvbr)
-        // that provide better compression efficiency than standard modes
+        // AMF rate control: use standard cbr/vbr modes.
+        // hqcbr/hqvbr/qvbr are "high quality" variants that imply deeper buffering
+        // and increased GPU resource reservation — not suitable for real-time capture.
         if matches!(encoder_name, "h264_amf" | "hevc_amf" | "av1_amf") {
             match self.config.rate_control {
                 RateControl::Cbr => {
-                    // High Quality CBR - better quality at same bitrate
-                    cmd.arg("-rc").arg("hqcbr");
+                    cmd.arg("-rc").arg("cbr");
                     cmd.arg("-b:v").arg(&bitrate);
                     cmd.arg("-maxrate").arg(&bitrate);
                     cmd.arg("-bufsize").arg(&bitrate);
                 }
                 RateControl::Vbr => {
-                    // High Quality VBR - significant efficiency gains
                     let peak_mbps = bitrate_mbps.saturating_mul(2).max(1);
-                    cmd.arg("-rc").arg("hqvbr");
+                    cmd.arg("-rc").arg("vbr_latency");
                     cmd.arg("-b:v").arg(&bitrate);
                     cmd.arg("-maxrate").arg(format!("{}M", peak_mbps));
                     cmd.arg("-bufsize").arg(&bitrate);
                 }
                 RateControl::Cq => {
-                    // Quality VBR with explicit quality level
-                    cmd.arg("-rc").arg("qvbr");
-                    cmd.arg("-qvbr_quality_level").arg(self.cq_value().to_string());
-                    // Still need bitrate bounds for QVBR
+                    // CQ maps to VBR with a quality target for AMF
                     let peak_mbps = bitrate_mbps.saturating_mul(2).max(1);
+                    cmd.arg("-rc").arg("vbr_latency");
                     cmd.arg("-b:v").arg(&bitrate);
                     cmd.arg("-maxrate").arg(format!("{}M", peak_mbps));
                     cmd.arg("-bufsize").arg(&bitrate);
