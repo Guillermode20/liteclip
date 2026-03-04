@@ -2354,6 +2354,7 @@ dependencies = [
  "tokio",
  "toml 0.8.2",
  "tracing",
+ "tracing-log",
  "tracing-subscriber",
  "tray-icon",
  "windows 0.58.0",

@@ -238,9 +238,9 @@ pub fn spawn_encoder(
                 match frame_rx.recv_timeout(std::time::Duration::from_millis(1)) {
                     Ok(frame) => {
                         frames_encoded += 1;
-                        if frames_encoded % 60 == 0 {
+                        if frames_encoded % 1800 == 0 {
                             trace!(
-                                "Encoded {} frames, received {} packets",
+                                "Encoded {} frames, {} packets",
                                 frames_encoded,
                                 packets_received
                             );

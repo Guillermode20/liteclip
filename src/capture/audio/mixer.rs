@@ -205,8 +205,8 @@ impl AudioMixer {
                 output_packets = output_packets.saturating_add(1);
                 if output_packets == 1 {
                     debug!("Audio mixer emitted first mixed packet");
-                } else if output_packets % 500 == 0 {
-                    debug!("Audio mixer emitted {} packets", output_packets);
+                } else if output_packets % 3000 == 0 {
+                    debug!("Audio mixer: {} packets", output_packets);
                 }
 
                 mixed_samples.fetch_add(sample_count, Ordering::SeqCst);
@@ -231,8 +231,8 @@ impl AudioMixer {
                     output_packets = output_packets.saturating_add(1);
                     if output_packets == 1 {
                         debug!("Audio mixer emitted first packet (system source)");
-                    } else if output_packets % 500 == 0 {
-                        debug!("Audio mixer emitted {} packets", output_packets);
+                    } else if output_packets % 3000 == 0 {
+                        debug!("Audio mixer: {} packets", output_packets);
                     }
 
                     mixed_samples.fetch_add(sample_count, Ordering::SeqCst);
@@ -254,8 +254,8 @@ impl AudioMixer {
                     output_packets = output_packets.saturating_add(1);
                     if output_packets == 1 {
                         debug!("Audio mixer emitted first packet (microphone source)");
-                    } else if output_packets % 500 == 0 {
-                        debug!("Audio mixer emitted {} packets", output_packets);
+                    } else if output_packets % 3000 == 0 {
+                        debug!("Audio mixer: {} packets", output_packets);
                     }
 
                     mixed_samples.fetch_add(sample_count, Ordering::SeqCst);

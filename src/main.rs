@@ -58,8 +58,17 @@ impl Drop for TimerResolutionGuard {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize compact logger: short, readable output with INFO as default.
-    let filter = tracing_subscriber::filter::EnvFilter::new("info");
+    // Suppress all Vulkan loader output (prints directly to stderr from C code)
+    std::env::set_var("VK_LOADER_DEBUG", "none");
+    std::env::set_var("DISABLE_LAYER_AMD_SWITCHABLE_GRAPHICS_1", "1");
+    std::env::set_var("DISABLE_VULKAN_OBS_CAPTURE", "1");
+    // Disable Vulkan SDK validation layer for release-like behavior
+    std::env::set_var("VK_LAYER_PATH", "");
+
+    // Initialize compact logger with filters to suppress noisy dependencies
+    let filter = tracing_subscriber::filter::EnvFilter::new(
+        "info,wgpu=warn,naga=warn"
+    );
 
     tracing_subscriber::fmt()
         .compact()

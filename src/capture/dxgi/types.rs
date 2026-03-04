@@ -471,7 +471,7 @@ impl DxgiCapture {
         let mut window_start = Instant::now();
         let mut window_frames = 0u64;
         let mut window_drops = 0u64;
-        let mut window_dropped_oldest = 0u64;
+        let mut _window_dropped_oldest = 0u64;
         let mut error_count = 0u32;
         let max_errors = 10;
         let mut reinit_backoff_ms = 100u64;
@@ -479,7 +479,7 @@ impl DxgiCapture {
         let backpressure = BackpressureState::new();
         let mut adaptive_skip_counter = 0u32;
         let mut adaptive_adjust_tick = Instant::now();
-        let mut adaptive_level_changes = 0u64;
+        let mut _adaptive_level_changes = 0u64;
         let mut state = match Self::init_capture(config.output_index) {
             Ok(state) => state,
             Err(e) => {
@@ -490,7 +490,7 @@ impl DxgiCapture {
         };
         info!("DXGI capture initialized and running");
         let mut log_counter = 0u64;
-        const LOG_INTERVAL: u64 = 300;
+        const LOG_INTERVAL: u64 = 1800; // Log every 1800 frames (~30s at 60fps)
         while running.load(Ordering::Relaxed) {
             match Self::capture_frame(
                 &mut state,
@@ -538,7 +538,7 @@ impl DxgiCapture {
                             let mut dropped_oldest = false;
                             if overflow_rx.try_recv().is_ok() {
                                 dropped_oldest = true;
-                                window_dropped_oldest += 1;
+                                _window_dropped_oldest += 1;
                                 match frame_tx.try_send(frame) {
                                     Ok(()) => {
                                         frame_count += 1;
@@ -607,7 +607,7 @@ impl DxgiCapture {
                             let mut dropped_oldest = false;
                             if overflow_rx.try_recv().is_ok() {
                                 dropped_oldest = true;
-                                window_dropped_oldest += 1;
+                                _window_dropped_oldest += 1;
                                 match frame_tx.try_send(frame) {
                                     Ok(()) => {
                                         frame_count += 1;
@@ -673,7 +673,7 @@ impl DxgiCapture {
                     if fps_divisor < 3 {
                         fps_divisor += 1;
                         backpressure.set_fps_divisor(fps_divisor);
-                        adaptive_level_changes += 1;
+                        _adaptive_level_changes += 1;
                         warn!(
                             "Adaptive throttling increased: fps_divisor={} queue={}/{}",
                             fps_divisor, queue_len, queue_cap
@@ -682,7 +682,7 @@ impl DxgiCapture {
                 } else if queue_len <= low_watermark && fps_divisor > 0 {
                     fps_divisor -= 1;
                     backpressure.set_fps_divisor(fps_divisor);
-                    adaptive_level_changes += 1;
+                    _adaptive_level_changes += 1;
                     info!(
                         "Adaptive throttling reduced: fps_divisor={} queue={}/{}",
                         fps_divisor, queue_len, queue_cap
@@ -690,17 +690,14 @@ impl DxgiCapture {
                 }
                 adaptive_adjust_tick = Instant::now();
             }
-            if window_start.elapsed() >= Duration::from_secs(5) {
+            if window_start.elapsed() >= Duration::from_secs(30) {
                 debug!(
-                    "Capture telemetry: target={}fps, actual={}fps, window_drops={}, window_drop_oldest={}, total_drops={}, adaptive_divisor={}, adaptive_changes={}",
-                    base_fps, window_frames / 5, window_drops, window_dropped_oldest,
-                    dropped_count, backpressure.current_fps_divisor(),
-                    adaptive_level_changes
+                    "Capture: {}fps, drops={}, divisor={}",
+                    window_frames / 30, window_drops, backpressure.current_fps_divisor()
                 );
                 window_start = Instant::now();
                 window_frames = 0;
                 window_drops = 0;
-                window_dropped_oldest = 0;
             }
         }
         info!(
