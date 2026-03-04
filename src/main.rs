@@ -140,10 +140,13 @@ async fn main() -> Result<()> {
         config.video.quality_value
     );
 
-    if config.general.auto_start_with_windows {
-        warn!(
-            "Config: auto_start_with_windows=true, but startup registration is not implemented yet"
-        );
+    // Initialize GUI manager (runs persistent eframe loop)
+    liteclip_replay::gui::init_gui_manager();
+
+    // Apply auto-start registry entry based on config
+    match liteclip_replay::platform::autostart::set_autostart(config.general.auto_start_with_windows) {
+        Ok(()) => info!("Auto-start set to {}", config.general.auto_start_with_windows),
+        Err(e) => warn!("Failed to configure auto-start: {}", e),
     }
     if config.general.auto_detect_game {
         warn!("Config: auto_detect_game=true, but game detection is not implemented yet");
@@ -380,9 +383,9 @@ async fn main() -> Result<()> {
                                         should_restart = true;
                                         break;
                                     }
-                                    liteclip_replay::platform::TrayEvent::OpenSettings => {
+                                     liteclip_replay::platform::TrayEvent::OpenSettings => {
                                         info!("Tray: Open Settings selected");
-                                        liteclip_replay::gui::run_settings_gui(tokio_tx.clone());
+                                        liteclip_replay::gui::show_settings_gui(tokio_tx.clone());
                                     }
                                     _ => {
                                         // Other tray events are not used (StartRecording, StopRecording,

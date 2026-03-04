@@ -1,71 +1,28 @@
 use eframe::egui;
-use std::sync::atomic::{AtomicBool, Ordering};
+
 use tokio::sync::mpsc::Sender;
 
 use crate::config::{config_mod::types::*, Config};
 use crate::platform::AppEvent;
 
-static IS_GUI_OPEN: AtomicBool = AtomicBool::new(false);
 
-pub fn run_settings_gui(event_tx: Sender<AppEvent>) {
-    if IS_GUI_OPEN.swap(true, Ordering::SeqCst) {
-        return; // Already open
+
+pub fn show_settings_gui(event_tx: Sender<AppEvent>) {
+    crate::gui::manager::send_gui_message(crate::gui::manager::GuiMessage::ShowSettings(event_tx));
+}
+
+pub struct SettingsApp {
+    pub config: Config,
+    pub event_tx: Sender<AppEvent>,
+    pub save_status: Option<String>,
+}
+
+impl SettingsApp {
+    pub fn update(&mut self, ctx: &egui::Context, is_open: &mut bool) {
+        self.render(ctx, is_open);
     }
 
-    let config = match Config::load_sync() {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!("Failed to load config for GUI: {}", e);
-            Config::default()
-        }
-    };
-
-    let app = SettingsApp {
-        config,
-        event_tx,
-        save_status: None,
-    };
-
-    std::thread::spawn(move || {
-        struct GuiOpenGuard;
-        impl Drop for GuiOpenGuard {
-            fn drop(&mut self) {
-                IS_GUI_OPEN.store(false, Ordering::SeqCst);
-            }
-        }
-        let _gui_open_guard = GuiOpenGuard;
-
-        let options = eframe::NativeOptions {
-            viewport: egui::ViewportBuilder::default()
-                .with_inner_size([600.0, 700.0])
-                .with_title("LiteClip Replay Settings"),
-            // Allow EventLoop creation on non-main thread (required for Windows)
-            event_loop_builder: Some(Box::new(|builder| {
-                #[cfg(target_os = "windows")]
-                {
-                    use winit::platform::windows::EventLoopBuilderExtWindows;
-                    builder.with_any_thread(true);
-                }
-            })),
-            ..Default::default()
-        };
-
-        let _ = eframe::run_native(
-            "liteclip_replay_settings",
-            options,
-            Box::new(|_cc| Ok(Box::new(app))),
-        );
-    });
-}
-
-struct SettingsApp {
-    config: Config,
-    event_tx: Sender<AppEvent>,
-    save_status: Option<String>,
-}
-
-impl eframe::App for SettingsApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn render(&mut self, ctx: &egui::Context, is_open: &mut bool) {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("LiteClip Replay Settings");
             ui.separator();
@@ -346,6 +303,7 @@ impl eframe::App for SettingsApp {
                     match self.config.save_sync() {
                         Ok(_) => match self.event_tx.try_send(AppEvent::Restart) {
                             Ok(_) => {
+                                 *is_open = false;
                                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                             }
                             Err(e) => {
@@ -362,5 +320,12 @@ impl eframe::App for SettingsApp {
                 }
             });
         });
+    }
+}
+
+impl eframe::App for SettingsApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let mut _dummy = true;
+        self.render(ctx, &mut _dummy);
     }
 }

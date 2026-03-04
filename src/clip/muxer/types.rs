@@ -188,7 +188,7 @@ impl Muxer {
     fn finalize_ffmpeg_h264_copy(
         &self,
         ffmpeg_cmd: OsString,
-        qpc_frequency_f64: f64,
+        _qpc_frequency_f64: f64,
     ) -> Result<PathBuf> {
         let frame_packets: Vec<&EncodedPacket> = self
             .video_packets
@@ -343,7 +343,7 @@ impl Muxer {
     fn finalize_ffmpeg_hevc_copy(
         &self,
         ffmpeg_cmd: OsString,
-        qpc_frequency_f64: f64,
+        _qpc_frequency_f64: f64,
     ) -> Result<PathBuf> {
         let frame_packets: Vec<&EncodedPacket> = self
             .video_packets
@@ -740,7 +740,7 @@ impl Muxer {
     fn finalize_ffmpeg_mjpeg_transcode(
         &self,
         ffmpeg_cmd: OsString,
-        qpc_frequency_f64: f64,
+        _qpc_frequency_f64: f64,
     ) -> Result<PathBuf> {
         const FFMPEG_TRANSCODE_TIMEOUT_SECS: u64 = 120;
         // Force exactly the configured FPS to avoid jitter.

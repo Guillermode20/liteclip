@@ -25,3 +25,5 @@ desktop.ini
 # Temporary and backup files
 *.tmp
 **/*.rs.bk
+
+.claude

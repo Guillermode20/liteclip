@@ -5,6 +5,7 @@
 use anyhow::Result;
 use crossbeam::channel::{Receiver, Sender};
 
+pub mod autostart;
 pub mod hotkeys;
 pub mod msg_loop;
 pub mod tray;

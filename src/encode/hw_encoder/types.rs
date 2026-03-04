@@ -340,18 +340,15 @@ impl HardwareEncoderBase {
                 // CRITICAL: B-frames must stay disabled for h264_amf compatibility
                 cmd.arg("-bf");
                 cmd.arg("0");
-                // Quality enhancement features
+                // Quality enhancement features (supported in this FFmpeg build)
                 cmd.arg("-preanalysis");
                 cmd.arg("1"); // Motion estimation for better encoding decisions
                 cmd.arg("-vbaq");
                 cmd.arg("1"); // Variance-based adaptive quantization
-                cmd.arg("-rc_lookahead");
-                cmd.arg("8"); // Lookahead depth for better rate control
-                cmd.arg("-max_qp_delta");
-                cmd.arg("4"); // Smooth QP transitions between frames
+                // AUD NAL units for cleaner seeking (direct boolean form)
+                cmd.arg("-aud");
+                cmd.arg("1");
                 // Header configuration for clean seeks
-                cmd.arg("-sei");
-                cmd.arg("+aud");
                 cmd.arg("-header_insertion_mode");
                 cmd.arg("idr");
                 cmd.arg("-gops_per_idr");
@@ -359,8 +356,6 @@ impl HardwareEncoderBase {
                 // Low latency mode for replay buffer
                 cmd.arg("-usage");
                 cmd.arg("lowlatency");
-                cmd.arg("-pa_adaptive_mini_gop");
-                cmd.arg("0");
             }
             "h264_qsv" | "hevc_qsv" => {
                 cmd.arg("-look_ahead");
