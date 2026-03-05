@@ -1,8 +1,8 @@
+use crate::platform::AppEvent;
 use eframe::egui;
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::{Arc, Mutex};
 use std::sync::LazyLock;
-use crate::platform::AppEvent;
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::Sender as TokioSender;
 
 pub enum GuiMessage {
@@ -71,10 +71,7 @@ impl eframe::App for GuiManagerApp {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 GuiMessage::ShowSettings(tx) => {
-                    let config = match crate::config::Config::load_sync() {
-                        Ok(c) => c,
-                        Err(_) => crate::config::Config::default(),
-                    };
+                    let config = crate::config::Config::load_sync().unwrap_or_default();
                     *self.settings.lock().unwrap() = Some(crate::gui::settings::SettingsApp {
                         config,
                         event_tx: tx,
@@ -97,7 +94,7 @@ impl eframe::App for GuiManagerApp {
                     if class == egui::ViewportClass::Embedded {
                         return;
                     }
-                    
+
                     let mut lock = settings_clone.lock().unwrap();
                     if let Some(settings) = lock.as_mut() {
                         let mut is_open = true;
@@ -109,7 +106,7 @@ impl eframe::App for GuiManagerApp {
                 },
             );
         }
-        
+
         ctx.request_repaint();
     }
 }

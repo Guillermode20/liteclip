@@ -106,11 +106,13 @@ impl ReplayBuffer {
             duration.as_secs(),
             config.advanced.memory_limit_mb
         );
+        let estimated_packets = (duration.as_secs_f32() * 60.0).max(100.0) as usize; // estimate 60 fps + audio
+
         Ok(Self {
-            packets: VecDeque::new(),
+            packets: VecDeque::with_capacity(estimated_packets),
             duration,
             max_memory_bytes,
-            keyframe_index: VecDeque::new(),
+            keyframe_index: VecDeque::with_capacity(estimated_packets / 30),
             base_offset: 0,
             total_bytes: 0,
             cached_sps: None,
@@ -125,11 +127,13 @@ impl ReplayBuffer {
             duration.as_secs(),
             max_memory_mb
         );
+        let estimated_packets = (duration.as_secs_f32() * 60.0).max(100.0) as usize; // estimate 60 fps + audio
+
         Self {
-            packets: VecDeque::new(),
+            packets: VecDeque::with_capacity(estimated_packets),
             duration,
             max_memory_bytes,
-            keyframe_index: VecDeque::new(),
+            keyframe_index: VecDeque::with_capacity(estimated_packets / 30), // assuming keyframe every 1-2 seconds
             base_offset: 0,
             total_bytes: 0,
             cached_sps: None,
@@ -408,7 +412,10 @@ impl ReplayBuffer {
             self.base_offset,
             self.keyframe_index.len()
         );
-        let search_idx = match self.keyframe_index.binary_search_by(|&(pts, _)| pts.cmp(&target_pts)) {
+        let search_idx = match self
+            .keyframe_index
+            .binary_search_by(|&(pts, _)| pts.cmp(&target_pts))
+        {
             Ok(i) => i,
             Err(i) => {
                 if i == 0 {
