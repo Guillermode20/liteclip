@@ -408,31 +408,38 @@ impl ReplayBuffer {
             self.base_offset,
             self.keyframe_index.len()
         );
-        for (i, &(pts, abs_idx)) in self.keyframe_index.iter().enumerate().rev() {
-            trace!("  keyframe[{}]: pts={}, abs_idx={}", i, pts, abs_idx);
-        }
-        for &(pts, abs_idx) in self.keyframe_index.iter().rev() {
-            if pts <= target_pts {
-                let relative_idx = abs_idx.saturating_sub(self.base_offset);
-                if relative_idx < self.packets.len() {
-                    trace!(
-                        "  found: pts={}, abs_idx={}, relative_idx={}",
-                        pts,
-                        abs_idx,
-                        relative_idx
-                    );
-                    return Some(relative_idx);
-                } else {
-                    trace!(
-                        "  found but relative_idx={} out of bounds (packets_len={}), continuing search",
-                        relative_idx,
-                        self.packets.len()
-                    );
-                    continue;
+        let search_idx = match self.keyframe_index.binary_search_by(|&(pts, _)| pts.cmp(&target_pts)) {
+            Ok(i) => i,
+            Err(i) => {
+                if i == 0 {
+                    trace!("  no keyframe found at or before target_pts");
+                    return None;
                 }
+                i - 1
+            }
+        };
+
+        for i in (0..=search_idx).rev() {
+            let (pts, abs_idx) = self.keyframe_index[i];
+            let relative_idx = abs_idx.saturating_sub(self.base_offset);
+            if relative_idx < self.packets.len() {
+                trace!(
+                    "  found: pts={}, abs_idx={}, relative_idx={}",
+                    pts,
+                    abs_idx,
+                    relative_idx
+                );
+                return Some(relative_idx);
+            } else {
+                trace!(
+                    "  found but relative_idx={} out of bounds (packets_len={}), continuing search",
+                    relative_idx,
+                    self.packets.len()
+                );
             }
         }
-        trace!("  no keyframe found at or before target_pts");
+
+        trace!("  no keyframe found at or before target_pts (after bound checks)");
         None
     }
     /// Get the last N seconds of packets based on duration
