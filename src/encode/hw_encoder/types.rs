@@ -152,6 +152,11 @@ impl HardwareEncoderBase {
         cmd.arg("-y");
         // Discard corrupted frames (gray frames at startup from ddagrab initialization)
         cmd.arg("-fflags").arg("+discardcorrupt");
+        // Setup video filters (scaling and format conversion if needed)
+        // Note: For D3D11 zero-copy hardware encoders (like AMF over ddagrab), we must AV_HWFRAME_RESTRICT
+        // filters like `scale` without first applying `hwdownload` or converting back, else they will error with
+        // "Error reinitializing filters! Function not implemented".
+        // Therefore, if resolution reduction is needed on a zero-copy hw-encoder, we must fallback to CPU or use a DXGI shader in the future.
         let mut video_filters: Vec<String> = Vec::new();
         if self.config.use_cpu_readback {
             cmd.arg("-f")
@@ -164,6 +169,10 @@ impl HardwareEncoderBase {
                 .arg(self.config.framerate.to_string())
                 .arg("-i")
                 .arg("pipe:0");
+
+            if out_w != width || out_h != height {
+                video_filters.push(format!("scale={}:{}", out_w, out_h));
+            }
         } else {
             cmd.arg("-f")
                 .arg("lavfi")
@@ -176,13 +185,19 @@ impl HardwareEncoderBase {
                     "ddagrab=output_idx={}:framerate={}",
                     self.config.output_index, self.config.framerate
                 ));
-            if matches!(encoder_name, "h264_amf" | "hevc_amf" | "av1_amf") {
+
+            // For Desktop Grab + D3D11 zero copy, scaling is not supported natively by standard FFmpeg scale filter
+            // without explicitly breaking zero-copy using hwdownload. Thus if we try to scale while using D3D11, we MUST download.
+            // When not scaling, skip hwdownload entirely.
+            if out_w != width || out_h != height {
+                warn!("Hardware encoding resolution scaling requested ({w}x{h} -> {out_w}x{out_h}). This breaks D3D11 zero-copy!", w=width, h=height, out_w=out_w, out_h=out_h);
                 video_filters.push("hwdownload,format=bgra".to_string());
+                video_filters.push(format!("scale={}:{}", out_w, out_h));
+                // Add pixel format specifically since we downloaded it to bgra software format
+                cmd.arg("-pix_fmt").arg("yuv420p");
             }
         }
-        if out_w != width || out_h != height {
-            video_filters.push(format!("scale={}:{}", out_w, out_h));
-        }
+
         if !video_filters.is_empty() {
             cmd.arg("-vf").arg(video_filters.join(","));
         }
@@ -215,10 +230,16 @@ impl HardwareEncoderBase {
         cmd.arg("-g")
             .arg(self.config.keyframe_interval_frames().to_string())
             .arg("-force_key_frames")
-            .arg(format!("expr:gte(t,n_forced*{keyframe_interval_secs:.3})"))
-            .arg("-pix_fmt")
-            .arg("yuv420p")
-            .arg("-r")
+            .arg(format!("expr:gte(t,n_forced*{keyframe_interval_secs:.3})"));
+
+        // Explicitly set pixel format for CPU frames to avoid unplayable RGB streams,
+        // but avoid it for D3D11 zero-copy which handles its own native formats (breaks auto-scale).
+        // (If we had to download via hwdownload for scaling, the -pix_fmt is already appended above).
+        if self.config.use_cpu_readback {
+            cmd.arg("-pix_fmt").arg("yuv420p");
+        }
+
+        cmd.arg("-r")
             .arg(self.config.framerate.to_string())
             .arg("-fps_mode")
             .arg("cfr")
@@ -358,28 +379,6 @@ impl HardwareEncoderBase {
                     cmd.arg("-profile_tier").arg("high");
                 }
 
-                // === PREANALYSIS - Core quality optimizations ===
-                cmd.arg("-preanalysis").arg("1");
-                // Pre-encode assisted rate control (different from preanalysis)
-                cmd.arg("-preencode").arg("1");
-                // Full YUV analysis for better decisions (not just luma)
-                cmd.arg("-pa_activity_type").arg("yuv");
-                // Scene change detection - high sensitivity for gaming content
-                cmd.arg("-pa_scene_change_detection_enable").arg("1");
-                cmd.arg("-pa_scene_change_detection_sensitivity").arg("high");
-                // Static scene detection - save bits on still images/menus
-                cmd.arg("-pa_static_scene_detection_enable").arg("1");
-                cmd.arg("-pa_static_scene_detection_sensitivity").arg("high");
-                // Content Adaptive Quantization - allocate bits where needed
-                cmd.arg("-pa_caq_strength").arg("high");
-                // Perceptual Adaptive Quantization - psycho-visual optimization
-                cmd.arg("-pa_paq_mode").arg("caq");
-                // Temporal Adaptive Quantization - consistency across frames
-                cmd.arg("-pa_taq_mode").arg("2");
-                // Lookahead buffer for better rate control decisions
-                // Increased to 32 for much better bit allocation padding during fast shooter motion
-                cmd.arg("-pa_lookahead_buffer_depth").arg("32");
-
                 // === ADAPTIVE QUANTIZATION ===
                 cmd.arg("-vbaq").arg("1"); // Variance-based AQ
 
@@ -390,7 +389,7 @@ impl HardwareEncoderBase {
                 cmd.arg("-high_motion_quality_boost_enable").arg("1");
 
                 // === QP BOUNDS ===
-                // Max limits relaxed (up to 51) to allow the rate control algorithm to breathe 
+                // Max limits relaxed (up to 51) to allow the rate control algorithm to breathe
                 // and compress heavily during chaotic, unperceivable fast-motion scenes (shooters),
                 // completely preventing gigantic bitrate spikes without hurting visible quality.
                 cmd.arg("-min_qp_i").arg("18");
