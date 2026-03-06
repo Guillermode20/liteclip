@@ -9,77 +9,72 @@ Complete the migration from spawning `ffmpeg` as a subprocess (CLI mode) to usin
 - `ffmpeg-next` is present in dependencies.
   - Evidence: @Cargo.toml#54-54
 - App startup initializes FFmpeg natively via `ffmpeg_next::init()`.
-  - Evidence: @src/main.rs#61-63
+  - Evidence: @src/main.rs#62-62
+- `encode::init_ffmpeg()` properly calls `ffmpeg_next::init()`.
+  - Evidence: @src/encode/encoder_mod/functions.rs#433-436
 
-### 2) Encoder creation path is currently native
-- `create_encoder()` returns `FfmpegEncoder` (native API path) instead of a CLI-backed encoder.
-  - Evidence: @src/encode/encoder_mod/functions.rs#95-98
-- The recording pipeline uses `spawn_encoder_with_receiver(...)` in capture mode (DXGI -> encoder), not the old CLI pull mode.
+### 2) Encoder is fully native
+- `FfmpegEncoder` in `ffmpeg_encoder.rs` implements the `Encoder` trait using native FFmpeg APIs.
+  - Evidence: @src/encode/ffmpeg_encoder.rs#10-22 (struct definition)
+  - Evidence: @src/encode/ffmpeg_encoder.rs#236-440 (native encoder initialization)
+- `create_encoder()` returns `FfmpegEncoder` (native API path).
+  - Evidence: @src/encode/encoder_mod/functions.rs#160-169
+- The recording pipeline uses `spawn_encoder_with_receiver(...)` in capture mode (DXGI -> native encoder).
   - Evidence: @src/app.rs#225-227
+- Native encoder supports NVENC, AMF, QSV, and software encoding with full configuration options.
+  - Evidence: @src/encode/ffmpeg_encoder.rs#267-413
 
-### 3) Legacy hardware pull mode is disabled at runtime
+### 3) Hardware encoder probing is native
+- `detect_hardware_encoder()` uses native `probe_encoder_available()` function.
+  - Evidence: @src/encode/encoder_mod/functions.rs#114-140
+- `probe_encoder_available()` uses `ffmpeg::encoder::find_by_name()` and attempts to open the encoder natively.
+  - Evidence: @src/encode/encoder_mod/functions.rs#51-109
+- No CLI subprocess spawning for encoder detection.
+
+### 4) Legacy hardware pull mode is disabled at runtime
 - `should_use_hardware_pull_mode()` hard-returns `false` with comments marking old pull mode obsolete.
   - Evidence: @src/app.rs#61-65
 
-### 4) Clip finalization is already native muxer-based
+### 5) Clip finalization uses native muxer
 - `Muxer::finalize_ffmpeg()` constructs `FfmpegMuxer` and writes packets natively.
-  - Evidence: @src/clip/muxer/types.rs#150-160
-- Native muxer implementation exists in `ffmpeg_muxer.rs`.
-  - Evidence: @src/clip/muxer/ffmpeg_muxer.rs#8-17
+  - Evidence: @src/clip/muxer/types.rs#121-142
+- Native muxer implementation in `ffmpeg_muxer.rs` handles MP4 creation.
+  - Evidence: @src/clip/muxer/ffmpeg_muxer.rs#14-25
+
+### 6) Audio stream writing is fully implemented
+- `FfmpegMuxer` creates AAC audio stream when `expect_audio` is true.
+  - Evidence: @src/clip/muxer/ffmpeg_muxer.rs#75-110
+- Audio packets are mixed, resampled, and encoded to AAC.
+  - Evidence: @src/clip/muxer/ffmpeg_muxer.rs#157-174
+- PCM mixing handles system audio + microphone combination.
+  - Evidence: @src/clip/muxer/ffmpeg_muxer.rs#263-305
+
+### 7) Faststart is implemented
+- `FfmpegMuxer` applies `movflags=+faststart` when configured.
+  - Evidence: @src/clip/muxer/ffmpeg_muxer.rs#143-154
 
 ## Remaining Work (What Is Left)
 
-## P0 - Remove active CLI coupling from codebase
+## P0 - Remove dead CLI coupling code
 
-### A) Replace/remove CLI-based hardware capability probing
-- `detect_hardware_encoder()` currently calls `hw_encoder::check_encoder_available(...)`.
-  - Evidence: @src/encode/encoder_mod/functions.rs#50-74
-- `check_encoder_available(...)` shells out to FFmpeg CLI (`Command::new(...).arg("-encoders") ...`).
-  - Evidence: @src/encode/hw_encoder/functions.rs#199-207
-
-**Plan**
-1. Implement native encoder capability probing (via `ffmpeg_next` codec discovery/open test).
-2. Switch `detect_hardware_encoder()` to native probe results.
-3. Remove CLI probe function usage.
-
-### B) Decommission legacy CLI encoder module from production path
-- `hw_encoder` still contains a full subprocess pipeline (`Command`, `Stdio`, process management, stdout/stderr readers).
-  - Evidence: @src/encode/hw_encoder/types.rs#91-100
-  - Evidence: @src/encode/hw_encoder/types.rs#151-161
-  - Evidence: @src/encode/hw_encoder/types.rs#258-261
+### A) Delete legacy `hw_encoder` module
+- The `hw_encoder` module contains CLI-based encoder implementations that are no longer used.
+  - `check_encoder_available()` spawns FFmpeg CLI to probe encoders (unused).
+    - Evidence: @src/encode/hw_encoder/functions.rs#199-290
+  - `NvencEncoder`, `AmfEncoder`, `QsvEncoder` types spawn FFmpeg CLI subprocesses.
+    - Evidence: @src/encode/hw_encoder/types.rs#91-100, #151-161, #258-261
+- These are still exported from `encode/mod.rs` but not used in production paths.
+  - Evidence: @src/encode/mod.rs#14
 
 **Plan**
-1. Mark `encode/hw_encoder/*` as deprecated/internal migration leftovers.
-2. Remove dead exports from `encode/mod.rs` once no callsites remain.
-3. Delete module after parity + tests are complete.
-
-## P0 - Finish native muxer parity (audio + container behavior)
-
-### C) Implement audio stream writing in native muxer
-- `FfmpegMuxer` has `_audio_stream_index` and `write_packets(..., _audio_packets)` where audio is currently ignored.
-  - Evidence: @src/clip/muxer/ffmpeg_muxer.rs#11-12
-  - Evidence: @src/clip/muxer/ffmpeg_muxer.rs#57-57
-- `Muxer` already buffers audio packets, but native muxer path does not write them yet.
-  - Evidence: @src/clip/muxer/types.rs#47-50
-  - Evidence: @src/clip/muxer/types.rs#158-158
-
-**Plan**
-1. Add audio stream creation (AAC or chosen codec) with explicit time base.
-2. Rescale audio packet PTS/DTS and interleave audio/video packets.
-3. Respect `expect_audio` behavior (silence/fallback semantics).
-4. Add regression tests for system-only, mic-only, and mixed audio clips.
-
-### D) Wire `faststart` and muxer config options fully
-- `MuxerConfig.faststart` exists but is not enforced in `FfmpegMuxer` output options today.
-  - Evidence: @src/clip/muxer/types.rs#181-183
-
-**Plan**
-1. Apply `movflags=+faststart` (or equivalent native API dictionary option).
-2. Verify playback/startup behavior in browser/media players.
+1. Remove `pub use hw_encoder::*;` from `encode/mod.rs`.
+2. Mark `hw_encoder` module as `#[allow(dead_code)]` or delete entirely.
+3. Remove `resolve_ffmpeg_command()` and related CLI helpers.
+4. Delete the entire `src/encode/hw_encoder/` directory after verification.
 
 ## P1 - Simplify encoder config semantics after CLI removal
 
-### E) Revisit `use_cpu_readback` + `output_index` semantics
+### B) Revisit `use_cpu_readback` + `output_index` semantics
 - These fields still reflect old CLI pull/capture split and desktop-grab index assumptions.
   - Evidence: @src/encode/encoder_mod/types.rs#106-109
   - Evidence: @src/encode/encoder_mod/encoderconfig_traits.rs#33-35
@@ -89,17 +84,9 @@ Complete the migration from spawning `ffmpeg` as a subprocess (CLI mode) to usin
 2. Remove config paths that only existed for CLI pull mode.
 3. Update settings UI labels/help text accordingly.
 
-### F) Clean up outdated init API surface
-- `encode::init_ffmpeg()` currently logs "initialization skipped" and is misleading now that native init occurs in `main.rs`.
-  - Evidence: @src/encode/encoder_mod/functions.rs#372-375
-
-**Plan**
-1. Either remove this helper or make it call `ffmpeg_next::init()`.
-2. Ensure there is a single source of truth for FFmpeg init.
-
 ## P1 - Packaging/build migration cleanup
 
-### G) Remove bundled CLI executable dependency
+### C) Remove bundled CLI executable dependency
 - Installer explicitly ships `liteclip-replay-ffmpeg.exe`.
   - Evidence: @installer/Components.wxs#20-22
 
@@ -110,28 +97,29 @@ Complete the migration from spawning `ffmpeg` as a subprocess (CLI mode) to usin
 
 ## P2 - Docs and dead-code cleanup
 
-### H) Update architecture docs/comments that still describe subprocess pipeline
+### D) Update architecture docs/comments that still describe subprocess pipeline
 - `CLAUDE.md` still says encoding is via FFmpeg subprocess and describes obsolete modes.
   - Evidence: @CLAUDE.md#45-49
 
 **Plan**
 1. Update architecture docs to native encoder/muxer pipeline.
 2. Remove stale comments and "Phase 1/Phase 2" notes no longer accurate.
+3. Update the architecture diagram to show DXGI -> Native Encoder path.
 
 ## Recommended Execution Order
-1. **Muxer parity first (audio + faststart)**
-2. **Native hardware probing + remove CLI probe usage**
-3. **Delete/deprecate legacy `hw_encoder` subprocess implementation**
-4. **Config/UI cleanup (`use_cpu_readback`, `output_index`)**
-5. **Installer + docs cleanup**
+1. **Delete/deprecate legacy `hw_encoder` subprocess implementation**
+2. **Config/UI cleanup (`use_cpu_readback`, `output_index`)**
+3. **Installer + docs cleanup**
 
 ## Definition of Done
-- No runtime `Command::new` calls remain for FFmpeg encoding/muxing/probing paths.
-- Native muxer writes both video and audio tracks correctly.
-- Hardware encoder detection is native-only.
-- Installer no longer ships FFmpeg CLI executable unless explicitly needed for a separate feature.
-- Documentation accurately reflects native FFmpeg architecture.
-- Regression matrix passes:
+- [x] No runtime `Command::new` calls remain for FFmpeg **encoding** paths.
+- [x] Native muxer writes both video and audio tracks correctly.
+- [x] Hardware encoder detection is native-only.
+- [x] `faststart` option is implemented.
+- [ ] `hw_encoder` module removed or marked as dead code.
+- [ ] Installer no longer ships FFmpeg CLI executable unless explicitly needed for a separate feature.
+- [ ] Documentation accurately reflects native FFmpeg architecture.
+- [ ] Regression matrix passes:
   - H.264/H.265/AV1 where supported
   - NVENC/AMF/QSV/Software selection
   - system audio only / mic only / both
