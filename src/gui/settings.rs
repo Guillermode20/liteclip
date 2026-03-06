@@ -236,10 +236,28 @@ impl SettingsApp {
 
                 // Advanced Settings
                 ui.collapsing("Advanced", |ui| {
+                    let estimated_storage_mb = self.config.estimated_replay_storage_mb();
+                    let recommended_limit_mb = self.config.recommended_replay_memory_limit_mb();
+
+                    ui.label(format!(
+                        "Estimated replay payload: ~{} MB for the current duration/bitrate",
+                        estimated_storage_mb
+                    ));
+                    ui.label(format!(
+                        "Recommended buffer cap: {} MB",
+                        recommended_limit_mb
+                    ));
+
                     ui.add(
-                        egui::Slider::new(&mut self.config.advanced.memory_limit_mb, 128..=4096)
+                        egui::Slider::new(&mut self.config.advanced.memory_limit_mb, 64..=4096)
                             .text("Memory Limit (MB)"),
                     );
+                    if self.config.advanced.memory_limit_mb < recommended_limit_mb {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(196, 120, 64),
+                            "The cap is below the estimated requirement, so the replay window may be shorter than configured.",
+                        );
+                    }
                     ui.add(
                         egui::Slider::new(&mut self.config.advanced.gpu_index, 0..=4)
                             .text("GPU Index"),

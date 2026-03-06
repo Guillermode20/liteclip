@@ -12,7 +12,10 @@ use super::functions::{
     default_hotkey_toggle, default_keyframe_interval, default_memory_limit, default_mic_device,
     default_mic_volume, default_overlay_position, default_quality_preset, default_quality_value,
     default_quality_value_for_preset, default_rate_control, default_replay_duration,
-    default_resolution, default_save_directory, default_system_volume, default_true, MAX_FRAMERATE,
+    default_resolution, default_save_directory, default_system_volume, default_true,
+    ESTIMATED_MIC_AUDIO_BITRATE_BPS, ESTIMATED_SYSTEM_AUDIO_BITRATE_BPS,
+    LEGACY_DEFAULT_MEMORY_LIMIT_MB, MAX_FRAMERATE, MAX_MEMORY_LIMIT_MB, MIN_MEMORY_LIMIT_MB,
+    RECOMMENDED_BUFFER_BASE_OVERHEAD_MB, RECOMMENDED_BUFFER_HEADROOM_PERCENT,
 };
 
 /// Encoder selection
@@ -141,15 +144,32 @@ impl Config {
             );
             self.video.framerate = MAX_FRAMERATE;
         }
-        if self.advanced.memory_limit_mb == 0 {
-            warn!("Config: memory_limit_mb was 0, clamping to 512");
-            self.advanced.memory_limit_mb = 512;
-        } else if self.advanced.memory_limit_mb > 16384 {
+        if self.advanced.memory_limit_mb == LEGACY_DEFAULT_MEMORY_LIMIT_MB {
+            let recommended = self.recommended_replay_memory_limit_mb();
             warn!(
-                "Config: memory_limit_mb was {}, clamping to 16384",
-                self.advanced.memory_limit_mb
+                "Config: migrating legacy memory_limit_mb={} to recommended {} MB",
+                LEGACY_DEFAULT_MEMORY_LIMIT_MB, recommended
             );
-            self.advanced.memory_limit_mb = 16384;
+            self.advanced.memory_limit_mb = recommended;
+        } else if self.advanced.memory_limit_mb == 0 {
+            let recommended = self.recommended_replay_memory_limit_mb();
+            warn!(
+                "Config: memory_limit_mb was 0, clamping to recommended {} MB",
+                recommended
+            );
+            self.advanced.memory_limit_mb = recommended;
+        } else if self.advanced.memory_limit_mb < MIN_MEMORY_LIMIT_MB {
+            warn!(
+                "Config: memory_limit_mb was {}, clamping to {}",
+                self.advanced.memory_limit_mb, MIN_MEMORY_LIMIT_MB
+            );
+            self.advanced.memory_limit_mb = MIN_MEMORY_LIMIT_MB;
+        } else if self.advanced.memory_limit_mb > MAX_MEMORY_LIMIT_MB {
+            warn!(
+                "Config: memory_limit_mb was {}, clamping to {}",
+                self.advanced.memory_limit_mb, MAX_MEMORY_LIMIT_MB
+            );
+            self.advanced.memory_limit_mb = MAX_MEMORY_LIMIT_MB;
         }
         if self.video.bitrate_mbps == 0 {
             warn!("Config: bitrate_mbps was 0, clamping to 20");
@@ -200,6 +220,59 @@ impl Config {
                 self.video.resolution
             );
         }
+    }
+
+    pub fn estimated_replay_storage_bytes(&self) -> usize {
+        let duration_secs = self.general.replay_duration_secs.max(1) as u64;
+        let video_bps = (self.video.bitrate_mbps.max(1) as u64).saturating_mul(1_000_000);
+        let system_audio_bps = if self.audio.capture_system {
+            ESTIMATED_SYSTEM_AUDIO_BITRATE_BPS
+        } else {
+            0
+        };
+        let mic_audio_bps = if self.audio.capture_mic {
+            ESTIMATED_MIC_AUDIO_BITRATE_BPS
+        } else {
+            0
+        };
+        let total_bps = video_bps
+            .saturating_add(system_audio_bps)
+            .saturating_add(mic_audio_bps);
+        let total_bytes = total_bps
+            .saturating_mul(duration_secs)
+            .checked_div(8)
+            .unwrap_or(u64::MAX);
+        total_bytes.min(usize::MAX as u64) as usize
+    }
+
+    pub fn estimated_replay_storage_mb(&self) -> u32 {
+        let bytes = self.estimated_replay_storage_bytes() as u64;
+        bytes
+            .saturating_add((1024 * 1024) - 1)
+            .checked_div(1024 * 1024)
+            .unwrap_or(u64::MAX)
+            .min(u32::MAX as u64) as u32
+    }
+
+    pub fn recommended_replay_memory_limit_mb(&self) -> u32 {
+        let estimated_bytes = self.estimated_replay_storage_bytes() as u64;
+        let with_headroom = estimated_bytes
+            .saturating_mul(RECOMMENDED_BUFFER_HEADROOM_PERCENT)
+            .checked_div(100)
+            .unwrap_or(u64::MAX)
+            .saturating_add(RECOMMENDED_BUFFER_BASE_OVERHEAD_MB * 1024 * 1024);
+        let recommended_mb = with_headroom
+            .saturating_add((1024 * 1024) - 1)
+            .checked_div(1024 * 1024)
+            .unwrap_or(u64::MAX)
+            .clamp(MIN_MEMORY_LIMIT_MB as u64, MAX_MEMORY_LIMIT_MB as u64);
+        recommended_mb as u32
+    }
+
+    pub fn effective_replay_memory_limit_mb(&self) -> u32 {
+        self.advanced
+            .memory_limit_mb
+            .clamp(MIN_MEMORY_LIMIT_MB, MAX_MEMORY_LIMIT_MB)
     }
 }
 /// Rate control mode preference

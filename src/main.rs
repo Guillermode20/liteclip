@@ -141,7 +141,7 @@ async fn main() -> Result<()> {
 
     // Log configuration summary
     info!(
-        "Config: {}s @ {} Mbps, {} FPS, codec={:?}, encoder={:?}, preset={:?}, rc={:?}, q={:?}",
+        "Config: {}s @ {} Mbps, {} FPS, codec={:?}, encoder={:?}, preset={:?}, rc={:?}, q={:?}, replay-est={} MB, buffer-cap={} MB",
         config.general.replay_duration_secs,
         config.video.bitrate_mbps,
         config.video.framerate,
@@ -149,7 +149,9 @@ async fn main() -> Result<()> {
         config.video.encoder,
         config.video.quality_preset,
         config.video.rate_control,
-        config.video.quality_value
+        config.video.quality_value,
+        config.estimated_replay_storage_mb(),
+        config.effective_replay_memory_limit_mb()
     );
 
     // Initialize GUI manager (runs persistent eframe loop)

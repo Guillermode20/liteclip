@@ -4,6 +4,7 @@
 
 #[cfg(test)]
 mod tests {
+    use super::super::functions::apply_auto_encoder_selection;
     use super::super::types::{EncodedPacket, EncoderConfig, HardwareEncoder, StreamType};
     #[test]
     fn test_encoder_config_codec_names() {
@@ -80,5 +81,39 @@ mod tests {
             HardwareEncoder::None.into(),
             crate::config::EncoderType::Software
         ));
+    }
+
+    #[test]
+    fn test_auto_encoder_selection_prefers_software_h264_when_no_hw_hevc() {
+        let mut config = EncoderConfig::new(
+            crate::config::Codec::H265,
+            20,
+            60,
+            (1920, 1080),
+            crate::config::EncoderType::Auto,
+            2,
+        );
+
+        apply_auto_encoder_selection(&mut config, HardwareEncoder::None);
+
+        assert_eq!(config.encoder_type, crate::config::EncoderType::Software);
+        assert_eq!(config.codec, crate::config::Codec::H264);
+    }
+
+    #[test]
+    fn test_auto_encoder_selection_preserves_codec_when_hw_available() {
+        let mut config = EncoderConfig::new(
+            crate::config::Codec::H265,
+            20,
+            60,
+            (1920, 1080),
+            crate::config::EncoderType::Auto,
+            2,
+        );
+
+        apply_auto_encoder_selection(&mut config, HardwareEncoder::Amf);
+
+        assert_eq!(config.encoder_type, crate::config::EncoderType::Amf);
+        assert_eq!(config.codec, crate::config::Codec::H265);
     }
 }

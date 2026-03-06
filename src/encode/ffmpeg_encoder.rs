@@ -1,6 +1,6 @@
 use super::{EncodedPacket, Encoder, EncoderConfig, StreamType};
-use anyhow::{Context, Result};
 use crate::config::{EncoderType, QualityPreset, RateControl};
+use anyhow::{Context, Result};
 use crossbeam::channel::{bounded, Receiver, Sender};
 use ffmpeg::format::Pixel;
 use ffmpeg_next as ffmpeg;
@@ -64,11 +64,13 @@ impl FfmpegEncoder {
     }
 
     fn cq_value(&self) -> u8 {
-        self.config.quality_value.unwrap_or(match self.config.quality_preset {
-            QualityPreset::Performance => 28,
-            QualityPreset::Balanced => 23,
-            QualityPreset::Quality => 19,
-        })
+        self.config
+            .quality_value
+            .unwrap_or(match self.config.quality_preset {
+                QualityPreset::Performance => 28,
+                QualityPreset::Balanced => 23,
+                QualityPreset::Quality => 19,
+            })
     }
 
     fn software_preset(&self) -> &'static str {
@@ -165,29 +167,33 @@ impl FfmpegEncoder {
     fn software_h265_params(&self, keyint: u32) -> String {
         let bitrate_kbps = self.bitrate_kbps();
         let peak_bitrate_kbps = self.peak_bitrate_kbps();
+        let low_memory_params = "pools=none:frame-threads=1:ref=1";
 
         match self.config.rate_control {
             RateControl::Cbr => format!(
-                "repeat-headers=1:aud=1:open-gop=0:scenecut=0:keyint={}:min-keyint={}:bitrate={}:vbv-maxrate={}:vbv-bufsize={}:strict-cbr=1",
-                keyint, keyint, bitrate_kbps, bitrate_kbps, bitrate_kbps
+                "repeat-headers=1:aud=1:open-gop=0:scenecut=0:keyint={}:min-keyint={}:bitrate={}:vbv-maxrate={}:vbv-bufsize={}:strict-cbr=1:{}",
+                keyint, keyint, bitrate_kbps, bitrate_kbps, bitrate_kbps, low_memory_params
             ),
             RateControl::Vbr => format!(
-                "repeat-headers=1:aud=1:open-gop=0:scenecut=0:keyint={}:min-keyint={}:bitrate={}:vbv-maxrate={}:vbv-bufsize={}",
-                keyint, keyint, bitrate_kbps, peak_bitrate_kbps, bitrate_kbps
+                "repeat-headers=1:aud=1:open-gop=0:scenecut=0:keyint={}:min-keyint={}:bitrate={}:vbv-maxrate={}:vbv-bufsize={}:{}",
+                keyint, keyint, bitrate_kbps, peak_bitrate_kbps, bitrate_kbps, low_memory_params
             ),
             RateControl::Cq => format!(
-                "repeat-headers=1:aud=1:open-gop=0:scenecut=0:keyint={}:min-keyint={}:crf={}:vbv-maxrate={}:vbv-bufsize={}",
+                "repeat-headers=1:aud=1:open-gop=0:scenecut=0:keyint={}:min-keyint={}:crf={}:vbv-maxrate={}:vbv-bufsize={}:{}",
                 keyint,
                 keyint,
                 self.cq_value(),
                 peak_bitrate_kbps,
-                bitrate_kbps
+                bitrate_kbps,
+                low_memory_params
             ),
         }
     }
 
     fn dequeue_packet_timestamp(&mut self, fallback: i64) -> i64 {
-        self.pending_packet_timestamps.pop_front().unwrap_or(fallback)
+        self.pending_packet_timestamps
+            .pop_front()
+            .unwrap_or(fallback)
     }
 
     fn detect_keyframe(data: &[u8], packet_is_key: bool) -> bool {
@@ -276,6 +282,14 @@ impl FfmpegEncoder {
                 options.set("b", &bitrate_param);
                 options.set("maxrate", &peak_bitrate_param);
                 options.set("bufsize", &bufsize_param);
+                options.set(
+                    "threads",
+                    match self.config.codec {
+                        crate::config::Codec::H265 => "2",
+                        crate::config::Codec::Av1 => "2",
+                        crate::config::Codec::H264 => "0",
+                    },
+                );
 
                 match self.config.codec {
                     crate::config::Codec::H264 => {
@@ -307,11 +321,14 @@ impl FfmpegEncoder {
                             },
                         );
                         options.set("lag-in-frames", "0");
-                        options.set("cpu-used", match self.config.quality_preset {
-                            QualityPreset::Performance => "8",
-                            QualityPreset::Balanced => "6",
-                            QualityPreset::Quality => "4",
-                        });
+                        options.set(
+                            "cpu-used",
+                            match self.config.quality_preset {
+                                QualityPreset::Performance => "8",
+                                QualityPreset::Balanced => "6",
+                                QualityPreset::Quality => "4",
+                            },
+                        );
                         if matches!(self.config.rate_control, RateControl::Cq) {
                             options.set("crf", &self.cq_value().to_string());
                         }
@@ -417,8 +434,16 @@ impl FfmpegEncoder {
             .context("Failed to open encoder")?;
 
         self.encoder = Some(encoder);
-        self.src_frame = Some(ffmpeg::util::frame::video::Video::new(Pixel::BGRA, width, height));
-        self.dst_frame = Some(ffmpeg::util::frame::video::Video::new(Pixel::YUV420P, out_w, out_h));
+        self.src_frame = Some(ffmpeg::util::frame::video::Video::new(
+            Pixel::BGRA,
+            width,
+            height,
+        ));
+        self.dst_frame = Some(ffmpeg::util::frame::video::Video::new(
+            Pixel::YUV420P,
+            out_w,
+            out_h,
+        ));
         self.scaler = Some(
             ffmpeg::software::scaling::Context::get(
                 Pixel::BGRA,
@@ -435,7 +460,10 @@ impl FfmpegEncoder {
         self.last_input_res = (width, height);
         self.pending_packet_timestamps.clear();
 
-        info!("Native FFmpeg encoder initialized: {} ({}x{})", codec_name, out_w, out_h);
+        info!(
+            "Native FFmpeg encoder initialized: {} ({}x{})",
+            codec_name, out_w, out_h
+        );
         Ok(())
     }
 
@@ -467,13 +495,8 @@ impl FfmpegEncoder {
                 );
             }
 
-            let mut encoded_packet = EncodedPacket::new(
-                data,
-                pts,
-                pts,
-                is_keyframe,
-                StreamType::Video,
-            );
+            let mut encoded_packet =
+                EncodedPacket::new(data, pts, pts, is_keyframe, StreamType::Video);
 
             if !self.config.use_native_resolution {
                 encoded_packet.resolution = Some(self.config.resolution);
@@ -495,7 +518,8 @@ impl Encoder for FfmpegEncoder {
     }
 
     fn encode_frame(&mut self, frame: &crate::capture::CapturedFrame) -> Result<()> {
-        if self.encoder.is_none() || self.last_input_res != (frame.resolution.0, frame.resolution.1) {
+        if self.encoder.is_none() || self.last_input_res != (frame.resolution.0, frame.resolution.1)
+        {
             self.init_encoder(frame.resolution.0, frame.resolution.1)?;
         }
 
@@ -507,10 +531,18 @@ impl Encoder for FfmpegEncoder {
         }
 
         {
-            let Some(ref mut encoder) = self.encoder else { return Ok(()); };
-            let Some(ref mut scaler) = self.scaler else { return Ok(()); };
-            let Some(ref mut src_frame) = self.src_frame else { return Ok(()); };
-            let Some(ref mut dst_frame) = self.dst_frame else { return Ok(()); };
+            let Some(ref mut encoder) = self.encoder else {
+                return Ok(());
+            };
+            let Some(ref mut scaler) = self.scaler else {
+                return Ok(());
+            };
+            let Some(ref mut src_frame) = self.src_frame else {
+                return Ok(());
+            };
+            let Some(ref mut dst_frame) = self.dst_frame else {
+                return Ok(());
+            };
 
             src_frame.data_mut(0).copy_from_slice(&frame.bgra);
             scaler.run(src_frame, dst_frame)?;

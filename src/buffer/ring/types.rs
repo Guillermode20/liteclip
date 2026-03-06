@@ -99,12 +99,13 @@ impl ReplayBuffer {
     /// Create new replay buffer from configuration
     pub fn new(config: &crate::config::Config) -> Result<Self> {
         let duration = Duration::from_secs(config.general.replay_duration_secs as u64 + 1); // +1s for corrupted frame padding
-        let max_memory_bytes =
-            (config.advanced.memory_limit_mb as usize).saturating_mul(1024 * 1024);
+        let effective_memory_limit_mb = config.effective_replay_memory_limit_mb();
+        let max_memory_bytes = (effective_memory_limit_mb as usize).saturating_mul(1024 * 1024);
         debug!(
-            "Creating ReplayBuffer: {} seconds, {} MB max",
+            "Creating ReplayBuffer: {} seconds, {} MB max (estimated payload {} MB)",
             duration.as_secs(),
-            config.advanced.memory_limit_mb
+            effective_memory_limit_mb,
+            config.estimated_replay_storage_mb()
         );
         let estimated_packets = (duration.as_secs_f32() * 60.0).max(100.0) as usize; // estimate 60 fps + audio
 

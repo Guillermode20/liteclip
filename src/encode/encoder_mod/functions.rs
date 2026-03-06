@@ -49,7 +49,10 @@ fn set_encoder_thread_priority() {
 #[cfg(feature = "ffmpeg")]
 fn probe_encoder_available(encoder_name: &str) -> bool {
     let Some(codec) = ffmpeg::encoder::find_by_name(encoder_name) else {
-        debug!("Encoder {} not present in linked FFmpeg build", encoder_name);
+        debug!(
+            "Encoder {} not present in linked FFmpeg build",
+            encoder_name
+        );
         return false;
     };
 
@@ -101,7 +104,10 @@ fn probe_encoder_available(encoder_name: &str) -> bool {
             true
         }
         Err(error) => {
-            debug!("Native probe failed for encoder {}: {}", encoder_name, error);
+            debug!(
+                "Native probe failed for encoder {}: {}",
+                encoder_name, error
+            );
             false
         }
     }
@@ -143,6 +149,24 @@ pub fn detect_hardware_encoder(_codec: crate::config::Codec) -> HardwareEncoder 
     info!("FFmpeg not compiled in, using software encoding");
     HardwareEncoder::None
 }
+
+pub(super) fn apply_auto_encoder_selection(
+    config: &mut EncoderConfig,
+    detected_encoder: HardwareEncoder,
+) {
+    if matches!(detected_encoder, HardwareEncoder::None)
+        && !matches!(config.codec, crate::config::Codec::H264)
+    {
+        warn!(
+            "No hardware encoder available for {:?}; falling back to software H.264 to reduce CPU and memory usage",
+            config.codec
+        );
+        config.codec = crate::config::Codec::H264;
+    }
+
+    config.encoder_type = detected_encoder.into();
+}
+
 /// Check if a specific FFmpeg encoder is available
 #[allow(dead_code)]
 fn is_encoder_available(codec_name: &str) -> bool {
@@ -159,12 +183,15 @@ fn is_encoder_available(codec_name: &str) -> bool {
 pub fn create_encoder(config: &EncoderConfig) -> Result<Box<dyn Encoder>> {
     let mut config = config.clone();
     if config.encoder_type == crate::config::EncoderType::Auto {
-        config.encoder_type = detect_hardware_encoder(config.codec).into();
+        let detected_encoder = detect_hardware_encoder(config.codec);
+        apply_auto_encoder_selection(&mut config, detected_encoder);
         info!("Auto-detected encoder: {:?}", config.encoder_type);
     }
-    
+
     info!("Creating native FFmpeg encoder: {:?}", config.encoder_type);
-    Ok(Box::new(crate::encode::ffmpeg_encoder::FfmpegEncoder::new(&config)?))
+    Ok(Box::new(crate::encode::ffmpeg_encoder::FfmpegEncoder::new(
+        &config,
+    )?))
 }
 /// Spawn an encoder on a dedicated thread
 ///
