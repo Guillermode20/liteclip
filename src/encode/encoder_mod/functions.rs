@@ -2,10 +2,14 @@
 //!
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
-use crate::encode::{hw_encoder, sw_encoder};
+use crate::encode::sw_encoder;
 use anyhow::{Context, Result};
 use crossbeam::channel::{bounded, Receiver, Sender};
-use tracing::{debug, info, trace, warn};
+#[cfg(feature = "ffmpeg")]
+use ffmpeg::format::Pixel;
+#[cfg(feature = "ffmpeg")]
+use ffmpeg_next as ffmpeg;
+use tracing::{debug, info, warn};
 #[cfg(windows)]
 use windows::Win32::System::Threading::{
     GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_ABOVE_NORMAL,
@@ -43,6 +47,67 @@ fn set_encoder_thread_priority() {
     }
 }
 
+#[cfg(feature = "ffmpeg")]
+fn probe_encoder_available(encoder_name: &str) -> bool {
+    let Some(codec) = ffmpeg::encoder::find_by_name(encoder_name) else {
+        debug!("Encoder {} not present in linked FFmpeg build", encoder_name);
+        return false;
+    };
+
+    let encoder_ctx = ffmpeg::codec::context::Context::new_with_codec(codec);
+    let mut encoder = match encoder_ctx.encoder().video() {
+        Ok(encoder) => encoder,
+        Err(error) => {
+            debug!(
+                "Encoder {} exists but could not create a video context: {}",
+                encoder_name, error
+            );
+            return false;
+        }
+    };
+
+    encoder.set_width(320);
+    encoder.set_height(240);
+    encoder.set_format(Pixel::YUV420P);
+    encoder.set_frame_rate(Some((30, 1)));
+    encoder.set_time_base((1, 30));
+    encoder.set_bit_rate(2_000_000);
+    encoder.set_max_bit_rate(2_000_000);
+    encoder.set_gop(30);
+
+    let mut options = ffmpeg::Dictionary::new();
+    options.set("bf", "0");
+
+    match encoder_name {
+        "h264_amf" | "hevc_amf" | "av1_amf" => {
+            options.set("usage", "lowlatency");
+            options.set("quality", "speed");
+            options.set("preanalysis", "0");
+        }
+        "h264_nvenc" | "hevc_nvenc" | "av1_nvenc" => {
+            options.set("preset", "p4");
+            options.set("tune", "ll");
+            options.set("zerolatency", "1");
+        }
+        "h264_qsv" | "hevc_qsv" => {
+            options.set("preset", "veryfast");
+            options.set("look_ahead", "0");
+        }
+        _ => {}
+    }
+
+    match encoder.open_with(options) {
+        Ok(_) => {
+            info!("Native probe succeeded for encoder {}", encoder_name);
+            true
+        }
+        Err(error) => {
+            debug!("Native probe failed for encoder {}: {}", encoder_name, error);
+            false
+        }
+    }
+}
+
 /// Detect available hardware encoder
 ///
 /// Priority order: NVENC → AMF → QSV → None (software)
@@ -56,16 +121,16 @@ pub fn detect_hardware_encoder(codec: crate::config::Codec) -> HardwareEncoder {
         crate::config::Codec::Av1 => ("av1_nvenc", "av1_amf", None),
     };
 
-    if hw_encoder::check_encoder_available(nvenc_name) {
+    if probe_encoder_available(nvenc_name) {
         info!("Using NVIDIA NVENC encoder");
         return HardwareEncoder::Nvenc;
     }
-    if hw_encoder::check_encoder_available(amf_name) {
+    if probe_encoder_available(amf_name) {
         info!("Using AMD AMF encoder");
         return HardwareEncoder::Amf;
     }
     if let Some(qsv_name) = qsv_name {
-        if hw_encoder::check_encoder_available(qsv_name) {
+        if probe_encoder_available(qsv_name) {
             info!("Using Intel QSV encoder");
             return HardwareEncoder::Qsv;
         }

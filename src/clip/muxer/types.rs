@@ -2,32 +2,11 @@
 //!
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
-use super::functions::{
-    h264_nal_type, hevc_nal_type, qpc_delta_to_aligned_pcm_bytes,
-    write_silence_bytes, AUDIO_BITRATE, AUDIO_CHANNELS, AUDIO_SAMPLE_RATE,
-};
 use super::ffmpeg_muxer::FfmpegMuxer;
-use crate::buffer::ring::qpc_frequency;
-#[cfg(feature = "ffmpeg")]
-use crate::encode::hw_encoder::functions::PROCESS_CREATION_FLAGS;
 use crate::encode::{EncodedPacket, StreamType};
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
-#[cfg(feature = "ffmpeg")]
-use std::{
-    ffi::OsString,
-    io::Write,
-    os::windows::process::CommandExt,
-    process::{Command, Stdio},
-    time::{Duration, Instant},
-};
-use tracing::{debug, error, info, trace, warn};
-
-#[cfg(feature = "ffmpeg")]
-struct AudioTrackInput {
-    path: PathBuf,
-    title: &'static str,
-}
+use tracing::{info, trace};
 /// MP4 muxer for writing clips
 ///
 /// Uses FFmpeg's AVFormatContext for proper MP4 container creation.
@@ -152,7 +131,8 @@ impl Muxer {
             &self.config.video_codec,
             self.config.width,
             self.config.height,
-            self.config.fps
+            self.config.fps,
+            &self.config,
         )?;
 
         muxer.write_packets(&self.video_packets, &self.audio_packets)?;
