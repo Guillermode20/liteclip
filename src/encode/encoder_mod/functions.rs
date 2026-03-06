@@ -93,66 +93,8 @@ fn is_encoder_available(codec_name: &str) -> bool {
 /// If encoder_type is Auto, performs hardware detection.
 /// Falls back to software encoder if hardware initialization fails.
 pub fn create_encoder(config: &EncoderConfig) -> Result<Box<dyn Encoder>> {
-    let encoder_type = config.encoder_type;
-    let encoder: Box<dyn Encoder> = match encoder_type {
-        crate::config::EncoderType::Auto => {
-            let hw = detect_hardware_encoder(config.codec);
-            match hw {
-                HardwareEncoder::Nvenc => {
-                    if let Ok(enc) = hw_encoder::NvencEncoder::new(config) {
-                        return Ok(Box::new(enc) as Box<dyn Encoder>);
-                    }
-                }
-                HardwareEncoder::Amf => {
-                    if let Ok(enc) = hw_encoder::AmfEncoder::new(config) {
-                        return Ok(Box::new(enc) as Box<dyn Encoder>);
-                    }
-                }
-                HardwareEncoder::Qsv => {
-                    if let Ok(enc) = hw_encoder::QsvEncoder::new(config) {
-                        return Ok(Box::new(enc) as Box<dyn Encoder>);
-                    }
-                }
-                HardwareEncoder::None => {}
-            }
-            info!("No hardware encoder available, using software encoder");
-            Box::new(sw_encoder::SoftwareEncoder::new(config)?) as Box<dyn Encoder>
-        }
-        crate::config::EncoderType::Nvenc => match hw_encoder::NvencEncoder::new(config) {
-            Ok(enc) => Box::new(enc) as Box<dyn Encoder>,
-            Err(e) => {
-                warn!(
-                    "Failed to create NVENC encoder: {}, falling back to software",
-                    e
-                );
-                Box::new(sw_encoder::SoftwareEncoder::new(config)?) as Box<dyn Encoder>
-            }
-        },
-        crate::config::EncoderType::Amf => match hw_encoder::AmfEncoder::new(config) {
-            Ok(enc) => Box::new(enc) as Box<dyn Encoder>,
-            Err(e) => {
-                warn!(
-                    "Failed to create AMF encoder: {}, falling back to software",
-                    e
-                );
-                Box::new(sw_encoder::SoftwareEncoder::new(config)?) as Box<dyn Encoder>
-            }
-        },
-        crate::config::EncoderType::Qsv => match hw_encoder::QsvEncoder::new(config) {
-            Ok(enc) => Box::new(enc) as Box<dyn Encoder>,
-            Err(e) => {
-                warn!(
-                    "Failed to create QSV encoder: {}, falling back to software",
-                    e
-                );
-                Box::new(sw_encoder::SoftwareEncoder::new(config)?) as Box<dyn Encoder>
-            }
-        },
-        crate::config::EncoderType::Software => {
-            Box::new(sw_encoder::SoftwareEncoder::new(config)?) as Box<dyn Encoder>
-        }
-    };
-    Ok(encoder)
+    info!("Creating native FFmpeg encoder: {:?}", config.encoder_type);
+    Ok(Box::new(crate::encode::ffmpeg_encoder::FfmpegEncoder::new(config)?))
 }
 /// Spawn an encoder on a dedicated thread
 ///

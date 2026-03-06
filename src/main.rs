@@ -6,7 +6,7 @@
 // Hide console window on Windows in release, but keep console in debug so logs are visible.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use liteclip_replay::{app::AppState, config::Config};
 use std::env;
 use std::os::windows::process::CommandExt;
@@ -58,6 +58,9 @@ impl Drop for TimerResolutionGuard {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Initialize FFmpeg
+    ffmpeg_next::init().context("Failed to initialize FFmpeg")?;
+
     // Suppress all Vulkan loader output (prints directly to stderr from C code)
     std::env::set_var("VK_LOADER_DEBUG", "none");
     std::env::set_var("DISABLE_LAYER_AMD_SWITCHABLE_GRAPHICS_1", "1");
