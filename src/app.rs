@@ -9,7 +9,7 @@ use crate::{
     },
     clip::{spawn_clip_saver, MuxerConfig},
     config::Config,
-    encode::{spawn_encoder, spawn_encoder_with_receiver, EncoderConfig, EncoderHandle},
+    encode::{spawn_encoder_with_receiver, EncoderConfig, EncoderHandle},
 };
 use anyhow::{bail, Context, Result};
 use crossbeam::channel::Receiver;
@@ -56,12 +56,6 @@ impl RecordingPipeline {
 
     pub fn is_recording(&self) -> bool {
         matches!(self.lifecycle, RecordingLifecycle::Running)
-    }
-
-    fn should_use_hardware_pull_mode(_config: &Config) -> bool {
-        // We are now using native FFmpeg integration which expects frames from DXGI capture.
-        // The old hardware pull mode (CLI gdigrab) is obsolete.
-        false
     }
 
     fn rollback_startup(&mut self) {
@@ -160,43 +154,16 @@ impl RecordingPipeline {
         info!("Recording: starting pipeline");
         self.lifecycle = RecordingLifecycle::Starting;
 
-        let mut encoder_config = EncoderConfig::from(config);
+        let encoder_config = EncoderConfig::from(config);
 
-        if Self::should_use_hardware_pull_mode(config) {
-            encoder_config.use_cpu_readback = false;
-            info!("Recording mode: hardware pull (FFmpeg desktop grab)");
-            let (encoder_handle, _unused_frame_tx) =
-                match spawn_encoder(encoder_config, buffer.clone())
-                    .context("Failed to spawn pull-mode encoder")
-                {
-                    Ok(v) => v,
-                    Err(e) => {
-                        self.rollback_startup();
-                        self.lifecycle = RecordingLifecycle::Idle;
-                        return Err(e);
-                    }
-                };
-
-            self.encoder_handle = Some(encoder_handle);
-
-            if let Err(e) = self.start_audio_capture(config, buffer, "pull mode") {
-                self.rollback_startup();
-                self.lifecycle = RecordingLifecycle::Idle;
-                return Err(e);
-            }
-
-            self.capture = None;
-            self.lifecycle = RecordingLifecycle::Running;
-            info!("Recording started");
-            return Ok(());
-        }
-
+        // Start audio capture
         if let Err(e) = self.start_audio_capture(config, buffer, "capture mode") {
             self.rollback_startup();
             self.lifecycle = RecordingLifecycle::Idle;
             return Err(e);
         }
 
+        // Create DXGI capture
         let mut capture = match DxgiCapture::new().context("Failed to create DXGI capture") {
             Ok(capture) => capture,
             Err(e) => {
@@ -239,7 +206,7 @@ impl RecordingPipeline {
         self.capture = Some(capture);
         self.lifecycle = RecordingLifecycle::Running;
 
-        info!("Recording mode: capture + encoder + audio");
+        info!("Recording mode: DXGI capture + native encoder + audio");
         info!("Recording started");
 
         Ok(())

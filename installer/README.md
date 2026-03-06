@@ -28,7 +28,7 @@ Or use the convenience script in `installer/`:
 ## Notes & validation checklist
 - All component GUIDs are explicit and unique.
 - Installer scope is per-machine only.
-- FFmpeg payload: `ffmpeg.exe` is always included from `..\ffmpeg\bin\ffmpeg.exe`; if `heat.exe` is available, additional files from `ffmpeg\bin` are harvested into `installer/Generated/FFmpegFiles.wxs`.
+- FFmpeg payload: DLLs are harvested from `..\ffmpeg\bin\` for native `ffmpeg-next` linking. Required DLLs include avcodec, avformat, avutil, swscale, swresample, etc.
 - File association `.lcr` is registered per-machine.
 - Desktop shortcut is optional (feature-controlled).
 

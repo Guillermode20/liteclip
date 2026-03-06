@@ -39,6 +39,8 @@ impl FfmpegMuxer {
         let rounded_fps = fps.round().clamp(1.0, i32::MAX as f64) as i32;
         let video_time_base = (1, 90_000);
         let audio_time_base = (1, AUDIO_SAMPLE_RATE as i32);
+
+        // Check global header flag before adding streams
         let global_header = format_context
             .format()
             .flags()
@@ -57,6 +59,11 @@ impl FfmpegMuxer {
             let mut stream = format_context.add_stream(codec)?;
             let stream_index = stream.index();
 
+            // Set basic stream parameters
+            stream.set_time_base(video_time_base);
+            stream.set_avg_frame_rate((rounded_fps, 1));
+
+            // Use a minimal codec context for basic parameters
             let mut video = ffmpeg::codec::context::Context::new_with_codec(codec)
                 .encoder()
                 .video()?;
@@ -65,10 +72,8 @@ impl FfmpegMuxer {
             video.set_format(ffmpeg::format::Pixel::YUV420P);
             video.set_time_base(video_time_base);
             video.set_frame_rate(Some((rounded_fps, 1)));
-
-            stream.set_time_base(video_time_base);
-            stream.set_avg_frame_rate((rounded_fps, 1));
             stream.set_parameters(&video);
+
             stream_index
         };
 
@@ -130,6 +135,10 @@ impl FfmpegMuxer {
         video_packets: &[EncodedPacket],
         audio_packets: &[EncodedPacket],
     ) -> Result<()> {
+        if video_packets.is_empty() {
+            anyhow::bail!("No video packets to write");
+        }
+
         let base_qpc = video_packets
             .first()
             .map(|packet| packet.pts)
@@ -143,8 +152,7 @@ impl FfmpegMuxer {
         if self.faststart {
             let mut options = ffmpeg::Dictionary::new();
             options.set("movflags", "+faststart");
-            let _ = self
-                .format_context
+            self.format_context
                 .write_header_with(options)
                 .context("Failed to write MP4 header with faststart")?;
         } else {

@@ -2,7 +2,6 @@
 //!
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
-use crate::encode::sw_encoder;
 use anyhow::{Context, Result};
 use crossbeam::channel::{bounded, Receiver, Sender};
 #[cfg(feature = "ffmpeg")]
@@ -197,32 +196,25 @@ pub fn spawn_encoder(
                 }
             };
             if let Err(init_error) = encoder.init(&config) {
-                if config.use_cpu_readback {
-                    warn!(
-                        "Primary encoder init failed: {}. Falling back to software encoder",
-                        init_error
-                    );
-                    let mut fallback_config = config.clone();
-                    fallback_config.encoder_type = crate::config::EncoderType::Software;
-                    fallback_config.use_cpu_readback = true;
-                    let mut fallback_encoder: Box<dyn Encoder> =
-                        Box::new(sw_encoder::SoftwareEncoder::new(&fallback_config)?);
-                    if let Err(fallback_error) = fallback_encoder.init(&fallback_config) {
-                        let _ = health_tx.try_send(EncoderHealthEvent::Fatal(format!(
-                            "Failed to initialize encoder and software fallback: primary={}, fallback={}",
-                            init_error, fallback_error
-                        )));
-                        return Err(fallback_error);
-                    }
-                    encoder = fallback_encoder;
-                    info!("Software fallback encoder initialized successfully");
-                } else {
+                // Fall back to software encoding using native FFmpeg (libx264/libx265/libaom-av1)
+                // This ensures the muxer receives proper H.264/H.265/AV1 packets, not MJPEG
+                warn!(
+                    "Primary encoder init failed: {}. Falling back to software encoder",
+                    init_error
+                );
+                let mut fallback_config = config.clone();
+                fallback_config.encoder_type = crate::config::EncoderType::Software;
+                let mut fallback_encoder: Box<dyn Encoder> =
+                    Box::new(crate::encode::ffmpeg_encoder::FfmpegEncoder::new(&fallback_config)?);
+                if let Err(fallback_error) = fallback_encoder.init(&fallback_config) {
                     let _ = health_tx.try_send(EncoderHealthEvent::Fatal(format!(
-                        "Failed to initialize encoder: {}",
-                        init_error
+                        "Failed to initialize encoder and software fallback: primary={}, fallback={}",
+                        init_error, fallback_error
                     )));
-                    return Err(init_error);
+                    return Err(fallback_error);
                 }
+                encoder = fallback_encoder;
+                info!("Software fallback encoder (native FFmpeg) initialized successfully");
             }
             debug!("Encoder initialized");
             let packet_rx = encoder.packet_rx();
@@ -333,32 +325,25 @@ pub fn spawn_encoder_with_receiver(
                 }
             };
             if let Err(init_error) = encoder.init(&config) {
-                if config.use_cpu_readback {
-                    warn!(
-                        "Primary encoder init failed: {}. Falling back to software encoder",
-                        init_error
-                    );
-                    let mut fallback_config = config.clone();
-                    fallback_config.encoder_type = crate::config::EncoderType::Software;
-                    fallback_config.use_cpu_readback = true;
-                    let mut fallback_encoder: Box<dyn Encoder> =
-                        Box::new(sw_encoder::SoftwareEncoder::new(&fallback_config)?);
-                    if let Err(fallback_error) = fallback_encoder.init(&fallback_config) {
-                        let _ = health_tx.try_send(EncoderHealthEvent::Fatal(format!(
-                            "Failed to initialize encoder and software fallback: primary={}, fallback={}",
-                            init_error, fallback_error
-                        )));
-                        return Err(fallback_error);
-                    }
-                    encoder = fallback_encoder;
-                    info!("Software fallback encoder initialized successfully");
-                } else {
+                // Fall back to software encoding using native FFmpeg (libx264/libx265/libaom-av1)
+                // This ensures the muxer receives proper H.264/H.265/AV1 packets, not MJPEG
+                warn!(
+                    "Primary encoder init failed: {}. Falling back to software encoder",
+                    init_error
+                );
+                let mut fallback_config = config.clone();
+                fallback_config.encoder_type = crate::config::EncoderType::Software;
+                let mut fallback_encoder: Box<dyn Encoder> =
+                    Box::new(crate::encode::ffmpeg_encoder::FfmpegEncoder::new(&fallback_config)?);
+                if let Err(fallback_error) = fallback_encoder.init(&fallback_config) {
                     let _ = health_tx.try_send(EncoderHealthEvent::Fatal(format!(
-                        "Failed to initialize encoder: {}",
-                        init_error
+                        "Failed to initialize encoder and software fallback: primary={}, fallback={}",
+                        init_error, fallback_error
                     )));
-                    return Err(init_error);
+                    return Err(fallback_error);
                 }
+                encoder = fallback_encoder;
+                info!("Software fallback encoder (native FFmpeg) initialized successfully");
             }
             debug!("Encoder initialized");
             let packet_rx = encoder.packet_rx();

@@ -16,13 +16,8 @@
       <ComponentGroupRef Id="AppHarvestedComponents" />
     </ComponentGroup>
 
-    <!-- Baseline FFmpeg payload + optional harvested binaries -->
-    <Component Id="cmpFfmpegExe" Guid="{A3D9F4C5-8AAE-4D4C-9412-24A64684E179}" Directory="FFMPEGBINDIR">
-      <File Id="filFfmpegExe" Source="..\ffmpeg\bin\liteclip-replay-ffmpeg.exe" KeyPath="yes" />
-    </Component>
-
+    <!-- FFmpeg DLLs for native ffmpeg-next linking (harvested from ffmpeg/bin) -->
     <ComponentGroup Id="FFmpegComponents">
-      <ComponentRef Id="cmpFfmpegExe" />
       <ComponentGroupRef Id="FFmpegHarvestedComponents" />
     </ComponentGroup>
 
