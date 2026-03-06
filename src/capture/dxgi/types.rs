@@ -462,7 +462,7 @@ impl DxgiCapture {
         let perform_cpu_readback = config.perform_cpu_readback;
         let target_resolution = config.target_resolution;
         let base_fps = config.target_fps.max(1);
-        let timeout_ms = (1000u32 / base_fps).max(1) + u32::from(!1000u32.is_multiple_of(base_fps));
+        let timeout_ms = (1000u32 / base_fps) * 2; // Wait up to two frames for an update before duplicating
         let frame_interval = Duration::from_nanos(1_000_000_000u64 / base_fps as u64);
         let mut next_frame_deadline = Instant::now();
         let mut frame_count = 0u64;

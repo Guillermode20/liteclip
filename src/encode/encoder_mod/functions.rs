@@ -106,7 +106,7 @@ pub fn spawn_encoder(
     buffer: crate::buffer::ring::SharedReplayBuffer,
 ) -> Result<(EncoderHandle, Sender<crate::capture::CapturedFrame>)> {
     const MAX_CONSECUTIVE_ENCODE_ERRORS: u32 = 8;
-    let (frame_tx, frame_rx): (Sender<crate::capture::CapturedFrame>, _) = bounded(16);
+    let (frame_tx, frame_rx): (Sender<crate::capture::CapturedFrame>, _) = bounded(128);
     let frame_tx_clone = frame_tx.clone();
     let (health_tx, health_rx) = bounded(8);
     let thread = std::thread::Builder::new()

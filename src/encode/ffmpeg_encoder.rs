@@ -54,7 +54,7 @@ impl FfmpegEncoder {
         encoder.set_height(out_h);
         encoder.set_format(Pixel::YUV420P);
         encoder.set_frame_rate(Some((self.config.framerate as i32, 1)));
-        encoder.set_time_base((1, self.config.framerate as i32));
+        encoder.set_time_base((1, 10_000_000));
         
         // Bitrate and GOP settings
         let bitrate = (self.config.bitrate_mbps * 1_000_000) as usize;
@@ -103,8 +103,47 @@ impl FfmpegEncoder {
         info!("Native FFmpeg encoder initialized: {} ({}x{})", codec_name, out_w, out_h);
         Ok(())
     }
+}
 
-    fn receive_and_process_packets(&mut self) -> Result<()> {
+impl Encoder for FfmpegEncoder {
+    fn init(&mut self, _config: &EncoderConfig) -> Result<()> {
+        self.running = true;
+        Ok(())
+    }
+
+    fn encode_frame(&mut self, frame: &crate::capture::CapturedFrame) -> Result<()> {
+        if self.encoder.is_none() {
+            self.init_encoder(frame.resolution.0, frame.resolution.1)?;
+        }
+
+        let Some(ref mut encoder) = self.encoder else { return Ok(()); };
+        let Some(ref mut scaler) = self.scaler else { return Ok(()); };
+
+        // 1. Create source frame from raw BGRA data
+        let mut src_frame = ffmpeg::util::frame::video::Video::new(Pixel::BGRA, frame.resolution.0, frame.resolution.1);
+        src_frame.data_mut(0).copy_from_slice(&frame.bgra);
+
+        // 2. Create destination frame (YUV420P)
+        let mut dst_frame = ffmpeg::util::frame::video::Video::new(encoder.format(), encoder.width(), encoder.height());
+        
+        // 3. Scale/Convert BGRA -> YUV420P
+        scaler.run(&src_frame, &mut dst_frame)?;
+        
+        // 4. Set timestamp (QPC ticks, perfectly synced with 1/10M time_base)
+        dst_frame.set_pts(Some(frame.timestamp));
+        
+        // Force keyframe (IDR) at GOP intervals (important for hardware encoders)
+        let gop = self.config.keyframe_interval_frames() as i64;
+        if gop > 0 && self.frame_count % gop == 0 {
+            dst_frame.set_kind(ffmpeg::picture::Type::I);
+        } else {
+            dst_frame.set_kind(ffmpeg::picture::Type::None);
+        }
+
+        // 5. Send frame to encoder
+        encoder.send_frame(&dst_frame).context("Failed to send frame to encoder")?;
+
+        // 6. Receive packets
         if let Some(ref mut encoder) = self.encoder {
             let mut packet = ffmpeg::Packet::empty();
             while encoder.receive_packet(&mut packet).is_ok() {
@@ -148,7 +187,8 @@ impl FfmpegEncoder {
                     tracing::info!("Packet received: size={}, pts={:?}, is_key={}", data.len(), packet.pts(), is_keyframe);
                 }
 
-                let pts = packet.pts().unwrap_or(self.frame_count);
+                // Map back to the exact QPC timestamp from capture so A/V sync is perfect
+                let pts = packet.pts().unwrap_or(frame.timestamp);
                 let dts = packet.dts().unwrap_or(pts);
 
                 let mut encoded_packet = EncodedPacket::new(
@@ -168,50 +208,6 @@ impl FfmpegEncoder {
                 }
             }
         }
-        Ok(())
-    }
-}
-
-impl Encoder for FfmpegEncoder {
-    fn init(&mut self, _config: &EncoderConfig) -> Result<()> {
-        self.running = true;
-        Ok(())
-    }
-
-    fn encode_frame(&mut self, frame: &crate::capture::CapturedFrame) -> Result<()> {
-        if self.encoder.is_none() {
-            self.init_encoder(frame.resolution.0, frame.resolution.1)?;
-        }
-
-        let Some(ref mut encoder) = self.encoder else { return Ok(()); };
-        let Some(ref mut scaler) = self.scaler else { return Ok(()); };
-
-        // 1. Create source frame from raw BGRA data
-        let mut src_frame = ffmpeg::util::frame::video::Video::new(Pixel::BGRA, frame.resolution.0, frame.resolution.1);
-        src_frame.data_mut(0).copy_from_slice(&frame.bgra);
-
-        // 2. Create destination frame (YUV420P)
-        let mut dst_frame = ffmpeg::util::frame::video::Video::new(encoder.format(), encoder.width(), encoder.height());
-        
-        // 3. Scale/Convert BGRA -> YUV420P
-        scaler.run(&src_frame, &mut dst_frame)?;
-        
-        // 4. Set timestamp
-        dst_frame.set_pts(Some(frame.timestamp));
-        
-        // Force keyframe (IDR) at GOP intervals (important for hardware encoders)
-        let gop = self.config.keyframe_interval_frames() as i64;
-        if gop > 0 && self.frame_count % gop == 0 {
-            dst_frame.set_kind(ffmpeg::picture::Type::I);
-        } else {
-            dst_frame.set_kind(ffmpeg::picture::Type::None);
-        }
-
-        // 5. Send frame to encoder
-        encoder.send_frame(&dst_frame).context("Failed to send frame to encoder")?;
-
-        // 6. Receive packets
-        self.receive_and_process_packets()?;
 
         self.frame_count += 1;
         Ok(())
@@ -220,7 +216,28 @@ impl Encoder for FfmpegEncoder {
     fn flush(&mut self) -> Result<Vec<EncodedPacket>> {
         if let Some(ref mut encoder) = self.encoder {
             encoder.send_eof().ok();
-            self.receive_and_process_packets().ok();
+            
+            let mut packet = ffmpeg::Packet::empty();
+            while encoder.receive_packet(&mut packet).is_ok() {
+                let data = packet.data().unwrap_or(&[]).to_vec();
+                let is_keyframe = packet.is_key();
+                
+                // Using 0 for flush packets since we don't have the original timestamp,
+                // but these usually don't matter much for replay buffers anyway.
+                let mut encoded_packet = EncodedPacket::new(
+                    data,
+                    0,
+                    0,
+                    is_keyframe,
+                    StreamType::Video,
+                );
+                
+                if !self.config.use_native_resolution {
+                    encoded_packet.resolution = Some(self.config.resolution);
+                }
+
+                let _ = self.packet_tx.send(encoded_packet);
+            }
         }
         
         let mut packets = Vec::new();
