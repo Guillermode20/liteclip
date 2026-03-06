@@ -60,7 +60,8 @@ pub struct DxgiCapture {
 impl DxgiCapture {
     /// Create a new DXGI capture instance
     pub fn new() -> Result<Self> {
-        let (frame_tx, frame_rx) = bounded::<CapturedFrame>(32);
+        // 4 frames at 2560x1440 BGRA = ~60MB (vs 32 frames = ~470MB)
+        let (frame_tx, frame_rx) = bounded::<CapturedFrame>(4);
         let (fatal_tx, fatal_rx) = bounded::<String>(8);
         Ok(Self {
             config: CaptureConfig::default(),
