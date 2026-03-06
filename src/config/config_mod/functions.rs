@@ -2,7 +2,7 @@
 //!
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
-use super::types::{Codec, EncoderType, OverlayPosition, QualityPreset, RateControl, Resolution};
+use super::types::{EncoderType, OverlayPosition, QualityPreset, RateControl, Resolution};
 
 pub const MAX_FRAMERATE: u32 = 240;
 pub const CURRENT_CONFIG_VERSION: u32 = 1;
@@ -41,9 +41,6 @@ pub(super) fn default_resolution() -> Resolution {
 }
 pub(super) fn default_framerate() -> u32 {
     60
-}
-pub(super) fn default_codec() -> Codec {
-    Codec::H264
 }
 pub(super) fn default_bitrate() -> u32 {
     10
@@ -110,7 +107,6 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.general.replay_duration_secs, 30);
         assert_eq!(config.video.framerate, 60);
-        assert_eq!(config.video.codec, Codec::H264);
         assert_eq!(config.video.bitrate_mbps, 10);
         assert_eq!(config.video.quality_preset, QualityPreset::Performance);
         assert_eq!(config.video.rate_control, RateControl::Vbr);

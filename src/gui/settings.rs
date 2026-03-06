@@ -102,17 +102,8 @@ impl SettingsApp {
                             .text("Bitrate (Mbps)"),
                     );
 
-                    egui::ComboBox::from_label("Codec")
-                        .selected_text(format!("{:?}", self.config.video.codec))
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.config.video.codec, Codec::H264, "H.264");
-                            ui.selectable_value(
-                                &mut self.config.video.codec,
-                                Codec::H265,
-                                "H.265 / HEVC",
-                            );
-                            ui.selectable_value(&mut self.config.video.codec, Codec::Av1, "AV1");
-                        });
+                    // Codec is fixed to HEVC for performance
+                    ui.label("Codec: HEVC (H.265)");
 
                     egui::ComboBox::from_label("Encoder")
                         .selected_text(format!("{:?}", self.config.video.encoder))
@@ -121,11 +112,6 @@ impl SettingsApp {
                                 &mut self.config.video.encoder,
                                 EncoderType::Auto,
                                 "Auto",
-                            );
-                            ui.selectable_value(
-                                &mut self.config.video.encoder,
-                                EncoderType::Software,
-                                "Software (CPU)",
                             );
                             ui.selectable_value(
                                 &mut self.config.video.encoder,

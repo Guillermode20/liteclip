@@ -59,8 +59,9 @@ pub struct DxgiCapture {
 impl DxgiCapture {
     /// Create a new DXGI capture instance
     pub fn new() -> Result<Self> {
-        // 4 frames at 2560x1440 BGRA = ~60MB (vs 32 frames = ~470MB)
-        let (frame_tx, frame_rx) = bounded::<CapturedFrame>(4);
+        // 16 frames at 2560x1440 BGRA = ~235MB (provides ~267ms buffer at 60fps)
+        // This gives the encoder enough headroom to handle transient slowdowns
+        let (frame_tx, frame_rx) = bounded::<CapturedFrame>(16);
         let (fatal_tx, fatal_rx) = bounded::<String>(8);
         Ok(Self {
             config: CaptureConfig::default(),
@@ -360,7 +361,6 @@ impl DxgiCapture {
     pub(crate) fn capture_loop(
         running: Arc<AtomicBool>,
         frame_tx: Sender<CapturedFrame>,
-        overflow_rx: Receiver<CapturedFrame>,
         fatal_tx: Sender<String>,
         config: CaptureConfig,
     ) {
@@ -378,7 +378,6 @@ impl DxgiCapture {
         let mut window_start = Instant::now();
         let mut window_frames = 0u64;
         let mut window_drops = 0u64;
-        let mut _window_dropped_oldest = 0u64;
         let mut error_count = 0u32;
         let max_errors = 10;
         let mut reinit_backoff_ms = 100u64;
@@ -437,35 +436,13 @@ impl DxgiCapture {
                                 }
                             }
                         }
-                        Err(crossbeam::channel::TrySendError::Full(frame)) => {
+                        Err(crossbeam::channel::TrySendError::Full(_frame)) => {
                             dropped_count += 1;
                             window_drops += 1;
                             error_count = 0;
                             backpressure.set_encoder_overloaded(true);
-                            let mut dropped_oldest = false;
-                            if overflow_rx.try_recv().is_ok() {
-                                dropped_oldest = true;
-                                _window_dropped_oldest += 1;
-                                match frame_tx.try_send(frame) {
-                                    Ok(()) => {
-                                        frame_count += 1;
-                                        window_frames += 1;
-                                    }
-                                    Err(crossbeam::channel::TrySendError::Full(_)) => {
-                                        dropped_count += 1;
-                                        window_drops += 1;
-                                    }
-                                    Err(crossbeam::channel::TrySendError::Disconnected(_)) => {
-                                        info!("Frame channel closed, stopping capture");
-                                        break;
-                                    }
-                                }
-                            }
                             if dropped_count % 60 == 0 {
-                                warn!(
-                                    "Dropped {} frames (encoder behind, drop_oldest={})",
-                                    dropped_count, dropped_oldest
-                                );
+                                warn!("Dropped {} frames (encoder behind)", dropped_count);
                             }
                         }
                         Err(crossbeam::channel::TrySendError::Disconnected(_)) => {
@@ -506,35 +483,13 @@ impl DxgiCapture {
                             error_count = 0;
                             backpressure.set_encoder_overloaded(false);
                         }
-                        Err(crossbeam::channel::TrySendError::Full(frame)) => {
+                        Err(crossbeam::channel::TrySendError::Full(_frame)) => {
                             dropped_count += 1;
                             window_drops += 1;
                             error_count = 0;
                             backpressure.set_encoder_overloaded(true);
-                            let mut dropped_oldest = false;
-                            if overflow_rx.try_recv().is_ok() {
-                                dropped_oldest = true;
-                                _window_dropped_oldest += 1;
-                                match frame_tx.try_send(frame) {
-                                    Ok(()) => {
-                                        frame_count += 1;
-                                        window_frames += 1;
-                                    }
-                                    Err(crossbeam::channel::TrySendError::Full(_)) => {
-                                        dropped_count += 1;
-                                        window_drops += 1;
-                                    }
-                                    Err(crossbeam::channel::TrySendError::Disconnected(_)) => {
-                                        info!("Frame channel closed, stopping capture");
-                                        break;
-                                    }
-                                }
-                            }
                             if dropped_count % 60 == 0 {
-                                warn!(
-                                    "Dropped {} frames (encoder behind, drop_oldest={})",
-                                    dropped_count, dropped_oldest
-                                );
+                                warn!("Dropped {} frames (encoder behind)", dropped_count);
                             }
                         }
                         Err(crossbeam::channel::TrySendError::Disconnected(_)) => {

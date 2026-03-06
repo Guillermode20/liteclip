@@ -66,7 +66,13 @@ pub fn spawn_clip_saver(
         let has_decodable_h264_frame = |packets: &[crate::encode::EncodedPacket]| {
             packets.iter().any(|packet| {
                 matches!(packet.stream, crate::encode::StreamType::Video)
-                    && matches!(muxer::h264_nal_type(packet.data.as_ref()), Some(1 | 5))
+                    && matches!(
+                        muxer::h264_nal_type(packet.data.as_ref()),
+                        // NAL types that indicate decodable content:
+                        // 1 = Non-IDR slice, 5 = IDR slice (keyframe)
+                        // 7 = SPS, 8 = PPS (also valid as stream starters)
+                        Some(1 | 5 | 7 | 8)
+                    )
             })
         };
 

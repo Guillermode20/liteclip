@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 use super::functions::{
-    default_bitrate, default_codec, default_encoder, default_false, default_framerate,
+    default_bitrate, default_encoder, default_false, default_framerate,
     default_gpu_index, default_hotkey_gallery, default_hotkey_save, default_hotkey_screenshot,
     default_hotkey_toggle, default_keyframe_interval, default_memory_limit, default_mic_device,
     default_mic_volume, default_overlay_position, default_quality_preset, default_quality_value,
@@ -18,7 +18,7 @@ use super::functions::{
     RECOMMENDED_BUFFER_BASE_OVERHEAD_MB, RECOMMENDED_BUFFER_HEADROOM_PERCENT,
 };
 
-/// Encoder selection
+/// Encoder selection (hardware only - HEVC)
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum EncoderType {
@@ -26,7 +26,6 @@ pub enum EncoderType {
     Nvenc,
     Amf,
     Qsv,
-    Software,
 }
 /// High-level quality/speed tradeoff for encoder options
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -311,15 +310,13 @@ pub struct HotkeyConfig {
     #[serde(default = "default_hotkey_gallery")]
     pub open_gallery: String,
 }
-/// Video capture and encoding settings
+/// Video capture and encoding settings (HEVC-only)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VideoConfig {
     #[serde(default = "default_resolution")]
     pub resolution: Resolution,
     #[serde(default = "default_framerate")]
     pub framerate: u32,
-    #[serde(default = "default_codec")]
-    pub codec: Codec,
     #[serde(default = "default_bitrate")]
     pub bitrate_mbps: u32,
     #[serde(default = "default_encoder")]
@@ -346,14 +343,6 @@ impl VideoConfig {
             Resolution::P480 => Some((854, 480)),
         }
     }
-}
-/// Video codec options
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum Codec {
-    H264,
-    H265,
-    Av1,
 }
 /// Advanced settings
 #[derive(Debug, Clone, Serialize, Deserialize)]

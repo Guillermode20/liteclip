@@ -9,7 +9,7 @@
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
 use super::functions::{
-    default_bitrate, default_codec, default_encoder, default_framerate, default_quality_preset,
+    default_bitrate, default_encoder, default_framerate, default_quality_preset,
     default_quality_value, default_rate_control, default_resolution, default_true,
 };
 use super::types::VideoConfig;
@@ -19,7 +19,6 @@ impl Default for VideoConfig {
         Self {
             resolution: default_resolution(),
             framerate: default_framerate(),
-            codec: default_codec(),
             bitrate_mbps: default_bitrate(),
             encoder: default_encoder(),
             quality_preset: default_quality_preset(),

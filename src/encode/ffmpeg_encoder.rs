@@ -52,17 +52,6 @@ impl FfmpegEncoder {
         }
     }
 
-    fn bitrate_kbps(&self) -> u32 {
-        self.config.bitrate_mbps.max(1) * 1000
-    }
-
-    fn peak_bitrate_kbps(&self) -> u32 {
-        match self.config.rate_control {
-            RateControl::Cbr => self.bitrate_kbps(),
-            RateControl::Vbr | RateControl::Cq => self.bitrate_kbps().saturating_mul(2),
-        }
-    }
-
     fn cq_value(&self) -> u8 {
         self.config
             .quality_value
@@ -71,18 +60,6 @@ impl FfmpegEncoder {
                 QualityPreset::Balanced => 23,
                 QualityPreset::Quality => 19,
             })
-    }
-
-    fn software_preset(&self) -> &'static str {
-        match self.config.quality_preset {
-            QualityPreset::Performance => "veryfast",
-            QualityPreset::Balanced => "medium",
-            QualityPreset::Quality => "slow",
-        }
-    }
-
-    fn software_tune(&self) -> &'static str {
-        "zerolatency"
     }
 
     fn nvenc_preset(&self) -> &'static str {
@@ -126,68 +103,6 @@ impl FfmpegEncoder {
 
     fn next_encoder_pts(&self) -> i64 {
         self.frame_count
-    }
-
-    fn software_target_bitrate_param(&self) -> String {
-        format!("{}k", self.bitrate_kbps())
-    }
-
-    fn software_peak_bitrate_param(&self) -> String {
-        format!("{}k", self.peak_bitrate_kbps())
-    }
-
-    fn software_bufsize_param(&self) -> String {
-        format!("{}k", self.bitrate_kbps())
-    }
-
-    fn software_h264_params(&self, keyint: u32) -> String {
-        let bitrate_kbps = self.bitrate_kbps();
-        let peak_bitrate_kbps = self.peak_bitrate_kbps();
-
-        match self.config.rate_control {
-            RateControl::Cbr => format!(
-                "force-cfr=1:nal-hrd=cbr:scenecut=0:keyint={}:min-keyint={}:vbv-maxrate={}:vbv-bufsize={}",
-                keyint, keyint, bitrate_kbps, bitrate_kbps
-            ),
-            RateControl::Vbr => format!(
-                "force-cfr=1:scenecut=0:keyint={}:min-keyint={}:vbv-maxrate={}:vbv-bufsize={}",
-                keyint, keyint, peak_bitrate_kbps, bitrate_kbps
-            ),
-            RateControl::Cq => format!(
-                "force-cfr=1:scenecut=0:keyint={}:min-keyint={}:crf={}:vbv-maxrate={}:vbv-bufsize={}",
-                keyint,
-                keyint,
-                self.cq_value(),
-                peak_bitrate_kbps,
-                bitrate_kbps
-            ),
-        }
-    }
-
-    fn software_h265_params(&self, keyint: u32) -> String {
-        let bitrate_kbps = self.bitrate_kbps();
-        let peak_bitrate_kbps = self.peak_bitrate_kbps();
-        let low_memory_params = "pools=none:frame-threads=1:ref=1";
-
-        match self.config.rate_control {
-            RateControl::Cbr => format!(
-                "repeat-headers=1:aud=1:open-gop=0:scenecut=0:keyint={}:min-keyint={}:bitrate={}:vbv-maxrate={}:vbv-bufsize={}:strict-cbr=1:{}",
-                keyint, keyint, bitrate_kbps, bitrate_kbps, bitrate_kbps, low_memory_params
-            ),
-            RateControl::Vbr => format!(
-                "repeat-headers=1:aud=1:open-gop=0:scenecut=0:keyint={}:min-keyint={}:bitrate={}:vbv-maxrate={}:vbv-bufsize={}:{}",
-                keyint, keyint, bitrate_kbps, peak_bitrate_kbps, bitrate_kbps, low_memory_params
-            ),
-            RateControl::Cq => format!(
-                "repeat-headers=1:aud=1:open-gop=0:scenecut=0:keyint={}:min-keyint={}:crf={}:vbv-maxrate={}:vbv-bufsize={}:{}",
-                keyint,
-                keyint,
-                self.cq_value(),
-                peak_bitrate_kbps,
-                bitrate_kbps,
-                low_memory_params
-            ),
-        }
     }
 
     fn dequeue_packet_timestamp(&mut self, fallback: i64) -> i64 {
@@ -242,29 +157,16 @@ impl FfmpegEncoder {
         while i + 4 < data.len() && i < 100 {
             if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 0 && data[i + 3] == 1 {
                 let nal_byte = data[i + 4];
-                let h264_type = nal_byte & 0x1f;
                 let hevc_type = (nal_byte >> 1) & 0x3f;
-                if h264_type == 7
-                    || h264_type == 5
-                    || hevc_type == 32
-                    || hevc_type == 33
-                    || hevc_type == 19
-                    || hevc_type == 20
-                {
+                // HEVC NAL types 19, 20 = IDR slice (keyframe)
+                if hevc_type == 19 || hevc_type == 20 {
                     return true;
                 }
                 i += 4;
             } else if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
                 let nal_byte = data[i + 3];
-                let h264_type = nal_byte & 0x1f;
                 let hevc_type = (nal_byte >> 1) & 0x3f;
-                if h264_type == 7
-                    || h264_type == 5
-                    || hevc_type == 32
-                    || hevc_type == 33
-                    || hevc_type == 19
-                    || hevc_type == 20
-                {
+                if hevc_type == 19 || hevc_type == 20 {
                     return true;
                 }
                 i += 3;
@@ -308,70 +210,6 @@ impl FfmpegEncoder {
         options.set("bf", "0");
 
         match self.config.encoder_type {
-            EncoderType::Software | EncoderType::Auto => {
-                let keyint = self.config.keyframe_interval_frames().max(1);
-                let bitrate_param = self.software_target_bitrate_param();
-                let peak_bitrate_param = self.software_peak_bitrate_param();
-                let bufsize_param = self.software_bufsize_param();
-
-                options.set("preset", self.software_preset());
-                options.set("tune", self.software_tune());
-                options.set("b", &bitrate_param);
-                options.set("maxrate", &peak_bitrate_param);
-                options.set("bufsize", &bufsize_param);
-                options.set(
-                    "threads",
-                    match self.config.codec {
-                        crate::config::Codec::H265 => "2",
-                        crate::config::Codec::Av1 => "2",
-                        crate::config::Codec::H264 => "0",
-                    },
-                );
-
-                match self.config.codec {
-                    crate::config::Codec::H264 => {
-                        options.set("x264-params", &self.software_h264_params(keyint));
-                        options.set("qmin", "18");
-                        options.set("rc-lookahead", "0");
-                        if matches!(self.config.rate_control, RateControl::Cbr) {
-                            options.set("minrate", &bitrate_param);
-                        }
-                        if matches!(self.config.rate_control, RateControl::Cq) {
-                            options.set("crf", &self.cq_value().to_string());
-                        }
-                    }
-                    crate::config::Codec::H265 => {
-                        options.set("x265-params", &self.software_h265_params(keyint));
-                        if matches!(self.config.rate_control, RateControl::Cbr) {
-                            options.set("minrate", &bitrate_param);
-                        }
-                        if matches!(self.config.rate_control, RateControl::Cq) {
-                            options.set("crf", &self.cq_value().to_string());
-                        }
-                    }
-                    crate::config::Codec::Av1 => {
-                        options.set(
-                            "usage",
-                            match self.config.quality_preset {
-                                QualityPreset::Performance => "realtime",
-                                QualityPreset::Balanced | QualityPreset::Quality => "good",
-                            },
-                        );
-                        options.set("lag-in-frames", "0");
-                        options.set(
-                            "cpu-used",
-                            match self.config.quality_preset {
-                                QualityPreset::Performance => "8",
-                                QualityPreset::Balanced => "6",
-                                QualityPreset::Quality => "4",
-                            },
-                        );
-                        if matches!(self.config.rate_control, RateControl::Cq) {
-                            options.set("crf", &self.cq_value().to_string());
-                        }
-                    }
-                }
-            }
             EncoderType::Nvenc => {
                 let bitrate_bps = bitrate.to_string();
                 let peak_bitrate_bps = self.peak_bitrate_bps().to_string();
@@ -442,12 +280,8 @@ impl FfmpegEncoder {
                 options.set("min_qp_p", "20");
                 options.set("max_qp_p", "51");
 
-                if matches!(self.config.codec, crate::config::Codec::H264) {
-                    options.set("coder", "cabac");
-                }
-                if matches!(self.config.codec, crate::config::Codec::H265) {
-                    options.set("profile_tier", "high");
-                }
+                // HEVC-specific
+                options.set("profile_tier", "high");
 
                 options.set("b", &bitrate_bps);
                 options.set("max_bitrate", &peak_bitrate_bps);
@@ -478,6 +312,10 @@ impl FfmpegEncoder {
                 options.set("b", &bitrate_bps);
                 options.set("maxrate", &peak_bitrate_bps);
                 options.set("bufsize", &bitrate_bps);
+            }
+            EncoderType::Auto => {
+                // Should not reach here - Auto is resolved before init
+                anyhow::bail!("Auto encoder type should be resolved before init");
             }
         }
 
@@ -534,24 +372,17 @@ impl FfmpegEncoder {
             }
         }
 
-        for (data, packet_is_key, packet_pts) in drained_packets {
-            let normalized_data = match self.config.codec {
-                crate::config::Codec::H264 | crate::config::Codec::H265 => {
-                    Self::convert_length_prefixed_to_annex_b(&data)
-                }
-                crate::config::Codec::Av1 => None,
-            };
+        for (data, packet_is_key, _packet_pts) in drained_packets {
+            // HEVC uses annex-b format
+            let normalized_data = Self::convert_length_prefixed_to_annex_b(&data);
             let inspection_data = normalized_data.as_deref().unwrap_or(data.as_slice());
             let is_keyframe = Self::detect_keyframe(inspection_data, packet_is_key);
             let pts = self.dequeue_packet_timestamp(fallback_timestamp);
 
+            // only log occasionally to avoid spam; keyframes always get logged
             if self.frame_count % 60 == 0 || is_keyframe {
-                tracing::info!(
-                    "Packet received: size={}, pts={:?}, is_key={}",
-                    data.len(),
-                    packet_pts,
-                    is_keyframe
-                );
+                // use debug level and a simpler message so the output is less obtuse
+                tracing::debug!("packet {}B keyframe={}", data.len(), is_keyframe);
             }
 
             let mut encoded_packet =

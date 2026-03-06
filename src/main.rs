@@ -139,11 +139,10 @@ async fn main() -> Result<()> {
 
     // Log configuration summary
     info!(
-        "Config: {}s @ {} Mbps, {} FPS, codec={:?}, encoder={:?}, preset={:?}, rc={:?}, q={:?}, replay-est={} MB, buffer-cap={} MB",
+        "Config: {}s @ {} Mbps, {} FPS, codec=HEVC, encoder={:?}, preset={:?}, rc={:?}, q={:?}, replay-est={} MB, buffer-cap={} MB",
         config.general.replay_duration_secs,
         config.video.bitrate_mbps,
         config.video.framerate,
-        config.video.codec,
         config.video.encoder,
         config.video.quality_preset,
         config.video.rate_control,
@@ -252,13 +251,13 @@ async fn main() -> Result<()> {
                                             info!("Save request ignored: clip save already in progress");
                                             continue;
                                         }
-                                        let (config, buffer, notifications_enabled, runtime_codec) =
+                                        let (config, buffer, notifications_enabled) =
                                             app_state.read().await.save_context();
                                         let platform_handle_clone = platform_handle.clone();
                                         let save_in_progress_clone = save_in_progress.clone();
                                         tokio::spawn(async move {
                                             let result = liteclip_replay::app::ClipManager::save_clip(
-                                                &config, &buffer, runtime_codec,
+                                                &config, &buffer,
                                             )
                                             .await;
                                             match result {
@@ -353,13 +352,13 @@ async fn main() -> Result<()> {
                                             info!("Save request ignored: clip save already in progress");
                                             continue;
                                         }
-                                        let (config, buffer, notifications_enabled, runtime_codec) =
+                                        let (config, buffer, notifications_enabled) =
                                             app_state.read().await.save_context();
                                         let platform_handle_clone = platform_handle.clone();
                                         let save_in_progress_clone = save_in_progress.clone();
                                         tokio::spawn(async move {
                                             let result = liteclip_replay::app::ClipManager::save_clip(
-                                                &config, &buffer, runtime_codec,
+                                                &config, &buffer,
                                             )
                                             .await;
                                             match result {

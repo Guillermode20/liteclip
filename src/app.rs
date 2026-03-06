@@ -339,7 +339,6 @@ impl ClipManager {
     pub async fn save_clip(
         config: &Config,
         buffer: &SharedReplayBuffer,
-        runtime_codec: crate::config::Codec,
     ) -> Result<PathBuf> {
         info!("Clip: saving replay buffer");
 
@@ -374,13 +373,9 @@ impl ClipManager {
                 });
         let fps = config.video.framerate as f64;
 
-        let muxer_video_codec = match runtime_codec {
-            crate::config::Codec::H264 => "h264",
-            crate::config::Codec::H265 => "hevc",
-            crate::config::Codec::Av1 => "av1",
-        };
+        // HEVC-only
         let muxer_config = MuxerConfig::new(width, height, fps, &output_path)
-            .with_video_codec(muxer_video_codec)
+            .with_video_codec("hevc")
             .with_expect_audio(config.audio.capture_system || config.audio.capture_mic);
 
         let buffer_clone = buffer.clone();
@@ -442,25 +437,14 @@ impl AppState {
     }
 
     pub async fn save_clip(&self) -> Result<PathBuf> {
-        let runtime_codec = self
-            .pipeline
-            .encoder_handle
-            .as_ref()
-            .map(|handle| handle.effective_config.codec)
-            .unwrap_or(self.config.video.codec);
-        ClipManager::save_clip(&self.config, &self.buffer, runtime_codec).await
+        ClipManager::save_clip(&self.config, &self.buffer).await
     }
 
-    pub fn save_context(&self) -> (Config, SharedReplayBuffer, bool, crate::config::Codec) {
+    pub fn save_context(&self) -> (Config, SharedReplayBuffer, bool) {
         (
             self.config.clone(),
             self.buffer.clone(),
             self.config.general.notifications,
-            self.pipeline
-                .encoder_handle
-                .as_ref()
-                .map(|handle| handle.effective_config.codec)
-                .unwrap_or(self.config.video.codec),
         )
     }
 

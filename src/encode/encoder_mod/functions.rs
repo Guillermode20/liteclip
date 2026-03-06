@@ -38,7 +38,7 @@ pub trait Encoder: Send + 'static {
 fn resolve_encoder_config(config: &EncoderConfig) -> EncoderConfig {
     let mut resolved = config.clone();
     if resolved.encoder_type == crate::config::EncoderType::Auto {
-        let detected_encoder = detect_hardware_encoder(resolved.codec);
+        let detected_encoder = detect_hardware_encoder();
         apply_auto_encoder_selection(&mut resolved, detected_encoder);
         info!("Auto-detected encoder: {:?}", resolved.encoder_type);
     }
@@ -123,18 +123,17 @@ fn probe_encoder_available(encoder_name: &str) -> bool {
     }
 }
 
-/// Detect available hardware encoder
+/// Detect available hardware encoder (HEVC-only)
 ///
-/// Priority order: NVENC → AMF → QSV → None (software)
+/// Priority order: NVENC → AMF → QSV
 #[cfg(feature = "ffmpeg")]
-pub fn detect_hardware_encoder(codec: crate::config::Codec) -> HardwareEncoder {
-    debug!("Detecting hardware encoders for codec {:?}...", codec);
+pub fn detect_hardware_encoder() -> HardwareEncoder {
+    debug!("Detecting hardware encoders for HEVC...");
 
-    let (nvenc_name, amf_name, qsv_name) = match codec {
-        crate::config::Codec::H264 => ("h264_nvenc", "h264_amf", Some("h264_qsv")),
-        crate::config::Codec::H265 => ("hevc_nvenc", "hevc_amf", Some("hevc_qsv")),
-        crate::config::Codec::Av1 => ("av1_nvenc", "av1_amf", None),
-    };
+    // HEVC encoders only
+    let nvenc_name = "hevc_nvenc";
+    let amf_name = "hevc_amf";
+    let qsv_name = "hevc_qsv";
 
     if probe_encoder_available(nvenc_name) {
         info!("Using NVIDIA NVENC encoder");
@@ -144,19 +143,17 @@ pub fn detect_hardware_encoder(codec: crate::config::Codec) -> HardwareEncoder {
         info!("Using AMD AMF encoder");
         return HardwareEncoder::Amf;
     }
-    if let Some(qsv_name) = qsv_name {
-        if probe_encoder_available(qsv_name) {
-            info!("Using Intel QSV encoder");
-            return HardwareEncoder::Qsv;
-        }
+    if probe_encoder_available(qsv_name) {
+        info!("Using Intel QSV encoder");
+        return HardwareEncoder::Qsv;
     }
-    info!("No hardware encoder, using software encoding");
+    warn!("No hardware encoder found");
     HardwareEncoder::None
 }
 /// Detect available hardware encoder (non-FFmpeg fallback)
 #[cfg(not(feature = "ffmpeg"))]
-pub fn detect_hardware_encoder(_codec: crate::config::Codec) -> HardwareEncoder {
-    info!("FFmpeg not compiled in, using software encoding");
+pub fn detect_hardware_encoder() -> HardwareEncoder {
+    warn!("FFmpeg not compiled in, no hardware encoder available");
     HardwareEncoder::None
 }
 
@@ -164,31 +161,9 @@ pub(super) fn apply_auto_encoder_selection(
     config: &mut EncoderConfig,
     detected_encoder: HardwareEncoder,
 ) {
-    if matches!(detected_encoder, HardwareEncoder::None)
-        && !matches!(config.codec, crate::config::Codec::H264)
-    {
-        warn!(
-            "No hardware encoder available for {:?}; falling back to software H.264 to reduce CPU and memory usage",
-            config.codec
-        );
-        config.codec = crate::config::Codec::H264;
-    }
-
     config.encoder_type = detected_encoder.into();
 
-    if matches!(detected_encoder, HardwareEncoder::Amf)
-        && matches!(config.codec, crate::config::Codec::H265)
-        && config.framerate >= 60
-        && config.bitrate_mbps <= 20
-        && !matches!(config.quality_preset, crate::config::QualityPreset::Quality)
-    {
-        warn!(
-            "AMD AMF HEVC is not keeping up at {} FPS / {} Mbps; preferring H.264 in Auto mode for stable realtime capture",
-            config.framerate, config.bitrate_mbps
-        );
-        config.codec = crate::config::Codec::H264;
-    }
-
+    // AMF-specific optimizations for realtime stability
     if matches!(detected_encoder, HardwareEncoder::Amf) && config.keyframe_interval_secs < 2 {
         warn!(
             "Raising keyframe interval from {}s to 2s for AMD AMF realtime stability",
@@ -264,25 +239,11 @@ pub fn spawn_encoder(
                 }
             };
             if let Err(init_error) = encoder.init(&thread_config) {
-                // Fall back to software encoding using native FFmpeg (libx264/libx265/libaom-av1)
-                // This ensures the muxer receives proper H.264/H.265/AV1 packets, not MJPEG
-                warn!(
-                    "Primary encoder init failed: {}. Falling back to software encoder",
+                let _ = health_tx.try_send(EncoderHealthEvent::Fatal(format!(
+                    "Failed to initialize encoder: {}",
                     init_error
-                );
-                let mut fallback_config = thread_config.clone();
-                fallback_config.encoder_type = crate::config::EncoderType::Software;
-                let mut fallback_encoder: Box<dyn Encoder> =
-                    Box::new(crate::encode::ffmpeg_encoder::FfmpegEncoder::new(&fallback_config)?);
-                if let Err(fallback_error) = fallback_encoder.init(&fallback_config) {
-                    let _ = health_tx.try_send(EncoderHealthEvent::Fatal(format!(
-                        "Failed to initialize encoder and software fallback: primary={}, fallback={}",
-                        init_error, fallback_error
-                    )));
-                    return Err(fallback_error);
-                }
-                encoder = fallback_encoder;
-                info!("Software fallback encoder (native FFmpeg) initialized successfully");
+                )));
+                return Err(init_error);
             }
             debug!("Encoder initialized");
             let packet_rx = encoder.packet_rx();
@@ -396,25 +357,11 @@ pub fn spawn_encoder_with_receiver(
                 }
             };
             if let Err(init_error) = encoder.init(&thread_config) {
-                // Fall back to software encoding using native FFmpeg (libx264/libx265/libaom-av1)
-                // This ensures the muxer receives proper H.264/H.265/AV1 packets, not MJPEG
-                warn!(
-                    "Primary encoder init failed: {}. Falling back to software encoder",
+                let _ = health_tx.try_send(EncoderHealthEvent::Fatal(format!(
+                    "Failed to initialize encoder: {}",
                     init_error
-                );
-                let mut fallback_config = thread_config.clone();
-                fallback_config.encoder_type = crate::config::EncoderType::Software;
-                let mut fallback_encoder: Box<dyn Encoder> =
-                    Box::new(crate::encode::ffmpeg_encoder::FfmpegEncoder::new(&fallback_config)?);
-                if let Err(fallback_error) = fallback_encoder.init(&fallback_config) {
-                    let _ = health_tx.try_send(EncoderHealthEvent::Fatal(format!(
-                        "Failed to initialize encoder and software fallback: primary={}, fallback={}",
-                        init_error, fallback_error
-                    )));
-                    return Err(fallback_error);
-                }
-                encoder = fallback_encoder;
-                info!("Software fallback encoder (native FFmpeg) initialized successfully");
+                )));
+                return Err(init_error);
             }
             debug!("Encoder initialized");
             let packet_rx = encoder.packet_rx();
@@ -505,7 +452,7 @@ impl From<HardwareEncoder> for crate::config::EncoderType {
             HardwareEncoder::Nvenc => crate::config::EncoderType::Nvenc,
             HardwareEncoder::Amf => crate::config::EncoderType::Amf,
             HardwareEncoder::Qsv => crate::config::EncoderType::Qsv,
-            HardwareEncoder::None => crate::config::EncoderType::Software,
+            HardwareEncoder::None => crate::config::EncoderType::Amf, // Default to AMF as fallback
         }
     }
 }
