@@ -164,4 +164,6 @@ pub struct EncoderHandle {
     pub packet_rx: Receiver<EncodedPacket>,
     /// Health events emitted by encoder worker thread
     pub health_rx: Receiver<EncoderHealthEvent>,
+    /// Effective encoder configuration after auto-selection/fallback decisions
+    pub effective_config: EncoderConfig,
 }

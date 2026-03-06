@@ -2,11 +2,14 @@
 //!
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
-use super::ffmpeg_muxer::FfmpegMuxer;
+use super::{
+    ffmpeg_muxer::FfmpegMuxer,
+    functions::{h264_nal_type, hevc_nal_type},
+};
 use crate::encode::{EncodedPacket, StreamType};
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
-use tracing::{info, trace};
+use tracing::{info, trace, warn};
 /// MP4 muxer for writing clips
 ///
 /// Uses FFmpeg's AVFormatContext for proper MP4 container creation.
@@ -29,6 +32,36 @@ pub struct Muxer {
     audio_packets: Vec<EncodedPacket>,
 }
 impl Muxer {
+    fn detect_video_codec(video_packets: &[EncodedPacket], fallback: &str) -> String {
+        let mut saw_h264_parameter_sets = false;
+        let mut saw_hevc_parameter_sets = false;
+
+        for packet in video_packets {
+            let data = packet.data.as_ref();
+
+            match h264_nal_type(data) {
+                Some(7 | 8) => saw_h264_parameter_sets = true,
+                Some(1 | 5) if saw_hevc_parameter_sets => {}
+                Some(1 | 5) => return "h264".to_string(),
+                _ => {}
+            }
+
+            if matches!(hevc_nal_type(data), Some(32 | 33 | 34)) {
+                saw_hevc_parameter_sets = true;
+            }
+
+            if saw_h264_parameter_sets {
+                return "h264".to_string();
+            }
+
+            if saw_hevc_parameter_sets {
+                return "hevc".to_string();
+            }
+        }
+
+        fallback.to_string()
+    }
+
     /// Create new muxer for output path
     pub fn new(output_path: &Path, config: &MuxerConfig) -> Result<Self> {
         let path = output_path.to_path_buf();
@@ -122,13 +155,22 @@ impl Muxer {
         if self.video_packets.is_empty() {
             bail!("No video packets available for MP4 generation");
         }
-        
+
         self.video_packets.sort_by_key(|packet| packet.pts);
         self.audio_packets.sort_by_key(|packet| packet.pts);
 
+        let detected_video_codec =
+            Self::detect_video_codec(&self.video_packets, &self.config.video_codec);
+        if detected_video_codec != self.config.video_codec {
+            warn!(
+                "Muxer video codec override: configured={}, detected={} from buffered packets",
+                self.config.video_codec, detected_video_codec
+            );
+        }
+
         let mut muxer = FfmpegMuxer::new(
             &self.output_path,
-            &self.config.video_codec,
+            &detected_video_codec,
             self.config.width,
             self.config.height,
             self.config.fps,
@@ -201,5 +243,39 @@ impl Muxer {
             })?;
         }
         bail!("Cannot create MP4: FFmpeg feature is disabled. Rebuild with `--features ffmpeg`.")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+
+    #[test]
+    fn test_detect_video_codec_prefers_h264_parameter_sets() {
+        let packets = vec![EncodedPacket {
+            data: Bytes::from_static(&[0x00, 0x00, 0x00, 0x01, 0x67, 0x64, 0x00, 0x1f]),
+            pts: 0,
+            dts: 0,
+            is_keyframe: false,
+            stream: StreamType::Video,
+            resolution: None,
+        }];
+
+        assert_eq!(Muxer::detect_video_codec(&packets, "hevc"), "h264");
+    }
+
+    #[test]
+    fn test_detect_video_codec_prefers_hevc_parameter_sets() {
+        let packets = vec![EncodedPacket {
+            data: Bytes::from_static(&[0x00, 0x00, 0x00, 0x01, 0x40, 0x01, 0x0c, 0x01]),
+            pts: 0,
+            dts: 0,
+            is_keyframe: false,
+            stream: StreamType::Video,
+            resolution: None,
+        }];
+
+        assert_eq!(Muxer::detect_video_codec(&packets, "h264"), "hevc");
     }
 }

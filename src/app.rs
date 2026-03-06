@@ -71,6 +71,7 @@ impl RecordingPipeline {
                 frame_tx,
                 packet_rx: _,
                 health_rx: _,
+                effective_config: _,
             } = handle;
             drop(frame_tx);
             match thread.join() {
@@ -237,6 +238,7 @@ impl RecordingPipeline {
                 frame_tx,
                 packet_rx: _,
                 health_rx: _,
+                effective_config: _,
             } = handle;
             drop(frame_tx);
 
@@ -316,6 +318,7 @@ impl Drop for RecordingPipeline {
                     frame_tx,
                     packet_rx: _,
                     health_rx: _,
+                    effective_config: _,
                 } = handle;
                 drop(frame_tx);
 
@@ -333,7 +336,11 @@ impl Drop for RecordingPipeline {
 pub struct ClipManager;
 
 impl ClipManager {
-    pub async fn save_clip(config: &Config, buffer: &SharedReplayBuffer) -> Result<PathBuf> {
+    pub async fn save_clip(
+        config: &Config,
+        buffer: &SharedReplayBuffer,
+        runtime_codec: crate::config::Codec,
+    ) -> Result<PathBuf> {
         info!("Clip: saving replay buffer");
 
         let output_path = Self::generate_output_path(config)?;
@@ -367,7 +374,7 @@ impl ClipManager {
                 });
         let fps = config.video.framerate as f64;
 
-        let muxer_video_codec = match config.video.codec {
+        let muxer_video_codec = match runtime_codec {
             crate::config::Codec::H264 => "h264",
             crate::config::Codec::H265 => "hevc",
             crate::config::Codec::Av1 => "av1",
@@ -435,14 +442,25 @@ impl AppState {
     }
 
     pub async fn save_clip(&self) -> Result<PathBuf> {
-        ClipManager::save_clip(&self.config, &self.buffer).await
+        let runtime_codec = self
+            .pipeline
+            .encoder_handle
+            .as_ref()
+            .map(|handle| handle.effective_config.codec)
+            .unwrap_or(self.config.video.codec);
+        ClipManager::save_clip(&self.config, &self.buffer, runtime_codec).await
     }
 
-    pub fn save_context(&self) -> (Config, SharedReplayBuffer, bool) {
+    pub fn save_context(&self) -> (Config, SharedReplayBuffer, bool, crate::config::Codec) {
         (
             self.config.clone(),
             self.buffer.clone(),
             self.config.general.notifications,
+            self.pipeline
+                .encoder_handle
+                .as_ref()
+                .map(|handle| handle.effective_config.codec)
+                .unwrap_or(self.config.video.codec),
         )
     }
 

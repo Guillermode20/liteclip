@@ -36,7 +36,6 @@ struct DxgiCaptureState {
     frame_width: u32,
     frame_height: u32,
     native_buffer: BytesMut,
-    output_buffer: BytesMut,
 }
 impl DxgiCaptureState {
     pub fn get_qpc_timestamp() -> i64 {
@@ -188,7 +187,6 @@ impl DxgiCapture {
                 frame_width,
                 frame_height,
                 native_buffer,
-                output_buffer: BytesMut::with_capacity(native_size),
             })
         }
     }
@@ -309,7 +307,7 @@ impl DxgiCapture {
                         let src_ptr = mapped.pData as *const u8;
                         let total_bytes = src_row_bytes * src_h;
                         state.native_buffer.resize(total_bytes, 0);
-                        
+
                         if src_pitch == src_row_bytes {
                             std::ptr::copy_nonoverlapping(
                                 src_ptr,
@@ -330,13 +328,13 @@ impl DxgiCapture {
                                 dst_row_offset += src_row_bytes;
                             }
                         }
-                        
+
                         let bgra = state.native_buffer.split_to(total_bytes).freeze();
                         state.native_buffer.reserve(total_bytes);
-                        
+
                         state.d3d_context.Unmap(Some(&staging_resource), 0);
                         state.duplication.ReleaseFrame().ok();
-                        
+
                         let frame = CapturedFrame {
                             bgra,
                             timestamp,
@@ -355,9 +353,9 @@ impl DxgiCapture {
             }
         }
     }
-    
+
     // Manual scaler removed - replaced with FFmpeg swscale in encoder thread
-    
+
     /// Capture thread entry point
     pub(crate) fn capture_loop(
         running: Arc<AtomicBool>,
@@ -602,7 +600,9 @@ impl DxgiCapture {
             if window_start.elapsed() >= Duration::from_secs(30) {
                 debug!(
                     "Capture: {}fps, drops={}, divisor={}",
-                    window_frames / 30, window_drops, backpressure.current_fps_divisor()
+                    window_frames / 30,
+                    window_drops,
+                    backpressure.current_fps_divisor()
                 );
                 window_start = Instant::now();
                 window_frames = 0;

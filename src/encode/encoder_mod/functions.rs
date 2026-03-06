@@ -35,6 +35,16 @@ pub trait Encoder: Send + 'static {
     fn is_running(&self) -> bool;
 }
 
+fn resolve_encoder_config(config: &EncoderConfig) -> EncoderConfig {
+    let mut resolved = config.clone();
+    if resolved.encoder_type == crate::config::EncoderType::Auto {
+        let detected_encoder = detect_hardware_encoder(resolved.codec);
+        apply_auto_encoder_selection(&mut resolved, detected_encoder);
+        info!("Auto-detected encoder: {:?}", resolved.encoder_type);
+    }
+    resolved
+}
+
 fn set_encoder_thread_priority() {
     #[cfg(windows)]
     {
@@ -165,6 +175,40 @@ pub(super) fn apply_auto_encoder_selection(
     }
 
     config.encoder_type = detected_encoder.into();
+
+    if matches!(detected_encoder, HardwareEncoder::Amf)
+        && matches!(config.codec, crate::config::Codec::H265)
+        && config.framerate >= 60
+        && config.bitrate_mbps <= 20
+        && !matches!(config.quality_preset, crate::config::QualityPreset::Quality)
+    {
+        warn!(
+            "AMD AMF HEVC is not keeping up at {} FPS / {} Mbps; preferring H.264 in Auto mode for stable realtime capture",
+            config.framerate, config.bitrate_mbps
+        );
+        config.codec = crate::config::Codec::H264;
+    }
+
+    if matches!(detected_encoder, HardwareEncoder::Amf) && config.keyframe_interval_secs < 2 {
+        warn!(
+            "Raising keyframe interval from {}s to 2s for AMD AMF realtime stability",
+            config.keyframe_interval_secs
+        );
+        config.keyframe_interval_secs = 2;
+    }
+
+    if matches!(detected_encoder, HardwareEncoder::Amf)
+        && config.framerate >= 60
+        && matches!(
+            config.quality_preset,
+            crate::config::QualityPreset::Balanced
+        )
+    {
+        warn!(
+            "Switching AMD AMF preset from Balanced to Performance for 1080p60 realtime stability"
+        );
+        config.quality_preset = crate::config::QualityPreset::Performance;
+    }
 }
 
 /// Check if a specific FFmpeg encoder is available
@@ -181,12 +225,7 @@ fn is_encoder_available(codec_name: &str) -> bool {
 /// If encoder_type is Auto, performs hardware detection.
 /// Falls back to software encoder if hardware initialization fails.
 pub fn create_encoder(config: &EncoderConfig) -> Result<Box<dyn Encoder>> {
-    let mut config = config.clone();
-    if config.encoder_type == crate::config::EncoderType::Auto {
-        let detected_encoder = detect_hardware_encoder(config.codec);
-        apply_auto_encoder_selection(&mut config, detected_encoder);
-        info!("Auto-detected encoder: {:?}", config.encoder_type);
-    }
+    let config = resolve_encoder_config(config);
 
     info!("Creating native FFmpeg encoder: {:?}", config.encoder_type);
     Ok(Box::new(crate::encode::ffmpeg_encoder::FfmpegEncoder::new(
@@ -203,6 +242,8 @@ pub fn spawn_encoder(
     buffer: crate::buffer::ring::SharedReplayBuffer,
 ) -> Result<(EncoderHandle, Sender<crate::capture::CapturedFrame>)> {
     const MAX_CONSECUTIVE_ENCODE_ERRORS: u32 = 8;
+    let effective_config = resolve_encoder_config(&config);
+    let thread_config = effective_config.clone();
     let (frame_tx, frame_rx): (Sender<crate::capture::CapturedFrame>, _) = bounded(128);
     let frame_tx_clone = frame_tx.clone();
     let (health_tx, health_rx) = bounded(8);
@@ -212,7 +253,7 @@ pub fn spawn_encoder(
         .spawn(move || {
             set_encoder_thread_priority();
             debug!("Encoder thread started");
-            let mut encoder = match create_encoder(&config) {
+            let mut encoder = match create_encoder(&thread_config) {
                 Ok(encoder) => encoder,
                 Err(e) => {
                     let _ = health_tx.try_send(EncoderHealthEvent::Fatal(format!(
@@ -222,14 +263,14 @@ pub fn spawn_encoder(
                     return Err(e);
                 }
             };
-            if let Err(init_error) = encoder.init(&config) {
+            if let Err(init_error) = encoder.init(&thread_config) {
                 // Fall back to software encoding using native FFmpeg (libx264/libx265/libaom-av1)
                 // This ensures the muxer receives proper H.264/H.265/AV1 packets, not MJPEG
                 warn!(
                     "Primary encoder init failed: {}. Falling back to software encoder",
                     init_error
                 );
-                let mut fallback_config = config.clone();
+                let mut fallback_config = thread_config.clone();
                 fallback_config.encoder_type = crate::config::EncoderType::Software;
                 let mut fallback_encoder: Box<dyn Encoder> =
                     Box::new(crate::encode::ffmpeg_encoder::FfmpegEncoder::new(&fallback_config)?);
@@ -320,6 +361,7 @@ pub fn spawn_encoder(
         frame_tx: frame_tx_clone.clone(),
         packet_rx: dummy_packet_rx,
         health_rx,
+        effective_config,
     };
     Ok((handle, frame_tx_clone))
 }
@@ -334,6 +376,8 @@ pub fn spawn_encoder_with_receiver(
     frame_rx: Receiver<crate::capture::CapturedFrame>,
 ) -> Result<EncoderHandle> {
     const MAX_CONSECUTIVE_ENCODE_ERRORS: u32 = 8;
+    let effective_config = resolve_encoder_config(&config);
+    let thread_config = effective_config.clone();
     let (health_tx, health_rx) = bounded(8);
     let thread = std::thread::Builder::new()
         .name("encoder".to_string())
@@ -341,7 +385,7 @@ pub fn spawn_encoder_with_receiver(
         .spawn(move || {
             set_encoder_thread_priority();
             debug!("Encoder thread started");
-            let mut encoder = match create_encoder(&config) {
+            let mut encoder = match create_encoder(&thread_config) {
                 Ok(encoder) => encoder,
                 Err(e) => {
                     let _ = health_tx.try_send(EncoderHealthEvent::Fatal(format!(
@@ -351,14 +395,14 @@ pub fn spawn_encoder_with_receiver(
                     return Err(e);
                 }
             };
-            if let Err(init_error) = encoder.init(&config) {
+            if let Err(init_error) = encoder.init(&thread_config) {
                 // Fall back to software encoding using native FFmpeg (libx264/libx265/libaom-av1)
                 // This ensures the muxer receives proper H.264/H.265/AV1 packets, not MJPEG
                 warn!(
                     "Primary encoder init failed: {}. Falling back to software encoder",
                     init_error
                 );
-                let mut fallback_config = config.clone();
+                let mut fallback_config = thread_config.clone();
                 fallback_config.encoder_type = crate::config::EncoderType::Software;
                 let mut fallback_encoder: Box<dyn Encoder> =
                     Box::new(crate::encode::ffmpeg_encoder::FfmpegEncoder::new(&fallback_config)?);
@@ -437,6 +481,7 @@ pub fn spawn_encoder_with_receiver(
         frame_tx: dummy_frame_tx,
         packet_rx: dummy_packet_rx,
         health_rx,
+        effective_config,
     };
     Ok(handle)
 }

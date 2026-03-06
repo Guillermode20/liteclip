@@ -61,7 +61,7 @@ pub fn is_h264_format(data: &[u8]) -> bool {
     if data.len() >= 3 && data[0] == 0x00 && data[1] == 0x00 && data[2] == 0x01 {
         return true;
     }
-    false
+    matches!(h264_nal_type(data), Some(1..=23))
 }
 pub fn h264_nal_type(data: &[u8]) -> Option<u8> {
     if data.len() >= 5 && data[0..4] == [0x00, 0x00, 0x00, 0x01] {
@@ -69,6 +69,12 @@ pub fn h264_nal_type(data: &[u8]) -> Option<u8> {
     }
     if data.len() >= 4 && data[0..3] == [0x00, 0x00, 0x01] {
         return Some(data[3] & 0x1f);
+    }
+    if data.len() >= 5 {
+        let nal_len = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
+        if nal_len > 0 && data.len() >= 4 + nal_len {
+            return Some(data[4] & 0x1f);
+        }
     }
     None
 }
@@ -79,6 +85,12 @@ pub fn hevc_nal_type(data: &[u8]) -> Option<u8> {
     }
     if data.len() >= 5 && data[0..3] == [0x00, 0x00, 0x01] {
         return Some((data[3] >> 1) & 0x3f);
+    }
+    if data.len() >= 6 {
+        let nal_len = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
+        if nal_len > 1 && data.len() >= 4 + nal_len {
+            return Some((data[4] >> 1) & 0x3f);
+        }
     }
     None
 }
@@ -176,6 +188,11 @@ mod tests {
         assert!(is_h264_format(&h264_data));
     }
     #[test]
+    fn test_is_h264_format_length_prefixed() {
+        let h264_data = vec![0x00, 0x00, 0x00, 0x04, 0x67, 0x64, 0x00, 0x1f];
+        assert!(is_h264_format(&h264_data));
+    }
+    #[test]
     fn test_is_h264_format_mjpeg() {
         let mjpeg_data = vec![0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46];
         assert!(!is_h264_format(&mjpeg_data));
@@ -189,6 +206,16 @@ mod tests {
     fn test_hevc_nal_type_parsing() {
         // 4-byte start code + HEVC NAL header where nal_unit_type = 32 (VPS)
         let hevc_data = vec![0x00, 0x00, 0x00, 0x01, 0x40, 0x01];
+        assert_eq!(hevc_nal_type(&hevc_data), Some(32));
+    }
+    #[test]
+    fn test_h264_nal_type_length_prefixed() {
+        let h264_data = vec![0x00, 0x00, 0x00, 0x04, 0x65, 0x88, 0x84, 0x21];
+        assert_eq!(h264_nal_type(&h264_data), Some(5));
+    }
+    #[test]
+    fn test_hevc_nal_type_length_prefixed() {
+        let hevc_data = vec![0x00, 0x00, 0x00, 0x04, 0x40, 0x01, 0x0c, 0x01];
         assert_eq!(hevc_nal_type(&hevc_data), Some(32));
     }
     #[cfg(feature = "ffmpeg")]

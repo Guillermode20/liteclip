@@ -69,9 +69,7 @@ async fn main() -> Result<()> {
     std::env::set_var("VK_LAYER_PATH", "");
 
     // Initialize compact logger with filters to suppress noisy dependencies
-    let filter = tracing_subscriber::filter::EnvFilter::new(
-        "info,wgpu=warn,naga=warn"
-    );
+    let filter = tracing_subscriber::filter::EnvFilter::new("info,wgpu=warn,naga=warn");
 
     tracing_subscriber::fmt()
         .compact()
@@ -90,13 +88,13 @@ async fn main() -> Result<()> {
     // when the main application exits.
     #[cfg(windows)]
     {
+        use windows::core::PCWSTR;
         use windows::Win32::System::JobObjects::{
             AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_BREAKAWAY_OK,
-            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, SetInformationJobObject,
+            SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
         };
         use windows::Win32::System::Threading::GetCurrentProcess;
-        use windows::core::PCWSTR;
 
         unsafe {
             if let Ok(job) = CreateJobObjectW(None, PCWSTR::null()) {
@@ -154,12 +152,14 @@ async fn main() -> Result<()> {
         config.effective_replay_memory_limit_mb()
     );
 
-    // Initialize GUI manager (runs persistent eframe loop)
-    liteclip_replay::gui::init_gui_manager();
-
     // Apply auto-start registry entry based on config
-    match liteclip_replay::platform::autostart::set_autostart(config.general.auto_start_with_windows) {
-        Ok(()) => info!("Auto-start set to {}", config.general.auto_start_with_windows),
+    match liteclip_replay::platform::autostart::set_autostart(
+        config.general.auto_start_with_windows,
+    ) {
+        Ok(()) => info!(
+            "Auto-start set to {}",
+            config.general.auto_start_with_windows
+        ),
         Err(e) => warn!("Failed to configure auto-start: {}", e),
     }
     if config.general.auto_detect_game {
@@ -252,13 +252,13 @@ async fn main() -> Result<()> {
                                             info!("Save request ignored: clip save already in progress");
                                             continue;
                                         }
-                                        let (config, buffer, notifications_enabled) =
+                                        let (config, buffer, notifications_enabled, runtime_codec) =
                                             app_state.read().await.save_context();
                                         let platform_handle_clone = platform_handle.clone();
                                         let save_in_progress_clone = save_in_progress.clone();
                                         tokio::spawn(async move {
                                             let result = liteclip_replay::app::ClipManager::save_clip(
-                                                &config, &buffer,
+                                                &config, &buffer, runtime_codec,
                                             )
                                             .await;
                                             match result {
@@ -353,13 +353,13 @@ async fn main() -> Result<()> {
                                             info!("Save request ignored: clip save already in progress");
                                             continue;
                                         }
-                                        let (config, buffer, notifications_enabled) =
+                                        let (config, buffer, notifications_enabled, runtime_codec) =
                                             app_state.read().await.save_context();
                                         let platform_handle_clone = platform_handle.clone();
                                         let save_in_progress_clone = save_in_progress.clone();
                                         tokio::spawn(async move {
                                             let result = liteclip_replay::app::ClipManager::save_clip(
-                                                &config, &buffer,
+                                                &config, &buffer, runtime_codec,
                                             )
                                             .await;
                                             match result {

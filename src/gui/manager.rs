@@ -2,7 +2,9 @@ use crate::platform::AppEvent;
 use eframe::egui;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::LazyLock;
+use std::sync::Once;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::mpsc::Sender as TokioSender;
 
 pub enum GuiMessage {
@@ -10,42 +12,45 @@ pub enum GuiMessage {
 }
 
 static GUI_TX: LazyLock<Mutex<Option<Sender<GuiMessage>>>> = LazyLock::new(|| Mutex::new(None));
+static GUI_INIT: Once = Once::new();
 
 /// Initialize the global GUI manager thread.
 /// This runs a single persistent eframe event loop to avoid "RecreationAttempt" errors.
 pub fn init_gui_manager() {
-    let (tx, rx) = channel();
-    *GUI_TX.lock().unwrap() = Some(tx);
+    GUI_INIT.call_once(|| {
+        let (tx, rx) = channel();
+        *GUI_TX.lock().unwrap() = Some(tx);
 
-    std::thread::spawn(move || {
-        let options = eframe::NativeOptions {
-            viewport: egui::ViewportBuilder::default()
-                .with_visible(true) // Visible but offscreen to keep WGPU rendering loop active
-                .with_active(false)
-                .with_position([-10000.0, -10000.0])
-                .with_taskbar(false)
-                .with_decorations(false)
-                .with_transparent(true)
-                .with_inner_size([1.0, 1.0]),
-            event_loop_builder: Some(Box::new(|builder| {
-                #[cfg(target_os = "windows")]
-                {
-                    use winit::platform::windows::EventLoopBuilderExtWindows;
-                    builder.with_any_thread(true);
-                }
-            })),
-            ..Default::default()
-        };
+        std::thread::spawn(move || {
+            let options = eframe::NativeOptions {
+                viewport: egui::ViewportBuilder::default()
+                    .with_visible(false)
+                    .with_active(false)
+                    .with_position([-10000.0, -10000.0])
+                    .with_taskbar(false)
+                    .with_decorations(false)
+                    .with_inner_size([1.0, 1.0]),
+                event_loop_builder: Some(Box::new(|builder| {
+                    #[cfg(target_os = "windows")]
+                    {
+                        use winit::platform::windows::EventLoopBuilderExtWindows;
+                        builder.with_any_thread(true);
+                    }
+                })),
+                ..Default::default()
+            };
 
-        let _ = eframe::run_native(
-            "liteclip_gui_manager",
-            options,
-            Box::new(|cc| Ok(Box::new(GuiManagerApp::new(cc, rx)))),
-        );
+            let _ = eframe::run_native(
+                "liteclip_gui_manager",
+                options,
+                Box::new(|cc| Ok(Box::new(GuiManagerApp::new(cc, rx)))),
+            );
+        });
     });
 }
 
 pub fn send_gui_message(msg: GuiMessage) {
+    init_gui_manager();
     if let Some(tx) = GUI_TX.lock().unwrap().as_ref() {
         let _ = tx.send(msg);
     }
@@ -107,6 +112,10 @@ impl eframe::App for GuiManagerApp {
             );
         }
 
-        ctx.request_repaint();
+        if show_settings {
+            ctx.request_repaint();
+        } else {
+            ctx.request_repaint_after(Duration::from_millis(250));
+        }
     }
 }

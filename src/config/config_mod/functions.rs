@@ -46,7 +46,7 @@ pub(super) fn default_codec() -> Codec {
     Codec::H264
 }
 pub(super) fn default_bitrate() -> u32 {
-    20
+    10
 }
 pub(super) fn default_encoder() -> EncoderType {
     EncoderType::Auto
@@ -111,7 +111,7 @@ mod tests {
         assert_eq!(config.general.replay_duration_secs, 30);
         assert_eq!(config.video.framerate, 60);
         assert_eq!(config.video.codec, Codec::H264);
-        assert_eq!(config.video.bitrate_mbps, 20);
+        assert_eq!(config.video.bitrate_mbps, 10);
         assert_eq!(config.video.quality_preset, QualityPreset::Performance);
         assert_eq!(config.video.rate_control, RateControl::Vbr);
         assert_eq!(config.video.quality_value, None);
@@ -167,7 +167,7 @@ mod tests {
     fn test_validate_migrates_legacy_memory_limit() {
         let mut config = Config::default();
         config.general.replay_duration_secs = 30;
-        config.video.bitrate_mbps = 20;
+        config.video.bitrate_mbps = 10;
         config.advanced.memory_limit_mb = LEGACY_DEFAULT_MEMORY_LIMIT_MB;
 
         let expected_limit = config.recommended_replay_memory_limit_mb();

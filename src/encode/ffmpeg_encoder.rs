@@ -196,8 +196,45 @@ impl FfmpegEncoder {
             .unwrap_or(fallback)
     }
 
+    fn convert_length_prefixed_to_annex_b(data: &[u8]) -> Option<Vec<u8>> {
+        if data.len() < 4 {
+            return None;
+        }
+
+        if data.starts_with(&[0x00, 0x00, 0x00, 0x01]) || data.starts_with(&[0x00, 0x00, 0x01]) {
+            return None;
+        }
+
+        let mut cursor = 0usize;
+        let mut converted = Vec::with_capacity(data.len() + 16);
+
+        while cursor + 4 <= data.len() {
+            let nal_len = u32::from_be_bytes([
+                data[cursor],
+                data[cursor + 1],
+                data[cursor + 2],
+                data[cursor + 3],
+            ]) as usize;
+            cursor += 4;
+
+            if nal_len == 0 || cursor + nal_len > data.len() {
+                return None;
+            }
+
+            converted.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+            converted.extend_from_slice(&data[cursor..cursor + nal_len]);
+            cursor += nal_len;
+        }
+
+        if cursor == data.len() && !converted.is_empty() {
+            Some(converted)
+        } else {
+            None
+        }
+    }
+
     fn detect_keyframe(data: &[u8], packet_is_key: bool) -> bool {
-        if packet_is_key || data.is_empty() {
+        if data.is_empty() {
             return packet_is_key;
         }
 
@@ -236,7 +273,7 @@ impl FfmpegEncoder {
             }
         }
 
-        false
+        packet_is_key
     }
 
     fn init_encoder(&mut self, width: u32, height: u32) -> Result<()> {
@@ -368,6 +405,18 @@ impl FfmpegEncoder {
             EncoderType::Amf => {
                 let bitrate_bps = bitrate.to_string();
                 let peak_bitrate_bps = self.peak_bitrate_bps().to_string();
+                let (
+                    preanalysis,
+                    vbaq,
+                    rc_lookahead,
+                    me_half_pel,
+                    me_quarter_pel,
+                    high_motion_quality_boost,
+                ) = match self.config.quality_preset {
+                    QualityPreset::Performance => ("0", "0", "0", "0", "0", "0"),
+                    QualityPreset::Balanced => ("0", "0", "0", "1", "0", "0"),
+                    QualityPreset::Quality => ("0", "1", "0", "1", "1", "0"),
+                };
 
                 options.set("usage", "lowlatency");
                 options.set("quality", self.amf_quality());
@@ -377,14 +426,17 @@ impl FfmpegEncoder {
                 options.set("header_insertion_mode", "idr");
                 options.set("gops_per_idr", "1");
                 options.set("pa_adaptive_mini_gop", "0");
-                options.set("preanalysis", "1");
-                options.set("vbaq", "1");
-                options.set("rc_lookahead", "8");
+                options.set("preanalysis", preanalysis);
+                options.set("vbaq", vbaq);
+                options.set("rc_lookahead", rc_lookahead);
                 options.set("max_qp_delta", "4");
                 options.set("filler_data", "0");
-                options.set("me_half_pel", "1");
-                options.set("me_quarter_pel", "1");
-                options.set("high_motion_quality_boost_enable", "1");
+                options.set("me_half_pel", me_half_pel);
+                options.set("me_quarter_pel", me_quarter_pel);
+                options.set(
+                    "high_motion_quality_boost_enable",
+                    high_motion_quality_boost,
+                );
                 options.set("min_qp_i", "18");
                 options.set("max_qp_i", "51");
                 options.set("min_qp_p", "20");
@@ -483,7 +535,14 @@ impl FfmpegEncoder {
         }
 
         for (data, packet_is_key, packet_pts) in drained_packets {
-            let is_keyframe = Self::detect_keyframe(&data, packet_is_key);
+            let normalized_data = match self.config.codec {
+                crate::config::Codec::H264 | crate::config::Codec::H265 => {
+                    Self::convert_length_prefixed_to_annex_b(&data)
+                }
+                crate::config::Codec::Av1 => None,
+            };
+            let inspection_data = normalized_data.as_deref().unwrap_or(data.as_slice());
+            let is_keyframe = Self::detect_keyframe(inspection_data, packet_is_key);
             let pts = self.dequeue_packet_timestamp(fallback_timestamp);
 
             if self.frame_count % 60 == 0 || is_keyframe {
