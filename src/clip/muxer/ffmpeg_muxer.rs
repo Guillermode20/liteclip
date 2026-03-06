@@ -3,13 +3,14 @@ use ffmpeg_next as ffmpeg;
 use std::path::{Path, PathBuf};
 use crate::encode::{EncodedPacket};
 use tracing::{info};
-use ffmpeg::Rescale;
 
 pub struct FfmpegMuxer {
     format_context: ffmpeg::format::context::Output,
     video_stream_index: Option<usize>,
     _audio_stream_index: Option<usize>,
     output_path: PathBuf,
+    video_time_base: (i32, i32),
+    video_frame_rate: i32,
 }
 
 impl FfmpegMuxer {
@@ -18,6 +19,9 @@ impl FfmpegMuxer {
             .context("Failed to create output format context")?;
 
         let v_idx;
+
+        let rounded_fps = fps.round().clamp(1.0, i32::MAX as f64) as i32;
+        let video_time_base = (1, 90_000);
 
         // 1. Setup Video Stream
         {
@@ -37,9 +41,8 @@ impl FfmpegMuxer {
             video.set_width(width);
             video.set_height(height);
             video.set_format(ffmpeg::format::Pixel::YUV420P);
-            video.set_time_base((1, 90000));
-            // Critical: Set frame rate so the MP4 container knows playback speed
-            video.set_frame_rate(Some((fps.round() as i32, 1)));
+            video.set_time_base(video_time_base);
+            video.set_frame_rate(Some((rounded_fps, 1)));
 
             stream.set_parameters(video);
         }
@@ -51,6 +54,8 @@ impl FfmpegMuxer {
             video_stream_index: Some(v_idx),
             _audio_stream_index: None,
             output_path: output_path.to_path_buf(),
+            video_time_base,
+            video_frame_rate: rounded_fps,
         })
     }
 
@@ -60,22 +65,19 @@ impl FfmpegMuxer {
         let mut video_count = 0;
 
         if let Some(v_idx) = self.video_stream_index {
-            let start_pts = video_packets.first().map(|p| p.pts).unwrap_or(0);
-            
-            for packet in video_packets {
+            let ticks_per_frame =
+                (self.video_time_base.1 as i64 / self.video_frame_rate.max(1) as i64).max(1);
+
+            for (index, packet) in video_packets.iter().enumerate() {
                 let mut ffmpeg_packet = ffmpeg::Packet::copy(&packet.data);
                 ffmpeg_packet.set_stream(v_idx);
-                
-                // Normalize timestamps so the clip starts at 0
-                let relative_pts = (packet.pts - start_pts).max(0);
-                let relative_dts = (packet.dts - start_pts).max(0);
-                
-                // Use rescale
-                let pts = relative_pts.rescale((1, 10_000_000), (1, 90_000));
-                let dts = relative_dts.rescale((1, 10_000_000), (1, 90_000));
-                
+                let pts = index as i64 * ticks_per_frame;
+                let dts = pts;
+                let duration = ticks_per_frame;
+
                 ffmpeg_packet.set_pts(Some(pts));
                 ffmpeg_packet.set_dts(Some(dts));
+                ffmpeg_packet.set_duration(duration);
                 
                 if packet.is_keyframe {
                     ffmpeg_packet.set_flags(ffmpeg::codec::packet::flag::Flags::KEY);
@@ -92,6 +94,4 @@ impl FfmpegMuxer {
         Ok(())
     }
 }
-
-
 

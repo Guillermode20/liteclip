@@ -79,6 +79,10 @@ impl FfmpegEncoder {
         }
     }
 
+    fn software_tune(&self) -> &'static str {
+        "zerolatency"
+    }
+
     fn nvenc_preset(&self) -> &'static str {
         match self.config.quality_preset {
             QualityPreset::Performance => "p3",
@@ -111,8 +115,75 @@ impl FfmpegEncoder {
         }
     }
 
+    fn amf_rc_mode(&self) -> &'static str {
+        match self.config.rate_control {
+            RateControl::Cbr => "cbr",
+            RateControl::Vbr | RateControl::Cq => "vbr_latency",
+        }
+    }
+
     fn next_encoder_pts(&self) -> i64 {
         self.frame_count
+    }
+
+    fn software_target_bitrate_param(&self) -> String {
+        format!("{}k", self.bitrate_kbps())
+    }
+
+    fn software_peak_bitrate_param(&self) -> String {
+        format!("{}k", self.peak_bitrate_kbps())
+    }
+
+    fn software_bufsize_param(&self) -> String {
+        format!("{}k", self.bitrate_kbps())
+    }
+
+    fn software_h264_params(&self, keyint: u32) -> String {
+        let bitrate_kbps = self.bitrate_kbps();
+        let peak_bitrate_kbps = self.peak_bitrate_kbps();
+
+        match self.config.rate_control {
+            RateControl::Cbr => format!(
+                "force-cfr=1:nal-hrd=cbr:scenecut=0:keyint={}:min-keyint={}:vbv-maxrate={}:vbv-bufsize={}",
+                keyint, keyint, bitrate_kbps, bitrate_kbps
+            ),
+            RateControl::Vbr => format!(
+                "force-cfr=1:scenecut=0:keyint={}:min-keyint={}:vbv-maxrate={}:vbv-bufsize={}",
+                keyint, keyint, peak_bitrate_kbps, bitrate_kbps
+            ),
+            RateControl::Cq => format!(
+                "force-cfr=1:scenecut=0:keyint={}:min-keyint={}:crf={}:vbv-maxrate={}:vbv-bufsize={}",
+                keyint,
+                keyint,
+                self.cq_value(),
+                peak_bitrate_kbps,
+                bitrate_kbps
+            ),
+        }
+    }
+
+    fn software_h265_params(&self, keyint: u32) -> String {
+        let bitrate_kbps = self.bitrate_kbps();
+        let peak_bitrate_kbps = self.peak_bitrate_kbps();
+
+        match self.config.rate_control {
+            RateControl::Cbr => format!(
+                "repeat-headers=1:aud=1:open-gop=0:scenecut=0:keyint={}:min-keyint={}:bitrate={}:vbv-maxrate={}:vbv-bufsize={}:strict-cbr=1",
+                keyint, keyint, bitrate_kbps, bitrate_kbps, bitrate_kbps
+            ),
+            RateControl::Vbr => format!(
+                "repeat-headers=1:aud=1:open-gop=0:scenecut=0:keyint={}:min-keyint={}:bitrate={}:vbv-maxrate={}:vbv-bufsize={}",
+                keyint, keyint, bitrate_kbps, peak_bitrate_kbps, bitrate_kbps
+            ),
+            RateControl::Cq => format!(
+                "repeat-headers=1:aud=1:open-gop=0:scenecut=0:keyint={}:min-keyint={}:crf={}:vbv-maxrate={}:vbv-bufsize={}",
+                keyint,
+                keyint,
+                self.cq_value(),
+                peak_bitrate_kbps,
+                bitrate_kbps
+            ),
+        }
     }
 
     fn dequeue_packet_timestamp(&mut self, fallback: i64) -> i64 {
@@ -195,41 +266,56 @@ impl FfmpegEncoder {
 
         match self.config.encoder_type {
             EncoderType::Software | EncoderType::Auto => {
-                let bitrate_bps = bitrate.to_string();
-                let peak_bitrate_bps = self.peak_bitrate_bps().to_string();
-                let bitrate_kbps = self.bitrate_kbps();
-                let peak_bitrate_kbps = self.peak_bitrate_kbps();
                 let keyint = self.config.keyframe_interval_frames().max(1);
+                let bitrate_param = self.software_target_bitrate_param();
+                let peak_bitrate_param = self.software_peak_bitrate_param();
+                let bufsize_param = self.software_bufsize_param();
 
                 options.set("preset", self.software_preset());
-                options.set("tune", "zerolatency");
-                options.set("b", &bitrate_bps);
-                options.set("maxrate", &peak_bitrate_bps);
-                options.set("bufsize", &bitrate_bps);
+                options.set("tune", self.software_tune());
+                options.set("b", &bitrate_param);
+                options.set("maxrate", &peak_bitrate_param);
+                options.set("bufsize", &bufsize_param);
 
-                let x264_params = match self.config.rate_control {
-                    RateControl::Cbr => format!(
-                        "force-cfr=1:nal-hrd=cbr:scenecut=0:keyint={}:min-keyint={}:vbv-maxrate={}:vbv-bufsize={}",
-                        keyint, keyint, bitrate_kbps, bitrate_kbps
-                    ),
-                    RateControl::Vbr => format!(
-                        "force-cfr=1:scenecut=0:keyint={}:min-keyint={}:vbv-maxrate={}:vbv-bufsize={}",
-                        keyint, keyint, peak_bitrate_kbps, bitrate_kbps
-                    ),
-                    RateControl::Cq => format!(
-                        "force-cfr=1:scenecut=0:keyint={}:min-keyint={}:crf={}:vbv-maxrate={}:vbv-bufsize={}",
-                        keyint, keyint, self.cq_value(), peak_bitrate_kbps, bitrate_kbps
-                    ),
-                };
-                options.set("x264-params", &x264_params);
-                options.set("qmin", "18");
-                options.set("rc-lookahead", "0");
-
-                if matches!(self.config.rate_control, RateControl::Cbr) {
-                    options.set("minrate", &bitrate_bps);
-                }
-                if matches!(self.config.rate_control, RateControl::Cq) {
-                    options.set("crf", &self.cq_value().to_string());
+                match self.config.codec {
+                    crate::config::Codec::H264 => {
+                        options.set("x264-params", &self.software_h264_params(keyint));
+                        options.set("qmin", "18");
+                        options.set("rc-lookahead", "0");
+                        if matches!(self.config.rate_control, RateControl::Cbr) {
+                            options.set("minrate", &bitrate_param);
+                        }
+                        if matches!(self.config.rate_control, RateControl::Cq) {
+                            options.set("crf", &self.cq_value().to_string());
+                        }
+                    }
+                    crate::config::Codec::H265 => {
+                        options.set("x265-params", &self.software_h265_params(keyint));
+                        if matches!(self.config.rate_control, RateControl::Cbr) {
+                            options.set("minrate", &bitrate_param);
+                        }
+                        if matches!(self.config.rate_control, RateControl::Cq) {
+                            options.set("crf", &self.cq_value().to_string());
+                        }
+                    }
+                    crate::config::Codec::Av1 => {
+                        options.set(
+                            "usage",
+                            match self.config.quality_preset {
+                                QualityPreset::Performance => "realtime",
+                                QualityPreset::Balanced | QualityPreset::Quality => "good",
+                            },
+                        );
+                        options.set("lag-in-frames", "0");
+                        options.set("cpu-used", match self.config.quality_preset {
+                            QualityPreset::Performance => "8",
+                            QualityPreset::Balanced => "6",
+                            QualityPreset::Quality => "4",
+                        });
+                        if matches!(self.config.rate_control, RateControl::Cq) {
+                            options.set("crf", &self.cq_value().to_string());
+                        }
+                    }
                 }
             }
             EncoderType::Nvenc => {
@@ -264,19 +350,44 @@ impl FfmpegEncoder {
             }
             EncoderType::Amf => {
                 let bitrate_bps = bitrate.to_string();
+                let peak_bitrate_bps = self.peak_bitrate_bps().to_string();
 
                 options.set("usage", "lowlatency");
                 options.set("quality", self.amf_quality());
-                options.set(
-                    "rc",
-                    match self.config.rate_control {
-                        RateControl::Cbr => "cbr",
-                        RateControl::Vbr | RateControl::Cq => "vbr_latency",
-                    },
-                );
-                options.set("header_spacing", "0");
+                options.set("rc", self.amf_rc_mode());
+                options.set("aud", "1");
+                options.set("bf", "0");
+                options.set("header_insertion_mode", "idr");
+                options.set("gops_per_idr", "1");
+                options.set("pa_adaptive_mini_gop", "0");
+                options.set("preanalysis", "1");
+                options.set("vbaq", "1");
+                options.set("rc_lookahead", "8");
+                options.set("max_qp_delta", "4");
+                options.set("filler_data", "0");
+                options.set("me_half_pel", "1");
+                options.set("me_quarter_pel", "1");
+                options.set("high_motion_quality_boost_enable", "1");
+                options.set("min_qp_i", "18");
+                options.set("max_qp_i", "51");
+                options.set("min_qp_p", "20");
+                options.set("max_qp_p", "51");
+
+                if matches!(self.config.codec, crate::config::Codec::H264) {
+                    options.set("coder", "cabac");
+                }
+                if matches!(self.config.codec, crate::config::Codec::H265) {
+                    options.set("profile_tier", "high");
+                }
+
                 options.set("b", &bitrate_bps);
-                options.set("max_bitrate", &bitrate_bps);
+                options.set("max_bitrate", &peak_bitrate_bps);
+                options.set("maxrate", &peak_bitrate_bps);
+                options.set("bufsize", &bitrate_bps);
+
+                if matches!(self.config.rate_control, RateControl::Cbr) {
+                    options.set("minrate", &bitrate_bps);
+                }
 
                 if matches!(self.config.rate_control, RateControl::Cq) {
                     options.set("qvbr_quality_level", &self.cq_value().to_string());
