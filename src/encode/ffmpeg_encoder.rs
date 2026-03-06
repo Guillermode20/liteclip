@@ -40,7 +40,7 @@ impl FfmpegEncoder {
         let codec = ffmpeg::encoder::find_by_name(codec_name)
             .context(format!("Failed to find encoder: {}", codec_name))?;
 
-        let mut encoder_ctx = ffmpeg::codec::context::Context::new_with_codec(codec);
+        let encoder_ctx = ffmpeg::codec::context::Context::new_with_codec(codec);
         let mut encoder = encoder_ctx.encoder().video()
             .context("Failed to create encoder context")?;
 
@@ -109,8 +109,45 @@ impl FfmpegEncoder {
             let mut packet = ffmpeg::Packet::empty();
             while encoder.receive_packet(&mut packet).is_ok() {
                 let data = packet.data().unwrap_or(&[]).to_vec();
-                let is_keyframe = packet.is_key();
+                let mut is_keyframe = packet.is_key();
                 
+                // Fallback heuristic for hardware encoders that don't set AV_PKT_FLAG_KEY reliably
+                if !is_keyframe && !data.is_empty() {
+                    // Quick scan for SPS (H264: 7, HEVC: 33) or VPS (HEVC: 32)
+                    let mut i = 0;
+                    while i + 4 < data.len() && i < 100 { // scan first 100 bytes
+                        if data[i] == 0 && data[i+1] == 0 && data[i+2] == 0 && data[i+3] == 1 {
+                            let nal_byte = data[i+4];
+                            let h264_type = nal_byte & 0x1f;
+                            let hevc_type = (nal_byte >> 1) & 0x3f;
+                            
+                            // H264: SPS (7) or IDR (5)
+                            // HEVC: VPS (32), SPS (33), or IDR_W_RADL (19) / IDR_N_LP (20)
+                            if h264_type == 7 || h264_type == 5 || hevc_type == 32 || hevc_type == 33 || hevc_type == 19 || hevc_type == 20 {
+                                is_keyframe = true;
+                                break;
+                            }
+                            i += 4;
+                        } else if data[i] == 0 && data[i+1] == 0 && data[i+2] == 1 {
+                            let nal_byte = data[i+3];
+                            let h264_type = nal_byte & 0x1f;
+                            let hevc_type = (nal_byte >> 1) & 0x3f;
+                            
+                            if h264_type == 7 || h264_type == 5 || hevc_type == 32 || hevc_type == 33 || hevc_type == 19 || hevc_type == 20 {
+                                is_keyframe = true;
+                                break;
+                            }
+                            i += 3;
+                        } else {
+                            i += 1;
+                        }
+                    }
+                }
+
+                if self.frame_count % 60 == 0 || is_keyframe {
+                    tracing::info!("Packet received: size={}, pts={:?}, is_key={}", data.len(), packet.pts(), is_keyframe);
+                }
+
                 let pts = packet.pts().unwrap_or(self.frame_count);
                 let dts = packet.dts().unwrap_or(pts);
 
@@ -161,6 +198,14 @@ impl Encoder for FfmpegEncoder {
         
         // 4. Set timestamp
         dst_frame.set_pts(Some(frame.timestamp));
+        
+        // Force keyframe (IDR) at GOP intervals (important for hardware encoders)
+        let gop = self.config.keyframe_interval_frames() as i64;
+        if gop > 0 && self.frame_count % gop == 0 {
+            dst_frame.set_kind(ffmpeg::picture::Type::I);
+        } else {
+            dst_frame.set_kind(ffmpeg::picture::Type::None);
+        }
 
         // 5. Send frame to encoder
         encoder.send_frame(&dst_frame).context("Failed to send frame to encoder")?;

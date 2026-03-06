@@ -58,33 +58,10 @@ impl RecordingPipeline {
         matches!(self.lifecycle, RecordingLifecycle::Running)
     }
 
-    fn should_use_hardware_pull_mode(config: &Config) -> bool {
-        match config.video.encoder {
-            crate::config::EncoderType::Software => false,
-            crate::config::EncoderType::Nvenc => {
-                if config.advanced.use_cpu_readback {
-                    return false;
-                }
-                crate::encode::hw_encoder::check_encoder_available("h264_nvenc")
-            }
-            crate::config::EncoderType::Amf => {
-                if config.advanced.use_cpu_readback {
-                    return false;
-                }
-                crate::encode::hw_encoder::check_encoder_available("h264_amf")
-            }
-            crate::config::EncoderType::Qsv => {
-                if config.advanced.use_cpu_readback {
-                    return false;
-                }
-                crate::encode::hw_encoder::check_encoder_available("h264_qsv")
-            }
-            crate::config::EncoderType::Auto => {
-                crate::encode::hw_encoder::check_encoder_available("h264_nvenc")
-                    || crate::encode::hw_encoder::check_encoder_available("h264_amf")
-                    || crate::encode::hw_encoder::check_encoder_available("h264_qsv")
-            }
-        }
+    fn should_use_hardware_pull_mode(_config: &Config) -> bool {
+        // We are now using native FFmpeg integration which expects frames from DXGI capture.
+        // The old hardware pull mode (CLI gdigrab) is obsolete.
+        false
     }
 
     fn rollback_startup(&mut self) {
