@@ -3,7 +3,7 @@
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
 use crate::encode::{hw_encoder, sw_encoder};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use crossbeam::channel::{bounded, Receiver, Sender};
 use tracing::{debug, info, trace, warn};
 #[cfg(windows)]
@@ -93,8 +93,14 @@ fn is_encoder_available(codec_name: &str) -> bool {
 /// If encoder_type is Auto, performs hardware detection.
 /// Falls back to software encoder if hardware initialization fails.
 pub fn create_encoder(config: &EncoderConfig) -> Result<Box<dyn Encoder>> {
+    let mut config = config.clone();
+    if config.encoder_type == crate::config::EncoderType::Auto {
+        config.encoder_type = detect_hardware_encoder(config.codec).into();
+        info!("Auto-detected encoder: {:?}", config.encoder_type);
+    }
+    
     info!("Creating native FFmpeg encoder: {:?}", config.encoder_type);
-    Ok(Box::new(crate::encode::ffmpeg_encoder::FfmpegEncoder::new(config)?))
+    Ok(Box::new(crate::encode::ffmpeg_encoder::FfmpegEncoder::new(&config)?))
 }
 /// Spawn an encoder on a dedicated thread
 ///
@@ -170,23 +176,11 @@ pub fn spawn_encoder(
                     }
                 }
                 if !packet_batch.is_empty() {
-                    trace!(
-                        "Pushing {} packets to buffer (total received: {})",
-                        packet_batch.len(),
-                        packets_received
-                    );
                     buffer.push_batch(packet_batch.drain(..));
                 }
                 match frame_rx.recv_timeout(std::time::Duration::from_millis(15)) {
                     Ok(frame) => {
                         frames_encoded += 1;
-                        if frames_encoded % 1800 == 0 {
-                            trace!(
-                                "Encoded {} frames, {} packets",
-                                frames_encoded,
-                                packets_received
-                            );
-                        }
                         if let Err(e) = encoder.encode_frame(&frame) {
                             warn!("Failed to encode frame: {}", e);
                             consecutive_encode_errors = consecutive_encode_errors.saturating_add(1);
@@ -370,6 +364,15 @@ pub fn spawn_encoder_with_receiver(
     Ok(handle)
 }
 /// Initialize FFmpeg (call once at startup)
+#[cfg(feature = "ffmpeg")]
+pub fn init_ffmpeg() -> Result<()> {
+    ffmpeg_next::init().context("Failed to initialize FFmpeg")?;
+    info!("FFmpeg initialized successfully");
+    Ok(())
+}
+
+/// Initialize FFmpeg (call once at startup)
+#[cfg(not(feature = "ffmpeg"))]
 pub fn init_ffmpeg() -> Result<()> {
     info!("FFmpeg initialization skipped (not compiled in)");
     Ok(())

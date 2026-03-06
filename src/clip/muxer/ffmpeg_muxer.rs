@@ -13,7 +13,7 @@ pub struct FfmpegMuxer {
 }
 
 impl FfmpegMuxer {
-    pub fn new(output_path: &Path, video_codec: &str, width: u32, height: u32, _fps: f64) -> Result<Self> {
+    pub fn new(output_path: &Path, video_codec: &str, width: u32, height: u32, fps: f64) -> Result<Self> {
         let mut format_context = ffmpeg::format::output(&output_path)
             .context("Failed to create output format context")?;
 
@@ -32,13 +32,15 @@ impl FfmpegMuxer {
 
             let mut stream = format_context.add_stream(codec)?;
             v_idx = stream.index();
-            
+
             let mut video = ffmpeg::codec::context::Context::new_with_codec(codec).encoder().video()?;
             video.set_width(width);
             video.set_height(height);
             video.set_format(ffmpeg::format::Pixel::YUV420P);
             video.set_time_base((1, 90000));
-            
+            // Critical: Set frame rate so the MP4 container knows playback speed
+            video.set_frame_rate(Some((fps.round() as i32, 1)));
+
             stream.set_parameters(video);
         }
 

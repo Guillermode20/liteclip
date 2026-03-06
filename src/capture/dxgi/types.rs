@@ -306,76 +306,40 @@ impl DxgiCapture {
                             );
                         }
                         let src_ptr = mapped.pData as *const u8;
-                        let (out_w, out_h, bgra) = if let Some((tw, th)) = target_resolution {
-                            let out_w = tw as usize;
-                            let out_h = th as usize;
-                            let total_bytes = out_w * out_h * 4;
-                            if src_pitch == src_row_bytes {
-                                std::ptr::copy_nonoverlapping(
-                                    src_ptr,
-                                    state.native_buffer.as_mut_ptr(),
-                                    src_w * src_h * 4,
-                                );
-                            } else {
-                                let dst_ptr = state.native_buffer.as_mut_ptr();
-                                let mut src_row_offset = 0;
-                                let mut dst_row_offset = 0;
-                                for _row in 0..src_h {
-                                    std::ptr::copy_nonoverlapping(
-                                        src_ptr.add(src_row_offset),
-                                        dst_ptr.add(dst_row_offset),
-                                        src_row_bytes,
-                                    );
-                                    src_row_offset += src_pitch;
-                                    dst_row_offset += src_row_bytes;
-                                }
-                            }
-                            state.output_buffer.reserve(total_bytes);
-                            state.output_buffer.resize(total_bytes, 0);
-                            Self::downscale_bgra_bilinear(
-                                &state.native_buffer,
-                                src_w,
-                                src_h,
-                                out_w,
-                                out_h,
-                                &mut state.output_buffer,
+                        let total_bytes = src_row_bytes * src_h;
+                        state.native_buffer.resize(total_bytes, 0);
+                        
+                        if src_pitch == src_row_bytes {
+                            std::ptr::copy_nonoverlapping(
+                                src_ptr,
+                                state.native_buffer.as_mut_ptr(),
+                                total_bytes,
                             );
-                            let bgra = state.output_buffer.split_to(total_bytes).freeze();
-                            (out_w, out_h, bgra)
                         } else {
-                            let total_bytes = src_row_bytes * src_h;
-                            state.native_buffer.resize(total_bytes, 0);
-                            if src_pitch == src_row_bytes {
+                            let dst_ptr = state.native_buffer.as_mut_ptr();
+                            let mut src_row_offset = 0;
+                            let mut dst_row_offset = 0;
+                            for _row in 0..src_h {
                                 std::ptr::copy_nonoverlapping(
-                                    src_ptr,
-                                    state.native_buffer.as_mut_ptr(),
-                                    total_bytes,
+                                    src_ptr.add(src_row_offset),
+                                    dst_ptr.add(dst_row_offset),
+                                    src_row_bytes,
                                 );
-                            } else {
-                                let dst_ptr = state.native_buffer.as_mut_ptr();
-                                let mut src_row_offset = 0;
-                                let mut dst_row_offset = 0;
-                                for _row in 0..src_h {
-                                    std::ptr::copy_nonoverlapping(
-                                        src_ptr.add(src_row_offset),
-                                        dst_ptr.add(dst_row_offset),
-                                        src_row_bytes,
-                                    );
-                                    src_row_offset += src_pitch;
-                                    dst_row_offset += src_row_bytes;
-                                }
+                                src_row_offset += src_pitch;
+                                dst_row_offset += src_row_bytes;
                             }
-                            let bgra = state.native_buffer.split_to(total_bytes).freeze();
-                            state.native_buffer.reserve(total_bytes);
-                            state.native_buffer.resize(total_bytes, 0);
-                            (src_w, src_h, bgra)
-                        };
+                        }
+                        
+                        let bgra = state.native_buffer.split_to(total_bytes).freeze();
+                        state.native_buffer.reserve(total_bytes);
+                        
                         state.d3d_context.Unmap(Some(&staging_resource), 0);
                         state.duplication.ReleaseFrame().ok();
+                        
                         let frame = CapturedFrame {
                             bgra,
                             timestamp,
-                            resolution: (out_w as u32, out_h as u32),
+                            resolution: (src_w as u32, src_h as u32),
                         };
                         return Ok(Some(frame));
                     }
@@ -390,65 +354,9 @@ impl DxgiCapture {
             }
         }
     }
-    fn downscale_bgra_bilinear(
-        src: &[u8],
-        src_w: usize,
-        src_h: usize,
-        out_w: usize,
-        out_h: usize,
-        dst: &mut [u8],
-    ) {
-        if src_w == 0 || src_h == 0 || out_w == 0 || out_h == 0 {
-            return;
-        }
-        debug_assert!(src.len() >= src_w * src_h * 4);
-        debug_assert!(dst.len() >= out_w * out_h * 4);
-
-        let src_stride = src_w * 4;
-        let out_stride = out_w * 4;
-
-        const FRAC_BITS: i32 = 16;
-        let x_scale = ((src_w as i64) << FRAC_BITS) / (out_w as i64);
-        let y_scale = ((src_h as i64) << FRAC_BITS) / (out_h as i64);
-
-        for out_y in 0..out_h {
-            let src_y_q = (out_y as i64) * y_scale;
-            let src_y0 = (src_y_q >> FRAC_BITS) as usize;
-            let src_y1 = (src_y0 + 1).min(src_h - 1);
-            let y_frac = (src_y_q & 0xFFFF) as u32;
-
-            let out_row = out_y * out_stride;
-            let src_row0 = src_y0 * src_stride;
-            let src_row1 = src_y1 * src_stride;
-
-            for out_x in 0..out_w {
-                let src_x_q = (out_x as i64) * x_scale;
-                let src_x0 = (src_x_q >> FRAC_BITS) as usize;
-                let src_x1 = (src_x0 + 1).min(src_w - 1);
-                let x_frac = (src_x_q & 0xFFFF) as u32;
-
-                let src_i00 = src_row0 + src_x0 * 4;
-                let src_i10 = src_row0 + src_x1 * 4;
-                let src_i01 = src_row1 + src_x0 * 4;
-                let src_i11 = src_row1 + src_x1 * 4;
-
-                let out_i = out_row + out_x * 4;
-
-                for c in 0..4 {
-                    let v00 = src[src_i00 + c] as u32;
-                    let v10 = src[src_i10 + c] as u32;
-                    let v01 = src[src_i01 + c] as u32;
-                    let v11 = src[src_i11 + c] as u32;
-
-                    let v_top = v00 as i32 + (((v10 as i32 - v00 as i32) * x_frac as i32) >> 16);
-                    let v_bot = v01 as i32 + (((v11 as i32 - v01 as i32) * x_frac as i32) >> 16);
-                    let v = v_top + (((v_bot - v_top) * y_frac as i32) >> 16);
-
-                    dst[out_i + c] = v.clamp(0, 255) as u8;
-                }
-            }
-        }
-    }
+    
+    // Manual scaler removed - replaced with FFmpeg swscale in encoder thread
+    
     /// Capture thread entry point
     pub(crate) fn capture_loop(
         running: Arc<AtomicBool>,

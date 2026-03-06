@@ -59,7 +59,7 @@ impl Drop for TimerResolutionGuard {
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize FFmpeg
-    ffmpeg_next::init().context("Failed to initialize FFmpeg")?;
+    liteclip_replay::encode::init_ffmpeg().context("Failed to initialize FFmpeg")?;
 
     // Suppress all Vulkan loader output (prints directly to stderr from C code)
     std::env::set_var("VK_LOADER_DEBUG", "none");

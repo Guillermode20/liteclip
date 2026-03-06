@@ -1,9 +1,11 @@
 use super::{EncodedPacket, Encoder, EncoderConfig, StreamType};
 use anyhow::{Context, Result};
-use ffmpeg_next as ffmpeg;
-use ffmpeg::format::Pixel;
+use crate::config::{EncoderType, QualityPreset, RateControl};
 use crossbeam::channel::{bounded, Receiver, Sender};
-use tracing::{info};
+use ffmpeg::format::Pixel;
+use ffmpeg_next as ffmpeg;
+use std::collections::VecDeque;
+use tracing::info;
 
 pub struct FfmpegEncoder {
     config: EncoderConfig,
@@ -12,13 +14,13 @@ pub struct FfmpegEncoder {
     packet_rx: Receiver<EncodedPacket>,
     frame_count: i64,
     running: bool,
-    // Software scaler for BGRA -> YUV conversion
     scaler: Option<ffmpeg::software::scaling::Context>,
+    src_frame: Option<ffmpeg::util::frame::video::Video>,
+    dst_frame: Option<ffmpeg::util::frame::video::Video>,
+    last_input_res: (u32, u32),
+    pending_packet_timestamps: VecDeque<i64>,
 }
 
-// Safety: FfmpegEncoder is only used within a single dedicated encoder thread.
-// The FFmpeg types it contains are not Send by default because they contain raw pointers,
-// but they are safe to move to the dedicated thread before any processing starts.
 unsafe impl Send for FfmpegEncoder {}
 
 impl FfmpegEncoder {
@@ -32,7 +34,132 @@ impl FfmpegEncoder {
             frame_count: 0,
             running: false,
             scaler: None,
+            src_frame: None,
+            dst_frame: None,
+            last_input_res: (0, 0),
+            pending_packet_timestamps: VecDeque::with_capacity(256),
         })
+    }
+
+    fn bitrate_bps(&self) -> usize {
+        (self.config.bitrate_mbps.max(1) * 1_000_000) as usize
+    }
+
+    fn peak_bitrate_bps(&self) -> usize {
+        match self.config.rate_control {
+            RateControl::Cbr => self.bitrate_bps(),
+            RateControl::Vbr | RateControl::Cq => self.bitrate_bps().saturating_mul(2),
+        }
+    }
+
+    fn bitrate_kbps(&self) -> u32 {
+        self.config.bitrate_mbps.max(1) * 1000
+    }
+
+    fn peak_bitrate_kbps(&self) -> u32 {
+        match self.config.rate_control {
+            RateControl::Cbr => self.bitrate_kbps(),
+            RateControl::Vbr | RateControl::Cq => self.bitrate_kbps().saturating_mul(2),
+        }
+    }
+
+    fn cq_value(&self) -> u8 {
+        self.config.quality_value.unwrap_or(match self.config.quality_preset {
+            QualityPreset::Performance => 28,
+            QualityPreset::Balanced => 23,
+            QualityPreset::Quality => 19,
+        })
+    }
+
+    fn software_preset(&self) -> &'static str {
+        match self.config.quality_preset {
+            QualityPreset::Performance => "veryfast",
+            QualityPreset::Balanced => "medium",
+            QualityPreset::Quality => "slow",
+        }
+    }
+
+    fn nvenc_preset(&self) -> &'static str {
+        match self.config.quality_preset {
+            QualityPreset::Performance => "p3",
+            QualityPreset::Balanced => "p5",
+            QualityPreset::Quality => "p7",
+        }
+    }
+
+    fn nvenc_tune(&self) -> &'static str {
+        match self.config.quality_preset {
+            QualityPreset::Performance => "ull",
+            QualityPreset::Balanced => "ll",
+            QualityPreset::Quality => "hq",
+        }
+    }
+
+    fn qsv_preset(&self) -> &'static str {
+        match self.config.quality_preset {
+            QualityPreset::Performance => "veryfast",
+            QualityPreset::Balanced => "faster",
+            QualityPreset::Quality => "medium",
+        }
+    }
+
+    fn amf_quality(&self) -> &'static str {
+        match self.config.quality_preset {
+            QualityPreset::Performance => "speed",
+            QualityPreset::Balanced => "balanced",
+            QualityPreset::Quality => "quality",
+        }
+    }
+
+    fn next_encoder_pts(&self) -> i64 {
+        self.frame_count
+    }
+
+    fn dequeue_packet_timestamp(&mut self, fallback: i64) -> i64 {
+        self.pending_packet_timestamps.pop_front().unwrap_or(fallback)
+    }
+
+    fn detect_keyframe(data: &[u8], packet_is_key: bool) -> bool {
+        if packet_is_key || data.is_empty() {
+            return packet_is_key;
+        }
+
+        let mut i = 0usize;
+        while i + 4 < data.len() && i < 100 {
+            if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 0 && data[i + 3] == 1 {
+                let nal_byte = data[i + 4];
+                let h264_type = nal_byte & 0x1f;
+                let hevc_type = (nal_byte >> 1) & 0x3f;
+                if h264_type == 7
+                    || h264_type == 5
+                    || hevc_type == 32
+                    || hevc_type == 33
+                    || hevc_type == 19
+                    || hevc_type == 20
+                {
+                    return true;
+                }
+                i += 4;
+            } else if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
+                let nal_byte = data[i + 3];
+                let h264_type = nal_byte & 0x1f;
+                let hevc_type = (nal_byte >> 1) & 0x3f;
+                if h264_type == 7
+                    || h264_type == 5
+                    || hevc_type == 32
+                    || hevc_type == 33
+                    || hevc_type == 19
+                    || hevc_type == 20
+                {
+                    return true;
+                }
+                i += 3;
+            } else {
+                i += 1;
+            }
+        }
+
+        false
     }
 
     fn init_encoder(&mut self, width: u32, height: u32) -> Result<()> {
@@ -41,7 +168,9 @@ impl FfmpegEncoder {
             .context(format!("Failed to find encoder: {}", codec_name))?;
 
         let encoder_ctx = ffmpeg::codec::context::Context::new_with_codec(codec);
-        let mut encoder = encoder_ctx.encoder().video()
+        let mut encoder = encoder_ctx
+            .encoder()
+            .video()
             .context("Failed to create encoder context")?;
 
         let (out_w, out_h) = if self.config.use_native_resolution {
@@ -54,53 +183,196 @@ impl FfmpegEncoder {
         encoder.set_height(out_h);
         encoder.set_format(Pixel::YUV420P);
         encoder.set_frame_rate(Some((self.config.framerate as i32, 1)));
-        encoder.set_time_base((1, 10_000_000));
-        
-        // Bitrate and GOP settings
-        let bitrate = (self.config.bitrate_mbps * 1_000_000) as usize;
+        encoder.set_time_base((1, self.config.framerate as i32));
+
+        let bitrate = self.bitrate_bps();
         encoder.set_bit_rate(bitrate);
-        encoder.set_max_bit_rate(bitrate);
+        encoder.set_max_bit_rate(self.peak_bitrate_bps());
         encoder.set_gop(self.config.keyframe_interval_frames());
 
-        // Encoder specific options
         let mut options = ffmpeg::Dictionary::new();
+        options.set("bf", "0");
+
         match self.config.encoder_type {
-            crate::config::EncoderType::Software | crate::config::EncoderType::Auto => {
-                options.set("preset", "ultrafast");
+            EncoderType::Software | EncoderType::Auto => {
+                let bitrate_bps = bitrate.to_string();
+                let peak_bitrate_bps = self.peak_bitrate_bps().to_string();
+                let bitrate_kbps = self.bitrate_kbps();
+                let peak_bitrate_kbps = self.peak_bitrate_kbps();
+                let keyint = self.config.keyframe_interval_frames().max(1);
+
+                options.set("preset", self.software_preset());
                 options.set("tune", "zerolatency");
+                options.set("b", &bitrate_bps);
+                options.set("maxrate", &peak_bitrate_bps);
+                options.set("bufsize", &bitrate_bps);
+
+                let x264_params = match self.config.rate_control {
+                    RateControl::Cbr => format!(
+                        "force-cfr=1:nal-hrd=cbr:scenecut=0:keyint={}:min-keyint={}:vbv-maxrate={}:vbv-bufsize={}",
+                        keyint, keyint, bitrate_kbps, bitrate_kbps
+                    ),
+                    RateControl::Vbr => format!(
+                        "force-cfr=1:scenecut=0:keyint={}:min-keyint={}:vbv-maxrate={}:vbv-bufsize={}",
+                        keyint, keyint, peak_bitrate_kbps, bitrate_kbps
+                    ),
+                    RateControl::Cq => format!(
+                        "force-cfr=1:scenecut=0:keyint={}:min-keyint={}:crf={}:vbv-maxrate={}:vbv-bufsize={}",
+                        keyint, keyint, self.cq_value(), peak_bitrate_kbps, bitrate_kbps
+                    ),
+                };
+                options.set("x264-params", &x264_params);
+                options.set("qmin", "18");
+                options.set("rc-lookahead", "0");
+
+                if matches!(self.config.rate_control, RateControl::Cbr) {
+                    options.set("minrate", &bitrate_bps);
+                }
+                if matches!(self.config.rate_control, RateControl::Cq) {
+                    options.set("crf", &self.cq_value().to_string());
+                }
             }
-            crate::config::EncoderType::Nvenc => {
-                options.set("preset", "p1");
-                options.set("tune", "ull");
+            EncoderType::Nvenc => {
+                let bitrate_bps = bitrate.to_string();
+                let peak_bitrate_bps = self.peak_bitrate_bps().to_string();
+
+                options.set("preset", self.nvenc_preset());
+                options.set("tune", self.nvenc_tune());
                 options.set("delay", "0");
+                options.set("zerolatency", "1");
+                options.set("strict_gop", "1");
+                options.set("b_ref_mode", "disabled");
+                options.set(
+                    "rc",
+                    match self.config.rate_control {
+                        RateControl::Cbr => "cbr",
+                        RateControl::Vbr | RateControl::Cq => "vbr",
+                    },
+                );
+                options.set("b", &bitrate_bps);
+                options.set("maxrate", &peak_bitrate_bps);
+                options.set("bufsize", &bitrate_bps);
+
+                if matches!(self.config.rate_control, RateControl::Cbr) {
+                    options.set("minrate", &bitrate_bps);
+                }
+                if matches!(self.config.rate_control, RateControl::Cq) {
+                    options.set("cq", &self.cq_value().to_string());
+                }
+
+                options.set("forced-idr", "1");
             }
-            crate::config::EncoderType::Amf => {
+            EncoderType::Amf => {
+                let bitrate_bps = bitrate.to_string();
+
                 options.set("usage", "lowlatency");
-                options.set("quality", "speed");
+                options.set("quality", self.amf_quality());
+                options.set(
+                    "rc",
+                    match self.config.rate_control {
+                        RateControl::Cbr => "cbr",
+                        RateControl::Vbr | RateControl::Cq => "vbr_latency",
+                    },
+                );
+                options.set("header_spacing", "0");
+                options.set("b", &bitrate_bps);
+                options.set("max_bitrate", &bitrate_bps);
+
+                if matches!(self.config.rate_control, RateControl::Cq) {
+                    options.set("qvbr_quality_level", &self.cq_value().to_string());
+                }
             }
-            crate::config::EncoderType::Qsv => {
-                options.set("preset", "veryfast");
+            EncoderType::Qsv => {
+                let bitrate_bps = bitrate.to_string();
+                let peak_bitrate_bps = self.peak_bitrate_bps().to_string();
+
+                options.set("preset", self.qsv_preset());
                 options.set("look_ahead", "0");
+                options.set(
+                    "rc",
+                    match self.config.rate_control {
+                        RateControl::Cbr => "cbr",
+                        RateControl::Vbr | RateControl::Cq => "vbr",
+                    },
+                );
+                options.set("b", &bitrate_bps);
+                options.set("maxrate", &peak_bitrate_bps);
+                options.set("bufsize", &bitrate_bps);
             }
         }
 
-        let encoder = encoder.open_with(options)
+        let encoder = encoder
+            .open_with(options)
             .context("Failed to open encoder")?;
 
         self.encoder = Some(encoder);
-        
-        // Initialize scaler for BGRA -> YUV420P
-        self.scaler = Some(ffmpeg::software::scaling::Context::get(
-            Pixel::BGRA,
-            width,
-            height,
-            Pixel::YUV420P,
-            out_w,
-            out_h,
-            ffmpeg::software::scaling::flag::Flags::BILINEAR,
-        ).context("Failed to create scaler context")?);
+        self.src_frame = Some(ffmpeg::util::frame::video::Video::new(Pixel::BGRA, width, height));
+        self.dst_frame = Some(ffmpeg::util::frame::video::Video::new(Pixel::YUV420P, out_w, out_h));
+        self.scaler = Some(
+            ffmpeg::software::scaling::Context::get(
+                Pixel::BGRA,
+                width,
+                height,
+                Pixel::YUV420P,
+                out_w,
+                out_h,
+                ffmpeg::software::scaling::flag::Flags::FAST_BILINEAR,
+            )
+            .context("Failed to create scaler context")?,
+        );
+
+        self.last_input_res = (width, height);
+        self.pending_packet_timestamps.clear();
 
         info!("Native FFmpeg encoder initialized: {} ({}x{})", codec_name, out_w, out_h);
+        Ok(())
+    }
+
+    fn drain_encoder_packets(&mut self, fallback_timestamp: i64) -> Result<()> {
+        let mut drained_packets = Vec::new();
+
+        if let Some(ref mut encoder) = self.encoder {
+            let mut packet = ffmpeg::Packet::empty();
+            while encoder.receive_packet(&mut packet).is_ok() {
+                drained_packets.push((
+                    packet.data().unwrap_or(&[]).to_vec(),
+                    packet.is_key(),
+                    packet.pts().unwrap_or(0),
+                ));
+                packet = ffmpeg::Packet::empty();
+            }
+        }
+
+        for (data, packet_is_key, packet_pts) in drained_packets {
+            let is_keyframe = Self::detect_keyframe(&data, packet_is_key);
+            let pts = self.dequeue_packet_timestamp(fallback_timestamp);
+
+            if self.frame_count % 60 == 0 || is_keyframe {
+                tracing::info!(
+                    "Packet received: size={}, pts={:?}, is_key={}",
+                    data.len(),
+                    packet_pts,
+                    is_keyframe
+                );
+            }
+
+            let mut encoded_packet = EncodedPacket::new(
+                data,
+                pts,
+                pts,
+                is_keyframe,
+                StreamType::Video,
+            );
+
+            if !self.config.use_native_resolution {
+                encoded_packet.resolution = Some(self.config.resolution);
+            }
+
+            if self.packet_tx.send(encoded_packet).is_err() {
+                break;
+            }
+        }
+
         Ok(())
     }
 }
@@ -112,103 +384,39 @@ impl Encoder for FfmpegEncoder {
     }
 
     fn encode_frame(&mut self, frame: &crate::capture::CapturedFrame) -> Result<()> {
-        if self.encoder.is_none() {
+        if self.encoder.is_none() || self.last_input_res != (frame.resolution.0, frame.resolution.1) {
             self.init_encoder(frame.resolution.0, frame.resolution.1)?;
         }
 
-        let Some(ref mut encoder) = self.encoder else { return Ok(()); };
-        let Some(ref mut scaler) = self.scaler else { return Ok(()); };
-
-        // 1. Create source frame from raw BGRA data
-        let mut src_frame = ffmpeg::util::frame::video::Video::new(Pixel::BGRA, frame.resolution.0, frame.resolution.1);
-        src_frame.data_mut(0).copy_from_slice(&frame.bgra);
-
-        // 2. Create destination frame (YUV420P)
-        let mut dst_frame = ffmpeg::util::frame::video::Video::new(encoder.format(), encoder.width(), encoder.height());
-        
-        // 3. Scale/Convert BGRA -> YUV420P
-        scaler.run(&src_frame, &mut dst_frame)?;
-        
-        // 4. Set timestamp (QPC ticks, perfectly synced with 1/10M time_base)
-        dst_frame.set_pts(Some(frame.timestamp));
-        
-        // Force keyframe (IDR) at GOP intervals (important for hardware encoders)
+        let encoder_pts = self.next_encoder_pts();
         let gop = self.config.keyframe_interval_frames() as i64;
-        if gop > 0 && self.frame_count % gop == 0 {
-            dst_frame.set_kind(ffmpeg::picture::Type::I);
-        } else {
-            dst_frame.set_kind(ffmpeg::picture::Type::None);
+        self.pending_packet_timestamps.push_back(frame.timestamp);
+        if self.pending_packet_timestamps.len() > 512 {
+            self.pending_packet_timestamps.pop_front();
         }
 
-        // 5. Send frame to encoder
-        encoder.send_frame(&dst_frame).context("Failed to send frame to encoder")?;
+        {
+            let Some(ref mut encoder) = self.encoder else { return Ok(()); };
+            let Some(ref mut scaler) = self.scaler else { return Ok(()); };
+            let Some(ref mut src_frame) = self.src_frame else { return Ok(()); };
+            let Some(ref mut dst_frame) = self.dst_frame else { return Ok(()); };
 
-        // 6. Receive packets
-        if let Some(ref mut encoder) = self.encoder {
-            let mut packet = ffmpeg::Packet::empty();
-            while encoder.receive_packet(&mut packet).is_ok() {
-                let data = packet.data().unwrap_or(&[]).to_vec();
-                let mut is_keyframe = packet.is_key();
-                
-                // Fallback heuristic for hardware encoders that don't set AV_PKT_FLAG_KEY reliably
-                if !is_keyframe && !data.is_empty() {
-                    // Quick scan for SPS (H264: 7, HEVC: 33) or VPS (HEVC: 32)
-                    let mut i = 0;
-                    while i + 4 < data.len() && i < 100 { // scan first 100 bytes
-                        if data[i] == 0 && data[i+1] == 0 && data[i+2] == 0 && data[i+3] == 1 {
-                            let nal_byte = data[i+4];
-                            let h264_type = nal_byte & 0x1f;
-                            let hevc_type = (nal_byte >> 1) & 0x3f;
-                            
-                            // H264: SPS (7) or IDR (5)
-                            // HEVC: VPS (32), SPS (33), or IDR_W_RADL (19) / IDR_N_LP (20)
-                            if h264_type == 7 || h264_type == 5 || hevc_type == 32 || hevc_type == 33 || hevc_type == 19 || hevc_type == 20 {
-                                is_keyframe = true;
-                                break;
-                            }
-                            i += 4;
-                        } else if data[i] == 0 && data[i+1] == 0 && data[i+2] == 1 {
-                            let nal_byte = data[i+3];
-                            let h264_type = nal_byte & 0x1f;
-                            let hevc_type = (nal_byte >> 1) & 0x3f;
-                            
-                            if h264_type == 7 || h264_type == 5 || hevc_type == 32 || hevc_type == 33 || hevc_type == 19 || hevc_type == 20 {
-                                is_keyframe = true;
-                                break;
-                            }
-                            i += 3;
-                        } else {
-                            i += 1;
-                        }
-                    }
-                }
+            src_frame.data_mut(0).copy_from_slice(&frame.bgra);
+            scaler.run(src_frame, dst_frame)?;
 
-                if self.frame_count % 60 == 0 || is_keyframe {
-                    tracing::info!("Packet received: size={}, pts={:?}, is_key={}", data.len(), packet.pts(), is_keyframe);
-                }
-
-                // Map back to the exact QPC timestamp from capture so A/V sync is perfect
-                let pts = packet.pts().unwrap_or(frame.timestamp);
-                let dts = packet.dts().unwrap_or(pts);
-
-                let mut encoded_packet = EncodedPacket::new(
-                    data,
-                    pts,
-                    dts,
-                    is_keyframe,
-                    StreamType::Video,
-                );
-                
-                if !self.config.use_native_resolution {
-                    encoded_packet.resolution = Some(self.config.resolution);
-                }
-
-                if self.packet_tx.send(encoded_packet).is_err() {
-                    break;
-                }
+            dst_frame.set_pts(Some(encoder_pts));
+            if gop > 0 && self.frame_count % gop == 0 {
+                dst_frame.set_kind(ffmpeg::picture::Type::I);
+            } else {
+                dst_frame.set_kind(ffmpeg::picture::Type::None);
             }
+
+            encoder
+                .send_frame(dst_frame)
+                .context("Failed to send frame to encoder")?;
         }
 
+        self.drain_encoder_packets(frame.timestamp)?;
         self.frame_count += 1;
         Ok(())
     }
@@ -216,35 +424,15 @@ impl Encoder for FfmpegEncoder {
     fn flush(&mut self) -> Result<Vec<EncodedPacket>> {
         if let Some(ref mut encoder) = self.encoder {
             encoder.send_eof().ok();
-            
-            let mut packet = ffmpeg::Packet::empty();
-            while encoder.receive_packet(&mut packet).is_ok() {
-                let data = packet.data().unwrap_or(&[]).to_vec();
-                let is_keyframe = packet.is_key();
-                
-                // Using 0 for flush packets since we don't have the original timestamp,
-                // but these usually don't matter much for replay buffers anyway.
-                let mut encoded_packet = EncodedPacket::new(
-                    data,
-                    0,
-                    0,
-                    is_keyframe,
-                    StreamType::Video,
-                );
-                
-                if !self.config.use_native_resolution {
-                    encoded_packet.resolution = Some(self.config.resolution);
-                }
-
-                let _ = self.packet_tx.send(encoded_packet);
-            }
         }
-        
+
+        self.drain_encoder_packets(0)?;
+
         let mut packets = Vec::new();
         while let Ok(packet) = self.packet_rx.try_recv() {
             packets.push(packet);
         }
-        
+
         self.running = false;
         Ok(packets)
     }
@@ -257,4 +445,3 @@ impl Encoder for FfmpegEncoder {
         self.running
     }
 }
-
