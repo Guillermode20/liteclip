@@ -27,3 +27,5 @@ desktop.ini
 **/*.rs.bk
 
 .claude
+
+ffmpeg_dev/
