@@ -45,6 +45,10 @@ fn resolve_encoder_config(config: &EncoderConfig) -> EncoderConfig {
     resolved
 }
 
+pub fn resolve_effective_encoder_config(config: &EncoderConfig) -> EncoderConfig {
+    resolve_encoder_config(config)
+}
+
 fn set_encoder_thread_priority() {
     #[cfg(windows)]
     {

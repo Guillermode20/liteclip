@@ -9,7 +9,9 @@ use crate::{
     },
     clip::{spawn_clip_saver, MuxerConfig},
     config::Config,
-    encode::{spawn_encoder_with_receiver, EncoderConfig, EncoderHandle},
+    encode::{
+        resolve_effective_encoder_config, spawn_encoder_with_receiver, EncoderConfig, EncoderHandle,
+    },
 };
 use anyhow::{bail, Context, Result};
 use crossbeam::channel::Receiver;
@@ -155,7 +157,8 @@ impl RecordingPipeline {
         info!("Recording: starting pipeline");
         self.lifecycle = RecordingLifecycle::Starting;
 
-        let encoder_config = EncoderConfig::from(config);
+        let requested_encoder_config = EncoderConfig::from(config);
+        let mut encoder_config = resolve_effective_encoder_config(&requested_encoder_config);
 
         // Start audio capture
         if let Err(e) = self.start_audio_capture(config, buffer, "capture mode") {
@@ -174,7 +177,22 @@ impl RecordingPipeline {
             }
         };
         let mut capture_config = CaptureConfig::from(config);
-        capture_config.perform_cpu_readback = true;
+        if encoder_config.supports_gpu_frame_transport() {
+            info!(
+                "Using GPU frame transport for {:?}",
+                encoder_config.encoder_type
+            );
+            capture_config.perform_cpu_readback = false;
+            encoder_config.use_cpu_readback = false;
+        } else if !capture_config.perform_cpu_readback
+            && !encoder_config.supports_gpu_frame_transport()
+        {
+            warn!(
+                "Requested no-CPU-readback mode is not supported for {:?}; falling back to CPU readback",
+                encoder_config.encoder_type
+            );
+            capture_config.perform_cpu_readback = true;
+        }
 
         if let Err(e) = capture
             .start(capture_config)
@@ -187,8 +205,7 @@ impl RecordingPipeline {
 
         let frame_rx: Receiver<CapturedFrame> = capture.frame_rx();
 
-        let mut capture_encoder_config = encoder_config;
-        capture_encoder_config.use_cpu_readback = true;
+        let capture_encoder_config = encoder_config;
 
         let encoder_handle =
             match spawn_encoder_with_receiver(capture_encoder_config, buffer.clone(), frame_rx)
@@ -336,10 +353,7 @@ impl Drop for RecordingPipeline {
 pub struct ClipManager;
 
 impl ClipManager {
-    pub async fn save_clip(
-        config: &Config,
-        buffer: &SharedReplayBuffer,
-    ) -> Result<PathBuf> {
+    pub async fn save_clip(config: &Config, buffer: &SharedReplayBuffer) -> Result<PathBuf> {
         info!("Clip: saving replay buffer");
 
         let output_path = Self::generate_output_path(config)?;

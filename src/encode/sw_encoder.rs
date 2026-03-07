@@ -116,6 +116,9 @@ fn bgra_to_jpeg(
     output_height: u32,
     quality: u8,
 ) -> Result<Vec<u8>> {
+    if frame.d3d11.is_some() {
+        anyhow::bail!("software JPEG encoding requires CPU-readable BGRA frames");
+    }
     let (sw, sh) = frame.resolution;
     let mut rgb_buf = Vec::new();
     bgra_to_jpeg_reuse(
@@ -337,6 +340,9 @@ impl Encoder for SoftwareEncoder {
     }
 
     fn encode_frame(&mut self, frame: &crate::capture::CapturedFrame) -> Result<()> {
+        if frame.d3d11.is_some() {
+            anyhow::bail!("software encoder cannot consume GPU-backed frames");
+        }
         let item = WorkItem {
             bgra: frame.bgra.clone(), // Bytes clone = ref-count bump, O(1)
             src_w: frame.resolution.0,

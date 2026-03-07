@@ -63,29 +63,40 @@ pub fn spawn_clip_saver(
             .snapshot_from(start_pts)
             .context("Failed to get packets from buffer")?;
 
-        let has_decodable_h264_frame = |packets: &[crate::encode::EncodedPacket]| {
+        // Check for decodable video frames (supports both H.264 and HEVC)
+        let has_decodable_video_frame = |packets: &[crate::encode::EncodedPacket]| {
             packets.iter().any(|packet| {
-                matches!(packet.stream, crate::encode::StreamType::Video)
-                    && matches!(
-                        muxer::h264_nal_type(packet.data.as_ref()),
-                        // NAL types that indicate decodable content:
-                        // 1 = Non-IDR slice, 5 = IDR slice (keyframe)
-                        // 7 = SPS, 8 = PPS (also valid as stream starters)
-                        Some(1 | 5 | 7 | 8)
-                    )
+                if !matches!(packet.stream, crate::encode::StreamType::Video) {
+                    return false;
+                }
+                // Check H.264 NAL types: 1 (slice), 5 (IDR), 7 (SPS), 8 (PPS)
+                if matches!(
+                    muxer::h264_nal_type(packet.data.as_ref()),
+                    Some(1 | 5 | 7 | 8)
+                ) {
+                    return true;
+                }
+                // Check HEVC NAL types: 19/20 (IDR), 32 (VPS), 33 (SPS), 34 (PPS)
+                if matches!(
+                    muxer::hevc_nal_type(packet.data.as_ref()),
+                    Some(19 | 20 | 32 | 33 | 34)
+                ) {
+                    return true;
+                }
+                false
             })
         };
 
-        if !has_decodable_h264_frame(&clip_packets) {
-            warn!("Clip snapshot does not yet contain a decodable H.264 frame; retrying briefly");
+        if !has_decodable_video_frame(&clip_packets) {
+            warn!("Clip snapshot does not yet contain a decodable video frame; retrying briefly");
             for attempt in 1..=5 {
                 thread::sleep(Duration::from_millis(150));
                 clip_packets = buffer
                     .snapshot_from(start_pts)
                     .context("Failed to refresh packets from buffer")?;
-                if has_decodable_h264_frame(&clip_packets) {
+                if has_decodable_video_frame(&clip_packets) {
                     info!(
-                        "Found decodable H.264 frame after clip snapshot retry {}/5",
+                        "Found decodable video frame after clip snapshot retry {}/5",
                         attempt
                     );
                     break;

@@ -142,6 +142,13 @@ impl EncoderConfig {
     pub fn keyframe_interval_frames(&self) -> u32 {
         self.keyframe_interval_secs * self.framerate
     }
+
+    pub fn supports_gpu_frame_transport(&self) -> bool {
+        // AMF rejects BGRA-backed D3D11 input frames. Re-enable this once the
+        // capture side can hand off NV12 hardware frames directly.
+        let _ = self;
+        false
+    }
 }
 /// Encoder thread handle
 pub struct EncoderHandle {

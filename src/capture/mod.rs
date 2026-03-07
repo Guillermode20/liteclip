@@ -7,7 +7,10 @@ use crate::encode::EncodedPacket;
 use anyhow::Result;
 use bytes::Bytes;
 use crossbeam::channel::Receiver;
+use std::sync::Arc;
 use std::time::Duration;
+#[cfg(windows)]
+use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
 
 pub mod audio;
 pub mod backpressure;
@@ -45,11 +48,20 @@ impl From<&crate::config::Config> for CaptureConfig {
     }
 }
 
+#[cfg(windows)]
+pub struct D3d11Frame {
+    pub texture: ID3D11Texture2D,
+    pub device: ID3D11Device,
+}
+
 /// Captured frame data
 pub struct CapturedFrame {
     /// CPU-readable BGRA frame bytes (packed, width*height*4).
     /// Uses `Bytes` for reference-counted sharing – cloning is O(1).
     pub bgra: Bytes,
+    /// Optional GPU-backed frame payload for zero-copy encoder paths.
+    #[cfg(windows)]
+    pub d3d11: Option<Arc<D3d11Frame>>,
     /// QPC timestamp for sync
     pub timestamp: i64,
     /// Frame resolution (width, height)
@@ -60,6 +72,8 @@ impl Clone for CapturedFrame {
     fn clone(&self) -> Self {
         Self {
             bgra: self.bgra.clone(),
+            #[cfg(windows)]
+            d3d11: self.d3d11.clone(),
             timestamp: self.timestamp,
             resolution: self.resolution,
         }
