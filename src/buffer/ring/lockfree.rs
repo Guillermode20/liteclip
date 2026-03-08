@@ -1,0 +1,511 @@
+//! Lock-free replay buffer implementation
+//!
+//! Uses a ring buffer with atomic indices for single-producer, multi-consumer access.
+//! The producer writes atomically; consumers read via optimistic locking (seqlock pattern).
+
+use crate::encode::{EncodedPacket, StreamType};
+use anyhow::Result;
+use bytes::Bytes;
+use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+use tracing::{debug, trace};
+
+use super::functions::{h264_nal_type, hevc_nal_type, qpc_frequency};
+use super::types::BufferStats;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CodecKind {
+    #[default]
+    H264,
+    Hevc,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FirstVideoKind {
+    H264Sps,
+    HevcVps,
+    Other,
+}
+
+impl FirstVideoKind {
+    pub fn is_parameter_set(&self) -> bool {
+        matches!(self, FirstVideoKind::H264Sps | FirstVideoKind::HevcVps)
+    }
+}
+
+#[derive(Clone)]
+pub struct LockFreeReplayBuffer {
+    inner: Arc<LockFreeInner>,
+}
+
+struct LockFreeInner {
+    slots: Box<[Slot]>,
+    capacity: usize,
+    mask: usize,
+    write_idx: AtomicUsize,
+    max_memory_bytes: usize,
+    total_bytes: AtomicUsize,
+    keyframe_count: AtomicUsize,
+    oldest_pts: AtomicI64,
+    newest_pts: AtomicI64,
+    cached_sps: std::sync::Mutex<Option<Bytes>>,
+    cached_pps: std::sync::Mutex<Option<Bytes>>,
+    cached_vps: std::sync::Mutex<Option<Bytes>>,
+    cached_hevc_sps: std::sync::Mutex<Option<Bytes>>,
+    cached_hevc_pps: std::sync::Mutex<Option<Bytes>>,
+    codec_kind: std::sync::Mutex<CodecKind>,
+    first_video_info: std::sync::Mutex<Option<(usize, FirstVideoKind)>>,
+}
+
+struct Slot {
+    packet: std::sync::Mutex<Option<EncodedPacket>>,
+}
+
+impl Slot {
+    fn new() -> Self {
+        Self {
+            packet: std::sync::Mutex::new(None),
+        }
+    }
+}
+
+impl LockFreeReplayBuffer {
+    pub fn new(config: &crate::config::Config) -> Result<Self> {
+        let duration = Duration::from_secs(config.general.replay_duration_secs as u64 + 1);
+        let effective_memory_limit_mb = config.effective_replay_memory_limit_mb();
+        let max_memory_bytes = (effective_memory_limit_mb as usize).saturating_mul(1024 * 1024);
+
+        let estimated_packets = (duration.as_secs_f32() * 60.0).max(100.0) as usize;
+        let capacity = estimated_packets.next_power_of_two();
+        let mask = capacity - 1;
+
+        let mut slots = Vec::with_capacity(capacity);
+        for _ in 0..capacity {
+            slots.push(Slot::new());
+        }
+
+        debug!(
+            "Creating LockFreeReplayBuffer: {} seconds, {} MB max, {} slots",
+            duration.as_secs(),
+            effective_memory_limit_mb,
+            capacity
+        );
+
+        Ok(Self {
+            inner: Arc::new(LockFreeInner {
+                slots: slots.into_boxed_slice(),
+                capacity,
+                mask,
+                write_idx: AtomicUsize::new(0),
+                max_memory_bytes,
+                total_bytes: AtomicUsize::new(0),
+                keyframe_count: AtomicUsize::new(0),
+                oldest_pts: AtomicI64::new(0),
+                newest_pts: AtomicI64::new(0),
+                cached_sps: std::sync::Mutex::new(None),
+                cached_pps: std::sync::Mutex::new(None),
+                cached_vps: std::sync::Mutex::new(None),
+                cached_hevc_sps: std::sync::Mutex::new(None),
+                cached_hevc_pps: std::sync::Mutex::new(None),
+                codec_kind: std::sync::Mutex::new(CodecKind::default()),
+                first_video_info: std::sync::Mutex::new(None),
+            }),
+        })
+    }
+
+    pub fn push_batch(&self, packets: impl IntoIterator<Item = EncodedPacket>) {
+        for packet in packets {
+            self.push_single(packet);
+        }
+    }
+
+    pub fn push(&self, packet: EncodedPacket) {
+        self.push_single(packet);
+    }
+
+    fn push_single(&self, packet: EncodedPacket) {
+        let inner = &self.inner;
+        let packet_size = packet.data.len();
+        let packet_pts = packet.pts;
+        let is_keyframe = packet.is_keyframe;
+
+        self.cache_parameter_sets(&packet);
+
+        if matches!(packet.stream, StreamType::Video) {
+            let mut first_video_info = inner.first_video_info.lock().unwrap();
+            if first_video_info.is_none() {
+                let kind = self.detect_first_video_kind(packet.data.as_ref());
+                *first_video_info = Some((inner.write_idx.load(Ordering::Relaxed), kind));
+            }
+        }
+
+        let write_idx = inner.write_idx.fetch_add(1, Ordering::Release);
+        let slot_idx = write_idx & inner.mask;
+        let slot = &inner.slots[slot_idx];
+
+        let old_packet = {
+            let mut packet_guard = slot.packet.lock().unwrap();
+            let old = packet_guard.take();
+            *packet_guard = Some(packet);
+            old
+        };
+
+        if let Some(ref old) = old_packet {
+            inner
+                .total_bytes
+                .fetch_sub(old.data.len(), Ordering::Relaxed);
+            if old.is_keyframe {
+                inner.keyframe_count.fetch_sub(1, Ordering::Relaxed);
+            }
+        }
+
+        inner.total_bytes.fetch_add(packet_size, Ordering::Relaxed);
+        if is_keyframe {
+            inner.keyframe_count.fetch_add(1, Ordering::Relaxed);
+        }
+
+        inner.newest_pts.store(packet_pts, Ordering::Release);
+    }
+
+    fn cache_parameter_sets(&self, packet: &EncodedPacket) {
+        if !matches!(packet.stream, StreamType::Video) {
+            return;
+        }
+
+        let inner = &self.inner;
+        let data = packet.data.as_ref();
+
+        let codec_kind = *inner.codec_kind.lock().unwrap();
+        let codec_detected = inner.cached_sps.lock().unwrap().is_some()
+            || inner.cached_pps.lock().unwrap().is_some()
+            || inner.cached_vps.lock().unwrap().is_some()
+            || inner.cached_hevc_sps.lock().unwrap().is_some()
+            || inner.cached_hevc_pps.lock().unwrap().is_some();
+
+        if codec_detected {
+            match codec_kind {
+                CodecKind::H264 => {
+                    if let Some(7) = h264_nal_type(data) {
+                        *inner.cached_sps.lock().unwrap() = Some(packet.data.clone());
+                        trace!("Cached H.264 SPS ({} bytes)", packet.data.len());
+                    }
+                    if let Some(8) = h264_nal_type(data) {
+                        *inner.cached_pps.lock().unwrap() = Some(packet.data.clone());
+                        trace!("Cached H.264 PPS ({} bytes)", packet.data.len());
+                    }
+                }
+                CodecKind::Hevc => {
+                    if let Some(32) = hevc_nal_type(data) {
+                        *inner.cached_vps.lock().unwrap() = Some(packet.data.clone());
+                        trace!("Cached HEVC VPS ({} bytes)", packet.data.len());
+                    }
+                    if let Some(33) = hevc_nal_type(data) {
+                        *inner.cached_hevc_sps.lock().unwrap() = Some(packet.data.clone());
+                        trace!("Cached HEVC SPS ({} bytes)", packet.data.len());
+                    }
+                    if let Some(34) = hevc_nal_type(data) {
+                        *inner.cached_hevc_pps.lock().unwrap() = Some(packet.data.clone());
+                        trace!("Cached HEVC PPS ({} bytes)", packet.data.len());
+                    }
+                }
+            }
+        } else {
+            if let Some(7) = h264_nal_type(data) {
+                *inner.cached_sps.lock().unwrap() = Some(packet.data.clone());
+                *inner.codec_kind.lock().unwrap() = CodecKind::H264;
+                trace!("Cached H.264 SPS ({} bytes)", packet.data.len());
+            }
+            if let Some(8) = h264_nal_type(data) {
+                *inner.cached_pps.lock().unwrap() = Some(packet.data.clone());
+                *inner.codec_kind.lock().unwrap() = CodecKind::H264;
+                trace!("Cached H.264 PPS ({} bytes)", packet.data.len());
+            }
+            if let Some(32) = hevc_nal_type(data) {
+                *inner.cached_vps.lock().unwrap() = Some(packet.data.clone());
+                *inner.codec_kind.lock().unwrap() = CodecKind::Hevc;
+                trace!("Cached HEVC VPS ({} bytes)", packet.data.len());
+            }
+            if let Some(33) = hevc_nal_type(data) {
+                *inner.cached_hevc_sps.lock().unwrap() = Some(packet.data.clone());
+                *inner.codec_kind.lock().unwrap() = CodecKind::Hevc;
+                trace!("Cached HEVC SPS ({} bytes)", packet.data.len());
+            }
+            if let Some(34) = hevc_nal_type(data) {
+                *inner.cached_hevc_pps.lock().unwrap() = Some(packet.data.clone());
+                *inner.codec_kind.lock().unwrap() = CodecKind::Hevc;
+                trace!("Cached HEVC PPS ({} bytes)", packet.data.len());
+            }
+        }
+    }
+
+    fn detect_first_video_kind(&self, data: &[u8]) -> FirstVideoKind {
+        if matches!(h264_nal_type(data), Some(7)) {
+            return FirstVideoKind::H264Sps;
+        }
+        if matches!(hevc_nal_type(data), Some(32)) {
+            return FirstVideoKind::HevcVps;
+        }
+        FirstVideoKind::Other
+    }
+
+    pub fn snapshot(&self) -> Result<Vec<EncodedPacket>> {
+        let inner = &self.inner;
+        let write_idx = inner.write_idx.load(Ordering::Acquire);
+
+        if write_idx == 0 {
+            return Ok(vec![]);
+        }
+
+        let capacity = inner.capacity;
+        let start_idx = write_idx.saturating_sub(capacity);
+        let count = write_idx - start_idx;
+
+        let mut result = Vec::with_capacity(count);
+
+        for i in start_idx..write_idx {
+            let slot_idx = i & inner.mask;
+            let slot = &inner.slots[slot_idx];
+
+            if let Ok(packet_guard) = slot.packet.try_lock() {
+                if let Some(ref packet) = *packet_guard {
+                    result.push(packet.clone());
+                }
+            }
+        }
+
+        let first_video_is_param_set = inner
+            .first_video_info
+            .lock()
+            .unwrap()
+            .map(|(_, kind)| kind.is_parameter_set())
+            .unwrap_or(true);
+
+        if !first_video_is_param_set && !result.is_empty() {
+            let first_video_pts = result
+                .iter()
+                .find_map(|p| {
+                    if matches!(p.stream, StreamType::Video) {
+                        Some(p.pts)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(0);
+
+            let codec_kind = *inner.codec_kind.lock().unwrap();
+            let mut prepend = Vec::new();
+
+            match codec_kind {
+                CodecKind::H264 => {
+                    if let Some(ref sps_data) = *inner.cached_sps.lock().unwrap() {
+                        prepend.push(EncodedPacket {
+                            data: sps_data.clone(),
+                            pts: first_video_pts,
+                            dts: first_video_pts,
+                            stream: StreamType::Video,
+                            is_keyframe: false,
+                            resolution: None,
+                        });
+                    }
+                    if let Some(ref pps_data) = *inner.cached_pps.lock().unwrap() {
+                        prepend.push(EncodedPacket {
+                            data: pps_data.clone(),
+                            pts: first_video_pts,
+                            dts: first_video_pts,
+                            stream: StreamType::Video,
+                            is_keyframe: false,
+                            resolution: None,
+                        });
+                    }
+                }
+                CodecKind::Hevc => {
+                    if let Some(ref vps_data) = *inner.cached_vps.lock().unwrap() {
+                        prepend.push(EncodedPacket {
+                            data: vps_data.clone(),
+                            pts: first_video_pts,
+                            dts: first_video_pts,
+                            stream: StreamType::Video,
+                            is_keyframe: false,
+                            resolution: None,
+                        });
+                    }
+                    if let Some(ref sps_data) = *inner.cached_hevc_sps.lock().unwrap() {
+                        prepend.push(EncodedPacket {
+                            data: sps_data.clone(),
+                            pts: first_video_pts,
+                            dts: first_video_pts,
+                            stream: StreamType::Video,
+                            is_keyframe: false,
+                            resolution: None,
+                        });
+                    }
+                    if let Some(ref pps_data) = *inner.cached_hevc_pps.lock().unwrap() {
+                        prepend.push(EncodedPacket {
+                            data: pps_data.clone(),
+                            pts: first_video_pts,
+                            dts: first_video_pts,
+                            stream: StreamType::Video,
+                            is_keyframe: false,
+                            resolution: None,
+                        });
+                    }
+                }
+            }
+
+            let mut final_result = Vec::with_capacity(prepend.len() + result.len());
+            final_result.extend(prepend);
+            final_result.extend(result);
+            return Ok(final_result);
+        }
+
+        Ok(result)
+    }
+
+    pub fn snapshot_from(&self, start_pts: i64) -> Result<Vec<EncodedPacket>> {
+        let all_packets = self.snapshot()?;
+
+        if all_packets.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let keyframe_idx = all_packets
+            .iter()
+            .position(|p| p.is_keyframe && p.pts >= start_pts)
+            .or_else(|| {
+                all_packets
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find(|(_, p)| p.is_keyframe && p.pts <= start_pts)
+                    .map(|(i, _)| i)
+            });
+
+        let start_idx = keyframe_idx.unwrap_or(0);
+        Ok(all_packets.into_iter().skip(start_idx).collect())
+    }
+
+    pub fn clear(&self) {
+        let inner = &self.inner;
+
+        for i in 0..inner.capacity {
+            let slot = &inner.slots[i];
+            if let Ok(mut packet_guard) = slot.packet.try_lock() {
+                *packet_guard = None;
+            }
+        }
+
+        inner.write_idx.store(0, Ordering::Release);
+        inner.total_bytes.store(0, Ordering::Release);
+        inner.keyframe_count.store(0, Ordering::Release);
+        *inner.first_video_info.lock().unwrap() = None;
+
+        debug!(
+            "Lock-free buffer cleared (H.264 SPS: {}, PPS: {} | HEVC VPS: {}, SPS: {}, PPS: {})",
+            inner.cached_sps.lock().unwrap().is_some(),
+            inner.cached_pps.lock().unwrap().is_some(),
+            inner.cached_vps.lock().unwrap().is_some(),
+            inner.cached_hevc_sps.lock().unwrap().is_some(),
+            inner.cached_hevc_pps.lock().unwrap().is_some()
+        );
+    }
+
+    pub fn soft_clear(&self) {
+        self.clear();
+    }
+
+    pub fn stats(&self) -> BufferStats {
+        let inner = &self.inner;
+        let write_idx = inner.write_idx.load(Ordering::Acquire);
+        let total_bytes = inner.total_bytes.load(Ordering::Relaxed);
+        let keyframe_count = inner.keyframe_count.load(Ordering::Relaxed);
+
+        let memory_usage_percent = if inner.max_memory_bytes > 0 {
+            (total_bytes as f32 / inner.max_memory_bytes as f32) * 100.0
+        } else {
+            0.0
+        };
+
+        let duration_secs = if write_idx >= 2 {
+            let oldest = inner.oldest_pts.load(Ordering::Relaxed);
+            let newest = inner.newest_pts.load(Ordering::Relaxed);
+            let qpc_freq = qpc_frequency() as f64;
+            ((newest - oldest) as f64) / qpc_freq
+        } else {
+            0.0
+        };
+
+        let packet_count = write_idx.min(inner.capacity);
+
+        BufferStats {
+            duration_secs,
+            total_bytes,
+            packet_count,
+            keyframe_count,
+            memory_usage_percent: memory_usage_percent.min(100.0),
+        }
+    }
+
+    pub fn is_full(&self) -> bool {
+        let inner = &self.inner;
+        inner.write_idx.load(Ordering::Relaxed) >= inner.capacity
+    }
+
+    pub fn oldest_pts(&self) -> Option<i64> {
+        let inner = &self.inner;
+        let write_idx = inner.write_idx.load(Ordering::Acquire);
+        if write_idx == 0 {
+            return None;
+        }
+
+        let oldest_idx = write_idx.saturating_sub(inner.capacity);
+        let slot_idx = oldest_idx & inner.mask;
+        let slot = &inner.slots[slot_idx];
+
+        if let Ok(packet_guard) = slot.packet.try_lock() {
+            packet_guard.as_ref().map(|p| p.pts)
+        } else {
+            None
+        }
+    }
+
+    pub fn newest_pts(&self) -> Option<i64> {
+        let inner = &self.inner;
+        let write_idx = inner.write_idx.load(Ordering::Acquire);
+        if write_idx == 0 {
+            return None;
+        }
+
+        let newest_idx = write_idx - 1;
+        let slot_idx = newest_idx & inner.mask;
+        let slot = &inner.slots[slot_idx];
+
+        if let Ok(packet_guard) = slot.packet.try_lock() {
+            packet_guard.as_ref().map(|p| p.pts)
+        } else {
+            None
+        }
+    }
+
+    pub fn first_packet_resolution(&self) -> Option<(u32, u32)> {
+        let inner = &self.inner;
+        let write_idx = inner.write_idx.load(Ordering::Acquire);
+        if write_idx == 0 {
+            return None;
+        }
+
+        let start_idx = write_idx.saturating_sub(inner.capacity);
+        let slot_idx = start_idx & inner.mask;
+        let slot = &inner.slots[slot_idx];
+
+        if let Ok(packet_guard) = slot.packet.try_lock() {
+            packet_guard.as_ref().and_then(|p| p.resolution)
+        } else {
+            None
+        }
+    }
+
+    pub fn has_keyframe(&self) -> bool {
+        self.inner.keyframe_count.load(Ordering::Relaxed) > 0
+    }
+}

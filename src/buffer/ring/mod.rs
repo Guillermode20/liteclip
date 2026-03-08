@@ -1,8 +1,9 @@
-//! Auto-generated module structure
+//! Replay buffer module
 
 pub mod functions;
+pub mod lockfree;
 pub mod types;
 
-// Re-export all types
 pub use functions::*;
-pub use types::*;
+pub use lockfree::LockFreeReplayBuffer;
+pub use types::{BufferStats, SharedReplayBuffer};

@@ -178,47 +178,32 @@ impl RecordingPipeline {
         };
         let mut capture_config = CaptureConfig::from(config);
 
-        // Determine GPU transport eligibility
-        // AMF is the only encoder that can currently accept D3D11/NV12 frames.
-        // When it is selected, prefer the GPU path and let capture fall back to CPU readback if
-        // NV12 conversion is unavailable or fails at runtime.
         let encoder_supports_gpu = encoder_config.supports_gpu_frame_transport();
         let capture_supports_nv12 =
             capture.refresh_nv12_conversion_capability(capture_config.output_index);
 
         if encoder_supports_gpu {
-            if capture_supports_nv12 {
-                info!(
-                    "GPU NV12 transport preferred: encoder={:?}, output={}, nv12_preflight=true",
-                    encoder_config.encoder_type, capture_config.output_index
-                );
-            } else {
-                warn!(
-                    "GPU NV12 preflight failed for encoder {:?} on output {}; capture will still try GPU NV12 first and fall back to CPU readback if needed",
+            if !capture_supports_nv12 {
+                self.rollback_startup();
+                self.lifecycle = RecordingLifecycle::Idle;
+                bail!(
+                    "GPU encoder {:?} requires NV12 conversion capability, but the capture device (output {}) does not support it. \
+                     Please try a different display output or encoder.",
                     encoder_config.encoder_type, capture_config.output_index
                 );
             }
+            info!(
+                "GPU NV12 transport enabled: encoder={:?}, output={}",
+                encoder_config.encoder_type, capture_config.output_index
+            );
             capture_config.perform_cpu_readback = false;
             encoder_config.use_cpu_readback = false;
         } else {
-            // Log why GPU transport is not available
-            if !encoder_supports_gpu && !capture_config.perform_cpu_readback {
-                warn!(
-                    "GPU transport not available: encoder {:?} does not support GPU frame transport",
-                    encoder_config.encoder_type
-                );
-            } else if !capture_supports_nv12 && !capture_config.perform_cpu_readback {
-                warn!(
-                    "GPU transport not available: capture device does not support NV12 conversion for {:?}",
-                    encoder_config.encoder_type
-                );
-            }
-
-            // Ensure CPU readback is enabled for fallback
-            if !capture_config.perform_cpu_readback {
-                info!("Using CPU readback mode (GPU transport not available)");
-                capture_config.perform_cpu_readback = true;
-            }
+            warn!(
+                "GPU transport not available: encoder {:?} does not support GPU frame transport, using CPU readback",
+                encoder_config.encoder_type
+            );
+            capture_config.perform_cpu_readback = true;
             encoder_config.use_cpu_readback = true;
         }
 
