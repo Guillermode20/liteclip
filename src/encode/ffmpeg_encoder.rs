@@ -2,13 +2,18 @@ use super::{EncodedPacket, Encoder, EncoderConfig, StreamType};
 use crate::capture::GpuTextureFormat;
 use crate::config::{EncoderType, QualityPreset, RateControl};
 use anyhow::{Context, Result};
-use crossbeam::channel::{bounded, Receiver, Sender};
+use crossbeam::channel::{unbounded, Receiver, Sender};
 use ffmpeg::format::Pixel;
 use ffmpeg_next as ffmpeg;
 use std::collections::VecDeque;
 use std::ffi::{c_void, CString};
 use tracing::{info, warn};
-use windows::Win32::Graphics::Direct3D11::{ID3D11DeviceContext, ID3D11Resource, ID3D11Texture2D};
+use windows::Win32::Graphics::Direct3D11::{
+    D3D11CreateDevice, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, ID3D11Device,
+    ID3D11Device5, ID3D11DeviceContext, ID3D11DeviceContext4, ID3D11Fence, ID3D11Resource,
+    ID3D11Texture2D,
+};
+use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 use windows_core::Interface;
 
 #[repr(C)]
@@ -25,8 +30,16 @@ struct AvD3d11vaDeviceContext {
 struct D3d11HardwareContext {
     device_ctx_ref: *mut ffmpeg::ffi::AVBufferRef,
     frames_ctx_ref: *mut ffmpeg::ffi::AVBufferRef,
+    /// Immediate context of the encoder's own D3D11 device (separate from the capture device).
     copy_context: ID3D11DeviceContext,
     reusable_hw_frame: *mut ffmpeg::ffi::AVFrame,
+    /// Encoder's own D3D11 device — isolated from the capture device so neither thread
+    /// contends on the other's D3D11 multithread lock.
+    encoder_device: ID3D11Device,
+    /// The capture's shared ID3D11Fence opened on this (encoder) device. The encoder submits
+    /// a GPU-side Wait before CopySubresourceRegion so the GPU stalls instead of the CPU.
+    /// None until the first NV12 frame arrives with a valid fence_shared_handle.
+    encoder_fence: Option<ID3D11Fence>,
 }
 
 unsafe impl Send for D3d11HardwareContext {}
@@ -43,6 +56,7 @@ impl Drop for D3d11HardwareContext {
             if !self.device_ctx_ref.is_null() {
                 ffmpeg::ffi::av_buffer_unref(&mut self.device_ctx_ref);
             }
+            // encoder_device and copy_context are COM-ref-counted and drop automatically.
         }
     }
 }
@@ -65,8 +79,42 @@ pub struct FfmpegEncoder {
 unsafe impl Send for FfmpegEncoder {}
 
 impl FfmpegEncoder {
+    fn create_hw_frames_ctx_with_pool_size(
+        device_ctx_ref: *mut ffmpeg::ffi::AVBufferRef,
+        width: u32,
+        height: u32,
+        initial_pool_size: i32,
+    ) -> Result<*mut ffmpeg::ffi::AVBufferRef> {
+        unsafe {
+            let frames_ctx_ref = ffmpeg::ffi::av_hwframe_ctx_alloc(device_ctx_ref);
+            if frames_ctx_ref.is_null() {
+                anyhow::bail!("Failed to allocate FFmpeg D3D11 frame context");
+            }
+
+            let frames_ctx = (*frames_ctx_ref).data as *mut ffmpeg::ffi::AVHWFramesContext;
+            (*frames_ctx).format = Pixel::D3D11.into();
+            (*frames_ctx).sw_format = Pixel::NV12.into();
+            (*frames_ctx).width = width as i32;
+            (*frames_ctx).height = height as i32;
+            (*frames_ctx).initial_pool_size = initial_pool_size;
+
+            let init_frames_result = ffmpeg::ffi::av_hwframe_ctx_init(frames_ctx_ref);
+            if init_frames_result < 0 {
+                let mut frames_ctx_ref = frames_ctx_ref;
+                ffmpeg::ffi::av_buffer_unref(&mut frames_ctx_ref);
+                anyhow::bail!(
+                    "Failed to initialize FFmpeg D3D11 frame context with pool size {}: {}",
+                    initial_pool_size,
+                    init_frames_result
+                );
+            }
+
+            Ok(frames_ctx_ref)
+        }
+    }
+
     pub fn new(config: &EncoderConfig) -> Result<Self> {
-        let (tx, rx) = bounded(128);
+        let (tx, rx) = unbounded();
         Ok(Self {
             config: config.clone(),
             encoder: None,
@@ -446,6 +494,44 @@ impl FfmpegEncoder {
         height: u32,
     ) -> Result<D3d11HardwareContext> {
         unsafe {
+            // --- Create a separate D3D11 device on the same GPU adapter ---
+            // The encoder gets its own device so it never contends with the capture thread
+            // on a shared D3D11 multithread lock.
+            let dxgi_device: IDXGIDevice = gpu_frame
+                .device
+                .cast()
+                .context("Failed to get IDXGIDevice from capture D3D11 device")?;
+            let adapter = dxgi_device
+                .GetAdapter()
+                .context("Failed to get DXGI adapter from capture device")?;
+            let adapter_typed: windows::Win32::Graphics::Dxgi::IDXGIAdapter =
+                adapter.cast().context("Failed to cast DXGI adapter")?;
+
+            let feature_levels = [
+                windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_1,
+                windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_0,
+            ];
+            let mut encoder_device_opt: Option<ID3D11Device> = None;
+            let mut encoder_context_opt: Option<ID3D11DeviceContext> = None;
+            D3D11CreateDevice(
+                Some(&adapter_typed),
+                windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN,
+                windows::Win32::Foundation::HMODULE::default(),
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                Some(&feature_levels),
+                D3D11_SDK_VERSION,
+                Some(&mut encoder_device_opt),
+                None,
+                Some(&mut encoder_context_opt),
+            )
+            .ok()
+            .context("Failed to create encoder D3D11 device")?;
+            let encoder_device = encoder_device_opt.context("Encoder D3D11 device is null")?;
+            let encoder_context = encoder_context_opt.context("Encoder D3D11 context is null")?;
+
+            info!("Encoder using separate D3D11 device (isolated from capture thread)");
+
+            // --- Wire up FFmpeg's D3D11VA device context to the encoder device ---
             let device_type_name = CString::new("d3d11va").expect("static string");
             let device_type = ffmpeg::ffi::av_hwdevice_find_type_by_name(device_type_name.as_ptr());
             if device_type == ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_NONE {
@@ -460,13 +546,10 @@ impl FfmpegEncoder {
             let hw_device_ctx = (*device_ctx_ref).data as *mut ffmpeg::ffi::AVHWDeviceContext;
             let d3d11_device_ctx = (*hw_device_ctx).hwctx as *mut AvD3d11vaDeviceContext;
 
-            let device = gpu_frame.device.clone();
-            let immediate_context = gpu_frame
-                .device
-                .GetImmediateContext()
-                .context("Failed to get D3D11 immediate context for encoder")?;
-            let ffmpeg_device = device.clone();
-            let ffmpeg_context = immediate_context.clone();
+            // Hand the encoder's own device/context to FFmpeg. `mem::forget` keeps the COM
+            // objects alive — FFmpeg calls AddRef internally and will release on its own.
+            let ffmpeg_device = encoder_device.clone();
+            let ffmpeg_context = encoder_context.clone();
             (*d3d11_device_ctx).device = ffmpeg_device.as_raw() as *mut _;
             (*d3d11_device_ctx).device_context = ffmpeg_context.as_raw() as *mut _;
             std::mem::forget(ffmpeg_device);
@@ -482,32 +565,48 @@ impl FfmpegEncoder {
                 );
             }
 
-            let frames_ctx_ref = ffmpeg::ffi::av_hwframe_ctx_alloc(device_ctx_ref);
-            if frames_ctx_ref.is_null() {
-                let mut device_ctx_ref = device_ctx_ref;
-                ffmpeg::ffi::av_buffer_unref(&mut device_ctx_ref);
-                anyhow::bail!("Failed to allocate FFmpeg D3D11 frame context");
+            // Try progressively smaller pool sizes. pool_size=0 → dynamic allocation (never exhausted).
+            let pool_sizes: &[i32] = &[4, 2, 0];
+            let mut frames_ctx_ref_result = Err(anyhow::anyhow!("no pool sizes tried"));
+            for &pool_size in pool_sizes {
+                match Self::create_hw_frames_ctx_with_pool_size(
+                    device_ctx_ref,
+                    width,
+                    height,
+                    pool_size,
+                ) {
+                    Ok(frames_ctx_ref) => {
+                        if pool_size == 0 {
+                            info!("Initialized FFmpeg D3D11 frame context with dynamic pool");
+                        } else {
+                            info!(
+                                "Initialized FFmpeg D3D11 frame pool with {} surfaces",
+                                pool_size
+                            );
+                        }
+                        frames_ctx_ref_result = Ok(frames_ctx_ref);
+                        break;
+                    }
+                    Err(error) => {
+                        if pool_size == 0 {
+                            frames_ctx_ref_result = Err(error);
+                        } else {
+                            warn!(
+                                "Failed to initialize {}-surface FFmpeg D3D11 frame pool, trying smaller: {}",
+                                pool_size, error
+                            );
+                        }
+                    }
+                }
             }
-
-            let frames_ctx = (*frames_ctx_ref).data as *mut ffmpeg::ffi::AVHWFramesContext;
-            (*frames_ctx).format = Pixel::D3D11.into();
-            (*frames_ctx).sw_format = Pixel::NV12.into();
-            (*frames_ctx).width = width as i32;
-            (*frames_ctx).height = height as i32;
-            // Use 2 to avoid D3D11 array texture limits (ArraySize>2 fails with RENDER_TARGET on some drivers)
-            (*frames_ctx).initial_pool_size = 2;
-
-            let init_frames_result = ffmpeg::ffi::av_hwframe_ctx_init(frames_ctx_ref);
-            if init_frames_result < 0 {
-                let mut frames_ctx_ref = frames_ctx_ref;
-                let mut device_ctx_ref = device_ctx_ref;
-                ffmpeg::ffi::av_buffer_unref(&mut frames_ctx_ref);
-                ffmpeg::ffi::av_buffer_unref(&mut device_ctx_ref);
-                anyhow::bail!(
-                    "Failed to initialize FFmpeg D3D11 frame context: {}",
-                    init_frames_result
-                );
-            }
+            let frames_ctx_ref = match frames_ctx_ref_result {
+                Ok(frames_ctx_ref) => frames_ctx_ref,
+                Err(e) => {
+                    let mut device_ctx_ref = device_ctx_ref;
+                    ffmpeg::ffi::av_buffer_unref(&mut device_ctx_ref);
+                    return Err(e);
+                }
+            };
 
             let reusable_hw_frame = ffmpeg::ffi::av_frame_alloc();
             if reusable_hw_frame.is_null() {
@@ -521,8 +620,10 @@ impl FfmpegEncoder {
             Ok(D3d11HardwareContext {
                 device_ctx_ref,
                 frames_ctx_ref,
-                copy_context: immediate_context,
+                copy_context: encoder_context,
                 reusable_hw_frame,
+                encoder_device,
+                encoder_fence: None,
             })
         }
     }
@@ -619,14 +720,14 @@ impl FfmpegEncoder {
         let Some(ref mut encoder) = self.encoder else {
             return Ok(());
         };
-        let Some(ref hw_context) = self.hw_context else {
+        let Some(ref mut hw_context) = self.hw_context else {
             anyhow::bail!("Hardware encoder context is not initialized");
         };
 
         unsafe {
             let hw_frame = hw_context.reusable_hw_frame;
             if hw_frame.is_null() {
-                anyhow::bail!("Failed to allocate FFmpeg hardware frame");
+                anyhow::bail!("Reusable FFmpeg hardware frame is null");
             }
             ffmpeg::ffi::av_frame_unref(hw_frame);
 
@@ -639,10 +740,42 @@ impl FfmpegEncoder {
                 );
             }
 
-            let source_resource: ID3D11Resource = gpu_frame
-                .texture
+            // Open the capture's shared fence on the encoder device the first time we see a
+            // frame that carries one. Subsequent frames reuse the cached encoder_fence.
+            if hw_context.encoder_fence.is_none() {
+                if let Some(fence_handle) = gpu_frame.fence_shared_handle {
+                    match hw_context.encoder_device.cast::<ID3D11Device5>() {
+                        Ok(device5) => {
+                            let mut fence_opt: Option<ID3D11Fence> = None;
+                            match device5.OpenSharedFence(fence_handle, &mut fence_opt) {
+                                Ok(()) => {
+                                    hw_context.encoder_fence = fence_opt;
+                                    info!("Encoder opened shared NV12 sync fence (GPU-side wait enabled)");
+                                }
+                                Err(e) => {
+                                    warn!("Failed to open shared NV12 sync fence on encoder device: {}", e);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!("ID3D11Device5 unavailable on encoder device, GPU fence wait disabled: {}", e);
+                        }
+                    }
+                }
+            }
+
+            // Open the capture's NV12 texture on the encoder's own D3D11 device.
+            let mut shared_nv12_opt: Option<ID3D11Texture2D> = None;
+            hw_context
+                .encoder_device
+                .OpenSharedResource(gpu_frame.shared_handle, &mut shared_nv12_opt)
+                .context("Failed to open shared NV12 texture on encoder device")?;
+            let shared_nv12 = shared_nv12_opt
+                .context("OpenSharedResource returned null for shared NV12 texture")?;
+
+            let source_resource: ID3D11Resource = shared_nv12
                 .cast()
-                .context("Failed to cast source GPU frame texture to resource")?;
+                .context("Failed to cast shared NV12 texture to D3D11Resource")?;
 
             let raw_texture = (*hw_frame).data[0] as *mut c_void;
             let dest_texture = ID3D11Texture2D::from_raw_borrowed(&raw_texture)
@@ -650,12 +783,27 @@ impl FfmpegEncoder {
             let dest_resource: ID3D11Resource = dest_texture
                 .cast()
                 .context("Failed to cast destination GPU frame texture to resource")?;
-            let dest_array_slice = (*hw_frame).data[1] as usize as u32;
-            let dest_subresource = dest_array_slice;
+            // data[1] is the array-slice index within the FFmpeg D3D11 texture array.
+            let dest_subresource = (*hw_frame).data[1] as usize as u32;
 
-            // FFmpeg D3D11 hardware frames expose a texture plus an array-slice index in
-            // `data[1]`. Copying the whole resource can leave the encoder reading an untouched
-            // slice, which shows up as a solid green output even though encoding succeeds.
+            // Enqueue a GPU-side Wait before the copy. The hardware will not begin
+            // CopySubresourceRegion until the capture device has signaled the fence
+            // (i.e. VideoProcessorBlt has completed). No CPU thread is blocked.
+            if let Some(ref encoder_fence) = hw_context.encoder_fence {
+                if gpu_frame.fence_value > 0 {
+                    match hw_context.copy_context.cast::<ID3D11DeviceContext4>() {
+                        Ok(ctx4) => {
+                            if let Err(e) = ctx4.Wait(encoder_fence, gpu_frame.fence_value) {
+                                warn!("GPU fence Wait failed (copy will proceed without ordering guarantee): {}", e);
+                            }
+                        }
+                        Err(e) => {
+                            warn!("ID3D11DeviceContext4 unavailable for fence Wait: {}", e);
+                        }
+                    }
+                }
+            }
+
             hw_context.copy_context.CopySubresourceRegion(
                 Some(&dest_resource),
                 dest_subresource,
@@ -666,7 +814,6 @@ impl FfmpegEncoder {
                 0,
                 None,
             );
-            hw_context.copy_context.Flush();
 
             (*hw_frame).pts = encoder_pts;
             (*hw_frame).width = frame.resolution.0 as i32;

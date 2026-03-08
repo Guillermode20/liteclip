@@ -145,7 +145,9 @@ impl EncoderConfig {
 
     pub fn supports_gpu_frame_transport(&self) -> bool {
         // AMF encoder accepts NV12 hardware frames via D3D11.
-        // The capture layer now produces NV12 textures via Video Processor.
+        // The capture produces NV12 textures tagged with D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX
+        // so the encoder can open them on its own isolated D3D11 device without sharing the
+        // capture thread's command context or multithread lock.
         matches!(self.encoder_type, crate::config::EncoderType::Amf)
     }
 }

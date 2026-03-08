@@ -1,11 +1,12 @@
 //! DXGI capture with GPU-side scaling support
 
 use crate::capture::{
-    backpressure::BackpressureState, CaptureConfig, CapturedFrame, D3d11Frame, GpuTextureFormat,
+    backpressure::BackpressureState, CaptureConfig, CapturedFrame, D3d11Frame,
+    D3d11TexturePoolItem, GpuTextureFormat,
 };
 use anyhow::{bail, Context, Result};
 use bytes::{Bytes, BytesMut};
-use crossbeam::channel::{bounded, Receiver, Sender};
+use crossbeam::channel::{bounded, unbounded, Receiver, Sender};
 use std::mem::ManuallyDrop;
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,19 +14,21 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
-use windows::Win32::Foundation::BOOL;
+use windows::Win32::Foundation::{BOOL, HANDLE};
 use windows::Win32::Graphics::Direct3D11::{
-    ID3D11Buffer, ID3D11Device, ID3D11DeviceContext, ID3D11InputLayout, ID3D11Multithread,
-    ID3D11PixelShader, ID3D11RenderTargetView, ID3D11Resource, ID3D11SamplerState,
-    ID3D11ShaderResourceView, ID3D11Texture2D, ID3D11VertexShader, ID3D11VideoContext,
-    ID3D11VideoDevice, ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator,
-    ID3D11VideoProcessorInputView, ID3D11VideoProcessorOutputView, D3D11_BIND_VERTEX_BUFFER,
+    D3D11_BIND_RENDER_TARGET, D3D11_BIND_VERTEX_BUFFER, D3D11_FENCE_FLAG_SHARED,
     D3D11_INPUT_ELEMENT_DESC, D3D11_INPUT_PER_VERTEX_DATA, D3D11_MAPPED_SUBRESOURCE,
-    D3D11_MAP_READ, D3D11_USAGE_IMMUTABLE, D3D11_VIDEO_PROCESSOR_CONTENT_DESC,
-    D3D11_VIDEO_PROCESSOR_COLOR_SPACE, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
-    D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255, D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_16_235,
-    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_STREAM,
-    D3D11_VPIV_DIMENSION_TEXTURE2D, D3D11_VPOV_DIMENSION_TEXTURE2D, D3D11_BIND_RENDER_TARGET,
+    D3D11_MAP_READ, D3D11_RESOURCE_MISC_SHARED, D3D11_USAGE_IMMUTABLE,
+    D3D11_VIDEO_PROCESSOR_COLOR_SPACE, D3D11_VIDEO_PROCESSOR_CONTENT_DESC,
+    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255,
+    D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_16_235, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC,
+    D3D11_VIDEO_PROCESSOR_STREAM, D3D11_VPIV_DIMENSION_TEXTURE2D, D3D11_VPOV_DIMENSION_TEXTURE2D,
+    ID3D11Buffer, ID3D11Device, ID3D11Device5, ID3D11DeviceContext, ID3D11DeviceContext4,
+    ID3D11Fence, ID3D11InputLayout, ID3D11Multithread, ID3D11PixelShader,
+    ID3D11RenderTargetView, ID3D11Resource, ID3D11SamplerState, ID3D11ShaderResourceView,
+    ID3D11Texture2D, ID3D11VertexShader, ID3D11VideoContext, ID3D11VideoDevice,
+    ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator, ID3D11VideoProcessorInputView,
+    ID3D11VideoProcessorOutputView,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_FORMAT_R32G32_FLOAT, DXGI_RATIONAL,
@@ -49,6 +52,27 @@ struct Vertex {
     v: f32,
 }
 
+struct Nv12TexturePool {
+    available: Vec<D3d11TexturePoolItem>,
+    return_tx: Sender<D3d11TexturePoolItem>,
+    return_rx: Receiver<D3d11TexturePoolItem>,
+    width: u32,
+    height: u32,
+}
+
+impl Nv12TexturePool {
+    fn new(width: u32, height: u32) -> Self {
+        let (return_tx, return_rx) = unbounded();
+        Self {
+            available: Vec::new(),
+            return_tx,
+            return_rx,
+            width,
+            height,
+        }
+    }
+}
+
 /// DXGI capture state with GPU-side scaling support
 struct DxgiCaptureState {
     d3d_device: ID3D11Device,
@@ -69,17 +93,25 @@ struct DxgiCaptureState {
     rtv: Option<ID3D11RenderTargetView>,
     scale_texture: Option<ID3D11Texture2D>,
     native_buffer: BytesMut,
-    nv12_texture: Option<ID3D11Texture2D>,
+    nv12_pool: Option<Nv12TexturePool>,
     video_device: Option<ID3D11VideoDevice>,
     video_context: Option<ID3D11VideoContext>,
     video_processor: Option<ID3D11VideoProcessor>,
     video_processor_enumerator: Option<ID3D11VideoProcessorEnumerator>,
     scale_input_view: Option<ID3D11VideoProcessorInputView>,
-    nv12_output_view: Option<ID3D11VideoProcessorOutputView>,
     nv12_conversion_available: bool,
     nv12_runtime_failures: u32,
     nv12_retry_after: Option<Instant>,
     nv12_unavailable_logged: bool,
+    /// Shared ID3D11Fence used for GPU-side cross-device synchronization.
+    /// After VideoProcessorBlt the capture GPU queue signals this fence; the encoder GPU queue
+    /// waits on it before CopySubresourceRegion. No CPU stall — ordering is fully on the GPU.
+    nv12_sync_fence: Option<ID3D11Fence>,
+    /// NT kernel handle for `nv12_sync_fence` (D3D11_FENCE_FLAG_SHARED).
+    /// Passed through D3d11Frame so the encoder can call OpenSharedFence once on its own device.
+    nv12_fence_shared_handle: Option<HANDLE>,
+    /// Monotonically increasing value. Incremented and signaled before each frame hand-off.
+    nv12_fence_value: u64,
 }
 
 impl DxgiCaptureState {
@@ -280,13 +312,12 @@ impl DxgiCaptureState {
 
             // Initialize NV12 conversion resources for hardware encoding
             let (
-                nv12_texture,
+                nv12_pool,
                 video_device,
                 video_context,
                 video_processor,
                 video_processor_enumerator,
                 scale_input_view,
-                nv12_output_view,
                 nv12_conversion_available,
             ) = Self::init_nv12_conversion_resources(&d3d_device, target_width, target_height)
                 .unwrap_or_else(|e| {
@@ -294,12 +325,60 @@ impl DxgiCaptureState {
                         "NV12 conversion unavailable during capture init: {}; GPU-preferred capture will fall back to CPU readback",
                         e
                     );
-                    (None, None, None, None, None, None, None, false)
+                    (None, None, None, None, None, None, false)
                 });
 
             if nv12_conversion_available {
                 info!("NV12 conversion enabled for GPU zero-copy encoding");
             }
+
+            // Create a shared ID3D11Fence for GPU-side cross-device synchronization.
+            // After VideoProcessorBlt the capture GPU queue signals the fence; the encoder GPU
+            // queue waits on it before CopySubresourceRegion. This replaces the CPU spin loop
+            // (D3D11_QUERY_EVENT) which held the DXGI frame during the stall and caused the
+            // capture rate to drop below 60 fps whenever AMD's GPU took >16 ms for the BLT.
+            let (nv12_sync_fence, nv12_fence_shared_handle) = if nv12_conversion_available {
+                match d3d_device.cast::<ID3D11Device5>() {
+                    Ok(device5) => {
+                        let mut fence_opt: Option<ID3D11Fence> = None;
+                        match device5.CreateFence(0, D3D11_FENCE_FLAG_SHARED, &mut fence_opt) {
+                            Ok(()) => match fence_opt {
+                                Some(fence) => {
+                                    // 0x10000000 = GENERIC_ALL — full access for cross-device use
+                                    match fence.CreateSharedHandle(
+                                        None,
+                                        0x10000000u32,
+                                        windows_core::PCWSTR::null(),
+                                    ) {
+                                        Ok(handle) => {
+                                            info!("NV12 sync fence created (GPU-side cross-device ordering)");
+                                            (Some(fence), Some(handle))
+                                        }
+                                        Err(e) => {
+                                            warn!("Failed to create shared fence handle, NV12 sync will fall back to Flush-only: {}", e);
+                                            (None, None)
+                                        }
+                                    }
+                                }
+                                None => {
+                                    warn!("CreateFence returned null, NV12 sync will fall back to Flush-only");
+                                    (None, None)
+                                }
+                            },
+                            Err(e) => {
+                                warn!("Failed to create NV12 sync fence, NV12 sync will fall back to Flush-only: {}", e);
+                                (None, None)
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!("ID3D11Device5 unavailable, NV12 sync will fall back to Flush-only: {}", e);
+                        (None, None)
+                    }
+                }
+            } else {
+                (None, None)
+            };
 
             // Buffer size is based on target resolution (smaller if GPU scaling enabled)
             let buffer_size = if scale_texture.is_some() {
@@ -344,17 +423,19 @@ impl DxgiCaptureState {
                 rtv,
                 scale_texture,
                 native_buffer,
-                nv12_texture,
+                nv12_pool,
                 video_device,
                 video_context,
                 video_processor,
                 video_processor_enumerator,
                 scale_input_view,
-                nv12_output_view,
                 nv12_conversion_available,
                 nv12_runtime_failures: 0,
                 nv12_retry_after: None,
                 nv12_unavailable_logged: false,
+                nv12_sync_fence,
+                nv12_fence_shared_handle,
+                nv12_fence_value: 0,
             })
         }
     }
@@ -378,13 +459,12 @@ impl DxgiCaptureState {
         width: u32,
         height: u32,
     ) -> Result<(
-        Option<ID3D11Texture2D>,
+        Option<Nv12TexturePool>,
         Option<ID3D11VideoDevice>,
         Option<ID3D11VideoContext>,
         Option<ID3D11VideoProcessor>,
         Option<ID3D11VideoProcessorEnumerator>,
         Option<ID3D11VideoProcessorInputView>,
-        Option<ID3D11VideoProcessorOutputView>,
         bool,
     )> {
         unsafe {
@@ -392,29 +472,6 @@ impl DxgiCaptureState {
             let video_device: ID3D11VideoDevice = d3d_device
                 .cast()
                 .context("D3D11 device does not support video processing")?;
-
-            // Create NV12 texture for output (Video Processor output requires D3D11_BIND_RENDER_TARGET)
-            let nv12_desc = windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE2D_DESC {
-                Width: width,
-                Height: height,
-                MipLevels: 1,
-                ArraySize: 1,
-                Format: DXGI_FORMAT_NV12,
-                SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC {
-                    Count: 1,
-                    Quality: 0,
-                },
-                Usage: windows::Win32::Graphics::Direct3D11::D3D11_USAGE_DEFAULT,
-                BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
-                CPUAccessFlags: 0,
-                MiscFlags: 0,
-            };
-            let mut nv12_texture: Option<ID3D11Texture2D> = None;
-            d3d_device
-                .CreateTexture2D(&nv12_desc, None, Some(&mut nv12_texture))
-                .ok()
-                .context("Failed to create NV12 texture")?;
-            let nv12_texture = nv12_texture.context("NV12 texture is null")?;
 
             // Create video processor enumerator
             let content_desc = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
@@ -471,18 +528,28 @@ impl DxgiCaptureState {
                 .CreateVideoProcessor(&video_processor_enumerator, 0)
                 .context("Failed to create video processor")?;
 
+            let mut nv12_pool = Nv12TexturePool::new(width, height);
+            for _ in 0..4 {
+                nv12_pool.available.push(Self::create_nv12_pool_item(
+                    d3d_device,
+                    &video_device,
+                    &video_processor_enumerator,
+                    width,
+                    height,
+                )?);
+            }
+
             info!(
                 "NV12 video processor initialized successfully for {}x{}",
                 width, height
             );
 
             Ok((
-                Some(nv12_texture),
+                Some(nv12_pool),
                 Some(video_device),
                 None, // video_context will be obtained from d3d_context when needed
                 Some(video_processor),
                 Some(video_processor_enumerator),
-                None,
                 None,
                 true,
             ))
@@ -572,62 +639,120 @@ impl DxgiCaptureState {
     }
 
     fn ensure_nv12_cached_views(state: &mut DxgiCaptureState) -> Result<()> {
-        unsafe {
-            if state.nv12_output_view.is_none() {
-                let video_device = state
-                    .video_device
-                    .as_ref()
-                    .context("Video device not initialized")?;
-                let enumerator = state
-                    .video_processor_enumerator
-                    .as_ref()
-                    .context("Video processor enumerator is None")?;
-                let nv12_texture = state
-                    .nv12_texture
-                    .as_ref()
-                    .context("NV12 texture not initialized")?;
-                let output_view_desc = D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC {
-                    ViewDimension: D3D11_VPOV_DIMENSION_TEXTURE2D,
-                    Anonymous: std::mem::zeroed(),
-                };
-                let mut output_view: Option<ID3D11VideoProcessorOutputView> = None;
-                video_device
-                    .CreateVideoProcessorOutputView(
-                        nv12_texture,
-                        enumerator,
-                        &output_view_desc,
-                        Some(&mut output_view),
-                    )
-                    .ok()
-                    .context("Failed to create video processor output view")?;
-                state.nv12_output_view = Some(output_view.context("Output view is null")?);
-            }
-
-            if state.scale_input_view.is_none() {
-                if let Some(scale_texture) = state.scale_texture.as_ref() {
-                    state.scale_input_view =
-                        Some(Self::create_video_processor_input_view(state, scale_texture)?);
-                }
+        if state.scale_input_view.is_none() {
+            if let Some(scale_texture) = state.scale_texture.as_ref() {
+                state.scale_input_view =
+                    Some(Self::create_video_processor_input_view(state, scale_texture)?);
             }
         }
 
         Ok(())
     }
 
-    /// Convert BGRA texture to NV12 using Video Processor
+    fn create_nv12_pool_item(
+        d3d_device: &ID3D11Device,
+        video_device: &ID3D11VideoDevice,
+        enumerator: &ID3D11VideoProcessorEnumerator,
+        width: u32,
+        height: u32,
+    ) -> Result<D3d11TexturePoolItem> {
+        unsafe {
+            // D3D11_RESOURCE_MISC_SHARED enables cross-device sharing via GetSharedHandle /
+            // OpenSharedResource. GPU ordering is ensured by a D3D11_QUERY_EVENT stall on the
+            // capture side before the frame is handed off; no keyed mutex is needed.
+            let nv12_desc = windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE2D_DESC {
+                Width: width,
+                Height: height,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_NV12,
+                SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
+                Usage: windows::Win32::Graphics::Direct3D11::D3D11_USAGE_DEFAULT,
+                BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
+                CPUAccessFlags: 0,
+                MiscFlags: D3D11_RESOURCE_MISC_SHARED.0 as u32,
+            };
+            let mut texture: Option<ID3D11Texture2D> = None;
+            d3d_device
+                .CreateTexture2D(&nv12_desc, None, Some(&mut texture))
+                .ok()
+                .context("Failed to create pooled NV12 shared texture")?;
+            let texture = texture.context("Pooled NV12 texture is null")?;
+
+            // Get the DXGI shared handle so the encoder can open this texture on its own device.
+            let dxgi_resource: IDXGIResource = texture
+                .cast()
+                .context("Failed to get IDXGIResource from pooled NV12 texture")?;
+            let shared_handle: HANDLE = dxgi_resource
+                .GetSharedHandle()
+                .context("Failed to get shared handle for pooled NV12 texture")?;
+
+            let output_view_desc = D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC {
+                ViewDimension: D3D11_VPOV_DIMENSION_TEXTURE2D,
+                Anonymous: std::mem::zeroed(),
+            };
+            let mut output_view: Option<ID3D11VideoProcessorOutputView> = None;
+            video_device
+                .CreateVideoProcessorOutputView(
+                    &texture,
+                    enumerator,
+                    &output_view_desc,
+                    Some(&mut output_view),
+                )
+                .ok()
+                .context("Failed to create pooled NV12 output view")?;
+
+            Ok(D3d11TexturePoolItem {
+                texture,
+                output_view: output_view.context("Pooled NV12 output view is null")?,
+                shared_handle,
+            })
+        }
+    }
+
+    fn acquire_nv12_pool_item(state: &mut DxgiCaptureState) -> Result<D3d11TexturePoolItem> {
+        let (width, height, maybe_item) = {
+            let pool = state
+                .nv12_pool
+                .as_mut()
+                .context("NV12 pool is not initialized")?;
+            while let Ok(item) = pool.return_rx.try_recv() {
+                pool.available.push(item);
+            }
+            (pool.width, pool.height, pool.available.pop())
+        };
+
+        if let Some(item) = maybe_item {
+            return Ok(item);
+        }
+
+        let video_device = state
+            .video_device
+            .as_ref()
+            .context("Video device not initialized")?;
+        let enumerator = state
+            .video_processor_enumerator
+            .as_ref()
+            .context("Video processor enumerator is None")?;
+        Self::create_nv12_pool_item(&state.d3d_device, video_device, enumerator, width, height)
+    }
+
+    /// Convert BGRA texture to NV12 using Video Processor.
+    ///
+    /// Acquires the NV12 pool texture's keyed mutex (key=0 = capture's write turn) before the
+    /// VideoProcessorBlt and releases it with key=1 afterward to signal the encoder it may read.
     fn convert_bgra_to_nv12(
         state: &mut DxgiCaptureState,
         bgra_texture: &ID3D11Texture2D,
-        width: u32,
-        height: u32,
-    ) -> Result<ID3D11Texture2D> {
+    ) -> Result<D3d11TexturePoolItem> {
         unsafe {
             Self::ensure_nv12_cached_views(state)?;
+            let pooled_output = Self::acquire_nv12_pool_item(state)?;
             let Some(ref video_processor) = state.video_processor else {
                 bail!("Video processor not initialized");
-            };
-            let Some(ref nv12_texture) = state.nv12_texture else {
-                bail!("NV12 texture not initialized");
             };
 
             // Get video context from D3D context (lazy initialization)
@@ -642,10 +767,6 @@ impl DxgiCaptureState {
                 .video_context
                 .as_ref()
                 .context("Video context is None")?;
-            let output_view = state
-                .nv12_output_view
-                .as_ref()
-                .context("Output view is null")?;
             let using_cached_scale_input = state
                 .scale_texture
                 .as_ref()
@@ -692,23 +813,29 @@ impl DxgiCaptureState {
             };
 
             video_context
-                .VideoProcessorBlt(video_processor, output_view, 0, &[stream_data])
+                .VideoProcessorBlt(video_processor, &pooled_output.output_view, 0, &[stream_data])
                 .ok()
                 .context("VideoProcessorBlt failed")?;
 
-            // Create an owned copy of the NV12 texture to return
-            let owned_nv12 = Self::create_owned_texture(state, width, height, DXGI_FORMAT_NV12)?;
-            let owned_resource: ID3D11Resource = owned_nv12
-                .cast()
-                .context("Failed to cast owned NV12 texture to resource")?;
-            let nv12_resource: ID3D11Resource = nv12_texture
-                .cast()
-                .context("Failed to cast NV12 texture to resource")?;
-            state
-                .d3d_context
-                .CopyResource(Some(&owned_resource), Some(&nv12_resource));
+            // Enqueue a GPU-side Signal into the capture device's command queue. The encoder
+            // device's command queue will Wait on this fence value before CopySubresourceRegion,
+            // guaranteeing that VideoProcessorBlt has completed before the encoder reads the
+            // NV12 texture. This is entirely GPU-side — no CPU stall, no DXGI frame hold-up.
+            if let Some(ref sync_fence) = state.nv12_sync_fence {
+                state.nv12_fence_value += 1;
+                let ctx4: ID3D11DeviceContext4 = state
+                    .d3d_context
+                    .cast()
+                    .context("Failed to get ID3D11DeviceContext4 for fence signal")?;
+                ctx4.Signal(sync_fence, state.nv12_fence_value)
+                    .context("Failed to signal NV12 sync fence")?;
+            }
+            // Flush submits all pending GPU commands (VideoProcessorBlt + Signal) to the
+            // hardware queue. This ensures the Signal is in-flight before the frame is handed
+            // off to the encoder, so the encoder's Wait sees a valid fence value.
+            state.d3d_context.Flush();
 
-            Ok(owned_nv12)
+            Ok(pooled_output)
         }
     }
 
@@ -734,8 +861,8 @@ impl DxgiCaptureState {
                 };
 
             if should_try_nv12 {
-                match Self::convert_bgra_to_nv12(state, &source_texture, resolution.0, resolution.1) {
-                    Ok(nv12_texture) => {
+                match Self::convert_bgra_to_nv12(state, &source_texture) {
+                    Ok(nv12_item) => {
                         if state.nv12_runtime_failures > 0 {
                             info!(
                                 "NV12 GPU conversion recovered after {} runtime failure(s)",
@@ -747,11 +874,19 @@ impl DxgiCaptureState {
 
                         return Ok(CapturedFrame {
                             bgra: Bytes::new(),
-                            d3d11: Some(Arc::new(D3d11Frame {
-                                texture: nv12_texture,
-                                device: state.d3d_device.clone(),
-                                format: GpuTextureFormat::Nv12,
-                            })),
+                            d3d11: Some(Arc::new(D3d11Frame::from_pooled(
+                                state.d3d_device.clone(),
+                                GpuTextureFormat::Nv12,
+                                state
+                                    .nv12_pool
+                                    .as_ref()
+                                    .context("NV12 pool is not initialized")?
+                                    .return_tx
+                                    .clone(),
+                                nv12_item,
+                                state.nv12_fence_value,
+                                state.nv12_fence_shared_handle,
+                            ))),
                             timestamp,
                             resolution,
                         });

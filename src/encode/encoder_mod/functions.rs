@@ -3,7 +3,7 @@
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
 use anyhow::{Context, Result};
-use crossbeam::channel::{bounded, Receiver, Sender};
+use crossbeam::channel::{bounded, unbounded, Receiver, Sender};
 #[cfg(feature = "ffmpeg")]
 use ffmpeg::format::Pixel;
 #[cfg(feature = "ffmpeg")]
@@ -33,6 +33,50 @@ pub trait Encoder: Send + 'static {
     fn packet_rx(&self) -> Receiver<EncodedPacket>;
     /// Check if encoder is still running
     fn is_running(&self) -> bool;
+}
+
+fn spawn_buffer_writer(
+    buffer: crate::buffer::ring::SharedReplayBuffer,
+) -> (
+    Sender<EncodedPacket>,
+    std::thread::JoinHandle<(u64, usize)>,
+) {
+    let (packet_tx, packet_rx) = unbounded::<EncodedPacket>();
+    let thread = std::thread::Builder::new()
+        .name("encoder-buffer-writer".to_string())
+        .spawn(move || {
+            let mut total_packets = 0u64;
+            let mut flush_batches = 0usize;
+            let mut packet_batch = Vec::with_capacity(128);
+
+            while let Ok(packet) = packet_rx.recv() {
+                packet_batch.push(packet);
+                total_packets = total_packets.saturating_add(1);
+
+                while packet_batch.len() < 128 {
+                    match packet_rx.try_recv() {
+                        Ok(packet) => {
+                            packet_batch.push(packet);
+                            total_packets = total_packets.saturating_add(1);
+                        }
+                        Err(_) => break,
+                    }
+                }
+
+                buffer.push_batch(packet_batch.drain(..));
+                flush_batches = flush_batches.saturating_add(1);
+            }
+
+            if !packet_batch.is_empty() {
+                buffer.push_batch(packet_batch.drain(..));
+                flush_batches = flush_batches.saturating_add(1);
+            }
+
+            (total_packets, flush_batches)
+        })
+        .expect("failed to spawn encoder buffer writer thread");
+
+    (packet_tx, thread)
 }
 
 fn resolve_encoder_config(config: &EncoderConfig) -> EncoderConfig {
@@ -251,22 +295,17 @@ pub fn spawn_encoder(
             }
             debug!("Encoder initialized");
             let packet_rx = encoder.packet_rx();
-            let mut packet_batch = Vec::with_capacity(64);
+            let (buffer_packet_tx, buffer_writer_thread) = spawn_buffer_writer(buffer.clone());
             let mut frames_encoded = 0u64;
             let mut packets_received = 0u64;
             let mut consecutive_encode_errors = 0u32;
             loop {
-                let mut count = 0;
                 while let Ok(packet) = packet_rx.try_recv() {
-                    packet_batch.push(packet);
-                    count += 1;
                     packets_received += 1;
-                    if count >= 64 {
+                    if buffer_packet_tx.send(packet).is_err() {
+                        warn!("Buffer writer channel closed, stopping encoder");
                         break;
                     }
-                }
-                if !packet_batch.is_empty() {
-                    buffer.push_batch(packet_batch.drain(..));
                 }
                 match frame_rx.recv_timeout(std::time::Duration::from_millis(15)) {
                     Ok(frame) => {
@@ -302,7 +341,11 @@ pub fn spawn_encoder(
             match encoder.flush() {
                 Ok(packets) => {
                     info!("Flushed {} packets from encoder", packets.len());
-                    buffer.push_batch(packets);
+                    for packet in packets {
+                        if buffer_packet_tx.send(packet).is_err() {
+                            break;
+                        }
+                    }
                 }
                 Err(e) => {
                     warn!("Failed to flush encoder: {}", e);
@@ -310,13 +353,18 @@ pub fn spawn_encoder(
             }
             let mut final_packets = Vec::new();
             while let Ok(packet) = packet_rx.try_recv() {
-                final_packets.push(packet);
+                if buffer_packet_tx.send(packet).is_ok() {
+                    final_packets.push(());
+                }
             }
-            info!(
-                "Drained {} final packets from encoder channel",
-                final_packets.len()
-            );
-            buffer.push_batch(final_packets);
+            info!("Drained {} final packets from encoder channel", final_packets.len());
+            drop(buffer_packet_tx);
+            if let Ok((buffered_packets, flush_batches)) = buffer_writer_thread.join() {
+                info!(
+                    "Encoder buffer writer flushed {} packets across {} batches",
+                    buffered_packets, flush_batches
+                );
+            }
             debug!("Encoder thread stopped");
             Ok(())
         })?;
@@ -369,19 +417,14 @@ pub fn spawn_encoder_with_receiver(
             }
             debug!("Encoder initialized");
             let packet_rx = encoder.packet_rx();
-            let mut packet_batch = Vec::with_capacity(64);
+            let (buffer_packet_tx, buffer_writer_thread) = spawn_buffer_writer(buffer.clone());
             let mut consecutive_encode_errors = 0u32;
             loop {
-                let mut count = 0;
                 while let Ok(packet) = packet_rx.try_recv() {
-                    packet_batch.push(packet);
-                    count += 1;
-                    if count >= 64 {
+                    if buffer_packet_tx.send(packet).is_err() {
+                        warn!("Buffer writer channel closed, stopping encoder");
                         break;
                     }
-                }
-                if !packet_batch.is_empty() {
-                    buffer.push_batch(packet_batch.drain(..));
                 }
                 match frame_rx.recv_timeout(std::time::Duration::from_millis(15)) {
                     Ok(frame) => {
@@ -411,7 +454,11 @@ pub fn spawn_encoder_with_receiver(
             debug!("Encoder thread shutting down");
             match encoder.flush() {
                 Ok(packets) => {
-                    buffer.push_batch(packets);
+                    for packet in packets {
+                        if buffer_packet_tx.send(packet).is_err() {
+                            break;
+                        }
+                    }
                 }
                 Err(e) => {
                     warn!("Failed to flush encoder: {}", e);
@@ -419,9 +466,18 @@ pub fn spawn_encoder_with_receiver(
             }
             let mut final_packets = Vec::new();
             while let Ok(packet) = packet_rx.try_recv() {
-                final_packets.push(packet);
+                if buffer_packet_tx.send(packet).is_ok() {
+                    final_packets.push(());
+                }
             }
-            buffer.push_batch(final_packets);
+            debug!("Drained {} final packets from encoder channel", final_packets.len());
+            drop(buffer_packet_tx);
+            if let Ok((buffered_packets, flush_batches)) = buffer_writer_thread.join() {
+                debug!(
+                    "Encoder buffer writer flushed {} packets across {} batches",
+                    buffered_packets, flush_batches
+                );
+            }
             debug!("Encoder thread stopped");
             Ok(())
         })?;
