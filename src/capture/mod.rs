@@ -48,10 +48,22 @@ impl From<&crate::config::Config> for CaptureConfig {
     }
 }
 
+/// GPU texture format for D3D11 frames
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GpuTextureFormat {
+    /// BGRA format (B8G8R8A8_UNORM) - default capture format
+    Bgra,
+    /// NV12 format - required for hardware encoders like AMF
+    Nv12,
+}
+
 #[cfg(windows)]
 pub struct D3d11Frame {
     pub texture: ID3D11Texture2D,
     pub device: ID3D11Device,
+    /// Texture format - indicates whether this is BGRA or NV12
+    pub format: GpuTextureFormat,
 }
 
 /// Captured frame data

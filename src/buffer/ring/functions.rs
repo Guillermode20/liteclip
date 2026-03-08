@@ -27,6 +27,16 @@ pub(crate) fn h264_nal_type(data: &[u8]) -> Option<u8> {
     None
 }
 
+pub(crate) fn hevc_nal_type(data: &[u8]) -> Option<u8> {
+    if data.len() >= 6 && data[0..4] == [0x00, 0x00, 0x00, 0x01] {
+        return Some((data[4] >> 1) & 0x3f);
+    }
+    if data.len() >= 5 && data[0..3] == [0x00, 0x00, 0x01] {
+        return Some((data[3] >> 1) & 0x3f);
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use crate::buffer::ring::types::ReplayBuffer;
@@ -111,7 +121,7 @@ mod tests {
     }
 
     #[test]
-    fn test_soft_clear_preserves_keyframes() {
+    fn test_soft_clear_clears_all_state() {
         let mut buffer = ReplayBuffer::with_params(Duration::from_secs(120), 512);
 
         // Add packets with keyframes
@@ -127,18 +137,18 @@ mod tests {
             "Should have keyframes before soft clear"
         );
 
-        // Soft clear should preserve keyframe tracking
+        // Soft clear should clear all state including keyframe index
         buffer.soft_clear();
 
         let stats_after = buffer.stats();
         assert_eq!(stats_after.packet_count, 0, "Packets should be cleared");
         assert_eq!(stats_after.total_bytes, 0, "Bytes should be cleared");
-        assert!(
-            stats_after.keyframe_count > 0,
-            "Keyframes should be preserved after soft clear"
+        assert_eq!(
+            stats_after.keyframe_count, 0,
+            "Keyframe index should be cleared to prevent stale indices"
         );
 
-        // Add more packets and verify keyframe tracking still works
+        // Add more packets and verify keyframe tracking works from fresh state
         for i in 10..20 {
             let is_keyframe = i % 3 == 0;
             buffer.push(create_test_packet(i * 1_000_000, is_keyframe, 1024));
@@ -219,5 +229,148 @@ mod tests {
             snap.iter().any(|p| p.is_keyframe),
             "snapshot after wrap contains no keyframe packets"
         );
+    }
+
+    fn create_hevc_vps_packet(pts: i64) -> EncodedPacket {
+        EncodedPacket {
+            data: Bytes::from(vec![0x00, 0x00, 0x00, 0x01, 0x40, 0x01, 0x0c, 0x01]),
+            pts,
+            dts: pts,
+            is_keyframe: false,
+            stream: StreamType::Video,
+            resolution: None,
+        }
+    }
+
+    fn create_hevc_sps_packet(pts: i64) -> EncodedPacket {
+        EncodedPacket {
+            data: Bytes::from(vec![0x00, 0x00, 0x00, 0x01, 0x42, 0x01, 0x01, 0x01]),
+            pts,
+            dts: pts,
+            is_keyframe: false,
+            stream: StreamType::Video,
+            resolution: None,
+        }
+    }
+
+    fn create_hevc_pps_packet(pts: i64) -> EncodedPacket {
+        EncodedPacket {
+            data: Bytes::from(vec![0x00, 0x00, 0x00, 0x01, 0x44, 0x01, 0xc1, 0x72]),
+            pts,
+            dts: pts,
+            is_keyframe: false,
+            stream: StreamType::Video,
+            resolution: None,
+        }
+    }
+
+    fn create_hevc_idr_packet(pts: i64) -> EncodedPacket {
+        EncodedPacket {
+            data: Bytes::from(vec![0x00, 0x00, 0x00, 0x01, 0x26, 0x01, 0xaf, 0x1d]),
+            pts,
+            dts: pts,
+            is_keyframe: true,
+            stream: StreamType::Video,
+            resolution: None,
+        }
+    }
+
+    #[test]
+    fn test_hevc_nal_type_detection() {
+        assert_eq!(
+            super::hevc_nal_type(&[0x00, 0x00, 0x00, 0x01, 0x40, 0x01]),
+            Some(32)
+        );
+        assert_eq!(
+            super::hevc_nal_type(&[0x00, 0x00, 0x00, 0x01, 0x42, 0x01]),
+            Some(33)
+        );
+        assert_eq!(
+            super::hevc_nal_type(&[0x00, 0x00, 0x00, 0x01, 0x44, 0x01]),
+            Some(34)
+        );
+        assert_eq!(
+            super::hevc_nal_type(&[0x00, 0x00, 0x00, 0x01, 0x26, 0x01]),
+            Some(19)
+        );
+    }
+
+    #[test]
+    fn test_hevc_parameter_set_caching() {
+        use crate::buffer::ring::types::ReplayBuffer;
+        let mut buffer = ReplayBuffer::with_params(Duration::from_secs(120), 512);
+
+        buffer.push(create_hevc_vps_packet(0));
+        buffer.push(create_hevc_sps_packet(1_000_000));
+        buffer.push(create_hevc_pps_packet(2_000_000));
+        buffer.push(create_hevc_idr_packet(3_000_000));
+
+        let snapshot = buffer.snapshot().unwrap();
+        assert!(snapshot.len() >= 4);
+    }
+
+    #[test]
+    fn test_hevc_snapshot_prepends_parameter_sets() {
+        use crate::buffer::ring::types::ReplayBuffer;
+        let mut buffer = ReplayBuffer::with_params(Duration::from_secs(120), 512);
+
+        buffer.push(create_hevc_vps_packet(0));
+        buffer.push(create_hevc_sps_packet(1_000_000));
+        buffer.push(create_hevc_pps_packet(2_000_000));
+        buffer.push(create_hevc_idr_packet(3_000_000));
+
+        buffer.soft_clear();
+
+        buffer.push(create_hevc_idr_packet(4_000_000));
+
+        let snapshot = buffer.snapshot().unwrap();
+        assert_eq!(snapshot.len(), 4);
+        assert_eq!(super::hevc_nal_type(&snapshot[0].data), Some(32));
+        assert_eq!(super::hevc_nal_type(&snapshot[1].data), Some(33));
+        assert_eq!(super::hevc_nal_type(&snapshot[2].data), Some(34));
+        assert_eq!(super::hevc_nal_type(&snapshot[3].data), Some(19));
+    }
+
+    #[test]
+    fn test_hevc_snapshot_from_prepends_parameter_sets() {
+        use crate::buffer::ring::types::ReplayBuffer;
+        let mut buffer = ReplayBuffer::with_params(Duration::from_secs(120), 512);
+
+        buffer.push(create_hevc_vps_packet(0));
+        buffer.push(create_hevc_sps_packet(1_000_000));
+        buffer.push(create_hevc_pps_packet(2_000_000));
+        buffer.push(create_hevc_idr_packet(3_000_000));
+
+        buffer.soft_clear();
+
+        buffer.push(create_hevc_idr_packet(4_000_000));
+
+        let snapshot = buffer.snapshot_from(3_000_000).unwrap();
+        assert!(snapshot.len() >= 4);
+        assert_eq!(super::hevc_nal_type(&snapshot[0].data), Some(32));
+        assert_eq!(super::hevc_nal_type(&snapshot[1].data), Some(33));
+        assert_eq!(super::hevc_nal_type(&snapshot[2].data), Some(34));
+    }
+
+    #[test]
+    fn test_soft_clear_preserves_hevc_parameter_sets() {
+        use crate::buffer::ring::types::ReplayBuffer;
+        let mut buffer = ReplayBuffer::with_params(Duration::from_secs(120), 512);
+
+        buffer.push(create_hevc_vps_packet(0));
+        buffer.push(create_hevc_sps_packet(1_000_000));
+        buffer.push(create_hevc_pps_packet(2_000_000));
+
+        buffer.soft_clear();
+
+        assert_eq!(buffer.stats().packet_count, 0);
+        assert_eq!(buffer.stats().keyframe_count, 0);
+
+        buffer.push(create_hevc_idr_packet(4_000_000));
+        let snapshot = buffer.snapshot().unwrap();
+        assert_eq!(snapshot.len(), 4);
+        assert_eq!(super::hevc_nal_type(&snapshot[0].data), Some(32));
+        assert_eq!(super::hevc_nal_type(&snapshot[1].data), Some(33));
+        assert_eq!(super::hevc_nal_type(&snapshot[2].data), Some(34));
     }
 }

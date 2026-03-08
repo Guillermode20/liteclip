@@ -412,14 +412,7 @@ mod tests {
     use super::*;
 
     fn create_test_config() -> EncoderConfig {
-        EncoderConfig::new(
-            crate::config::Codec::H264,
-            20,
-            30,
-            (1920, 1080),
-            crate::config::EncoderType::Software,
-            1,
-        )
+        EncoderConfig::new(20, 30, (1920, 1080), crate::config::EncoderType::Amf, 1)
     }
 
     #[test]
@@ -437,6 +430,6 @@ mod tests {
     #[test]
     fn test_encoder_codec_name() {
         let config = create_test_config();
-        assert_eq!(config.ffmpeg_codec_name(), "libx264");
+        assert_eq!(config.ffmpeg_codec_name(), "hevc_amf");
     }
 }

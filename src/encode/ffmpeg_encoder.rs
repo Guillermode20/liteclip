@@ -1,4 +1,5 @@
 use super::{EncodedPacket, Encoder, EncoderConfig, StreamType};
+use crate::capture::GpuTextureFormat;
 use crate::config::{EncoderType, QualityPreset, RateControl};
 use anyhow::{Context, Result};
 use crossbeam::channel::{bounded, Receiver, Sender};
@@ -6,7 +7,7 @@ use ffmpeg::format::Pixel;
 use ffmpeg_next as ffmpeg;
 use std::collections::VecDeque;
 use std::ffi::{c_void, CString};
-use tracing::info;
+use tracing::{info, warn};
 use windows::Win32::Graphics::Direct3D11::{ID3D11DeviceContext, ID3D11Resource, ID3D11Texture2D};
 use windows_core::Interface;
 
@@ -486,10 +487,11 @@ impl FfmpegEncoder {
 
             let frames_ctx = (*frames_ctx_ref).data as *mut ffmpeg::ffi::AVHWFramesContext;
             (*frames_ctx).format = Pixel::D3D11.into();
-            (*frames_ctx).sw_format = Pixel::BGRA.into();
+            (*frames_ctx).sw_format = Pixel::NV12.into();
             (*frames_ctx).width = width as i32;
             (*frames_ctx).height = height as i32;
-            (*frames_ctx).initial_pool_size = 8;
+            // Use 2 to avoid D3D11 array texture limits (ArraySize>2 fails with RENDER_TARGET on some drivers)
+            (*frames_ctx).initial_pool_size = 2;
 
             let init_frames_result = ffmpeg::ffi::av_hwframe_ctx_init(frames_ctx_ref);
             if init_frames_result < 0 {
@@ -635,10 +637,22 @@ impl FfmpegEncoder {
             let dest_resource: ID3D11Resource = dest_texture
                 .cast()
                 .context("Failed to cast destination GPU frame texture to resource")?;
+            let dest_array_slice = (*hw_frame).data[1] as usize as u32;
+            let dest_subresource = dest_array_slice;
 
-            hw_context
-                .copy_context
-                .CopyResource(Some(&dest_resource), Some(&source_resource));
+            // FFmpeg D3D11 hardware frames expose a texture plus an array-slice index in
+            // `data[1]`. Copying the whole resource can leave the encoder reading an untouched
+            // slice, which shows up as a solid green output even though encoding succeeds.
+            hw_context.copy_context.CopySubresourceRegion(
+                Some(&dest_resource),
+                dest_subresource,
+                0,
+                0,
+                0,
+                Some(&source_resource),
+                0,
+                None,
+            );
             hw_context.copy_context.Flush();
 
             (*hw_frame).pts = encoder_pts;
@@ -662,30 +676,25 @@ impl FfmpegEncoder {
     }
 
     fn drain_encoder_packets(&mut self, fallback_timestamp: i64) -> Result<()> {
-        let mut drained_packets = Vec::new();
+        let mut packets_data: Vec<(Vec<u8>, bool)> = Vec::with_capacity(8);
 
         if let Some(ref mut encoder) = self.encoder {
             let mut packet = ffmpeg::Packet::empty();
             while encoder.receive_packet(&mut packet).is_ok() {
-                drained_packets.push((
-                    packet.data().unwrap_or(&[]).to_vec(),
-                    packet.is_key(),
-                    packet.pts().unwrap_or(0),
-                ));
+                let data = packet.data().unwrap_or(&[]).to_vec();
+                let packet_is_key = packet.is_key();
+                packets_data.push((data, packet_is_key));
                 packet = ffmpeg::Packet::empty();
             }
         }
 
-        for (data, packet_is_key, _packet_pts) in drained_packets {
-            // HEVC uses annex-b format
+        for (data, packet_is_key) in packets_data {
             let normalized_data = Self::convert_length_prefixed_to_annex_b(&data);
-            let inspection_data = normalized_data.as_deref().unwrap_or(data.as_slice());
+            let inspection_data = normalized_data.as_deref().unwrap_or(&data);
             let is_keyframe = Self::detect_keyframe(inspection_data, packet_is_key);
             let pts = self.dequeue_packet_timestamp(fallback_timestamp);
 
-            // only log occasionally to avoid spam; keyframes always get logged
             if self.frame_count % 60 == 0 || is_keyframe {
-                // use debug level and a simpler message so the output is less obtuse
                 tracing::debug!("packet {}B keyframe={}", data.len(), is_keyframe);
             }
 
@@ -714,15 +723,49 @@ impl Encoder for FfmpegEncoder {
     fn encode_frame(&mut self, frame: &crate::capture::CapturedFrame) -> Result<()> {
         let gpu_frame = frame.d3d11.as_deref();
 
-        if self.encoder.is_none() || self.last_input_res != (frame.resolution.0, frame.resolution.1)
+        // Check if we can use GPU frame transport
+        // Only accept NV12 hardware frames - BGRA frames must use CPU path
+        let can_use_gpu = gpu_frame.is_some()
+            && self.supports_gpu_frames()
+            && gpu_frame.unwrap().format == GpuTextureFormat::Nv12;
+        let needs_transport_reinit = if can_use_gpu {
+            self.hw_context.is_none()
+        } else {
+            self.hw_context.is_some()
+        };
+
+        if self.encoder.is_none()
+            || self.last_input_res != (frame.resolution.0, frame.resolution.1)
+            || needs_transport_reinit
         {
-            if let Some(gpu_frame) = gpu_frame {
-                if self.supports_gpu_frames() {
+            if can_use_gpu {
+                if let Some(gpu_frame) = gpu_frame {
+                    if needs_transport_reinit && self.encoder.is_some() {
+                        info!("GPU NV12 frames restored; reinitializing encoder for D3D11 transport");
+                    } else {
+                        info!(
+                            "Initializing hardware encoder with D3D11 NV12 frames (GPU transport enabled)"
+                        );
+                    }
                     self.init_hardware_encoder(gpu_frame, frame.resolution.0, frame.resolution.1)?;
-                } else {
-                    anyhow::bail!("Received GPU frame for an encoder path that does not support hardware frames");
                 }
+            } else if gpu_frame.is_some() && self.supports_gpu_frames() {
+                // GPU frame present but format is not NV12 - fall back to CPU path
+                if let Some(gpu_frame) = gpu_frame {
+                    warn!(
+                        "GPU frame format is {:?}, expected NV12 for hardware encoder. Falling back to CPU path.",
+                        gpu_frame.format
+                    );
+                }
+                self.hw_context = None;
+                self.init_encoder(frame.resolution.0, frame.resolution.1)?;
             } else {
+                // No GPU frame or GPU transport not supported
+                if needs_transport_reinit && self.encoder.is_some() && self.supports_gpu_frames() {
+                    info!(
+                        "GPU frame transport unavailable for current frame; reinitializing encoder for CPU input"
+                    );
+                }
                 self.hw_context = None;
                 self.init_encoder(frame.resolution.0, frame.resolution.1)?;
             }
@@ -735,8 +778,10 @@ impl Encoder for FfmpegEncoder {
             self.pending_packet_timestamps.pop_front();
         }
 
-        if let Some(gpu_frame) = gpu_frame {
-            self.encode_gpu_frame(frame, gpu_frame, encoder_pts, gop)?;
+        if can_use_gpu {
+            if let Some(gpu_frame) = gpu_frame {
+                self.encode_gpu_frame(frame, gpu_frame, encoder_pts, gop)?;
+            }
         } else {
             let Some(ref mut encoder) = self.encoder else {
                 return Ok(());

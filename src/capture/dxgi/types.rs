@@ -1,9 +1,13 @@
 //! DXGI capture with GPU-side scaling support
 
-use crate::capture::{backpressure::BackpressureState, CaptureConfig, CapturedFrame, D3d11Frame};
+use crate::capture::{
+    backpressure::BackpressureState, CaptureConfig, CapturedFrame, D3d11Frame, GpuTextureFormat,
+};
 use anyhow::{bail, Context, Result};
 use bytes::{Bytes, BytesMut};
 use crossbeam::channel::{bounded, Receiver, Sender};
+use std::mem::ManuallyDrop;
+use std::ptr::null_mut;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -13,11 +17,19 @@ use windows::Win32::Foundation::BOOL;
 use windows::Win32::Graphics::Direct3D11::{
     ID3D11Buffer, ID3D11Device, ID3D11DeviceContext, ID3D11InputLayout, ID3D11Multithread,
     ID3D11PixelShader, ID3D11RenderTargetView, ID3D11Resource, ID3D11SamplerState,
-    ID3D11ShaderResourceView, ID3D11Texture2D, ID3D11VertexShader, D3D11_BIND_VERTEX_BUFFER,
+    ID3D11ShaderResourceView, ID3D11Texture2D, ID3D11VertexShader, ID3D11VideoContext,
+    ID3D11VideoDevice, ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator,
+    ID3D11VideoProcessorInputView, ID3D11VideoProcessorOutputView, D3D11_BIND_VERTEX_BUFFER,
     D3D11_INPUT_ELEMENT_DESC, D3D11_INPUT_PER_VERTEX_DATA, D3D11_MAPPED_SUBRESOURCE,
-    D3D11_MAP_READ, D3D11_USAGE_IMMUTABLE,
+    D3D11_MAP_READ, D3D11_USAGE_IMMUTABLE, D3D11_VIDEO_PROCESSOR_CONTENT_DESC,
+    D3D11_VIDEO_PROCESSOR_COLOR_SPACE, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
+    D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255, D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_16_235,
+    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_STREAM,
+    D3D11_VPIV_DIMENSION_TEXTURE2D, D3D11_VPOV_DIMENSION_TEXTURE2D, D3D11_BIND_RENDER_TARGET,
 };
-use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R32G32_FLOAT;
+use windows::Win32::Graphics::Dxgi::Common::{
+    DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_FORMAT_R32G32_FLOAT, DXGI_RATIONAL,
+};
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIOutput1, IDXGIResource, DXGI_ERROR_ACCESS_DENIED,
     DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_INVALID_CALL, DXGI_ERROR_NON_COMPOSITED_UI,
@@ -44,27 +56,49 @@ struct DxgiCaptureState {
     duplication: windows::Win32::Graphics::Dxgi::IDXGIOutputDuplication,
     #[allow(dead_code)]
     output_desc: DXGI_OUTPUT_DESC,
-    /// Staging texture for CPU readback (at target resolution after GPU scaling)
     staging_texture: Option<ID3D11Texture2D>,
-    /// Native capture resolution
     frame_width: u32,
     frame_height: u32,
-    /// Target output resolution (for GPU scaling)
     target_width: u32,
     target_height: u32,
-    /// GPU resources for shader-based scaling
     vertex_shader: Option<ID3D11VertexShader>,
     pixel_shader: Option<ID3D11PixelShader>,
     input_layout: Option<ID3D11InputLayout>,
     sampler: Option<ID3D11SamplerState>,
     vertex_buffer: Option<ID3D11Buffer>,
-    /// Render target view for the scaled output texture
     rtv: Option<ID3D11RenderTargetView>,
-    /// Scaled output texture (render target for GPU downscaling)
     scale_texture: Option<ID3D11Texture2D>,
     native_buffer: BytesMut,
+    nv12_texture: Option<ID3D11Texture2D>,
+    video_device: Option<ID3D11VideoDevice>,
+    video_context: Option<ID3D11VideoContext>,
+    video_processor: Option<ID3D11VideoProcessor>,
+    video_processor_enumerator: Option<ID3D11VideoProcessorEnumerator>,
+    nv12_conversion_available: bool,
+    nv12_runtime_failures: u32,
+    nv12_retry_after: Option<Instant>,
+    nv12_unavailable_logged: bool,
 }
+
 impl DxgiCaptureState {
+    fn video_processor_color_space(
+        rgb_full_range: bool,
+        ycbcr_bt709: bool,
+        nominal_range: u32,
+    ) -> D3D11_VIDEO_PROCESSOR_COLOR_SPACE {
+        let mut bitfield = 0u32;
+        if !rgb_full_range {
+            bitfield |= 1 << 1;
+        }
+        if ycbcr_bt709 {
+            bitfield |= 1 << 2;
+        }
+        bitfield |= (nominal_range & 0b11) << 4;
+        D3D11_VIDEO_PROCESSOR_COLOR_SPACE {
+            _bitfield: bitfield,
+        }
+    }
+
     pub fn get_qpc_timestamp() -> i64 {
         unsafe {
             let mut qpc = 0i64;
@@ -192,8 +226,7 @@ impl DxgiCaptureState {
                             Height: target_height,
                             MipLevels: 1,
                             ArraySize: 1,
-                            Format:
-                                windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM,
+                            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
                             SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC {
                                 Count: 1,
                                 Quality: 0,
@@ -243,6 +276,27 @@ impl DxgiCaptureState {
                 (None, None, None, None, None, None, None)
             };
 
+            // Initialize NV12 conversion resources for hardware encoding
+            let (
+                nv12_texture,
+                video_device,
+                video_context,
+                video_processor,
+                video_processor_enumerator,
+                nv12_conversion_available,
+            ) = Self::init_nv12_conversion_resources(&d3d_device, target_width, target_height)
+                .unwrap_or_else(|e| {
+                    warn!(
+                        "NV12 conversion unavailable during capture init: {}; GPU-preferred capture will fall back to CPU readback",
+                        e
+                    );
+                    (None, None, None, None, None, false)
+                });
+
+            if nv12_conversion_available {
+                info!("NV12 conversion enabled for GPU zero-copy encoding");
+            }
+
             // Buffer size is based on target resolution (smaller if GPU scaling enabled)
             let buffer_size = if scale_texture.is_some() {
                 (target_width * target_height * 4) as usize
@@ -286,6 +340,15 @@ impl DxgiCaptureState {
                 rtv,
                 scale_texture,
                 native_buffer,
+                nv12_texture,
+                video_device,
+                video_context,
+                video_processor,
+                video_processor_enumerator,
+                nv12_conversion_available,
+                nv12_runtime_failures: 0,
+                nv12_retry_after: None,
+                nv12_unavailable_logged: false,
             })
         }
     }
@@ -303,10 +366,124 @@ impl DxgiCaptureState {
         }
     }
 
+    /// Initialize NV12 conversion resources using D3D11 Video Processor
+    fn init_nv12_conversion_resources(
+        d3d_device: &ID3D11Device,
+        width: u32,
+        height: u32,
+    ) -> Result<(
+        Option<ID3D11Texture2D>,
+        Option<ID3D11VideoDevice>,
+        Option<ID3D11VideoContext>,
+        Option<ID3D11VideoProcessor>,
+        Option<ID3D11VideoProcessorEnumerator>,
+        bool,
+    )> {
+        unsafe {
+            // Try to get video device interface
+            let video_device: ID3D11VideoDevice = d3d_device
+                .cast()
+                .context("D3D11 device does not support video processing")?;
+
+            // Create NV12 texture for output (Video Processor output requires D3D11_BIND_RENDER_TARGET)
+            let nv12_desc = windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE2D_DESC {
+                Width: width,
+                Height: height,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_NV12,
+                SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
+                Usage: windows::Win32::Graphics::Direct3D11::D3D11_USAGE_DEFAULT,
+                BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
+                CPUAccessFlags: 0,
+                MiscFlags: 0,
+            };
+            let mut nv12_texture: Option<ID3D11Texture2D> = None;
+            d3d_device
+                .CreateTexture2D(&nv12_desc, None, Some(&mut nv12_texture))
+                .ok()
+                .context("Failed to create NV12 texture")?;
+            let nv12_texture = nv12_texture.context("NV12 texture is null")?;
+
+            // Create video processor enumerator
+            let content_desc = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
+                InputFrameFormat:
+                    windows::Win32::Graphics::Direct3D11::D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
+                InputFrameRate: DXGI_RATIONAL {
+                    Numerator: 60,
+                    Denominator: 1,
+                },
+                InputWidth: width,
+                InputHeight: height,
+                OutputFrameRate: DXGI_RATIONAL {
+                    Numerator: 60,
+                    Denominator: 1,
+                },
+                OutputWidth: width,
+                OutputHeight: height,
+                Usage: windows::Win32::Graphics::Direct3D11::D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
+            };
+            let video_processor_enumerator = video_device
+                .CreateVideoProcessorEnumerator(&content_desc)
+                .context("Failed to create video processor enumerator")?;
+
+            // Check if the video processor supports BGRA input and NV12 output
+            let input_format = DXGI_FORMAT_B8G8R8A8_UNORM;
+            let output_format = DXGI_FORMAT_NV12;
+
+            // Check input format support (BGRA)
+            let input_caps = video_processor_enumerator
+                .CheckVideoProcessorFormat(input_format)
+                .context("Failed to check input format support")?;
+            let input_supported = (input_caps
+                & windows::Win32::Graphics::Direct3D11::D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT.0
+                    as u32)
+                != 0;
+            if !input_supported {
+                bail!("Video processor does not support BGRA input format");
+            }
+
+            // Check output format support (NV12)
+            let output_caps = video_processor_enumerator
+                .CheckVideoProcessorFormat(output_format)
+                .context("Failed to check output format support")?;
+            let output_supported = (output_caps
+                & windows::Win32::Graphics::Direct3D11::D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT
+                    .0 as u32)
+                != 0;
+            if !output_supported {
+                bail!("Video processor does not support NV12 output format");
+            }
+
+            // Create video processor
+            let video_processor = video_device
+                .CreateVideoProcessor(&video_processor_enumerator, 0)
+                .context("Failed to create video processor")?;
+
+            info!(
+                "NV12 video processor initialized successfully for {}x{}",
+                width, height
+            );
+
+            Ok((
+                Some(nv12_texture),
+                Some(video_device),
+                None, // video_context will be obtained from d3d_context when needed
+                Some(video_processor),
+                Some(video_processor_enumerator),
+                true,
+            ))
+        }
+    }
+
     fn create_owned_texture(
         state: &DxgiCaptureState,
         width: u32,
         height: u32,
+        format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT,
     ) -> Result<ID3D11Texture2D> {
         unsafe {
             let desc = windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE2D_DESC {
@@ -314,7 +491,7 @@ impl DxgiCaptureState {
                 Height: height,
                 MipLevels: 1,
                 ArraySize: 1,
-                Format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM,
+                Format: format,
                 SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC {
                     Count: 1,
                     Quality: 0,
@@ -359,6 +536,138 @@ impl DxgiCaptureState {
         Ok((source_texture, resolution))
     }
 
+    /// Convert BGRA texture to NV12 using Video Processor
+    fn convert_bgra_to_nv12(
+        state: &mut DxgiCaptureState,
+        bgra_texture: &ID3D11Texture2D,
+        width: u32,
+        height: u32,
+    ) -> Result<ID3D11Texture2D> {
+        unsafe {
+            let Some(ref video_device) = state.video_device else {
+                bail!("Video device not initialized");
+            };
+            let Some(ref video_processor) = state.video_processor else {
+                bail!("Video processor not initialized");
+            };
+            let Some(ref nv12_texture) = state.nv12_texture else {
+                bail!("NV12 texture not initialized");
+            };
+
+            // Get video context from D3D context (lazy initialization)
+            if state.video_context.is_none() {
+                let video_context: ID3D11VideoContext = state
+                    .d3d_context
+                    .cast()
+                    .context("Failed to get video context from device context")?;
+                state.video_context = Some(video_context);
+            }
+            let video_context = state
+                .video_context
+                .as_ref()
+                .context("Video context is None")?;
+
+            // Create input view for BGRA texture
+            let input_view_desc = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
+                FourCC: 0,
+                ViewDimension: D3D11_VPIV_DIMENSION_TEXTURE2D,
+                Anonymous: std::mem::zeroed(), // Texture2D: MipSlice=0, ArraySlice=0
+            };
+            let mut input_view: Option<ID3D11VideoProcessorInputView> = None;
+            video_device
+                .CreateVideoProcessorInputView(
+                    bgra_texture,
+                    state
+                        .video_processor_enumerator
+                        .as_ref()
+                        .context("Video processor enumerator is None")?,
+                    &input_view_desc,
+                    Some(&mut input_view),
+                )
+                .ok()
+                .context("Failed to create video processor input view")?;
+            let input_view = input_view.context("Input view is null")?;
+
+            // Create output view for NV12 texture
+            let output_view_desc = D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC {
+                ViewDimension: D3D11_VPOV_DIMENSION_TEXTURE2D,
+                Anonymous: std::mem::zeroed(), // Texture2D: MipSlice=0
+            };
+            let mut output_view: Option<ID3D11VideoProcessorOutputView> = None;
+            video_device
+                .CreateVideoProcessorOutputView(
+                    nv12_texture,
+                    state
+                        .video_processor_enumerator
+                        .as_ref()
+                        .context("Video processor enumerator is None")?,
+                    &output_view_desc,
+                    Some(&mut output_view),
+                )
+                .ok()
+                .context("Failed to create video processor output view")?;
+            let output_view = output_view.context("Output view is null")?;
+
+            let input_color_space = Self::video_processor_color_space(
+                true,
+                true,
+                D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255.0 as u32,
+            );
+            let output_color_space = Self::video_processor_color_space(
+                true,
+                true,
+                D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_16_235.0 as u32,
+            );
+            video_context.VideoProcessorSetStreamColorSpace(
+                video_processor,
+                0,
+                &input_color_space,
+            );
+            video_context.VideoProcessorSetOutputColorSpace(video_processor, &output_color_space);
+
+            // Create the stream data for VideoProcessorBlt
+            // Store raw pointer to manually release after the call since ManuallyDrop prevents Drop
+            let input_view_raw = input_view.as_raw();
+            let stream_data = D3D11_VIDEO_PROCESSOR_STREAM {
+                Enable: BOOL(1),
+                OutputIndex: 0,
+                InputFrameOrField: 0,
+                PastFrames: 0,
+                FutureFrames: 0,
+                ppPastSurfaces: null_mut(),
+                pInputSurface: ManuallyDrop::new(Some(input_view)),
+                ppFutureSurfaces: null_mut(),
+                ppPastSurfacesRight: null_mut(),
+                pInputSurfaceRight: ManuallyDrop::new(None),
+                ppFutureSurfacesRight: null_mut(),
+            };
+
+            video_context
+                .VideoProcessorBlt(video_processor, &output_view, 0, &[stream_data])
+                .ok()
+                .context("VideoProcessorBlt failed")?;
+
+            // Manually release the input_view COM interface since ManuallyDrop prevented Drop
+            // Safety: input_view_raw is a valid COM interface pointer that we own
+            let _ = windows::core::IUnknown::from_raw(input_view_raw);
+            drop(output_view);
+
+            // Create an owned copy of the NV12 texture to return
+            let owned_nv12 = Self::create_owned_texture(state, width, height, DXGI_FORMAT_NV12)?;
+            let owned_resource: ID3D11Resource = owned_nv12
+                .cast()
+                .context("Failed to cast owned NV12 texture to resource")?;
+            let nv12_resource: ID3D11Resource = nv12_texture
+                .cast()
+                .context("Failed to cast NV12 texture to resource")?;
+            state
+                .d3d_context
+                .CopyResource(Some(&owned_resource), Some(&nv12_resource));
+
+            Ok(owned_nv12)
+        }
+    }
+
     fn capture_gpu_frame(
         state: &mut DxgiCaptureState,
         captured_texture: &ID3D11Texture2D,
@@ -367,23 +676,218 @@ impl DxgiCaptureState {
         unsafe {
             let (source_texture, resolution) =
                 Self::source_texture_for_frame(state, captured_texture)?;
-            let owned_texture = Self::create_owned_texture(state, resolution.0, resolution.1)?;
-            let owned_resource: ID3D11Resource = owned_texture
+            let now = Instant::now();
+
+            // Prefer GPU NV12 when available. If conversion fails at runtime, back off briefly
+            // and keep using CPU readback until the next retry window.
+            let should_try_nv12 = state.nv12_conversion_available
+                && match state.nv12_retry_after {
+                    Some(retry_after) => now >= retry_after,
+                    None => true,
+                };
+
+            if should_try_nv12 {
+                let bgra_texture = Self::create_owned_texture(
+                    state,
+                    resolution.0,
+                    resolution.1,
+                    DXGI_FORMAT_B8G8R8A8_UNORM,
+                )?;
+                let bgra_resource: ID3D11Resource = bgra_texture
+                    .cast()
+                    .context("Failed to cast owned BGRA texture to resource")?;
+                state
+                    .d3d_context
+                    .CopyResource(Some(&bgra_resource), Some(&source_texture));
+
+                match Self::convert_bgra_to_nv12(state, &bgra_texture, resolution.0, resolution.1) {
+                    Ok(nv12_texture) => {
+                        if state.nv12_runtime_failures > 0 {
+                            info!(
+                                "NV12 GPU conversion recovered after {} runtime failure(s)",
+                                state.nv12_runtime_failures
+                            );
+                        }
+                        state.nv12_runtime_failures = 0;
+                        state.nv12_retry_after = None;
+
+                        return Ok(CapturedFrame {
+                            bgra: Bytes::new(),
+                            d3d11: Some(Arc::new(D3d11Frame {
+                                texture: nv12_texture,
+                                device: state.d3d_device.clone(),
+                                format: GpuTextureFormat::Nv12,
+                            })),
+                            timestamp,
+                            resolution,
+                        });
+                    }
+                    Err(e) => {
+                        state.nv12_runtime_failures =
+                            state.nv12_runtime_failures.saturating_add(1);
+                        let retry_delay = Duration::from_secs(2);
+                        state.nv12_retry_after = Some(now + retry_delay);
+                        warn!(
+                            "NV12 conversion failed at runtime (attempt {}), falling back to CPU readback for {:.1}s: {}",
+                            state.nv12_runtime_failures,
+                            retry_delay.as_secs_f32(),
+                            e
+                        );
+
+                        return Self::readback_texture_to_cpu(
+                            state,
+                            &bgra_texture,
+                            timestamp,
+                            resolution,
+                        );
+                    }
+                }
+            }
+
+            if !state.nv12_conversion_available && !state.nv12_unavailable_logged {
+                warn!(
+                    "NV12 conversion resources are unavailable on the selected capture device; using CPU readback fallback"
+                );
+                state.nv12_unavailable_logged = true;
+            }
+
+            // BGRA GPU path (when NV12 conversion not available or already failed)
+            // Note: Encoder only supports NV12 GPU frames, so we must do CPU readback for BGRA
+            let bgra_texture = Self::create_owned_texture(
+                state,
+                resolution.0,
+                resolution.1,
+                DXGI_FORMAT_B8G8R8A8_UNORM,
+            )?;
+            let bgra_resource: ID3D11Resource = bgra_texture
                 .cast()
-                .context("Failed to cast owned GPU frame texture to resource")?;
+                .context("Failed to cast owned BGRA texture to resource")?;
             state
                 .d3d_context
-                .CopyResource(Some(&owned_resource), Some(&source_texture));
+                .CopyResource(Some(&bgra_resource), Some(&source_texture));
+
+            Self::readback_texture_to_cpu(state, &bgra_texture, timestamp, resolution)
+        }
+    }
+
+    fn readback_texture_to_cpu(
+        state: &mut DxgiCaptureState,
+        src_texture: &ID3D11Texture2D,
+        timestamp: i64,
+        resolution: (u32, u32),
+    ) -> Result<CapturedFrame> {
+        unsafe {
+            Self::ensure_staging_texture(state)?;
+            let Some(ref staging) = state.staging_texture else {
+                bail!("Staging texture unavailable for CPU readback");
+            };
+
+            let staging_resource: ID3D11Resource = staging
+                .cast()
+                .context("Failed to cast staging texture to resource")?;
+            let src_resource: ID3D11Resource = src_texture
+                .cast()
+                .context("Failed to cast source texture to resource")?;
+
+            state
+                .d3d_context
+                .CopyResource(Some(&staging_resource), Some(&src_resource));
+
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            state
+                .d3d_context
+                .Map(
+                    Some(&staging_resource),
+                    0,
+                    D3D11_MAP_READ,
+                    0,
+                    Some(&mut mapped),
+                )
+                .ok()
+                .context("Failed to map staging texture for readback")?;
+
+            let read_w = resolution.0 as usize;
+            let read_h = resolution.1 as usize;
+            let src_row_bytes = read_w * 4;
+            let src_pitch = mapped.RowPitch as usize;
+
+            if mapped.pData.is_null() {
+                state.d3d_context.Unmap(Some(&staging_resource), 0);
+                bail!("Mapped staging texture has null data pointer");
+            }
+
+            let total_bytes = src_row_bytes * read_h;
+            state.native_buffer.resize(total_bytes, 0);
+
+            let src_ptr = mapped.pData as *const u8;
+            if src_pitch == src_row_bytes {
+                std::ptr::copy_nonoverlapping(
+                    src_ptr,
+                    state.native_buffer.as_mut_ptr(),
+                    total_bytes,
+                );
+            } else {
+                let dst_ptr = state.native_buffer.as_mut_ptr();
+                for row in 0..read_h {
+                    std::ptr::copy_nonoverlapping(
+                        src_ptr.add(row * src_pitch),
+                        dst_ptr.add(row * src_row_bytes),
+                        src_row_bytes,
+                    );
+                }
+            }
+
+            let bgra = state.native_buffer.split_to(total_bytes).freeze();
+            state.native_buffer.reserve(total_bytes);
+            state.d3d_context.Unmap(Some(&staging_resource), 0);
 
             Ok(CapturedFrame {
-                bgra: Bytes::new(),
-                d3d11: Some(Arc::new(D3d11Frame {
-                    texture: owned_texture,
-                    device: state.d3d_device.clone(),
-                })),
+                bgra,
+                d3d11: None,
                 timestamp,
                 resolution,
             })
+        }
+    }
+
+    fn ensure_staging_texture(state: &mut DxgiCaptureState) -> Result<()> {
+        unsafe {
+            if state.staging_texture.is_some() {
+                return Ok(());
+            }
+            let (width, height) = if state.scale_texture.is_some() {
+                (state.target_width, state.target_height)
+            } else {
+                (state.frame_width, state.frame_height)
+            };
+            let desc = windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE2D_DESC {
+                Width: width,
+                Height: height,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
+                Usage: windows::Win32::Graphics::Direct3D11::D3D11_USAGE_STAGING,
+                BindFlags: 0,
+                CPUAccessFlags: windows::Win32::Graphics::Direct3D11::D3D11_CPU_ACCESS_READ.0
+                    as u32,
+                MiscFlags: 0,
+            };
+            let mut texture = None;
+            state
+                .d3d_device
+                .CreateTexture2D(&desc, None, Some(&mut texture))
+                .ok()
+                .context("Failed to create staging texture")?;
+            state.staging_texture = texture;
+            debug!(
+                "Created staging texture for NV12 fallback: {}x{}",
+                width, height
+            );
+            Ok(())
         }
     }
 
@@ -531,6 +1035,7 @@ impl DxgiCaptureState {
         }
     }
 }
+
 /// DXGI-based screen capture
 pub struct DxgiCapture {
     pub(super) config: CaptureConfig,
@@ -540,14 +1045,31 @@ pub struct DxgiCapture {
     pub(super) fatal_tx: Sender<String>,
     pub(super) fatal_rx: Receiver<String>,
     pub(super) capture_thread: Option<JoinHandle<()>>,
+    /// Cached result of NV12 conversion capability check
+    nv12_conversion_capable: bool,
 }
+
 impl DxgiCapture {
     /// Create a new DXGI capture instance
     pub fn new() -> Result<Self> {
-        // 16 frames at 2560x1440 BGRA = ~235MB (provides ~267ms buffer at 60fps)
-        // This gives the encoder enough headroom to handle transient slowdowns
-        let (frame_tx, frame_rx) = bounded::<CapturedFrame>(16);
+        // 32 frames at 1920x1080 BGRA is ~253MB worst case, but GPU NV12 transport greatly
+        // reduces steady-state memory usage. The extra queue depth helps absorb encoder jitter
+        // without immediately oscillating into adaptive throttling.
+        let (frame_tx, frame_rx) = bounded::<CapturedFrame>(32);
         let (fatal_tx, fatal_rx) = bounded::<String>(8);
+
+        // Pre-validate NV12 conversion capability
+        let nv12_conversion_capable = Self::validate_nv12_capability().unwrap_or_else(|e| {
+            warn!("NV12 conversion capability check failed: {}", e);
+            false
+        });
+
+        if nv12_conversion_capable {
+            info!("NV12 GPU conversion capability validated successfully");
+        } else {
+            info!("NV12 GPU conversion not available - will use CPU readback or BGRA GPU frames");
+        }
+
         Ok(Self {
             config: CaptureConfig::default(),
             running: Arc::new(AtomicBool::new(false)),
@@ -556,19 +1078,194 @@ impl DxgiCapture {
             fatal_tx,
             fatal_rx,
             capture_thread: None,
+            nv12_conversion_capable,
         })
     }
+
+    pub fn refresh_nv12_conversion_capability(&mut self, output_index: u32) -> bool {
+        let nv12_conversion_capable =
+            Self::validate_nv12_capability_for_output(output_index).unwrap_or_else(|e| {
+                warn!(
+                    "NV12 conversion capability check failed for output {}: {}",
+                    output_index, e
+                );
+                false
+            });
+
+        self.nv12_conversion_capable = nv12_conversion_capable;
+        nv12_conversion_capable
+    }
+
+    /// Validate that NV12 conversion is supported by the GPU
+    /// This creates a temporary D3D11 device and checks Video Processor support
+    pub fn validate_nv12_capability() -> Result<bool> {
+        Self::validate_nv12_capability_for_output(0)
+    }
+
+    pub fn validate_nv12_capability_for_output(output_index: u32) -> Result<bool> {
+        unsafe {
+            // Create a temporary DXGI factory and D3D11 device
+            let factory: windows::Win32::Graphics::Dxgi::IDXGIFactory1 = CreateDXGIFactory1()
+                .context("Failed to create DXGI factory for NV12 validation")?;
+
+            // Try to find the requested output on any adapter.
+            let mut adapter_index = 0u32;
+            let mut selected_adapter = None;
+            loop {
+                let adapter = match factory.EnumAdapters1(adapter_index) {
+                    Ok(adapter) => adapter,
+                    Err(_) => break,
+                };
+
+                match adapter.EnumOutputs(output_index) {
+                    Ok(_) => {
+                        selected_adapter = Some(adapter);
+                        break;
+                    }
+                    Err(_) => {
+                        adapter_index += 1;
+                    }
+                }
+            }
+
+            let adapter = selected_adapter.context(format!(
+                "No adapter with output {} found for NV12 validation",
+                output_index
+            ))?;
+
+            let mut d3d_device: Option<ID3D11Device> = None;
+            let feature_levels = [
+                windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_1,
+                windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_0,
+            ];
+            let adapter_for_device: windows::Win32::Graphics::Dxgi::IDXGIAdapter =
+                adapter.cast().context("Failed to cast adapter")?;
+
+            windows::Win32::Graphics::Direct3D11::D3D11CreateDevice(
+                Some(&adapter_for_device),
+                windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN,
+                windows::Win32::Foundation::HMODULE::default(),
+                windows::Win32::Graphics::Direct3D11::D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                Some(&feature_levels),
+                windows::Win32::Graphics::Direct3D11::D3D11_SDK_VERSION,
+                Some(&mut d3d_device),
+                None,
+                None,
+            )
+            .ok()
+            .context("Failed to create D3D11 device for NV12 validation")?;
+
+            let d3d_device = d3d_device.context("D3D11 device is null")?;
+
+            // Check if the device supports video processing
+            let video_device: ID3D11VideoDevice = match d3d_device.cast() {
+                Ok(vd) => vd,
+                Err(_) => {
+                    debug!("D3D11 device does not support video processing interface");
+                    return Ok(false);
+                }
+            };
+
+            // Create video processor enumerator to check format support
+            let content_desc = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
+                InputFrameFormat:
+                    windows::Win32::Graphics::Direct3D11::D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
+                InputFrameRate: DXGI_RATIONAL {
+                    Numerator: 60,
+                    Denominator: 1,
+                },
+                InputWidth: 1920,
+                InputHeight: 1080,
+                OutputFrameRate: DXGI_RATIONAL {
+                    Numerator: 60,
+                    Denominator: 1,
+                },
+                OutputWidth: 1920,
+                OutputHeight: 1080,
+                Usage: windows::Win32::Graphics::Direct3D11::D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
+            };
+
+            let enumerator = match video_device.CreateVideoProcessorEnumerator(&content_desc) {
+                Ok(e) => e,
+                Err(_) => {
+                    debug!("Failed to create video processor enumerator");
+                    return Ok(false);
+                }
+            };
+
+            // Check BGRA input format support
+            let input_caps = match enumerator.CheckVideoProcessorFormat(DXGI_FORMAT_B8G8R8A8_UNORM)
+            {
+                Ok(caps) => caps,
+                Err(_) => {
+                    debug!("Failed to check BGRA format support");
+                    return Ok(false);
+                }
+            };
+            let input_supported = (input_caps
+                & windows::Win32::Graphics::Direct3D11::D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT.0
+                    as u32)
+                != 0;
+            if !input_supported {
+                debug!("Video processor does not support BGRA input");
+                return Ok(false);
+            }
+
+            // Check NV12 output format support
+            let output_caps = match enumerator.CheckVideoProcessorFormat(DXGI_FORMAT_NV12) {
+                Ok(caps) => caps,
+                Err(_) => {
+                    debug!("Failed to check NV12 format support");
+                    return Ok(false);
+                }
+            };
+            let output_supported = (output_caps
+                & windows::Win32::Graphics::Direct3D11::D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT
+                    .0 as u32)
+                != 0;
+            if !output_supported {
+                debug!("Video processor does not support NV12 output");
+                return Ok(false);
+            }
+
+            // Try to create a video processor to ensure full support
+            let video_processor = match video_device.CreateVideoProcessor(&enumerator, 0) {
+                Ok(vp) => vp,
+                Err(_) => {
+                    debug!("Failed to create video processor");
+                    return Ok(false);
+                }
+            };
+
+            // All checks passed
+            drop(video_processor);
+            debug!(
+                "NV12 conversion capability validated on output {}: BGRA->NV12 supported",
+                output_index
+            );
+            Ok(true)
+        }
+    }
+
+    /// Check if NV12 GPU conversion is available for zero-copy encoding
+    pub fn is_nv12_conversion_capable(&self) -> bool {
+        self.nv12_conversion_capable
+    }
+
     pub fn try_recv_fatal(&self) -> Option<String> {
         self.fatal_rx.try_recv().ok()
     }
+
     pub fn is_running(&self) -> bool {
         self.running.load(Ordering::Relaxed)
     }
+
     pub fn is_capture_thread_finished(&self) -> bool {
         self.capture_thread
             .as_ref()
             .is_some_and(|thread| thread.is_finished())
     }
+
     /// Initialize D3D11 device and DXGI duplication
     fn init_capture(output_index: u32) -> Result<DxgiCaptureState> {
         DxgiCaptureState::init_capture_with_scaling(output_index, None)
@@ -601,7 +1298,7 @@ impl DxgiCapture {
                 Height: height,
                 MipLevels: 1,
                 ArraySize: 1,
-                Format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM,
+                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
                 SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC {
                     Count: 1,
                     Quality: 0,
@@ -889,6 +1586,8 @@ impl DxgiCapture {
         let backpressure = BackpressureState::new();
         let mut adaptive_skip_counter = 0u32;
         let mut adaptive_adjust_tick = Instant::now();
+        let mut pressure_high_streak = 0u32;
+        let mut pressure_low_streak = 0u32;
         let mut _adaptive_level_changes = 0u64;
         // Use GPU scaling if target resolution is provided
         let mut state = match target_resolution {
@@ -1053,8 +1752,13 @@ impl DxgiCapture {
                 let queue_cap = frame_tx.capacity().unwrap_or(32) as u32;
                 let high_watermark = queue_cap.saturating_mul(3) / 4;
                 let low_watermark = queue_cap / 4;
+                let severe_watermark = queue_cap.saturating_mul(7) / 8;
                 let mut fps_divisor = backpressure.current_fps_divisor();
-                if backpressure.is_encoder_overloaded() || queue_len >= high_watermark {
+                let encoder_overloaded = backpressure.is_encoder_overloaded();
+
+                if queue_len >= severe_watermark {
+                    pressure_high_streak = 0;
+                    pressure_low_streak = 0;
                     if fps_divisor < 3 {
                         fps_divisor += 1;
                         backpressure.set_fps_divisor(fps_divisor);
@@ -1064,14 +1768,35 @@ impl DxgiCapture {
                             fps_divisor, queue_len, queue_cap
                         );
                     }
-                } else if queue_len <= low_watermark && fps_divisor > 0 {
-                    fps_divisor -= 1;
-                    backpressure.set_fps_divisor(fps_divisor);
-                    _adaptive_level_changes += 1;
-                    info!(
-                        "Adaptive throttling reduced: fps_divisor={} queue={}/{}",
-                        fps_divisor, queue_len, queue_cap
-                    );
+                } else if encoder_overloaded || queue_len >= high_watermark {
+                    pressure_high_streak = pressure_high_streak.saturating_add(1);
+                    pressure_low_streak = 0;
+                    if pressure_high_streak >= 2 && fps_divisor < 3 {
+                        fps_divisor += 1;
+                        backpressure.set_fps_divisor(fps_divisor);
+                        _adaptive_level_changes += 1;
+                        pressure_high_streak = 0;
+                        warn!(
+                            "Adaptive throttling increased: fps_divisor={} queue={}/{}",
+                            fps_divisor, queue_len, queue_cap
+                        );
+                    }
+                } else if queue_len <= low_watermark {
+                    pressure_low_streak = pressure_low_streak.saturating_add(1);
+                    pressure_high_streak = 0;
+                    if pressure_low_streak >= 3 && fps_divisor > 0 {
+                        fps_divisor -= 1;
+                        backpressure.set_fps_divisor(fps_divisor);
+                        _adaptive_level_changes += 1;
+                        pressure_low_streak = 0;
+                        info!(
+                            "Adaptive throttling reduced: fps_divisor={} queue={}/{}",
+                            fps_divisor, queue_len, queue_cap
+                        );
+                    }
+                } else {
+                    pressure_high_streak = 0;
+                    pressure_low_streak = 0;
                 }
                 adaptive_adjust_tick = Instant::now();
             }
@@ -1092,10 +1817,12 @@ impl DxgiCapture {
             frame_count, dropped_count
         );
     }
+
     /// Get current QPC timestamp
     fn get_qpc_timestamp() -> i64 {
         DxgiCaptureState::get_qpc_timestamp()
     }
+
     fn wait_until_deadline(deadline: Instant) {
         const SPIN_THRESHOLD: Duration = Duration::from_millis(1);
         loop {
@@ -1111,6 +1838,7 @@ impl DxgiCapture {
             }
         }
     }
+
     fn set_capture_thread_priority() {
         #[cfg(windows)]
         {

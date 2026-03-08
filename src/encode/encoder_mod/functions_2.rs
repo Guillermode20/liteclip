@@ -8,44 +8,24 @@ mod tests {
     use super::super::types::{EncodedPacket, EncoderConfig, HardwareEncoder, StreamType};
     #[test]
     fn test_encoder_config_codec_names() {
-        let mut config = EncoderConfig::new(
-            crate::config::Codec::H264,
-            20,
-            30,
-            (1920, 1080),
-            crate::config::EncoderType::Nvenc,
-            1,
-        );
-        assert_eq!(config.ffmpeg_codec_name(), "h264_nvenc");
+        let mut config =
+            EncoderConfig::new(20, 30, (1920, 1080), crate::config::EncoderType::Nvenc, 1);
+        assert_eq!(config.ffmpeg_codec_name(), "hevc_nvenc");
         config.encoder_type = crate::config::EncoderType::Amf;
-        assert_eq!(config.ffmpeg_codec_name(), "h264_amf");
+        assert_eq!(config.ffmpeg_codec_name(), "hevc_amf");
         config.encoder_type = crate::config::EncoderType::Qsv;
-        assert_eq!(config.ffmpeg_codec_name(), "h264_qsv");
-        config.encoder_type = crate::config::EncoderType::Software;
-        assert_eq!(config.ffmpeg_codec_name(), "libx264");
+        assert_eq!(config.ffmpeg_codec_name(), "hevc_qsv");
+        config.encoder_type = crate::config::EncoderType::Auto;
+        assert_eq!(config.ffmpeg_codec_name(), "hevc_amf");
     }
     #[test]
     fn test_keyframe_interval_calculation() {
-        let config = EncoderConfig::new(
-            crate::config::Codec::H264,
-            20,
-            30,
-            (1920, 1080),
-            crate::config::EncoderType::Nvenc,
-            2,
-        );
+        let config = EncoderConfig::new(20, 30, (1920, 1080), crate::config::EncoderType::Nvenc, 2);
         assert_eq!(config.keyframe_interval_frames(), 60);
     }
     #[test]
     fn test_encoder_config_new_sets_quality_defaults() {
-        let config = EncoderConfig::new(
-            crate::config::Codec::H264,
-            20,
-            30,
-            (1920, 1080),
-            crate::config::EncoderType::Nvenc,
-            1,
-        );
+        let config = EncoderConfig::new(20, 30, (1920, 1080), crate::config::EncoderType::Nvenc, 1);
         assert_eq!(
             config.quality_preset,
             crate::config::QualityPreset::Balanced
@@ -79,63 +59,38 @@ mod tests {
         ));
         assert!(matches!(
             HardwareEncoder::None.into(),
-            crate::config::EncoderType::Software
+            crate::config::EncoderType::Amf
         ));
     }
 
     #[test]
-    fn test_auto_encoder_selection_prefers_software_h264_when_no_hw_hevc() {
-        let mut config = EncoderConfig::new(
-            crate::config::Codec::H265,
-            20,
-            60,
-            (1920, 1080),
-            crate::config::EncoderType::Auto,
-            2,
-        );
+    fn test_auto_encoder_selection_falls_back_to_amf_when_no_hw() {
+        let mut config =
+            EncoderConfig::new(20, 60, (1920, 1080), crate::config::EncoderType::Auto, 2);
 
         apply_auto_encoder_selection(&mut config, HardwareEncoder::None);
 
-        assert_eq!(config.encoder_type, crate::config::EncoderType::Software);
-        assert_eq!(config.codec, crate::config::Codec::H264);
+        assert_eq!(config.encoder_type, crate::config::EncoderType::Amf);
     }
 
     #[test]
-    fn test_auto_encoder_selection_preserves_codec_when_hw_available() {
-        let mut config = EncoderConfig::new(
-            crate::config::Codec::H265,
-            20,
-            30,
-            (1920, 1080),
-            crate::config::EncoderType::Auto,
-            2,
-        );
+    fn test_auto_encoder_selection_preserves_encoder_when_hw_available() {
+        let mut config =
+            EncoderConfig::new(20, 30, (1920, 1080), crate::config::EncoderType::Auto, 2);
 
         apply_auto_encoder_selection(&mut config, HardwareEncoder::Amf);
 
         assert_eq!(config.encoder_type, crate::config::EncoderType::Amf);
-        assert_eq!(config.codec, crate::config::Codec::H265);
     }
 
     #[test]
-    fn test_auto_encoder_selection_prefers_h264_for_amf_realtime_hevc() {
-        let mut config = EncoderConfig::new(
-            crate::config::Codec::H265,
-            10,
-            60,
-            (1920, 1080),
-            crate::config::EncoderType::Auto,
-            1,
-        );
+    fn test_auto_encoder_selection_selects_amf_for_high_framerate() {
+        let mut config =
+            EncoderConfig::new(10, 60, (1920, 1080), crate::config::EncoderType::Auto, 1);
 
         apply_auto_encoder_selection(&mut config, HardwareEncoder::Amf);
 
         assert_eq!(config.encoder_type, crate::config::EncoderType::Amf);
-        assert_eq!(config.codec, crate::config::Codec::H264);
         assert_eq!(config.keyframe_interval_secs, 2);
-        assert_eq!(
-            config.quality_preset,
-            crate::config::QualityPreset::Performance
-        );
     }
 }

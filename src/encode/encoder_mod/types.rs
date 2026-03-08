@@ -144,10 +144,9 @@ impl EncoderConfig {
     }
 
     pub fn supports_gpu_frame_transport(&self) -> bool {
-        // AMF rejects BGRA-backed D3D11 input frames. Re-enable this once the
-        // capture side can hand off NV12 hardware frames directly.
-        let _ = self;
-        false
+        // AMF encoder accepts NV12 hardware frames via D3D11.
+        // The capture layer now produces NV12 textures via Video Processor.
+        matches!(self.encoder_type, crate::config::EncoderType::Amf)
     }
 }
 /// Encoder thread handle

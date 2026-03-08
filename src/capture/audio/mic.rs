@@ -3,6 +3,7 @@
 //! Captures microphone audio using WASAPI in shared mode.
 
 use anyhow::{Context, Result};
+use bytes::Bytes;
 use crossbeam::channel::{bounded, Receiver, Sender};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -221,6 +222,9 @@ impl WasapiMicCapture {
             None
         };
 
+        let max_buffer_size = (config.sample_rate as usize / 10) * block_align as usize;
+        let mut audio_buffer = Vec::with_capacity(max_buffer_size);
+
         while running.load(Ordering::SeqCst) {
             let mut packet_frames = unsafe { capture_client.GetNextPacketSize() }
                 .context("IAudioCaptureClient::GetNextPacketSize failed")?;
@@ -249,12 +253,13 @@ impl WasapiMicCapture {
                 .context("IAudioCaptureClient::GetBuffer failed")?;
 
                 let byte_count = frame_count as usize * block_align as usize;
-                let mut audio_data = vec![0u8; byte_count];
+                audio_buffer.clear();
+                audio_buffer.resize(byte_count, 0);
                 unsafe {
                     if flags & (AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) == 0 && !data_ptr.is_null() {
                         std::ptr::copy_nonoverlapping(
                             data_ptr,
-                            audio_data.as_mut_ptr(),
+                            audio_buffer.as_mut_ptr(),
                             byte_count,
                         );
                     }
@@ -264,7 +269,7 @@ impl WasapiMicCapture {
                     .context("IAudioCaptureClient::ReleaseBuffer failed")?;
 
                 if let Some(processor) = &mut noise_processor {
-                    processor.process(&mut audio_data);
+                    processor.process(&mut audio_buffer);
                 }
 
                 let pts = if qpc_position > 0 {
@@ -274,8 +279,13 @@ impl WasapiMicCapture {
                 };
                 total_frames = total_frames.saturating_add(frame_count as u64);
 
-                let packet =
-                    EncodedPacket::new(audio_data, pts, pts, false, StreamType::Microphone);
+                let packet = EncodedPacket::new(
+                    Bytes::copy_from_slice(&audio_buffer),
+                    pts,
+                    pts,
+                    false,
+                    StreamType::Microphone,
+                );
 
                 if packet_tx.send(packet).is_err() {
                     running.store(false, Ordering::SeqCst);

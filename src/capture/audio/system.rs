@@ -3,6 +3,7 @@
 //! Captures system audio (loopback) using WASAPI in shared mode.
 
 use anyhow::{Context, Result};
+use bytes::Bytes;
 use crossbeam::channel::{bounded, Receiver, Sender};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -189,6 +190,8 @@ impl WasapiSystemCapture {
         let sample_rate = config.sample_rate.max(1) as f64;
         let mut total_frames: u64 = 0;
         let mut packet_count: u64 = 0;
+        let max_buffer_size = (config.sample_rate as usize / 10) * block_align as usize;
+        let mut audio_buffer = Vec::with_capacity(max_buffer_size);
 
         while running.load(Ordering::SeqCst) {
             let mut packet_frames = unsafe { capture_client.GetNextPacketSize() }
@@ -218,12 +221,13 @@ impl WasapiSystemCapture {
                 .context("IAudioCaptureClient::GetBuffer failed")?;
 
                 let byte_count = frame_count as usize * block_align as usize;
-                let mut audio_data = vec![0u8; byte_count];
+                audio_buffer.clear();
+                audio_buffer.resize(byte_count, 0);
                 unsafe {
                     if flags & (AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) == 0 && !data_ptr.is_null() {
                         std::ptr::copy_nonoverlapping(
                             data_ptr,
-                            audio_data.as_mut_ptr(),
+                            audio_buffer.as_mut_ptr(),
                             byte_count,
                         );
                     }
@@ -239,8 +243,13 @@ impl WasapiSystemCapture {
                 };
                 total_frames = total_frames.saturating_add(frame_count as u64);
 
-                let packet =
-                    EncodedPacket::new(audio_data, pts, pts, false, StreamType::SystemAudio);
+                let packet = EncodedPacket::new(
+                    Bytes::copy_from_slice(&audio_buffer),
+                    pts,
+                    pts,
+                    false,
+                    StreamType::SystemAudio,
+                );
 
                 if packet_tx.send(packet).is_err() {
                     running.store(false, Ordering::SeqCst);
