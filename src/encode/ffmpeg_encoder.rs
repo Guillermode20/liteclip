@@ -26,6 +26,7 @@ struct D3d11HardwareContext {
     device_ctx_ref: *mut ffmpeg::ffi::AVBufferRef,
     frames_ctx_ref: *mut ffmpeg::ffi::AVBufferRef,
     copy_context: ID3D11DeviceContext,
+    reusable_hw_frame: *mut ffmpeg::ffi::AVFrame,
 }
 
 unsafe impl Send for D3d11HardwareContext {}
@@ -33,6 +34,9 @@ unsafe impl Send for D3d11HardwareContext {}
 impl Drop for D3d11HardwareContext {
     fn drop(&mut self) {
         unsafe {
+            if !self.reusable_hw_frame.is_null() {
+                ffmpeg::ffi::av_frame_free(&mut self.reusable_hw_frame);
+            }
             if !self.frames_ctx_ref.is_null() {
                 ffmpeg::ffi::av_buffer_unref(&mut self.frames_ctx_ref);
             }
@@ -505,10 +509,20 @@ impl FfmpegEncoder {
                 );
             }
 
+            let reusable_hw_frame = ffmpeg::ffi::av_frame_alloc();
+            if reusable_hw_frame.is_null() {
+                let mut frames_ctx_ref = frames_ctx_ref;
+                let mut device_ctx_ref = device_ctx_ref;
+                ffmpeg::ffi::av_buffer_unref(&mut frames_ctx_ref);
+                ffmpeg::ffi::av_buffer_unref(&mut device_ctx_ref);
+                anyhow::bail!("Failed to allocate reusable FFmpeg hardware frame");
+            }
+
             Ok(D3d11HardwareContext {
                 device_ctx_ref,
                 frames_ctx_ref,
                 copy_context: immediate_context,
+                reusable_hw_frame,
             })
         }
     }
@@ -610,16 +624,15 @@ impl FfmpegEncoder {
         };
 
         unsafe {
-            let hw_frame = ffmpeg::ffi::av_frame_alloc();
+            let hw_frame = hw_context.reusable_hw_frame;
             if hw_frame.is_null() {
                 anyhow::bail!("Failed to allocate FFmpeg hardware frame");
             }
+            ffmpeg::ffi::av_frame_unref(hw_frame);
 
             let get_buffer_result =
                 ffmpeg::ffi::av_hwframe_get_buffer(hw_context.frames_ctx_ref, hw_frame, 0);
             if get_buffer_result < 0 {
-                let mut hw_frame = hw_frame;
-                ffmpeg::ffi::av_frame_free(&mut hw_frame);
                 anyhow::bail!(
                     "Failed to allocate FFmpeg hardware frame buffer: {}",
                     get_buffer_result
@@ -665,8 +678,6 @@ impl FfmpegEncoder {
             };
 
             let send_result = ffmpeg::ffi::avcodec_send_frame(encoder.as_mut_ptr(), hw_frame);
-            let mut hw_frame = hw_frame;
-            ffmpeg::ffi::av_frame_free(&mut hw_frame);
             if send_result < 0 {
                 anyhow::bail!("Failed to send D3D11 frame to encoder: {}", send_result);
             }
