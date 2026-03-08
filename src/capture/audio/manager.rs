@@ -3,6 +3,7 @@
 //! Coordinates system and microphone audio capture with mixing.
 
 use anyhow::Result;
+use bytes::BytesMut;
 use crossbeam::channel::{Receiver, Sender, TryRecvError};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -100,13 +101,22 @@ impl WasapiAudioManager {
             .as_ref()
             .map(|capture| capture.packet_rx());
         let mut mic_rx = self.mic_capture.as_ref().map(|capture| capture.packet_rx());
+        let system_gain = (config.system_volume as f32 / 100.0).clamp(0.0, 2.0);
+        let mic_gain = (config.mic_volume as f32 / 100.0).clamp(0.0, 2.0);
 
         self.running.store(true, Ordering::SeqCst);
 
         let running = Arc::clone(&self.running);
         let packet_tx = self.packet_tx.clone();
         self.forward_thread = Some(thread::spawn(move || {
-            Self::forward_loop(running, packet_tx, &mut system_rx, &mut mic_rx)
+            Self::forward_loop(
+                running,
+                packet_tx,
+                &mut system_rx,
+                &mut mic_rx,
+                system_gain,
+                mic_gain,
+            )
         }));
 
         debug!("WASAPI audio manager started");
@@ -155,10 +165,14 @@ impl WasapiAudioManager {
         packet_tx: Sender<EncodedPacket>,
         system_rx: &mut Option<Receiver<EncodedPacket>>,
         mic_rx: &mut Option<Receiver<EncodedPacket>>,
+        system_gain: f32,
+        mic_gain: f32,
     ) {
         let mut forwarded_total: u64 = 0;
         let mut forwarded_system: u64 = 0;
         let mut forwarded_mic: u64 = 0;
+        let mut system_volume_buffer = BytesMut::new();
+        let mut mic_volume_buffer = BytesMut::new();
 
         while running.load(Ordering::SeqCst) {
             let mut forwarded_this_tick = false;
@@ -168,6 +182,7 @@ impl WasapiAudioManager {
             if let Some(rx) = system_rx.as_ref() {
                 match rx.try_recv() {
                     Ok(packet) => {
+                        let packet = apply_volume_to_packet(packet, system_gain, &mut system_volume_buffer);
                         if packet_tx.send(packet).is_err() {
                             warn!("Audio manager output channel disconnected while forwarding system audio");
                             break;
@@ -187,6 +202,7 @@ impl WasapiAudioManager {
             if let Some(rx) = mic_rx.as_ref() {
                 match rx.try_recv() {
                     Ok(packet) => {
+                        let packet = apply_volume_to_packet(packet, mic_gain, &mut mic_volume_buffer);
                         if packet_tx.send(packet).is_err() {
                             warn!("Audio manager output channel disconnected while forwarding microphone audio");
                             break;
@@ -230,6 +246,33 @@ impl WasapiAudioManager {
             forwarded_total, forwarded_system, forwarded_mic
         );
     }
+}
+
+fn apply_volume_to_packet(packet: EncodedPacket, gain: f32, buffer: &mut BytesMut) -> EncodedPacket {
+    if (gain - 1.0).abs() < f32::EPSILON || packet.data.len() < 2 {
+        return packet;
+    }
+
+    buffer.clear();
+    buffer.extend_from_slice(&packet.data);
+
+    for chunk in buffer.chunks_exact_mut(2) {
+        let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
+        let scaled = (sample as f32 * gain)
+            .round()
+            .clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+        let bytes = scaled.to_le_bytes();
+        chunk[0] = bytes[0];
+        chunk[1] = bytes[1];
+    }
+
+    EncodedPacket::new(
+        buffer.split().freeze(),
+        packet.pts,
+        packet.dts,
+        packet.is_keyframe,
+        packet.stream,
+    )
 }
 
 impl Drop for WasapiAudioManager {

@@ -3,7 +3,7 @@
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
 use anyhow::{Context, Result};
-use crossbeam::channel::{bounded, unbounded, Receiver, Sender};
+use crossbeam::channel::{bounded, Receiver, Sender};
 #[cfg(feature = "ffmpeg")]
 use ffmpeg::format::Pixel;
 #[cfg(feature = "ffmpeg")]
@@ -37,11 +37,8 @@ pub trait Encoder: Send + 'static {
 
 fn spawn_buffer_writer(
     buffer: crate::buffer::ring::SharedReplayBuffer,
-) -> (
-    Sender<EncodedPacket>,
-    std::thread::JoinHandle<(u64, usize)>,
-) {
-    let (packet_tx, packet_rx) = unbounded::<EncodedPacket>();
+) -> (Sender<EncodedPacket>, std::thread::JoinHandle<(u64, usize)>) {
+    let (packet_tx, packet_rx) = bounded::<EncodedPacket>(512);
     let thread = std::thread::Builder::new()
         .name("encoder-buffer-writer".to_string())
         .spawn(move || {
@@ -302,10 +299,7 @@ pub fn spawn_encoder(
             loop {
                 while let Ok(packet) = packet_rx.try_recv() {
                     packets_received += 1;
-                    if buffer_packet_tx.send(packet).is_err() {
-                        warn!("Buffer writer channel closed, stopping encoder");
-                        break;
-                    }
+                    buffer_packet_tx.send(packet).unwrap();
                 }
                 match frame_rx.recv_timeout(std::time::Duration::from_millis(20)) {
                     Ok(frame) => {
@@ -342,9 +336,7 @@ pub fn spawn_encoder(
                 Ok(packets) => {
                     info!("Flushed {} packets from encoder", packets.len());
                     for packet in packets {
-                        if buffer_packet_tx.send(packet).is_err() {
-                            break;
-                        }
+                        buffer_packet_tx.send(packet).unwrap();
                     }
                 }
                 Err(e) => {
@@ -353,11 +345,13 @@ pub fn spawn_encoder(
             }
             let mut final_packets = Vec::new();
             while let Ok(packet) = packet_rx.try_recv() {
-                if buffer_packet_tx.send(packet).is_ok() {
-                    final_packets.push(());
-                }
+                buffer_packet_tx.send(packet).unwrap();
+                final_packets.push(());
             }
-            info!("Drained {} final packets from encoder channel", final_packets.len());
+            info!(
+                "Drained {} final packets from encoder channel",
+                final_packets.len()
+            );
             drop(buffer_packet_tx);
             if let Ok((buffered_packets, flush_batches)) = buffer_writer_thread.join() {
                 info!(
@@ -421,10 +415,7 @@ pub fn spawn_encoder_with_receiver(
             let mut consecutive_encode_errors = 0u32;
             loop {
                 while let Ok(packet) = packet_rx.try_recv() {
-                    if buffer_packet_tx.send(packet).is_err() {
-                        warn!("Buffer writer channel closed, stopping encoder");
-                        break;
-                    }
+                    buffer_packet_tx.send(packet).unwrap();
                 }
                 match frame_rx.recv_timeout(std::time::Duration::from_millis(20)) {
                     Ok(frame) => {
@@ -470,7 +461,10 @@ pub fn spawn_encoder_with_receiver(
                     final_packets.push(());
                 }
             }
-            debug!("Drained {} final packets from encoder channel", final_packets.len());
+            debug!(
+                "Drained {} final packets from encoder channel",
+                final_packets.len()
+            );
             drop(buffer_packet_tx);
             if let Ok((buffered_packets, flush_batches)) = buffer_writer_thread.join() {
                 debug!(

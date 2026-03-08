@@ -3,7 +3,7 @@
 //! Captures system audio (loopback) using WASAPI in shared mode.
 
 use anyhow::{Context, Result};
-use bytes::Bytes;
+use bytes::BytesMut;
 use crossbeam::channel::{bounded, Receiver, Sender};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -11,14 +11,13 @@ use std::thread;
 use std::time::Duration;
 use tracing::{debug, error, warn};
 
+use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::Media::Audio::{
     eConsole, eMultimedia, eRender, IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator,
     MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED,
     AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-    AUDCLNT_STREAMFLAGS_LOOPBACK,
-    AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY, WAVEFORMATEX,
+    AUDCLNT_STREAMFLAGS_LOOPBACK, AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY, WAVEFORMATEX,
 };
-use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
 };
@@ -200,7 +199,7 @@ impl WasapiSystemCapture {
         let mut total_frames: u64 = 0;
         let mut packet_count: u64 = 0;
         let max_buffer_size = (config.sample_rate as usize / 10) * block_align as usize;
-        let mut audio_buffer = Vec::with_capacity(max_buffer_size);
+        let mut audio_buffer = BytesMut::with_capacity(max_buffer_size);
 
         while running.load(Ordering::SeqCst) {
             let mut packet_frames = unsafe { capture_client.GetNextPacketSize() }
@@ -237,7 +236,6 @@ impl WasapiSystemCapture {
                 .context("IAudioCaptureClient::GetBuffer failed")?;
 
                 let byte_count = frame_count as usize * block_align as usize;
-                audio_buffer.clear();
                 audio_buffer.resize(byte_count, 0);
                 unsafe {
                     if flags & (AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) == 0 && !data_ptr.is_null() {
@@ -260,7 +258,7 @@ impl WasapiSystemCapture {
                 total_frames = total_frames.saturating_add(frame_count as u64);
 
                 let packet = EncodedPacket::new(
-                    Bytes::copy_from_slice(&audio_buffer),
+                    audio_buffer.split_to(byte_count).freeze(),
                     pts,
                     pts,
                     false,
