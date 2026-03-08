@@ -4,7 +4,7 @@
 
 #[cfg(test)]
 mod tests {
-    use super::super::types::DxgiCapture;
+    use super::super::DxgiCapture;
     #[test]
     fn test_dxgi_capture_creation() {
         let _capture = DxgiCapture::new();

@@ -248,7 +248,7 @@ pub fn create_encoder(config: &EncoderConfig) -> Result<Box<dyn Encoder>> {
     let config = resolve_encoder_config(config);
 
     info!("Creating native FFmpeg encoder: {:?}", config.encoder_type);
-    Ok(Box::new(crate::encode::ffmpeg_encoder::FfmpegEncoder::new(
+    Ok(Box::new(crate::encode::ffmpeg::FfmpegEncoder::new(
         &config,
     )?))
 }

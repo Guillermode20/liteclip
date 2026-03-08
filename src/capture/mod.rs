@@ -19,6 +19,11 @@ use windows::Win32::Graphics::Direct3D11::{
 pub mod audio;
 pub mod backpressure;
 pub mod dxgi;
+pub mod error;
+pub mod frame;
+
+pub use dxgi::DxgiCapture;
+pub use error::CaptureError;
 
 /// Configuration for screen capture
 #[derive(Debug, Clone)]

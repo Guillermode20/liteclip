@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::thread::spawn;
 use tracing::{error, info};
 
-use super::types::DxgiCapture;
+use super::DxgiCapture;
 
 impl CaptureBackend for DxgiCapture {
     fn start(&mut self, config: CaptureConfig) -> Result<()> {

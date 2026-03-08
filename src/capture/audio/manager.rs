@@ -248,7 +248,7 @@ impl WasapiAudioManager {
     }
 }
 
-fn apply_volume_to_packet(packet: EncodedPacket, gain: f32, buffer: &mut BytesMut) -> EncodedPacket {
+pub(crate) fn apply_volume_to_packet(packet: EncodedPacket, gain: f32, buffer: &mut BytesMut) -> EncodedPacket {
     if (gain - 1.0).abs() < f32::EPSILON || packet.data.len() < 2 {
         return packet;
     }

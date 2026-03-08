@@ -5,6 +5,7 @@
 
 pub mod device_info;
 pub mod manager;
+pub mod mixer;
 pub mod mic;
 pub mod system;
 

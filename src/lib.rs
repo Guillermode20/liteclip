@@ -7,15 +7,18 @@
 //! - Hidden HWND thread for hotkeys
 //! - CLI-only interface (GUI in Phase 2)
 
+#[path = "app/mod.rs"]
 pub mod app;
 pub mod buffer;
 pub mod capture;
 pub mod clip;
 pub mod config;
+pub mod core;
 pub mod d3d;
 pub mod encode;
 pub mod gui;
 pub mod metrics;
+pub mod output;
 pub mod platform;
 
 use std::sync::Arc;
