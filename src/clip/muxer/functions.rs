@@ -97,15 +97,43 @@ pub fn hevc_nal_type(data: &[u8]) -> Option<u8> {
 /// Calculate start timestamp for clip based on duration
 ///
 /// Returns the QPC timestamp to seek to (nearest keyframe at or before this time).
-pub fn calculate_clip_start_pts(newest_pts: i64, duration: std::time::Duration) -> i64 {
+///
+/// Smart skipping logic:
+/// - If buffer has enough data for requested duration, skip first 1 second to avoid
+///   potential encoder initialization artifacts
+/// - If buffer has less data than requested, don't skip - use all available data
+pub fn calculate_clip_start_pts(
+    newest_pts: i64,
+    duration: std::time::Duration,
+    oldest_pts: Option<i64>,
+) -> i64 {
     let qpc_freq = crate::buffer::ring::functions::qpc_frequency();
     let duration_qpc = (duration.as_secs_f64() * qpc_freq as f64) as i64;
-    // Skip first 1 second to avoid corrupted frames from encoder initialization
-    let skip_qpc = qpc_freq; // 1 second worth of QPC units
-    let start_pts = (newest_pts - duration_qpc + skip_qpc).max(skip_qpc);
+
+    let available_duration_qpc = if let Some(oldest) = oldest_pts {
+        newest_pts.saturating_sub(oldest)
+    } else {
+        duration_qpc
+    };
+
+    let has_full_duration = available_duration_qpc >= duration_qpc;
+
+    let start_pts = if has_full_duration {
+        let skip_qpc = qpc_freq;
+        (newest_pts - duration_qpc + skip_qpc).max(skip_qpc)
+    } else {
+        newest_pts.saturating_sub(available_duration_qpc).max(0)
+    };
+
+    let start_pts = start_pts.max(0);
+
     debug!(
-        "Clip window: newest_pts={}, duration_qpc={}, skip_qpc={}, start_pts={}",
-        newest_pts, duration_qpc, skip_qpc, start_pts
+        "Clip window: newest_pts={}, requested_duration={}s, available_duration={}s, has_full={}, start_pts={}",
+        newest_pts,
+        duration.as_secs(),
+        available_duration_qpc / qpc_freq,
+        has_full_duration,
+        start_pts
     );
     start_pts
 }

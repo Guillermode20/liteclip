@@ -32,7 +32,7 @@ pub fn spawn_clip_saver(
     config: MuxerConfig,
 ) -> JoinHandle<Result<PathBuf>> {
     tokio::task::spawn_blocking(move || {
-        info!(
+info!(
             "Clip saver started: duration={}s, output={:?}",
             duration.as_secs(),
             output_path
@@ -41,9 +41,9 @@ pub fn spawn_clip_saver(
         let newest_pts = buffer
             .newest_pts()
             .context("No packets in buffer to save")?;
+        let oldest_pts = buffer.oldest_pts();
 
-        // Step 2: Find time window and seek to nearest keyframe
-        let start_pts = muxer::calculate_clip_start_pts(newest_pts, duration);
+        let start_pts = muxer::calculate_clip_start_pts(newest_pts, duration, oldest_pts);
         debug!(
             "Clip window: {} to {} (duration: {}s)",
             start_pts,
@@ -51,12 +51,29 @@ pub fn spawn_clip_saver(
             duration.as_secs()
         );
 
-        // Step 3: Get packets from keyframe
-        let mut clip_packets = buffer
+let mut clip_packets = buffer
             .snapshot_from(start_pts)
             .context("Failed to get packets from buffer")?;
 
-        // Check for decodable video frames (supports both H.264 and HEVC)
+        let video_packets: Vec<_> = clip_packets
+            .iter()
+            .filter(|p| matches!(p.stream, crate::encode::StreamType::Video))
+            .collect();
+        
+        if !video_packets.is_empty() {
+            let first_vid = video_packets[0];
+            let first_20_bytes: Vec<String> = first_vid.data.iter().take(20).map(|b| format!("{:02x}", b)).collect();
+            info!(
+                "First video packet: {}B, keyframe={}, first20=[{}]",
+                first_vid.data.len(),
+                first_vid.is_keyframe,
+                first_20_bytes.join(" ")
+            );
+            
+            let nal_type = muxer::hevc_nal_type(first_vid.data.as_ref());
+            info!("First video packet HEVC NAL type: {:?}", nal_type);
+        }
+
         let has_decodable_video_frame = |packets: &[crate::encode::EncodedPacket]| {
             packets.iter().any(|packet| {
                 if !matches!(packet.stream, crate::encode::StreamType::Video) {

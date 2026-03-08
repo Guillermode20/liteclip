@@ -9,7 +9,7 @@ use bytes::Bytes;
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, trace};
+use tracing::{debug, info, trace};
 
 use super::functions::{h264_nal_type, hevc_nal_type, qpc_frequency};
 use super::types::BufferStats;
@@ -181,7 +181,7 @@ impl LockFreeReplayBuffer {
     }
 
     fn cache_parameter_sets(&self, packet: &EncodedPacket) {
-        if !matches!(packet.stream, StreamType::Video) {
+        if !matches!(packet.stream, StreamType::Video) || packet.data.is_empty() {
             return;
         }
 
@@ -189,64 +189,78 @@ impl LockFreeReplayBuffer {
         let data = packet.data.as_ref();
 
         let mut cache = inner.param_cache.lock().unwrap();
-        let codec_detected = cache.h264_sps.is_some()
-            || cache.h264_pps.is_some()
-            || cache.hevc_vps.is_some()
-            || cache.hevc_sps.is_some()
-            || cache.hevc_pps.is_some();
 
-        if codec_detected {
-            match cache.codec_kind {
-                CodecKind::H264 => {
-                    if let Some(7) = h264_nal_type(data) {
-                        cache.h264_sps = Some(packet.data.clone());
-                        trace!("Cached H.264 SPS ({} bytes)", packet.data.len());
-                    }
-                    if let Some(8) = h264_nal_type(data) {
-                        cache.h264_pps = Some(packet.data.clone());
-                        trace!("Cached H.264 PPS ({} bytes)", packet.data.len());
+        let mut nals: Vec<(usize, usize, u8, u8)> = Vec::new();
+        let mut i = 0;
+        while i < data.len() {
+            let start_code_len;
+            if i + 4 <= data.len() && data[i..i + 4] == [0x00, 0x00, 0x00, 0x01] {
+                start_code_len = 4;
+            } else if i + 3 <= data.len() && data[i..i + 3] == [0x00, 0x00, 0x01] {
+                start_code_len = 3;
+            } else {
+                i += 1;
+                continue;
+            }
+
+            let nal_start = i + start_code_len;
+            if nal_start >= data.len() {
+                break;
+            }
+
+            let hevc_nal = (data[nal_start] >> 1) & 0x3f;
+            let h264_nal = data[nal_start] & 0x1f;
+
+            nals.push((i, start_code_len, hevc_nal, h264_nal));
+            i = nal_start + 1;
+        }
+
+        for (idx, (start, sc_len, hevc_nal, h264_nal)) in nals.iter().enumerate() {
+            let _nal_start = start + sc_len;
+
+            let next_start = nals
+                .get(idx + 1)
+                .map(|(s, _, _, _)| *s)
+                .unwrap_or(data.len());
+
+            let nal_data = Bytes::copy_from_slice(&data[*start..next_start]);
+
+            let already_hevc =
+                cache.hevc_vps.is_some() || cache.hevc_sps.is_some() || cache.hevc_pps.is_some();
+
+            match hevc_nal {
+                32 => {
+                    cache.hevc_vps = Some(nal_data);
+                    cache.codec_kind = CodecKind::Hevc;
+                    trace!("Cached HEVC VPS ({} bytes)", next_start - start);
+                }
+                33 => {
+                    cache.hevc_sps = Some(nal_data);
+                    cache.codec_kind = CodecKind::Hevc;
+                    trace!("Cached HEVC SPS ({} bytes)", next_start - start);
+                }
+                34 => {
+                    cache.hevc_pps = Some(nal_data);
+                    cache.codec_kind = CodecKind::Hevc;
+                    trace!("Cached HEVC PPS ({} bytes)", next_start - start);
+                }
+                _ => {
+                    if !already_hevc {
+                        match h264_nal {
+                            7 => {
+                                cache.h264_sps = Some(nal_data);
+                                cache.codec_kind = CodecKind::H264;
+                                trace!("Cached H.264 SPS ({} bytes)", next_start - start);
+                            }
+                            8 => {
+                                cache.h264_pps = Some(nal_data);
+                                cache.codec_kind = CodecKind::H264;
+                                trace!("Cached H.264 PPS ({} bytes)", next_start - start);
+                            }
+                            _ => {}
+                        }
                     }
                 }
-                CodecKind::Hevc => {
-                    if let Some(32) = hevc_nal_type(data) {
-                        cache.hevc_vps = Some(packet.data.clone());
-                        trace!("Cached HEVC VPS ({} bytes)", packet.data.len());
-                    }
-                    if let Some(33) = hevc_nal_type(data) {
-                        cache.hevc_sps = Some(packet.data.clone());
-                        trace!("Cached HEVC SPS ({} bytes)", packet.data.len());
-                    }
-                    if let Some(34) = hevc_nal_type(data) {
-                        cache.hevc_pps = Some(packet.data.clone());
-                        trace!("Cached HEVC PPS ({} bytes)", packet.data.len());
-                    }
-                }
-            }
-        } else {
-            if let Some(7) = h264_nal_type(data) {
-                cache.h264_sps = Some(packet.data.clone());
-                cache.codec_kind = CodecKind::H264;
-                trace!("Cached H.264 SPS ({} bytes)", packet.data.len());
-            }
-            if let Some(8) = h264_nal_type(data) {
-                cache.h264_pps = Some(packet.data.clone());
-                cache.codec_kind = CodecKind::H264;
-                trace!("Cached H.264 PPS ({} bytes)", packet.data.len());
-            }
-            if let Some(32) = hevc_nal_type(data) {
-                cache.hevc_vps = Some(packet.data.clone());
-                cache.codec_kind = CodecKind::Hevc;
-                trace!("Cached HEVC VPS ({} bytes)", packet.data.len());
-            }
-            if let Some(33) = hevc_nal_type(data) {
-                cache.hevc_sps = Some(packet.data.clone());
-                cache.codec_kind = CodecKind::Hevc;
-                trace!("Cached HEVC SPS ({} bytes)", packet.data.len());
-            }
-            if let Some(34) = hevc_nal_type(data) {
-                cache.hevc_pps = Some(packet.data.clone());
-                cache.codec_kind = CodecKind::Hevc;
-                trace!("Cached HEVC PPS ({} bytes)", packet.data.len());
             }
         }
     }
@@ -381,6 +395,21 @@ impl LockFreeReplayBuffer {
             return Ok(vec![]);
         }
 
+        let video_count = all_packets
+            .iter()
+            .filter(|p| matches!(p.stream, StreamType::Video))
+            .count();
+        let audio_count = all_packets.len() - video_count;
+        let keyframe_count = all_packets.iter().filter(|p| p.is_keyframe).count();
+        debug!(
+            "snapshot_from: all_packets={} ({} video, {} audio, {} keyframes), start_pts={}",
+            all_packets.len(),
+            video_count,
+            audio_count,
+            keyframe_count,
+            start_pts
+        );
+
         let keyframe_idx = all_packets
             .iter()
             .position(|p| p.is_keyframe && p.pts >= start_pts)
@@ -394,7 +423,126 @@ impl LockFreeReplayBuffer {
             });
 
         let start_idx = keyframe_idx.unwrap_or(0);
-        Ok(all_packets.into_iter().skip(start_idx).collect())
+
+        if start_idx > 0 {
+            debug!(
+                "snapshot_from: skipping {} packets to reach keyframe at idx {}",
+                start_idx, start_idx
+            );
+        }
+
+        let result: Vec<EncodedPacket> = all_packets.into_iter().skip(start_idx).collect();
+
+        let result_video = result
+            .iter()
+            .filter(|p| matches!(p.stream, StreamType::Video))
+            .count();
+        debug!(
+            "snapshot_from: result={} packets ({} video)",
+            result.len(),
+            result_video
+        );
+
+        if !result.is_empty() {
+            let first_video = result
+                .iter()
+                .find(|p| matches!(p.stream, StreamType::Video));
+            if let Some(first_vid) = first_video {
+                let first_is_keyframe = first_vid.is_keyframe;
+                let first_data = first_vid.data.as_ref();
+                let first_nal_is_vps = hevc_nal_type(first_data) == Some(32);
+                let first_nal_is_sps = h264_nal_type(first_data) == Some(7);
+
+                debug!(
+                    "snapshot_from: first_video keyframe={}, nal_vps={}, nal_sps={}",
+                    first_is_keyframe, first_nal_is_vps, first_nal_is_sps
+                );
+
+                if first_is_keyframe && !first_nal_is_vps && !first_nal_is_sps {
+                    let cache = self.inner.param_cache.lock().unwrap();
+                    info!(
+                        "snapshot_from: prepending param sets (codec={:?}, vps={}, sps={}, pps={})",
+                        cache.codec_kind,
+                        cache.hevc_vps.is_some(),
+                        cache.hevc_sps.is_some(),
+                        cache.hevc_pps.is_some()
+                    );
+                    let first_pts = first_vid.pts;
+                    let mut prepend = Vec::new();
+
+                    match cache.codec_kind {
+                        CodecKind::H264 => {
+                            if let Some(ref sps_data) = cache.h264_sps {
+                                prepend.push(EncodedPacket {
+                                    data: sps_data.clone(),
+                                    pts: first_pts,
+                                    dts: first_pts,
+                                    stream: StreamType::Video,
+                                    is_keyframe: false,
+                                    resolution: None,
+                                });
+                            }
+                            if let Some(ref pps_data) = cache.h264_pps {
+                                prepend.push(EncodedPacket {
+                                    data: pps_data.clone(),
+                                    pts: first_pts,
+                                    dts: first_pts,
+                                    stream: StreamType::Video,
+                                    is_keyframe: false,
+                                    resolution: None,
+                                });
+                            }
+                        }
+                        CodecKind::Hevc => {
+                            if let Some(ref vps_data) = cache.hevc_vps {
+                                prepend.push(EncodedPacket {
+                                    data: vps_data.clone(),
+                                    pts: first_pts,
+                                    dts: first_pts,
+                                    stream: StreamType::Video,
+                                    is_keyframe: false,
+                                    resolution: None,
+                                });
+                            }
+                            if let Some(ref sps_data) = cache.hevc_sps {
+                                prepend.push(EncodedPacket {
+                                    data: sps_data.clone(),
+                                    pts: first_pts,
+                                    dts: first_pts,
+                                    stream: StreamType::Video,
+                                    is_keyframe: false,
+                                    resolution: None,
+                                });
+                            }
+                            if let Some(ref pps_data) = cache.hevc_pps {
+                                prepend.push(EncodedPacket {
+                                    data: pps_data.clone(),
+                                    pts: first_pts,
+                                    dts: first_pts,
+                                    stream: StreamType::Video,
+                                    is_keyframe: false,
+                                    resolution: None,
+                                });
+                            }
+                        }
+                    }
+
+                    if !prepend.is_empty() {
+                        trace!(
+                            "snapshot_from: prepending {} parameter sets before keyframe at idx {}",
+                            prepend.len(),
+                            start_idx
+                        );
+                        let mut final_result = Vec::with_capacity(prepend.len() + result.len());
+                        final_result.extend(prepend);
+                        final_result.extend(result);
+                        return Ok(final_result);
+                    }
+                }
+            }
+        }
+
+        Ok(result)
     }
 
     pub fn clear(&self) {

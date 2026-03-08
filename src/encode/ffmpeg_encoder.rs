@@ -10,9 +10,9 @@ use std::collections::VecDeque;
 use std::ffi::{c_void, CString};
 use tracing::{info, warn};
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, ID3D11Device,
-    ID3D11Device5, ID3D11DeviceContext, ID3D11DeviceContext4, ID3D11Fence, ID3D11Resource,
-    ID3D11Texture2D,
+    D3D11CreateDevice, ID3D11Device, ID3D11Device5, ID3D11DeviceContext, ID3D11DeviceContext4,
+    ID3D11Fence, ID3D11Resource, ID3D11Texture2D, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+    D3D11_SDK_VERSION,
 };
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 use windows_core::Interface;
@@ -68,6 +68,7 @@ pub struct FfmpegEncoder {
     packet_tx: Sender<EncodedPacket>,
     packet_rx: Receiver<EncodedPacket>,
     frame_count: i64,
+    packet_count: i64,
     running: bool,
     scaler: Option<ffmpeg::software::scaling::Context>,
     src_frame: Option<ffmpeg::util::frame::video::Video>,
@@ -145,6 +146,7 @@ impl FfmpegEncoder {
             packet_tx: tx,
             packet_rx: rx,
             frame_count: 0,
+            packet_count: 0,
             running: false,
             scaler: None,
             src_frame: None,
@@ -899,14 +901,53 @@ impl FfmpegEncoder {
             }
         }
 
-        for (data, packet_is_key) in packets_data {
+        let qpc_freq = crate::buffer::ring::qpc_frequency();
+        let drained_count = packets_data.len();
+        let mut keyframe_count = 0usize;
+
+        for (idx, (data, packet_is_key)) in packets_data.into_iter().enumerate() {
             let normalized_data = Self::convert_length_prefixed_to_annex_b(&data);
             let inspection_data = normalized_data.as_deref().unwrap_or(&data);
             let is_keyframe = Self::detect_keyframe(inspection_data, packet_is_key);
             let pts = self.dequeue_packet_timestamp(fallback_timestamp);
 
-            if self.frame_count % 60 == 0 || is_keyframe {
-                tracing::debug!("packet {}B keyframe={}", data.len(), is_keyframe);
+            if is_keyframe {
+                keyframe_count += 1;
+            }
+
+            let hevc_nal: Option<u8> = if data.len() >= 5 && data[0..4] == [0x00, 0x00, 0x00, 0x01]
+            {
+                Some((data[4] >> 1) & 0x3f)
+            } else if data.len() >= 4 && data[0..3] == [0x00, 0x00, 0x01] {
+                Some((data[3] >> 1) & 0x3f)
+            } else {
+                None
+            };
+
+            if self.frame_count % 60 == 0 || is_keyframe || idx == 0 {
+                let pts_ms = if qpc_freq > 0 {
+                    pts * 1000 / qpc_freq
+                } else {
+                    0
+                };
+                let nal_name = match hevc_nal {
+                    Some(32) => "VPS".to_string(),
+                    Some(33) => "SPS".to_string(),
+                    Some(34) => "PPS".to_string(),
+                    Some(19) => "IDR_W_RADL".to_string(),
+                    Some(20) => "IDR_N_LP".to_string(),
+                    Some(1) => "TRAIL_R".to_string(),
+                    Some(n) => format!("NAL{}", n),
+                    None => "unknown".to_string(),
+                };
+                tracing::debug!(
+                    "encoder packet: frame={} pts={}ms ({}B) nal={} keyframe={}",
+                    self.frame_count,
+                    pts_ms,
+                    data.len(),
+                    nal_name,
+                    is_keyframe
+                );
             }
 
             let mut encoded_packet =
@@ -919,6 +960,17 @@ impl FfmpegEncoder {
             if self.packet_tx.send(encoded_packet).is_err() {
                 break;
             }
+
+            self.packet_count += 1;
+        }
+
+        if drained_count > 0 && self.frame_count % 60 == 0 {
+            tracing::info!(
+                "encoder stats: frames={}, packets={}, ratio={:.2}",
+                self.frame_count,
+                self.packet_count,
+                self.packet_count as f64 / self.frame_count.max(1) as f64
+            );
         }
 
         Ok(())
@@ -952,7 +1004,9 @@ impl Encoder for FfmpegEncoder {
             if can_use_gpu {
                 if let Some(gpu_frame) = gpu_frame {
                     if needs_transport_reinit && self.encoder.is_some() {
-                        info!("GPU NV12 frames restored; reinitializing encoder for D3D11 transport");
+                        info!(
+                            "GPU NV12 frames restored; reinitializing encoder for D3D11 transport"
+                        );
                     } else {
                         info!(
                             "Initializing hardware encoder with D3D11 NV12 frames (GPU transport enabled)"

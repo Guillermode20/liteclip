@@ -53,8 +53,8 @@ impl FfmpegMuxer {
                 _ => ffmpeg::codec::Id::H264,
             };
 
-            let codec = ffmpeg::encoder::find(codec_id)
-                .context("Failed to find video codec for muxer")?;
+            let codec =
+                ffmpeg::encoder::find(codec_id).context("Failed to find video codec for muxer")?;
 
             let mut stream = format_context.add_stream(codec)?;
             let stream_index = stream.index();
@@ -199,13 +199,50 @@ impl FfmpegMuxer {
             return Ok(0);
         }
 
+        let qpc_freq = crate::buffer::ring::qpc_frequency();
+        let first_pts_qpc = video_packets.first().map(|p| p.pts).unwrap_or(0);
+        let last_pts_qpc = video_packets.last().map(|p| p.pts).unwrap_or(0);
+        let duration_qpc = last_pts_qpc.saturating_sub(first_pts_qpc);
+        let duration_ms = if qpc_freq > 0 {
+            duration_qpc * 1000 / qpc_freq
+        } else {
+            0
+        };
+
+        let keyframe_count = video_packets.iter().filter(|p| p.is_keyframe).count();
+        let expected_fps = self.video_frame_rate;
+        let actual_fps = if duration_ms > 0 {
+            (video_packets.len() as i64 * 1000 / duration_ms as i64) as i32
+        } else {
+            0
+        };
+
+        info!(
+            "Writing {} video packets: duration={}ms, keyframes={}, expected_fps={}, actual_fps={}",
+            video_packets.len(),
+            duration_ms,
+            keyframe_count,
+            expected_fps,
+            actual_fps
+        );
+
         for (index, packet) in video_packets.iter().enumerate() {
-            let pts = qpc_to_time_base(packet.pts.saturating_sub(base_qpc), self.video_time_base.1 as i64);
-            let dts = qpc_to_time_base(packet.dts.saturating_sub(base_qpc), self.video_time_base.1 as i64);
+            let pts = qpc_to_time_base(
+                packet.pts.saturating_sub(base_qpc),
+                self.video_time_base.1 as i64,
+            );
+            let dts = qpc_to_time_base(
+                packet.dts.saturating_sub(base_qpc),
+                self.video_time_base.1 as i64,
+            );
             let next_pts = video_packets
                 .get(index + 1)
                 .map(|next| next.pts)
-                .unwrap_or_else(|| packet.pts.saturating_add(default_video_frame_qpc(self.video_frame_rate)));
+                .unwrap_or_else(|| {
+                    packet
+                        .pts
+                        .saturating_add(default_video_frame_qpc(self.video_frame_rate))
+                });
             let duration_qpc = next_pts.saturating_sub(packet.pts).max(0);
             let duration = qpc_to_time_base(duration_qpc, self.video_time_base.1 as i64).max(1);
 
@@ -259,13 +296,16 @@ fn default_video_frame_qpc(video_frame_rate: i32) -> i64 {
     (qpc_freq / video_frame_rate.max(1) as i64).max(1)
 }
 
-fn estimate_video_end_qpc(video_packets: &[EncodedPacket], video_frame_rate: i32, video_tb_den: i32) -> i64 {
+fn estimate_video_end_qpc(
+    video_packets: &[EncodedPacket],
+    video_frame_rate: i32,
+    video_tb_den: i32,
+) -> i64 {
     video_packets
         .last()
         .map(|packet| {
-            let frame_qpc = default_video_frame_qpc(video_frame_rate).max(
-                qpc_to_qpc(1, video_tb_den as i64).max(1),
-            );
+            let frame_qpc = default_video_frame_qpc(video_frame_rate)
+                .max(qpc_to_qpc(1, video_tb_den as i64).max(1));
             packet.pts.saturating_add(frame_qpc)
         })
         .unwrap_or(0)
@@ -388,11 +428,13 @@ fn encode_audio_track(
         encoder
             .send_frame(&converted)
             .context("Failed to send audio frame to encoder")?;
-        encoded_packets += drain_audio_packets(format_context, encoder, stream_index, stream_time_base)?;
+        encoded_packets +=
+            drain_audio_packets(format_context, encoder, stream_index, stream_time_base)?;
     }
 
     encoder.send_eof().ok();
-    encoded_packets += drain_audio_packets(format_context, encoder, stream_index, stream_time_base)?;
+    encoded_packets +=
+        drain_audio_packets(format_context, encoder, stream_index, stream_time_base)?;
     Ok(encoded_packets)
 }
 
@@ -400,7 +442,10 @@ fn copy_pcm_into_frame(frame: &mut ffmpeg::frame::Audio, chunk: &[i16]) {
     match frame.format() {
         ffmpeg::format::Sample::I16(ffmpeg::format::sample::Type::Packed) => {
             let plane = frame.plane_mut::<(i16, i16)>(0);
-            for (dst, src) in plane.iter_mut().zip(chunk.chunks_exact(AUDIO_CHANNELS as usize)) {
+            for (dst, src) in plane
+                .iter_mut()
+                .zip(chunk.chunks_exact(AUDIO_CHANNELS as usize))
+            {
                 *dst = (src[0], src[1]);
             }
         }
@@ -416,7 +461,10 @@ fn copy_pcm_into_frame(frame: &mut ffmpeg::frame::Audio, chunk: &[i16]) {
         }
         ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Packed) => {
             let plane = frame.plane_mut::<(f32, f32)>(0);
-            for (dst, src) in plane.iter_mut().zip(chunk.chunks_exact(AUDIO_CHANNELS as usize)) {
+            for (dst, src) in plane
+                .iter_mut()
+                .zip(chunk.chunks_exact(AUDIO_CHANNELS as usize))
+            {
                 *dst = (
                     src[0] as f32 / i16::MAX as f32,
                     src[1] as f32 / i16::MAX as f32,
@@ -459,8 +507,7 @@ fn write_f32_plane(dst: &mut [u8], samples: &[f32]) {
     for (index, sample) in samples.iter().enumerate() {
         let start = index * std::mem::size_of::<f32>();
         if start + std::mem::size_of::<f32>() <= dst.len() {
-            dst[start..start + std::mem::size_of::<f32>()]
-                .copy_from_slice(&sample.to_ne_bytes());
+            dst[start..start + std::mem::size_of::<f32>()].copy_from_slice(&sample.to_ne_bytes());
         }
     }
 }
