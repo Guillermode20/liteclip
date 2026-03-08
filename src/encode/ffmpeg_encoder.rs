@@ -3,6 +3,7 @@ use crate::capture::GpuTextureFormat;
 use crate::config::{EncoderType, QualityPreset, RateControl};
 use anyhow::{Context, Result};
 use crossbeam::channel::{unbounded, Receiver, Sender};
+use ffmpeg::color::{Primaries, Range, Space, TransferCharacteristic};
 use ffmpeg::format::Pixel;
 use ffmpeg_next as ffmpeg;
 use std::collections::VecDeque;
@@ -79,6 +80,29 @@ pub struct FfmpegEncoder {
 unsafe impl Send for FfmpegEncoder {}
 
 impl FfmpegEncoder {
+    fn apply_bt709_encoder_metadata(encoder: &mut ffmpeg::encoder::video::Video) {
+        encoder.set_colorspace(Space::BT709);
+        encoder.set_color_range(Range::MPEG);
+        unsafe {
+            (*encoder.as_mut_ptr()).color_primaries = Primaries::BT709.into();
+            (*encoder.as_mut_ptr()).color_trc = TransferCharacteristic::BT709.into();
+        }
+    }
+
+    fn apply_bt709_frame_metadata(frame: &mut ffmpeg::util::frame::video::Video) {
+        frame.set_color_space(Space::BT709);
+        frame.set_color_range(Range::MPEG);
+        frame.set_color_primaries(Primaries::BT709);
+        frame.set_color_transfer_characteristic(TransferCharacteristic::BT709);
+    }
+
+    unsafe fn apply_bt709_raw_frame_metadata(frame: *mut ffmpeg::ffi::AVFrame) {
+        (*frame).colorspace = Space::BT709.into();
+        (*frame).color_range = Range::MPEG.into();
+        (*frame).color_primaries = Primaries::BT709.into();
+        (*frame).color_trc = TransferCharacteristic::BT709.into();
+    }
+
     fn create_hw_frames_ctx_with_pool_size(
         device_ctx_ref: *mut ffmpeg::ffi::AVBufferRef,
         width: u32,
@@ -306,6 +330,7 @@ impl FfmpegEncoder {
         encoder.set_format(encoder_pix_fmt);
         encoder.set_frame_rate(Some((self.config.framerate as i32, 1)));
         encoder.set_time_base((1, self.config.framerate as i32));
+        Self::apply_bt709_encoder_metadata(&mut encoder);
 
         let bitrate = self.bitrate_bps();
         encoder.set_bit_rate(bitrate);
@@ -655,6 +680,7 @@ impl FfmpegEncoder {
         encoder.set_format(Pixel::D3D11);
         encoder.set_frame_rate(Some((self.config.framerate as i32, 1)));
         encoder.set_time_base((1, self.config.framerate as i32));
+        Self::apply_bt709_encoder_metadata(&mut encoder);
 
         let bitrate = self.bitrate_bps();
         encoder.set_bit_rate(bitrate);
@@ -675,22 +701,48 @@ impl FfmpegEncoder {
 
         let bitrate_bps = bitrate.to_string();
         let peak_bitrate_bps = self.peak_bitrate_bps().to_string();
+        let (_, vbaq, _, me_half_pel, me_quarter_pel, high_motion_quality_boost) =
+            match self.config.quality_preset {
+                QualityPreset::Performance => ("0", "0", "0", "0", "0", "0"),
+                QualityPreset::Balanced => ("0", "0", "0", "1", "0", "0"),
+                QualityPreset::Quality => ("0", "1", "0", "1", "1", "0"),
+            };
         options.set("usage", "lowlatency");
         options.set("quality", self.amf_quality());
         options.set("rc", self.amf_rc_mode());
         options.set("aud", "1");
+        options.set("bf", "0");
         options.set("header_insertion_mode", "idr");
         options.set("gops_per_idr", "1");
         options.set("pa_adaptive_mini_gop", "0");
         options.set("preanalysis", "0");
-        options.set("vbaq", "0");
+        options.set("vbaq", vbaq);
         options.set("rc_lookahead", "0");
+        options.set("max_qp_delta", "4");
         options.set("filler_data", "0");
+        options.set("me_half_pel", me_half_pel);
+        options.set("me_quarter_pel", me_quarter_pel);
+        options.set(
+            "high_motion_quality_boost_enable",
+            high_motion_quality_boost,
+        );
+        options.set("min_qp_i", "18");
+        options.set("max_qp_i", "51");
+        options.set("min_qp_p", "20");
+        options.set("max_qp_p", "51");
         options.set("profile_tier", "high");
         options.set("b", &bitrate_bps);
         options.set("max_bitrate", &peak_bitrate_bps);
         options.set("maxrate", &peak_bitrate_bps);
         options.set("bufsize", &bitrate_bps);
+
+        if matches!(self.config.rate_control, RateControl::Cbr) {
+            options.set("minrate", &bitrate_bps);
+        }
+
+        if matches!(self.config.rate_control, RateControl::Cq) {
+            options.set("qvbr_quality_level", &self.cq_value().to_string());
+        }
 
         let encoder = encoder
             .open_with(options)
@@ -818,6 +870,7 @@ impl FfmpegEncoder {
             (*hw_frame).pts = encoder_pts;
             (*hw_frame).width = frame.resolution.0 as i32;
             (*hw_frame).height = frame.resolution.1 as i32;
+            Self::apply_bt709_raw_frame_metadata(hw_frame);
             (*hw_frame).pict_type = if gop > 0 && self.frame_count % gop == 0 {
                 ffmpeg::picture::Type::I.into()
             } else {
@@ -962,6 +1015,7 @@ impl Encoder for FfmpegEncoder {
                 dst_frame.data_mut(0).copy_from_slice(&frame.bgra);
             }
 
+            Self::apply_bt709_frame_metadata(dst_frame);
             dst_frame.set_pts(Some(encoder_pts));
             if gop > 0 && self.frame_count % gop == 0 {
                 dst_frame.set_kind(ffmpeg::picture::Type::I);

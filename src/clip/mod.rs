@@ -38,18 +38,11 @@ pub fn spawn_clip_saver(
             output_path
         );
 
-        // Step 1: Snapshot the buffer (sub-ms with Bytes ref counting)
-        let packets = buffer.snapshot().context("Failed to snapshot buffer")?;
-
-        if packets.is_empty() {
-            bail!("No packets in buffer to save");
-        }
-
-        debug!("Snapshot complete: {} packets", packets.len());
+        let newest_pts = buffer
+            .newest_pts()
+            .context("No packets in buffer to save")?;
 
         // Step 2: Find time window and seek to nearest keyframe
-        let newest_pts = packets.iter().map(|p| p.pts).max().unwrap_or(0);
-
         let start_pts = muxer::calculate_clip_start_pts(newest_pts, duration);
         debug!(
             "Clip window: {} to {} (duration: {}s)",

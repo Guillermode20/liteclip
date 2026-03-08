@@ -14,12 +14,15 @@ use tracing::{debug, error, warn};
 use windows::Win32::Media::Audio::{
     eConsole, eMultimedia, eRender, IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator,
     MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED,
-    AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, AUDCLNT_STREAMFLAGS_LOOPBACK,
+    AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+    AUDCLNT_STREAMFLAGS_LOOPBACK,
     AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY, WAVEFORMATEX,
 };
+use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
 };
+use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 
 use crate::buffer::ring::qpc_frequency;
 use crate::encode::{EncodedPacket, StreamType};
@@ -165,6 +168,7 @@ impl WasapiSystemCapture {
 
         let buffer_hns = duration_to_hns(config.buffer_duration);
         let stream_flags = AUDCLNT_STREAMFLAGS_LOOPBACK
+            | AUDCLNT_STREAMFLAGS_EVENTCALLBACK
             | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
             | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
 
@@ -179,6 +183,11 @@ impl WasapiSystemCapture {
             )
         }
         .context("Failed to initialize IAudioClient for loopback capture")?;
+
+        let capture_event =
+            EventHandle::new().context("Failed to create system audio event handle")?;
+        unsafe { audio_client.SetEventHandle(capture_event.raw()) }
+            .context("Failed to bind system audio event handle")?;
 
         let capture_client: IAudioCaptureClient = unsafe { audio_client.GetService() }
             .context("Failed to get IAudioCaptureClient service")?;
@@ -198,7 +207,14 @@ impl WasapiSystemCapture {
                 .context("IAudioCaptureClient::GetNextPacketSize failed")?;
 
             if packet_frames == 0 {
-                thread::sleep(Duration::from_millis(2));
+                match unsafe { WaitForSingleObject(capture_event.raw(), 100) }.0 {
+                    0 => {}
+                    258 => continue,
+                    status => {
+                        warn!("System audio wait returned unexpected status: {:?}", status);
+                        continue;
+                    }
+                }
                 continue;
             }
 
@@ -280,6 +296,28 @@ impl WasapiSystemCapture {
 
         debug!("WASAPI system audio capture loop ended");
         Ok(())
+    }
+}
+
+struct EventHandle(HANDLE);
+
+impl EventHandle {
+    fn new() -> Result<Self> {
+        let handle =
+            unsafe { CreateEventW(None, false, false, None) }.context("CreateEventW failed")?;
+        Ok(Self(handle))
+    }
+
+    fn raw(&self) -> HANDLE {
+        self.0
+    }
+}
+
+impl Drop for EventHandle {
+    fn drop(&mut self) {
+        if self.0 != HANDLE::default() {
+            let _ = unsafe { CloseHandle(self.0) };
+        }
     }
 }
 

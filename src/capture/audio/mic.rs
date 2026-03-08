@@ -14,11 +14,13 @@ use tracing::{debug, error, warn};
 use windows::Win32::Media::Audio::{
     eCapture, eConsole, IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator, MMDeviceEnumerator,
     AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
-    AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY, WAVEFORMATEX,
+    AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY, WAVEFORMATEX,
 };
+use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
 };
+use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 
 use crate::buffer::ring::qpc_frequency;
 use crate::encode::{EncodedPacket, StreamType};
@@ -95,8 +97,14 @@ impl WasapiMicCapture {
             }
         }));
 
-        // Wait briefly for the capture thread to initialize WASAPI and report status
-        thread::sleep(Duration::from_millis(500));
+        // Wait briefly for the capture thread to initialize WASAPI and report status without
+        // always paying a fixed half-second startup penalty.
+        for _ in 0..50 {
+            if self.initialized.load(Ordering::SeqCst) || !self.running.load(Ordering::SeqCst) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
 
         if self.initialized.load(Ordering::SeqCst) {
             debug!("WASAPI microphone audio capture started and initialized successfully");
@@ -184,8 +192,9 @@ impl WasapiMicCapture {
         };
 
         let buffer_hns = duration_to_hns(config.buffer_duration);
-        let stream_flags =
-            AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
+        let stream_flags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK
+            | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
+            | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
 
         unsafe {
             audio_client.Initialize(
@@ -198,6 +207,11 @@ impl WasapiMicCapture {
             )
         }
         .context("Failed to initialize IAudioClient for microphone capture")?;
+
+        let capture_event =
+            EventHandle::new().context("Failed to create microphone audio event handle")?;
+        unsafe { audio_client.SetEventHandle(capture_event.raw()) }
+            .context("Failed to bind microphone audio event handle")?;
 
         let capture_client: IAudioCaptureClient = unsafe { audio_client.GetService() }
             .context("Failed to get IAudioCaptureClient service for microphone")?;
@@ -230,7 +244,14 @@ impl WasapiMicCapture {
                 .context("IAudioCaptureClient::GetNextPacketSize failed")?;
 
             if packet_frames == 0 {
-                thread::sleep(Duration::from_millis(2));
+                match unsafe { WaitForSingleObject(capture_event.raw(), 100) }.0 {
+                    0 => {}
+                    258 => continue,
+                    status => {
+                        warn!("Microphone audio wait returned unexpected status: {:?}", status);
+                        continue;
+                    }
+                }
                 continue;
             }
 
@@ -303,6 +324,28 @@ impl WasapiMicCapture {
 
         debug!("WASAPI microphone audio capture loop ended");
         Ok(())
+    }
+}
+
+struct EventHandle(HANDLE);
+
+impl EventHandle {
+    fn new() -> Result<Self> {
+        let handle =
+            unsafe { CreateEventW(None, false, false, None) }.context("CreateEventW failed")?;
+        Ok(Self(handle))
+    }
+
+    fn raw(&self) -> HANDLE {
+        self.0
+    }
+}
+
+impl Drop for EventHandle {
+    fn drop(&mut self) {
+        if self.0 != HANDLE::default() {
+            let _ = unsafe { CloseHandle(self.0) };
+        }
     }
 }
 

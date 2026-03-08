@@ -375,13 +375,11 @@ impl ReplayBuffer {
                     break;
                 }
             }
-            if was_video {
-                self.first_video_info = self.find_next_first_video_info();
-            } else {
-                self.first_video_info = self
-                    .first_video_info
-                    .map(|(idx, kind)| (idx.saturating_sub(1), kind));
-            }
+            self.first_video_info = match self.first_video_info {
+                Some((0, _)) if was_video => self.find_next_first_video_info(),
+                Some((idx, kind)) => Some((idx.saturating_sub(1), kind)),
+                None => None,
+            };
             trace!(
                 "  after eviction: base_offset={}, keyframe_index_len_after={}",
                 self.base_offset,

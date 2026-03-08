@@ -307,7 +307,7 @@ pub fn spawn_encoder(
                         break;
                     }
                 }
-                match frame_rx.recv_timeout(std::time::Duration::from_millis(15)) {
+                match frame_rx.recv_timeout(std::time::Duration::from_millis(20)) {
                     Ok(frame) => {
                         frames_encoded += 1;
                         if let Err(e) = encoder.encode_frame(&frame) {
@@ -426,7 +426,7 @@ pub fn spawn_encoder_with_receiver(
                         break;
                     }
                 }
-                match frame_rx.recv_timeout(std::time::Duration::from_millis(15)) {
+                match frame_rx.recv_timeout(std::time::Duration::from_millis(20)) {
                     Ok(frame) => {
                         if let Err(e) = encoder.encode_frame(&frame) {
                             warn!("Failed to encode frame: {}", e);

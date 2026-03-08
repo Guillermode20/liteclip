@@ -200,9 +200,6 @@ impl FfmpegMuxer {
         }
 
         for (index, packet) in video_packets.iter().enumerate() {
-            let mut ffmpeg_packet = ffmpeg::Packet::copy(&packet.data);
-            ffmpeg_packet.set_stream(self.video_stream_index);
-
             let pts = qpc_to_time_base(packet.pts.saturating_sub(base_qpc), self.video_time_base.1 as i64);
             let dts = qpc_to_time_base(packet.dts.saturating_sub(base_qpc), self.video_time_base.1 as i64);
             let next_pts = video_packets
@@ -212,18 +209,48 @@ impl FfmpegMuxer {
             let duration_qpc = next_pts.saturating_sub(packet.pts).max(0);
             let duration = qpc_to_time_base(duration_qpc, self.video_time_base.1 as i64).max(1);
 
-            ffmpeg_packet.set_pts(Some(pts.max(0)));
-            ffmpeg_packet.set_dts(Some(dts.max(0)));
-            ffmpeg_packet.set_duration(duration);
-
-            if packet.is_keyframe {
-                ffmpeg_packet.set_flags(ffmpeg::codec::packet::flag::Flags::KEY);
-            }
-
-            ffmpeg_packet.write_interleaved(&mut self.format_context)?;
+            write_borrowed_video_packet(
+                &mut self.format_context,
+                self.video_stream_index,
+                packet,
+                pts.max(0),
+                dts.max(0),
+                duration,
+            )?;
         }
 
         Ok(video_packets.len())
+    }
+}
+
+fn write_borrowed_video_packet(
+    format_context: &mut ffmpeg::format::context::Output,
+    stream_index: usize,
+    packet: &EncodedPacket,
+    pts: i64,
+    dts: i64,
+    duration: i64,
+) -> Result<()> {
+    unsafe {
+        let mut raw_packet: ffmpeg::ffi::AVPacket = std::mem::zeroed();
+        ffmpeg::ffi::av_init_packet(&mut raw_packet);
+        raw_packet.data = packet.data.as_ptr() as *mut u8;
+        raw_packet.size = packet.data.len() as i32;
+        raw_packet.stream_index = stream_index as i32;
+        raw_packet.pts = pts;
+        raw_packet.dts = dts;
+        raw_packet.duration = duration;
+        raw_packet.pos = -1;
+
+        if packet.is_keyframe {
+            raw_packet.flags |= ffmpeg::ffi::AV_PKT_FLAG_KEY;
+        }
+
+        match ffmpeg::ffi::av_interleaved_write_frame(format_context.as_mut_ptr(), &mut raw_packet)
+        {
+            0 => Ok(()),
+            err => Err(ffmpeg::Error::from(err).into()),
+        }
     }
 }
 
