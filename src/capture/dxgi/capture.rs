@@ -825,11 +825,10 @@ impl DxgiCapture {
                         state.duplication.ReleaseFrame().ok();
                         return Ok(CaptureOutcome::Dropped);
                     }
-                    let timestamp = if frame_info.LastPresentTime > 0 {
-                        frame_info.LastPresentTime as i64
-                    } else {
-                        Self::get_qpc_timestamp()
-                    };
+                    // Use capture-time QPC for replay timestamps. `LastPresentTime` reflects the
+                    // desktop compositor's last present event, which can lag or remain stale across
+                    // duplication events and causes saved clips to collapse in duration.
+                    let timestamp = Self::get_qpc_timestamp();
                     let resource = desktop_resource.context("Desktop resource is null")?;
                     let captured_texture: ID3D11Texture2D = resource
                         .cast()
@@ -1034,11 +1033,12 @@ impl DxgiCapture {
                 target_resolution,
             ) {
                 Ok(CaptureOutcome::Frame(frame)) => {
-                    if frame.d3d11.is_some() {
-                        last_frame = None;
-                    } else {
-                        last_frame = Some(frame.clone());
-                    }
+                    // Always store the last frame so the timeout path can send
+                    // duplicate frames while DXGI has no new desktop update.
+                    // GPU frames use Arc<D3d11Frame>, so cloning is safe — the
+                    // pooled NV12 texture is returned to the pool only after every
+                    // clone has been dropped.
+                    last_frame = Some(frame.clone());
                     match frame_tx.try_send(frame) {
                         Ok(()) => {
                             frame_count += 1;
@@ -1081,9 +1081,6 @@ impl DxgiCapture {
                     if backpressure.is_encoder_overloaded() || frame_tx.len() > 0 {
                         continue;
                     }
-                    if last.d3d11.is_some() {
-                        continue;
-                    }
                     let fps_divisor = backpressure.current_fps_divisor();
                     if fps_divisor > 0 {
                         adaptive_skip_counter = adaptive_skip_counter.wrapping_add(1);
@@ -1094,6 +1091,9 @@ impl DxgiCapture {
                         }
                     }
                     let frame = CapturedFrame {
+                        // GPU frames are wrapped in `Arc<D3d11Frame>`, so re-sending the most
+                        // recent frame on DXGI timeouts is safe. The pooled texture is only
+                        // recycled once the final clone is dropped by the encoder.
                         bgra: if last.d3d11.is_some() {
                             Bytes::new()
                         } else {

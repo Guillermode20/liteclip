@@ -31,6 +31,7 @@ pub fn spawn_clip_saver(
         let oldest_pts = buffer.oldest_pts();
 
         let start_pts = calculate_clip_start_pts(newest_pts, duration, oldest_pts);
+
         debug!(
             "Clip window: {} to {} (duration: {}s)",
             start_pts,
