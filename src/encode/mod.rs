@@ -57,7 +57,6 @@
 pub mod config;
 pub mod encoder_mod;
 pub mod ffmpeg;
-mod ffmpeg_encoder;
 pub mod packet;
 pub mod spawn;
 pub mod sw_encoder;
