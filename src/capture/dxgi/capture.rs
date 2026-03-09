@@ -1,6 +1,8 @@
 //! DXGI capture with GPU-side scaling support
 
-use crate::capture::{backpressure::BackpressureState, CaptureConfig, CapturedFrame, D3d11TexturePoolItem};
+use crate::capture::{
+    backpressure::BackpressureState, CaptureConfig, CapturedFrame, D3d11TexturePoolItem,
+};
 use anyhow::{bail, Context, Result};
 use bytes::{Bytes, BytesMut};
 use crossbeam::channel::{bounded, unbounded, Receiver, Sender};
@@ -11,13 +13,12 @@ use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 use windows::Win32::Foundation::{BOOL, HANDLE};
 use windows::Win32::Graphics::Direct3D11::{
-    ID3D11Buffer, ID3D11Device, ID3D11Device5, ID3D11DeviceContext,
-    ID3D11Fence, ID3D11InputLayout, ID3D11Multithread, ID3D11PixelShader, ID3D11RenderTargetView,
-    ID3D11Resource, ID3D11SamplerState, ID3D11Texture2D,
-    ID3D11VertexShader, ID3D11VideoContext, ID3D11VideoDevice, ID3D11VideoProcessor,
-    ID3D11VideoProcessorEnumerator, ID3D11VideoProcessorInputView, D3D11_BIND_VERTEX_BUFFER, D3D11_FENCE_FLAG_SHARED,
-    D3D11_INPUT_ELEMENT_DESC, D3D11_INPUT_PER_VERTEX_DATA, D3D11_MAPPED_SUBRESOURCE,
-    D3D11_MAP_READ, D3D11_USAGE_IMMUTABLE,
+    ID3D11Buffer, ID3D11Device, ID3D11Device5, ID3D11DeviceContext, ID3D11Fence, ID3D11InputLayout,
+    ID3D11Multithread, ID3D11PixelShader, ID3D11RenderTargetView, ID3D11Resource,
+    ID3D11SamplerState, ID3D11Texture2D, ID3D11VertexShader, ID3D11VideoContext, ID3D11VideoDevice,
+    ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator, ID3D11VideoProcessorInputView,
+    D3D11_BIND_VERTEX_BUFFER, D3D11_FENCE_FLAG_SHARED, D3D11_INPUT_ELEMENT_DESC,
+    D3D11_INPUT_PER_VERTEX_DATA, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_USAGE_IMMUTABLE,
     D3D11_VIDEO_PROCESSOR_COLOR_SPACE, D3D11_VIDEO_PROCESSOR_CONTENT_DESC,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
@@ -790,15 +791,19 @@ impl DxgiCapture {
                         state.duplication.ReleaseFrame().ok();
                         return Ok(CaptureOutcome::Dropped);
                     }
-                    let timestamp = Self::get_qpc_timestamp();
+                    let timestamp = if frame_info.LastPresentTime > 0 {
+                        frame_info.LastPresentTime as i64
+                    } else {
+                        Self::get_qpc_timestamp()
+                    };
                     let resource = desktop_resource.context("Desktop resource is null")?;
                     let captured_texture: ID3D11Texture2D = resource
                         .cast()
                         .context("Failed to cast resource to texture")?;
 
                     let needs_gpu_scale = state.scale_texture.is_some();
-                    let needs_separate_gpu_scale =
-                        needs_gpu_scale && (perform_cpu_readback || !state.nv12_conversion_available);
+                    let needs_separate_gpu_scale = needs_gpu_scale
+                        && (perform_cpu_readback || !state.nv12_conversion_available);
 
                     if needs_separate_gpu_scale {
                         Self::perform_gpu_scale(state, &captured_texture)
@@ -806,11 +811,8 @@ impl DxgiCapture {
                     }
 
                     if !perform_cpu_readback {
-                        let frame = DxgiCapture::capture_gpu_frame(
-                            state,
-                            &captured_texture,
-                            timestamp,
-                        )?;
+                        let frame =
+                            DxgiCapture::capture_gpu_frame(state, &captured_texture, timestamp)?;
                         state.duplication.ReleaseFrame().ok();
                         return Ok(CaptureOutcome::Frame(frame));
                     }

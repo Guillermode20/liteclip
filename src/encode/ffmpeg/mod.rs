@@ -22,6 +22,7 @@ pub struct FfmpegEncoder {
     packet_rx: Receiver<EncodedPacket>,
     frame_count: i64,
     packet_count: i64,
+    warmup_packet_count: i64,
     running: bool,
     scaler: Option<ffmpeg::software::scaling::Context>,
     src_frame: Option<ffmpeg::util::frame::video::Video>,
@@ -30,6 +31,8 @@ pub struct FfmpegEncoder {
     last_input_res: (u32, u32),
     pending_packet_timestamps: VecDeque<i64>,
 }
+
+const WARMUP_FRAMES: i64 = 60;
 
 unsafe impl Send for FfmpegEncoder {}
 
@@ -66,6 +69,7 @@ impl FfmpegEncoder {
             packet_rx: rx,
             frame_count: 0,
             packet_count: 0,
+            warmup_packet_count: 0,
             running: false,
             scaler: None,
             src_frame: None,
@@ -164,7 +168,6 @@ impl FfmpegEncoder {
 
         packet_is_key
     }
-
 }
 
 impl Encoder for FfmpegEncoder {

@@ -124,7 +124,8 @@ impl FfmpegEncoder {
                 .pop_front()
                 .unwrap_or(fallback_timestamp);
 
-            let hevc_nal: Option<u8> = if data.len() >= 5 && data[0..4] == [0x00, 0x00, 0x00, 0x01] {
+            let hevc_nal: Option<u8> = if data.len() >= 5 && data[0..4] == [0x00, 0x00, 0x00, 0x01]
+            {
                 Some((data[4] >> 1) & 0x3f)
             } else if data.len() >= 4 && data[0..3] == [0x00, 0x00, 0x01] {
                 Some((data[3] >> 1) & 0x3f)
@@ -133,7 +134,11 @@ impl FfmpegEncoder {
             };
 
             if self.frame_count % 60 == 0 || is_keyframe || idx == 0 {
-                let pts_ms = if qpc_freq > 0 { pts * 1000 / qpc_freq } else { 0 };
+                let pts_ms = if qpc_freq > 0 {
+                    pts * 1000 / qpc_freq
+                } else {
+                    0
+                };
                 let nal_name = match hevc_nal {
                     Some(32) => "VPS".to_string(),
                     Some(33) => "SPS".to_string(),
@@ -166,15 +171,24 @@ impl FfmpegEncoder {
             }
 
             self.packet_count += 1;
+            if self.frame_count <= super::WARMUP_FRAMES {
+                self.warmup_packet_count += 1;
+            }
             drained_count += 1;
         }
 
-        if drained_count > 0 && self.frame_count % 60 == 0 {
+        if drained_count > 0
+            && self.frame_count % 60 == 0
+            && self.frame_count > super::WARMUP_FRAMES
+        {
+            let warmup_frames = super::WARMUP_FRAMES;
+            let post_warmup_frames = self.frame_count - warmup_frames;
+            let post_warmup_packets = self.packet_count - self.warmup_packet_count;
             tracing::info!(
                 "encoder stats: frames={}, packets={}, ratio={:.2}",
-                self.frame_count,
-                self.packet_count,
-                self.packet_count as f64 / self.frame_count.max(1) as f64
+                post_warmup_frames,
+                post_warmup_packets,
+                post_warmup_packets as f64 / post_warmup_frames.max(1) as f64
             );
         }
 

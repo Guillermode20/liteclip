@@ -21,12 +21,18 @@ impl FfmpegEncoder {
     pub(super) fn apply_amf_options(&self, options: &mut ffmpeg::Dictionary<'_>, bitrate: usize) {
         let bitrate_bps = bitrate.to_string();
         let peak_bitrate_bps = self.peak_bitrate_bps().to_string();
-        let (preanalysis, vbaq, rc_lookahead, me_half_pel, me_quarter_pel, high_motion_quality_boost) =
-            match self.config.quality_preset {
-                QualityPreset::Performance => ("0", "0", "0", "1", "0", "0"),
-                QualityPreset::Balanced => ("0", "1", "0", "1", "1", "0"),
-                QualityPreset::Quality => ("0", "1", "0", "1", "1", "1"),
-            };
+        let (
+            preanalysis,
+            vbaq,
+            rc_lookahead,
+            me_half_pel,
+            me_quarter_pel,
+            high_motion_quality_boost,
+        ) = match self.config.quality_preset {
+            QualityPreset::Performance => ("0", "0", "0", "1", "0", "0"),
+            QualityPreset::Balanced => ("0", "1", "0", "1", "1", "0"),
+            QualityPreset::Quality => ("0", "1", "0", "1", "1", "1"),
+        };
 
         options.set("usage", "lowlatency");
         options.set("quality", self.amf_quality());
@@ -43,7 +49,10 @@ impl FfmpegEncoder {
         options.set("filler_data", "0");
         options.set("me_half_pel", me_half_pel);
         options.set("me_quarter_pel", me_quarter_pel);
-        options.set("high_motion_quality_boost_enable", high_motion_quality_boost);
+        options.set(
+            "high_motion_quality_boost_enable",
+            high_motion_quality_boost,
+        );
         options.set("min_qp_i", "16");
         options.set("max_qp_i", "48");
         options.set("min_qp_p", "18");
@@ -129,18 +138,29 @@ impl FfmpegEncoder {
             if init_result < 0 {
                 let mut device_ctx_ref = device_ctx_ref;
                 ffmpeg::ffi::av_buffer_unref(&mut device_ctx_ref);
-                anyhow::bail!("Failed to initialize FFmpeg D3D11 device context: {}", init_result);
+                anyhow::bail!(
+                    "Failed to initialize FFmpeg D3D11 device context: {}",
+                    init_result
+                );
             }
 
             let pool_sizes: &[i32] = &[0, 4, 2];
             let mut frames_ctx_ref_result = Err(anyhow::anyhow!("no pool sizes tried"));
             for &pool_size in pool_sizes {
-                match Self::create_hw_frames_ctx_with_pool_size(device_ctx_ref, width, height, pool_size) {
+                match Self::create_hw_frames_ctx_with_pool_size(
+                    device_ctx_ref,
+                    width,
+                    height,
+                    pool_size,
+                ) {
                     Ok(frames_ctx_ref) => {
                         if pool_size == 0 {
                             info!("Initialized FFmpeg D3D11 frame context with dynamic pool");
                         } else {
-                            info!("Initialized FFmpeg D3D11 frame pool with {} surfaces", pool_size);
+                            info!(
+                                "Initialized FFmpeg D3D11 frame pool with {} surfaces",
+                                pool_size
+                            );
                         }
                         frames_ctx_ref_result = Ok(frames_ctx_ref);
                         break;
@@ -223,7 +243,8 @@ impl FfmpegEncoder {
 
         let hw_context = self.create_d3d11_hardware_context(gpu_frame, out_w, out_h)?;
         unsafe {
-            (*encoder.as_mut_ptr()).hw_frames_ctx = ffmpeg::ffi::av_buffer_ref(hw_context.frames_ctx_ref);
+            (*encoder.as_mut_ptr()).hw_frames_ctx =
+                ffmpeg::ffi::av_buffer_ref(hw_context.frames_ctx_ref);
             if (*encoder.as_mut_ptr()).hw_frames_ctx.is_null() {
                 anyhow::bail!("Failed to reference FFmpeg D3D11 frame context");
             }
@@ -272,9 +293,13 @@ impl FfmpegEncoder {
             }
             ffmpeg::ffi::av_frame_unref(hw_frame);
 
-            let get_buffer_result = ffmpeg::ffi::av_hwframe_get_buffer(hw_context.frames_ctx_ref, hw_frame, 0);
+            let get_buffer_result =
+                ffmpeg::ffi::av_hwframe_get_buffer(hw_context.frames_ctx_ref, hw_frame, 0);
             if get_buffer_result < 0 {
-                anyhow::bail!("Failed to allocate FFmpeg hardware frame buffer: {}", get_buffer_result);
+                anyhow::bail!(
+                    "Failed to allocate FFmpeg hardware frame buffer: {}",
+                    get_buffer_result
+                );
             }
 
             if hw_context.encoder_fence.is_none() {
