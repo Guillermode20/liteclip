@@ -95,18 +95,6 @@ impl PlatformHandle {
         }
     }
 
-    /// Update recording state for tray menu display
-    pub fn set_recording_state(&self, is_recording: bool) {
-        self.recording_state
-            .store(is_recording, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    /// Get current recording state
-    pub fn is_recording(&self) -> bool {
-        self.recording_state
-            .load(std::sync::atomic::Ordering::SeqCst)
-    }
-
     /// Send a command to the platform thread
     pub fn send_command(&self, cmd: PlatformCommand) -> Result<()> {
         self.command_tx

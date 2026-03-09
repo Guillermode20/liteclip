@@ -15,19 +15,46 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId, IsWindowVisible,
 };
 
+/// Information about a detected application (game or other).
+///
+/// Returned by [`GameDetector`] when querying the currently detected application.
 #[derive(Debug, Clone)]
 pub struct DetectedApp {
+    /// Display name of the detected application.
     pub name: String,
+    /// Folder name for organizing saved clips.
     pub folder_name: String,
+    /// Whether this is identified as a game.
     pub is_game: bool,
 }
 
+/// Game detector for identifying running games.
+///
+/// Periodically scans the foreground window and identifies if it's a game
+/// based on known game executable names.
+///
+/// # Example
+///
+/// ```ignore
+/// use liteclip_replay::detection::GameDetector;
+///
+/// let detector = GameDetector::new();
+/// detector.start();
+///
+/// // Later, check detection result
+/// if let Some(app) = detector.get_detected_app() {
+///     if app.is_game {
+///         println!("Playing: {}", app.name);
+///     }
+/// }
+/// ```
 pub struct GameDetector {
     detected: Arc<AtomicPtr<DetectedApp>>,
     running: Arc<AtomicBool>,
 }
 
 impl GameDetector {
+    /// Creates a new GameDetector instance.
     pub fn new() -> Self {
         let detected = Arc::new(AtomicPtr::new(Box::into_raw(Box::new(DetectedApp {
             name: String::new(),

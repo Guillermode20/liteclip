@@ -4,7 +4,6 @@
 //! when the encoder cannot keep up with capture rate.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::Arc;
 
 pub struct BackpressureState {
     pub queued_frames: AtomicU32,
@@ -61,8 +60,6 @@ impl Default for BackpressureState {
         Self::new()
     }
 }
-
-pub type SharedBackpressure = Arc<BackpressureState>;
 
 #[cfg(test)]
 mod tests {

@@ -245,15 +245,6 @@ pub(super) fn apply_auto_encoder_selection(
     }
 }
 
-/// Check if a specific FFmpeg encoder is available
-#[allow(dead_code)]
-fn is_encoder_available(codec_name: &str) -> bool {
-    debug!(
-        "Checking encoder availability: {} (FFmpeg not compiled in)",
-        codec_name
-    );
-    false
-}
 /// Create the best available encoder based on configuration
 ///
 /// If encoder_type is Auto, performs hardware detection.

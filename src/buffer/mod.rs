@@ -47,8 +47,6 @@
 //! println!("Duration: {:.1}s", stats.duration_secs);
 //! ```
 
-pub mod error;
 pub mod ring;
 
-pub use error::BufferError;
 pub use ring::{BufferStats, ReplayBuffer, SharedReplayBuffer};

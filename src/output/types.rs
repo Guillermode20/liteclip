@@ -7,15 +7,24 @@ use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use tracing::{info, trace, warn};
 
+/// MP4 muxer for combining encoded packets into a video file.
+///
+/// Handles muxing of video and audio streams into an MP4 container
+/// using FFmpeg.
 pub struct Muxer {
+    /// Path to the output MP4 file.
     output_path: PathBuf,
+    /// Muxer configuration.
     #[allow(dead_code)]
     config: MuxerConfig,
+    /// Stub mode when FFmpeg feature is disabled.
     #[cfg(not(feature = "ffmpeg"))]
     #[allow(dead_code)]
     stub_mode: bool,
+    /// Collected video packets for muxing.
     #[cfg(feature = "ffmpeg")]
     video_packets: Vec<EncodedPacket>,
+    /// Collected audio packets for muxing.
     #[cfg(feature = "ffmpeg")]
     audio_packets: Vec<EncodedPacket>,
 }
@@ -169,18 +178,29 @@ impl Muxer {
     }
 }
 
+/// Configuration for the MP4 muxer.
+///
+/// Controls output file properties including resolution, codec, and audio settings.
 #[derive(Debug, Clone)]
 pub struct MuxerConfig {
+    /// Video width in pixels.
     pub width: u32,
+    /// Video height in pixels.
     pub height: u32,
+    /// Video codec (e.g., "h264", "hevc").
     pub video_codec: String,
+    /// Frames per second.
     pub fps: f64,
+    /// Output file path.
     pub output_path: PathBuf,
+    /// Whether to enable faststart for web streaming.
     pub faststart: bool,
+    /// Whether to expect audio streams.
     pub expect_audio: bool,
 }
 
 impl MuxerConfig {
+    /// Creates a new muxer configuration.
     pub fn new(width: u32, height: u32, fps: f64, output_path: impl AsRef<Path>) -> Self {
         Self {
             width,
@@ -193,16 +213,19 @@ impl MuxerConfig {
         }
     }
 
+    /// Sets the video codec.
     pub fn with_video_codec(mut self, codec: impl Into<String>) -> Self {
         self.video_codec = codec.into();
         self
     }
 
+    /// Sets the faststart option.
     pub fn with_faststart(mut self, faststart: bool) -> Self {
         self.faststart = faststart;
         self
     }
 
+    /// Sets whether audio is expected.
     pub fn with_expect_audio(mut self, expect_audio: bool) -> Self {
         self.expect_audio = expect_audio;
         self

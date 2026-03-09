@@ -42,13 +42,11 @@
 //! spawn_clip_saver(muxer_config, packets, output_path, None).await?;
 //! ```
 
-pub mod error;
 pub mod functions;
 pub mod mp4;
 pub mod saver;
 pub mod types;
 
-pub use error::OutputError;
 pub use functions::{
     calculate_clip_start_pts, extract_thumbnail, generate_output_path, generate_thumbnail,
     h264_nal_type, hevc_nal_type,

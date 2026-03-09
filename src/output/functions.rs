@@ -4,13 +4,31 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
+/// Audio sample rate for encoded audio (48 kHz).
 #[cfg(feature = "ffmpeg")]
 pub const AUDIO_SAMPLE_RATE: u32 = 48_000;
+/// Number of audio channels (stereo).
 #[cfg(feature = "ffmpeg")]
 pub const AUDIO_CHANNELS: u16 = 2;
+/// Audio bitrate for AAC encoding.
 #[cfg(feature = "ffmpeg")]
 pub const AUDIO_BITRATE: &str = "192k";
 
+/// Converts a QPC (QueryPerformanceCounter) delta to aligned PCM byte count.
+///
+/// Ensures the byte count is aligned to audio frame boundaries for proper
+/// encoding.
+///
+/// # Arguments
+///
+/// * `delta_qpc` - Time delta in QPC units.
+/// * `qpc_freq` - QPC frequency in Hz.
+/// * `bytes_per_second` - Bytes per second for the audio stream.
+/// * `bytes_per_frame` - Bytes per audio frame.
+///
+/// # Returns
+///
+/// Aligned byte count as i64.
 #[cfg(feature = "ffmpeg")]
 pub fn qpc_delta_to_aligned_pcm_bytes(
     delta_qpc: i64,
@@ -30,6 +48,18 @@ pub fn qpc_delta_to_aligned_pcm_bytes(
     }
 }
 
+/// Writes silence (zeros) to a file.
+///
+/// Used for padding audio when there's a gap between streams.
+///
+/// # Arguments
+///
+/// * `file` - File to write to.
+/// * `byte_count` - Number of silence bytes to write.
+///
+/// # Errors
+///
+/// Returns an error if file write fails.
 #[cfg(feature = "ffmpeg")]
 pub fn write_silence_bytes(file: &mut std::fs::File, mut byte_count: usize) -> Result<()> {
     if byte_count == 0 {
@@ -45,6 +75,15 @@ pub fn write_silence_bytes(file: &mut std::fs::File, mut byte_count: usize) -> R
     Ok(())
 }
 
+/// Checks if the data appears to be H.264 format.
+///
+/// # Arguments
+///
+/// * `data` - Byte slice to check.
+///
+/// # Returns
+///
+/// `true` if the data appears to be H.264 encoded.
 pub fn is_h264_format(data: &[u8]) -> bool {
     if data.len() < 4 {
         return false;
@@ -58,6 +97,15 @@ pub fn is_h264_format(data: &[u8]) -> bool {
     matches!(h264_nal_type(data), Some(1..=23))
 }
 
+/// Extracts the H.264 NAL unit type from byte data.
+///
+/// # Arguments
+///
+/// * `data` - Byte slice containing H.264 NAL unit.
+///
+/// # Returns
+///
+/// NAL unit type (0-23 for non-VCL, 24-31 for VCL), or None if parsing fails.
 pub fn h264_nal_type(data: &[u8]) -> Option<u8> {
     if data.len() >= 5 && data[0..4] == [0x00, 0x00, 0x00, 0x01] {
         return Some(data[4] & 0x1f);
@@ -74,6 +122,15 @@ pub fn h264_nal_type(data: &[u8]) -> Option<u8> {
     None
 }
 
+/// Extracts the HEVC NAL unit type from byte data.
+///
+/// # Arguments
+///
+/// * `data` - Byte slice containing HEVC NAL unit.
+///
+/// # Returns
+///
+/// NAL unit type, or None if parsing fails.
 pub fn hevc_nal_type(data: &[u8]) -> Option<u8> {
     if data.len() >= 6 && data[0..4] == [0x00, 0x00, 0x00, 0x01] {
         return Some((data[4] >> 1) & 0x3f);
@@ -90,6 +147,19 @@ pub fn hevc_nal_type(data: &[u8]) -> Option<u8> {
     None
 }
 
+/// Calculates the starting PTS for a clip based on duration.
+///
+/// Determines where in the buffer to start when saving a clip of a given duration.
+///
+/// # Arguments
+///
+/// * `newest_pts` - The newest PTS in the buffer.
+/// * `duration` - Desired clip duration.
+/// * `oldest_pts` - Optional oldest PTS in the buffer.
+///
+/// # Returns
+///
+/// The starting PTS for the clip.
 pub fn calculate_clip_start_pts(
     newest_pts: i64,
     duration: std::time::Duration,
@@ -126,11 +196,28 @@ pub fn calculate_clip_start_pts(
     start_pts
 }
 
+/// Generates a timestamped output filename.
+///
+/// # Returns
+///
+/// Filename string in format "YYYY-MM-DD_HH-MM-SSS.mp4".
 pub fn generate_output_filename() -> String {
     let timestamp = chrono::Local::now();
     format!("{}.mp4", timestamp.format("%Y-%m-%d_%H-%M-%S_%3f"))
 }
 
+/// Generates an output path with optional game subdirectory.
+///
+/// Creates the output directory if it doesn't exist.
+///
+/// # Arguments
+///
+/// * `base_dir` - Base save directory.
+/// * `game_name` - Optional game name for subdirectory organization.
+///
+/// # Returns
+///
+/// Complete path to the output file.
 pub fn generate_output_path(base_dir: &Path, game_name: Option<&str>) -> Result<PathBuf> {
     let filename = generate_output_filename();
 

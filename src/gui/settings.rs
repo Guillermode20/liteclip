@@ -5,6 +5,14 @@ use tokio::sync::mpsc::Sender;
 use crate::config::{config_mod::types::*, Config};
 use crate::platform::AppEvent;
 
+/// Shows the settings GUI window.
+///
+/// Spawns a new egui window for configuring application settings.
+/// Changes are sent back to the main application via the event channel.
+///
+/// # Arguments
+///
+/// * `event_tx` - Channel to send configuration update events.
 pub fn show_settings_gui(event_tx: Sender<AppEvent>) {
     crate::gui::manager::send_gui_message(crate::gui::manager::GuiMessage::ShowSettings(event_tx));
 }

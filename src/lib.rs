@@ -67,56 +67,12 @@ pub mod capture;
 pub mod clip;
 pub mod config;
 pub mod core;
-pub mod d3d;
 pub mod detection;
 pub mod encode;
 pub mod gui;
-pub mod metrics;
 pub mod output;
 pub mod platform;
 
-use std::sync::Arc;
-use tokio::sync::RwLock;
-
-/// Application state handle shared across threads.
-///
-/// This type alias provides a thread-safe reference to the application state
-/// that can be cloned and shared between different parts of the application.
-///
-/// # Thread Safety
-///
-/// Uses `Arc<RwLock<...>>` to allow multiple readers or a single writer.
-/// The `RwLock` is async-aware (from tokio) for non-blocking concurrent access.
-pub type AppHandle = Arc<RwLock<app::AppState>>;
-
-/// Result type alias using anyhow for ergonomic error handling.
-///
-/// Use this for functions that can fail with any error type that implements
-/// `std::error::Error + Send + Sync + 'static`.
-pub type Result<T> = anyhow::Result<T>;
-
-/// Error type alias for anyhow errors.
-pub type Error = anyhow::Error;
-
-/// Initialize tracing subscriber for structured logging.
-///
-/// Sets up a default tracing subscriber that outputs to stdout with
-/// reasonable defaults for application logging.
-///
-/// # Example
-///
-/// ```ignore
-/// liteclip_replay::init_logging();
-/// tracing::info!("Application started");
-/// ```
-pub fn init_logging() {
-    tracing_subscriber::fmt::init();
-}
-
-/// Converts a [`config::Config`] reference into [`platform::HotkeyConfig`].
-///
-/// This implementation extracts hotkey configuration from the main config
-/// for use by the platform layer.
 impl From<&config::Config> for platform::HotkeyConfig {
     fn from(config: &config::Config) -> Self {
         Self {

@@ -50,7 +50,6 @@
 //! }
 //! ```
 
-use crate::encode::EncodedPacket;
 use anyhow::Result;
 use bytes::Bytes;
 use crossbeam::channel::{Receiver, Sender};
@@ -66,11 +65,9 @@ use windows::Win32::Graphics::Direct3D11::{
 pub mod audio;
 pub mod backpressure;
 pub mod dxgi;
-pub mod error;
 pub mod frame;
 
 pub use dxgi::DxgiCapture;
-pub use error::CaptureError;
 
 /// Configuration for screen capture.
 ///
@@ -295,31 +292,6 @@ pub trait CaptureBackend: Send + 'static {
     ///
     /// Frames are sent to this channel as they are captured.
     fn frame_rx(&self) -> Receiver<CapturedFrame>;
-}
-
-/// Audio capture backend trait for audio capture implementations.
-///
-/// Implementations must be `Send` to allow capture on a dedicated thread.
-///
-/// # Implementors
-///
-/// - `AudioManager` - WASAPI-based audio capture for Windows
-pub trait AudioCaptureBackend: Send + 'static {
-    /// Start capturing audio with the given configuration.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if audio initialization fails (e.g., no device).
-    fn start(&mut self, config: &crate::config::AudioConfig) -> Result<()>;
-
-    /// Stop capturing audio and release resources.
-    fn stop(&mut self);
-
-    /// Get the receiver for encoded audio packets.
-    fn packet_rx(&self) -> Receiver<EncodedPacket>;
-
-    /// Check if audio capture is currently running.
-    fn is_running(&self) -> bool;
 }
 
 /// Calculate frame duration from target FPS.

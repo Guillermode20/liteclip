@@ -8,6 +8,14 @@ use tracing::{debug, error, info};
 use crate::config::Config;
 use crate::platform::AppEvent;
 
+/// Shows the clip gallery GUI window.
+///
+/// Spawns a new egui window for browsing and managing saved clips.
+/// Clips are organized by game folder if game detection is enabled.
+///
+/// # Arguments
+///
+/// * `event_tx` - Channel to send events to the main application.
 pub fn show_gallery_gui(event_tx: Sender<AppEvent>) {
     crate::gui::manager::send_gui_message(crate::gui::manager::GuiMessage::ShowGallery(event_tx));
 }

@@ -56,7 +56,6 @@
 
 pub mod config;
 pub mod encoder_mod;
-pub mod error;
 pub mod ffmpeg;
 mod ffmpeg_encoder;
 pub mod packet;
@@ -66,7 +65,6 @@ pub mod sw_encoder;
 #[allow(unused_imports)]
 pub use config::*;
 pub use encoder_mod::*;
-pub use error::EncodeError;
 #[allow(unused_imports)]
 pub use ffmpeg::*;
 #[allow(unused_imports)]
