@@ -1,8 +1,12 @@
 use anyhow::{Context, Result};
 use std::sync::atomic::Ordering;
 use tracing::debug;
-use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11VideoDevice, D3D11_VIDEO_PROCESSOR_CONTENT_DESC};
-use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_RATIONAL};
+use windows::Win32::Graphics::Direct3D11::{
+    ID3D11Device, ID3D11VideoDevice, D3D11_VIDEO_PROCESSOR_CONTENT_DESC,
+};
+use windows::Win32::Graphics::Dxgi::Common::{
+    DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_RATIONAL,
+};
 use windows::Win32::Graphics::Dxgi::CreateDXGIFactory1;
 use windows_core::Interface;
 
@@ -191,5 +195,4 @@ impl DxgiCapture {
     ) -> Result<DxgiCaptureState> {
         DxgiCaptureState::init_capture_with_scaling(output_index, Some(target_resolution))
     }
-
 }

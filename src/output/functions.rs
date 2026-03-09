@@ -151,7 +151,7 @@ pub fn generate_output_path(base_dir: &Path, game_name: Option<&str>) -> Result<
 }
 
 /// Generates a thumbnail for a video file using FFmpeg.
-/// 
+///
 /// The thumbnail is saved to `<save_directory>/.cache/<hash>.jpg` where the hash
 /// is computed from the video path, matching the gallery's thumbnail lookup scheme.
 pub fn generate_thumbnail(video_path: &Path, save_directory: &Path) -> Result<PathBuf> {
@@ -253,14 +253,14 @@ pub fn generate_thumbnail(video_path: &Path, save_directory: &Path) -> Result<Pa
 /// Legacy function kept for API compatibility. Use `generate_thumbnail` instead.
 pub fn extract_thumbnail(_packet: &EncodedPacket, output_path: &Path) -> Result<PathBuf> {
     debug!("extract_thumbnail called - attempting to derive save directory from output path");
-    
+
     // Try to derive the save directory from the output path
     // Videos can be in: save_dir/game_name/video.mp4 or save_dir/video.mp4
     // We need to find the save directory (which contains .cache)
     let save_dir = output_path
         .parent()
         .context("Output path has no parent directory")?;
-    
+
     // Check if parent contains .cache (video is directly in save_dir)
     // or if grandparent contains .cache (video is in game subdirectory)
     let cache_check = save_dir.join(".cache");
@@ -279,6 +279,6 @@ pub fn extract_thumbnail(_packet: &EncodedPacket, output_path: &Path) -> Result<
     } else {
         save_dir.to_path_buf()
     };
-    
+
     generate_thumbnail(output_path, &actual_save_dir)
 }

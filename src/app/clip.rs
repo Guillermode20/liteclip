@@ -8,10 +8,50 @@ use std::path::PathBuf;
 use std::time::Duration;
 use tracing::{info, warn};
 
+/// Manages clip saving operations.
+///
+/// Handles the process of saving the replay buffer to an MP4 file,
+/// including output path generation and muxer configuration.
 pub struct ClipManager;
 
 impl ClipManager {
-    pub async fn save_clip(config: &Config, buffer: &ReplayBuffer, game_name: Option<&str>) -> Result<PathBuf> {
+    /// Saves the current replay buffer to an MP4 file.
+    ///
+    /// This is the main entry point for clip saving. It:
+    /// 1. Generates an output path with timestamp
+    /// 2. Validates buffer has packets and keyframes
+    /// 3. Spawns a background task for muxing
+    /// 4. Waits for completion and returns the final path
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - Application configuration.
+    /// * `buffer` - The replay buffer to save.
+    /// * `game_name` - Optional game name for folder organization.
+    ///
+    /// # Returns
+    ///
+    /// Path to the saved MP4 file.
+    ///
+    /// # Errors
+    ///
+    /// - Returns error if buffer is empty
+    /// - Returns error if no keyframe is available
+    /// - Returns error if muxing fails
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use liteclip_replay::app::ClipManager;
+    ///
+    /// let path = ClipManager::save_clip(&config, &buffer, Some("Valorant")).await?;
+    /// println!("Saved clip to: {:?}", path);
+    /// ```
+    pub async fn save_clip(
+        config: &Config,
+        buffer: &ReplayBuffer,
+        game_name: Option<&str>,
+    ) -> Result<PathBuf> {
         info!("Clip: saving replay buffer");
 
         let output_path = Self::generate_output_path(config, game_name)?;
@@ -68,14 +108,14 @@ impl ClipManager {
         Ok(final_path)
     }
 
-fn generate_output_path(config: &Config, game_name: Option<&str>) -> Result<PathBuf> {
+    fn generate_output_path(config: &Config, game_name: Option<&str>) -> Result<PathBuf> {
         use chrono::Local;
 
         let timestamp = Local::now();
         let filename = format!("{}.mp4", timestamp.format("%Y-%m-%d_%H-%M-%S_%3f"));
 
         let save_dir = PathBuf::from(&config.general.save_directory);
-        
+
         let output_dir = if let Some(game) = game_name {
             if game.is_empty() || !config.general.auto_detect_game {
                 save_dir

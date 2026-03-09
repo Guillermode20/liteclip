@@ -292,7 +292,6 @@ impl GalleryApp {
                                                 .show(ui, |ui| {
                                                     ui.vertical(|ui| {
                                                         ui.set_width(tile_width - 16.0);
-                                                        
                                                         let thumb_size = egui::vec2(tile_width - 16.0, thumb_height);
 
                                                         if let Some(texture) = thumbnails.get(&video.path) {
@@ -326,7 +325,6 @@ impl GalleryApp {
                                                             thumbs_to_generate.push((video.path.clone(), thumb_path));
 
                                                             hovered_tile |= response.hovered();
-                                                            
                                                             if response.double_clicked() {
                                                                 Self::open_video(video);
                                                             }

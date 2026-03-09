@@ -28,3 +28,6 @@ desktop.ini
 .claude
 
 ffmpeg_dev/
+
+.kilocode/
+.opencode/

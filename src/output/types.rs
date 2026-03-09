@@ -1,4 +1,7 @@
-use super::{functions::{h264_nal_type, hevc_nal_type}, mp4::FfmpegMuxer};
+use super::{
+    functions::{h264_nal_type, hevc_nal_type},
+    mp4::FfmpegMuxer,
+};
 use crate::encode::{EncodedPacket, StreamType};
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};

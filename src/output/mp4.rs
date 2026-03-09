@@ -4,7 +4,10 @@ use ffmpeg_next as ffmpeg;
 use std::path::{Path, PathBuf};
 use tracing::info;
 
-use super::{functions::{AUDIO_CHANNELS, AUDIO_SAMPLE_RATE}, MuxerConfig};
+use super::{
+    functions::{AUDIO_CHANNELS, AUDIO_SAMPLE_RATE},
+    MuxerConfig,
+};
 
 const AUDIO_BITRATE_BPS: usize = 192_000;
 const PCM_BYTES_PER_SAMPLE: usize = 2;

@@ -8,14 +8,13 @@ use bytes::Bytes;
 use tracing::{debug, info, warn};
 use windows::Win32::Foundation::BOOL;
 use windows::Win32::Graphics::Direct3D11::{
-    ID3D11Buffer, ID3D11Device, ID3D11DeviceContext4, ID3D11RenderTargetView,
-    ID3D11SamplerState, ID3D11ShaderResourceView, ID3D11Texture2D, ID3D11VideoContext,
-    ID3D11VideoDevice, ID3D11VideoProcessorEnumerator,
-    ID3D11VideoProcessorInputView, ID3D11VideoProcessorOutputView,
-    D3D11_BIND_RENDER_TARGET, D3D11_RESOURCE_MISC_SHARED,
-    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255,
-    D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_16_235, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC,
-    D3D11_VIDEO_PROCESSOR_STREAM, D3D11_VPIV_DIMENSION_TEXTURE2D, D3D11_VPOV_DIMENSION_TEXTURE2D,
+    ID3D11Buffer, ID3D11Device, ID3D11DeviceContext4, ID3D11RenderTargetView, ID3D11SamplerState,
+    ID3D11ShaderResourceView, ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoDevice,
+    ID3D11VideoProcessorEnumerator, ID3D11VideoProcessorInputView, ID3D11VideoProcessorOutputView,
+    D3D11_BIND_RENDER_TARGET, D3D11_RESOURCE_MISC_SHARED, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
+    D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255, D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_16_235,
+    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_STREAM,
+    D3D11_VPIV_DIMENSION_TEXTURE2D, D3D11_VPOV_DIMENSION_TEXTURE2D,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12};
 use windows::Win32::Graphics::Dxgi::IDXGIResource;
@@ -237,9 +236,13 @@ impl DxgiCapture {
                     true,
                     D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_16_235.0 as u32,
                 );
+                video_context.VideoProcessorSetStreamColorSpace(
+                    video_processor,
+                    0,
+                    &input_color_space,
+                );
                 video_context
-                    .VideoProcessorSetStreamColorSpace(video_processor, 0, &input_color_space);
-                video_context.VideoProcessorSetOutputColorSpace(video_processor, &output_color_space);
+                    .VideoProcessorSetOutputColorSpace(video_processor, &output_color_space);
 
                 state.video_context = Some(video_context);
             }
@@ -470,5 +473,4 @@ impl DxgiCapture {
             Ok(())
         }
     }
-
 }

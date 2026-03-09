@@ -2,7 +2,9 @@ use crate::{
     buffer::ReplayBuffer,
     capture::{CaptureBackend, CaptureConfig, CapturedFrame, DxgiCapture},
     config::Config,
-    encode::{resolve_effective_encoder_config, spawn_encoder_with_receiver, EncoderConfig, EncoderHandle},
+    encode::{
+        resolve_effective_encoder_config, spawn_encoder_with_receiver, EncoderConfig, EncoderHandle,
+    },
 };
 use anyhow::{bail, Context, Result};
 use crossbeam::channel::Receiver;
@@ -32,8 +34,7 @@ pub fn start_video_pipeline(
         }
         info!(
             "GPU NV12 transport enabled: encoder={:?}, output={}",
-            encoder_config.encoder_type,
-            capture_config.output_index
+            encoder_config.encoder_type, capture_config.output_index
         );
         capture_config.perform_cpu_readback = false;
         encoder_config.use_cpu_readback = false;

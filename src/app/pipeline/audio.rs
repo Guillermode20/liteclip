@@ -1,8 +1,4 @@
-use crate::{
-    buffer::ReplayBuffer,
-    capture::audio::WasapiAudioManager,
-    config::Config,
-};
+use crate::{buffer::ReplayBuffer, capture::audio::WasapiAudioManager, config::Config};
 use anyhow::{Context, Result};
 use tracing::{debug, info};
 

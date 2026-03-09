@@ -1,18 +1,29 @@
 use crate::{
-    buffer::ReplayBuffer,
-    capture::dxgi::DxgiCapture,
-    config::Config,
-    encode::EncoderHandle,
+    buffer::ReplayBuffer, capture::dxgi::DxgiCapture, config::Config, encode::EncoderHandle,
 };
 use anyhow::Result;
 use tracing::{error, info, warn};
 
-use super::{audio::start_audio_capture, lifecycle::RecordingLifecycle, video::start_video_pipeline};
+use super::{
+    audio::start_audio_capture, lifecycle::RecordingLifecycle, video::start_video_pipeline,
+};
 
+/// Recording pipeline manager.
+///
+/// Orchestrates the capture → encode → buffer data flow.
+/// Manages video capture, audio capture, and encoding threads.
+///
+/// # Thread Safety
+///
+/// This type is not thread-safe and must be used from a single async context.
 pub struct RecordingPipeline {
+    /// Handle to the encoder thread.
     encoder_handle: Option<EncoderHandle>,
+    /// DXGI capture instance.
     capture: Option<DxgiCapture>,
+    /// Audio capture manager.
     audio_manager: Option<crate::capture::audio::WasapiAudioManager>,
+    /// Current lifecycle state.
     lifecycle: RecordingLifecycle,
 }
 
@@ -23,6 +34,7 @@ impl Default for RecordingPipeline {
 }
 
 impl RecordingPipeline {
+    /// Creates a new RecordingPipeline in idle state.
     pub fn new() -> Self {
         Self {
             encoder_handle: None,
@@ -32,14 +44,21 @@ impl RecordingPipeline {
         }
     }
 
+    /// Gets the current lifecycle state.
     pub fn lifecycle(&self) -> RecordingLifecycle {
         self.lifecycle
     }
 
+    /// Checks if recording is currently active.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the pipeline is in the Running state.
     pub fn is_recording(&self) -> bool {
         matches!(self.lifecycle, RecordingLifecycle::Running)
     }
 
+    /// Rolls back startup by cleaning up partially-initialized resources.
     fn rollback_startup(&mut self) {
         if let Some(audio_manager) = self.audio_manager.take() {
             drop(audio_manager);
@@ -67,7 +86,9 @@ impl RecordingPipeline {
     pub async fn start(&mut self, config: &Config, buffer: &ReplayBuffer) -> Result<()> {
         if matches!(
             self.lifecycle,
-            RecordingLifecycle::Starting | RecordingLifecycle::Running | RecordingLifecycle::Stopping
+            RecordingLifecycle::Starting
+                | RecordingLifecycle::Running
+                | RecordingLifecycle::Stopping
         ) {
             warn!("Recording already in progress");
             return Ok(());

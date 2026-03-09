@@ -7,7 +7,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 use super::{
-    calculate_clip_start_pts, generate_thumbnail, generate_output_path, h264_nal_type,
+    calculate_clip_start_pts, generate_output_path, generate_thumbnail, h264_nal_type,
     hevc_nal_type, Muxer, MuxerConfig,
 };
 

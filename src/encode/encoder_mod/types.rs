@@ -1,38 +1,54 @@
-//! Auto-generated module
+//! Encoder types
 //!
-//! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
+//! This module provides core types for the encoding subsystem, including
+//! packet types, configuration, and encoder handles.
 
 use anyhow::Result;
 use bytes::Bytes;
 use crossbeam::channel::{Receiver, Sender};
 
+/// Encoder health events for error propagation.
 #[derive(Debug, Clone)]
 pub enum EncoderHealthEvent {
+    /// Fatal error that requires pipeline restart.
     Fatal(String),
 }
 
-/// Encoded packet data
+/// Encoded packet data from video or audio encoder.
 ///
 /// Uses `Bytes` for reference-counted data, making clones cheap (just a ref count bump).
 /// This is critical for the snapshot operation which needs to quickly clone the entire
 /// buffer when saving clips.
+///
+/// # Thread Safety
+///
+/// The `data` field is cheaply cloneable via `Bytes`.
 #[derive(Clone)]
 pub struct EncodedPacket {
-    /// Reference-counted byte buffer (cheap clone)
+    /// Reference-counted byte buffer (cheap clone).
     pub data: Bytes,
-    /// Presentation timestamp (QPC-based, 10MHz units)
+    /// Presentation timestamp (QPC-based, 10MHz units).
     pub pts: i64,
-    /// Decode timestamp
+    /// Decode timestamp.
     pub dts: i64,
-    /// True if this is a keyframe (IDR frame)
+    /// True if this is a keyframe (IDR frame for video).
     pub is_keyframe: bool,
-    /// Stream type
+    /// Stream type (video or audio).
     pub stream: StreamType,
-    /// Optional frame resolution for raw video payloads
+    /// Optional frame resolution for raw video payloads.
     pub resolution: Option<(u32, u32)>,
 }
+
 impl EncodedPacket {
-    /// Create a new encoded packet
+    /// Creates a new encoded packet.
+    ///
+    /// # Arguments
+    ///
+    /// * `data` - The encoded data.
+    /// * `pts` - Presentation timestamp.
+    /// * `dts` - Decode timestamp.
+    /// * `is_keyframe` - Whether this is a keyframe.
+    /// * `stream` - The stream type.
     pub fn new(
         data: impl Into<Bytes>,
         pts: i64,
@@ -49,65 +65,94 @@ impl EncodedPacket {
             resolution: None,
         }
     }
-    /// Create a video keyframe packet
+
+    /// Creates a video keyframe packet.
+    ///
+    /// # Arguments
+    ///
+    /// * `data` - The encoded keyframe data.
+    /// * `pts` - Presentation timestamp.
     pub fn video_keyframe(data: impl Into<Bytes>, pts: i64) -> Self {
         Self::new(data, pts, pts, true, StreamType::Video)
     }
-    /// Create a video delta frame packet
+
+    /// Creates a video delta frame packet.
+    ///
+    /// # Arguments
+    ///
+    /// * `data` - The encoded delta frame data.
+    /// * `pts` - Presentation timestamp.
     pub fn video_delta(data: impl Into<Bytes>, pts: i64) -> Self {
         Self::new(data, pts, pts, false, StreamType::Video)
     }
 }
-/// Stream type for multiplexed output
+
+/// Stream type for multiplexed output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamType {
-    /// Video stream (HEVC)
+    /// Video stream (HEVC/H.264).
     Video,
-    /// System audio (game/desktop audio)
+    /// System audio (game/desktop audio).
     SystemAudio,
-    /// Microphone input
+    /// Microphone input.
     Microphone,
 }
-/// Hardware detection result
+
+/// Hardware encoder detection result.
+///
+/// Indicates which hardware encoder (if any) is available on the system.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HardwareEncoder {
-    /// NVIDIA NVENC available
+    /// NVIDIA NVENC available.
     Nvenc,
-    /// AMD AMF available
+    /// AMD AMF available.
     Amf,
-    /// Intel QSV available
+    /// Intel QSV available.
     Qsv,
-    /// No hardware encoder available
+    /// No hardware encoder available.
     None,
 }
-/// Encoder configuration (HEVC-only, hardware encoders)
+
+/// Encoder configuration for video encoding.
+///
+/// Controls encoding parameters including bitrate, framerate, resolution,
+/// encoder selection (NVENC/AMF/QSV/software), and quality settings.
 #[derive(Debug, Clone)]
 pub struct EncoderConfig {
-    /// Target bitrate in Mbps
+    /// Target bitrate in Mbps.
     pub bitrate_mbps: u32,
-    /// Target framerate
+    /// Target framerate.
     pub framerate: u32,
-    /// Output resolution (width, height)
+    /// Output resolution as (width, height).
     pub resolution: (u32, u32),
-    /// Whether to use native capture resolution (ignores resolution field)
+    /// Whether to use native capture resolution (ignores resolution field).
     pub use_native_resolution: bool,
-    /// Encoder type selection
+    /// Encoder type selection (NVENC, AMF, QSV, software).
     pub encoder_type: crate::config::EncoderType,
-    /// Quality preset preference (speed vs quality)
+    /// Quality preset preference (speed vs quality).
     pub quality_preset: crate::config::QualityPreset,
-    /// Rate control mode preference
+    /// Rate control mode preference.
     pub rate_control: crate::config::RateControl,
-    /// Optional quality scalar (e.g. CQ/CRF-like)
+    /// Optional quality scalar (e.g., CQ/CRF-like).
     pub quality_value: Option<u8>,
-    /// Keyframe interval in seconds
+    /// Keyframe interval in seconds.
     pub keyframe_interval_secs: u32,
-    /// Force CPU readback path (Phase 1 fallback)
+    /// Force CPU readback path (Phase 1 fallback).
     pub use_cpu_readback: bool,
-    /// Desktop output index for capture/desktop-grab input selection
+    /// Desktop output index for capture/desktop-grab input selection.
     pub output_index: u32,
 }
+
 impl EncoderConfig {
-    /// Create encoder configuration with explicit parameters
+    /// Creates encoder configuration with explicit parameters.
+    ///
+    /// # Arguments
+    ///
+    /// * `bitrate_mbps` - Target bitrate in Mbps.
+    /// * `framerate` - Target framerate.
+    /// * `resolution` - Output resolution as (width, height).
+    /// * `encoder_type` - The encoder to use.
+    /// * `keyframe_interval_secs` - Keyframe interval in seconds.
     pub fn new(
         bitrate_mbps: u32,
         framerate: u32,

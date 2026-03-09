@@ -182,7 +182,8 @@ impl WasapiAudioManager {
             if let Some(rx) = system_rx.as_ref() {
                 match rx.try_recv() {
                     Ok(packet) => {
-                        let packet = apply_volume_to_packet(packet, system_gain, &mut system_volume_buffer);
+                        let packet =
+                            apply_volume_to_packet(packet, system_gain, &mut system_volume_buffer);
                         if packet_tx.send(packet).is_err() {
                             warn!("Audio manager output channel disconnected while forwarding system audio");
                             break;
@@ -202,7 +203,8 @@ impl WasapiAudioManager {
             if let Some(rx) = mic_rx.as_ref() {
                 match rx.try_recv() {
                     Ok(packet) => {
-                        let packet = apply_volume_to_packet(packet, mic_gain, &mut mic_volume_buffer);
+                        let packet =
+                            apply_volume_to_packet(packet, mic_gain, &mut mic_volume_buffer);
                         if packet_tx.send(packet).is_err() {
                             warn!("Audio manager output channel disconnected while forwarding microphone audio");
                             break;
@@ -248,7 +250,11 @@ impl WasapiAudioManager {
     }
 }
 
-pub(crate) fn apply_volume_to_packet(packet: EncodedPacket, gain: f32, buffer: &mut BytesMut) -> EncodedPacket {
+pub(crate) fn apply_volume_to_packet(
+    packet: EncodedPacket,
+    gain: f32,
+    buffer: &mut BytesMut,
+) -> EncodedPacket {
     if (gain - 1.0).abs() < f32::EPSILON || packet.data.len() < 2 {
         return packet;
     }

@@ -1,16 +1,17 @@
-//! Auto-generated module
+//! Configuration types
 //!
-//! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
+//! This module provides all configuration types for the application,
+//! including video, audio, hotkeys, and general settings.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 use super::functions::{
-    default_bitrate, default_encoder, default_false, default_framerate,
-    default_gpu_index, default_hotkey_gallery, default_hotkey_save, default_hotkey_screenshot,
-    default_hotkey_toggle, default_keyframe_interval, default_memory_limit, default_mic_device,
-    default_mic_volume, default_overlay_position, default_quality_preset, default_quality_value,
+    default_bitrate, default_encoder, default_false, default_framerate, default_gpu_index,
+    default_hotkey_gallery, default_hotkey_save, default_hotkey_screenshot, default_hotkey_toggle,
+    default_keyframe_interval, default_memory_limit, default_mic_device, default_mic_volume,
+    default_overlay_position, default_quality_preset, default_quality_value,
     default_quality_value_for_preset, default_rate_control, default_replay_duration,
     default_resolution, default_save_directory, default_system_volume, default_true,
     ESTIMATED_MIC_AUDIO_BITRATE_BPS, ESTIMATED_SYSTEM_AUDIO_BITRATE_BPS,
@@ -18,51 +19,96 @@ use super::functions::{
     RECOMMENDED_BUFFER_BASE_OVERHEAD_MB, RECOMMENDED_BUFFER_HEADROOM_PERCENT,
 };
 
-/// Encoder selection (hardware only - HEVC)
+/// Encoder selection for video encoding.
+///
+/// Specifies which encoder to use. Hardware encoders provide better performance
+/// while software encoding works on any system.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum EncoderType {
+    /// Automatically select the best available encoder.
     Auto,
+    /// NVIDIA NVENC (requires NVIDIA GPU).
     Nvenc,
+    /// AMD AMF (requires AMD GPU).
     Amf,
+    /// Intel Quick Sync Video (requires Intel iGPU).
     Qsv,
 }
-/// High-level quality/speed tradeoff for encoder options
+
+/// High-level quality/speed tradeoff for encoder options.
+///
+/// Controls the encoder preset which affects encoding speed vs output quality.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum QualityPreset {
+    /// Maximum performance (fastest encoding, lower quality).
     Performance,
+    /// Balanced between speed and quality.
     Balanced,
+    /// Maximum quality (slowest encoding, best quality).
     Quality,
 }
-/// Resolution options
+
+/// Resolution options for video capture.
+///
+/// Specifies the capture and output resolution.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Resolution {
+    /// Use the native/desktop resolution.
     Native,
+    /// 1920x1080 resolution.
     #[serde(rename = "1080p")]
     P1080,
+    /// 1280x720 resolution.
     #[serde(rename = "720p")]
     P720,
+    /// 854x480 resolution.
     #[serde(rename = "480p")]
     P480,
 }
-/// Root configuration structure
+
+/// Root configuration structure.
+///
+/// Contains all configuration sections for the application:
+/// - General settings (replay buffer, save directory, etc.)
+/// - Video settings (resolution, framerate, encoder, codec)
+/// - Audio settings (capture sources, volume levels)
+/// - Hotkey bindings
+/// - Advanced settings
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
+    /// General application settings.
     #[serde(default)]
     pub general: GeneralConfig,
+    /// Video encoding settings.
     #[serde(default)]
     pub video: VideoConfig,
+    /// Audio capture settings.
     #[serde(default)]
     pub audio: AudioConfig,
+    /// Hotkey bindings.
     #[serde(default)]
     pub hotkeys: HotkeyConfig,
+    /// Advanced/developer settings.
     #[serde(default)]
     pub advanced: AdvancedConfig,
 }
+
 impl Config {
-    /// Load configuration from file or create default
+    /// Loads configuration from file or creates default.
+    ///
+    /// Configuration is loaded from `%APPDATA%\liteclip-replay\config.toml`.
+    /// If the file doesn't exist, creates a default configuration.
+    ///
+    /// # Returns
+    ///
+    /// The loaded or default configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if file exists but cannot be parsed.
     pub async fn load() -> Result<Self> {
         let config_path = Self::config_path()?;
         if config_path.exists() {
@@ -268,7 +314,7 @@ impl Config {
         recommended_mb as u32
     }
 
-pub fn effective_replay_memory_limit_mb(&self) -> u32 {
+    pub fn effective_replay_memory_limit_mb(&self) -> u32 {
         self.advanced
             .memory_limit_mb
             .clamp(MIN_MEMORY_LIMIT_MB, MAX_MEMORY_LIMIT_MB)
@@ -426,10 +472,10 @@ mod tests {
     fn test_requires_pipeline_restart_video_encoder() {
         let mut config1 = default_config();
         let mut config2 = default_config();
-        
+
         config1.video.encoder = EncoderType::Nvenc;
         config2.video.encoder = EncoderType::Amf;
-        
+
         assert!(config1.requires_pipeline_restart(&config2));
     }
 
@@ -437,10 +483,10 @@ mod tests {
     fn test_requires_pipeline_restart_video_framerate() {
         let mut config1 = default_config();
         let mut config2 = default_config();
-        
+
         config1.video.framerate = 30;
         config2.video.framerate = 60;
-        
+
         assert!(config1.requires_pipeline_restart(&config2));
     }
 
@@ -448,10 +494,10 @@ mod tests {
     fn test_requires_pipeline_restart_video_bitrate() {
         let mut config1 = default_config();
         let mut config2 = default_config();
-        
+
         config1.video.bitrate_mbps = 20;
         config2.video.bitrate_mbps = 50;
-        
+
         assert!(config1.requires_pipeline_restart(&config2));
     }
 
@@ -459,10 +505,10 @@ mod tests {
     fn test_requires_pipeline_restart_audio_capture_system() {
         let mut config1 = default_config();
         let mut config2 = default_config();
-        
+
         config1.audio.capture_system = true;
         config2.audio.capture_system = false;
-        
+
         assert!(config1.requires_pipeline_restart(&config2));
     }
 
@@ -470,10 +516,10 @@ mod tests {
     fn test_requires_pipeline_restart_audio_capture_mic() {
         let mut config1 = default_config();
         let mut config2 = default_config();
-        
+
         config1.audio.capture_mic = true;
         config2.audio.capture_mic = false;
-        
+
         assert!(config1.requires_pipeline_restart(&config2));
     }
 
@@ -481,10 +527,10 @@ mod tests {
     fn test_requires_pipeline_restart_replay_duration() {
         let mut config1 = default_config();
         let mut config2 = default_config();
-        
+
         config1.general.replay_duration_secs = 30;
         config2.general.replay_duration_secs = 60;
-        
+
         assert!(config1.requires_pipeline_restart(&config2));
     }
 
@@ -492,7 +538,7 @@ mod tests {
     fn test_requires_pipeline_restart_no_change() {
         let config1 = default_config();
         let config2 = default_config();
-        
+
         assert!(!config1.requires_pipeline_restart(&config2));
     }
 
@@ -500,12 +546,12 @@ mod tests {
     fn test_requires_pipeline_restart_general_settings_dont_trigger() {
         let mut config1 = default_config();
         let mut config2 = default_config();
-        
+
         config1.general.notifications = true;
         config2.general.notifications = false;
         config1.general.auto_start_with_windows = true;
         config2.general.auto_start_with_windows = false;
-        
+
         assert!(!config1.requires_pipeline_restart(&config2));
     }
 
@@ -513,10 +559,10 @@ mod tests {
     fn test_requires_hotkey_reregister_changed() {
         let mut config1 = default_config();
         let mut config2 = default_config();
-        
+
         config1.hotkeys.save_clip = "Alt+F9".to_string();
         config2.hotkeys.save_clip = "Alt+F10".to_string();
-        
+
         assert!(config1.requires_hotkey_reregister(&config2));
     }
 
@@ -524,7 +570,7 @@ mod tests {
     fn test_requires_hotkey_reregister_no_change() {
         let config1 = default_config();
         let config2 = default_config();
-        
+
         assert!(!config1.requires_hotkey_reregister(&config2));
     }
 
@@ -532,23 +578,23 @@ mod tests {
     fn test_requires_hotkey_reregister_all_fields() {
         let mut config1 = default_config();
         let mut config2 = default_config();
-        
+
         config1.hotkeys.save_clip = "Alt+F1".to_string();
         config2.hotkeys.save_clip = "Alt+F2".to_string();
         assert!(config1.requires_hotkey_reregister(&config2));
-        
+
         config1 = default_config();
         config2 = default_config();
         config1.hotkeys.toggle_recording = "Alt+F3".to_string();
         config2.hotkeys.toggle_recording = "Alt+F4".to_string();
         assert!(config1.requires_hotkey_reregister(&config2));
-        
+
         config1 = default_config();
         config2 = default_config();
         config1.hotkeys.screenshot = "Alt+F5".to_string();
         config2.hotkeys.screenshot = "Alt+F6".to_string();
         assert!(config1.requires_hotkey_reregister(&config2));
-        
+
         config1 = default_config();
         config2 = default_config();
         config1.hotkeys.open_gallery = "Alt+F7".to_string();

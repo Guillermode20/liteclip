@@ -1,7 +1,37 @@
-//! LiteClip Replay - System Tray Only Entry Point
+//! LiteClip Replay - Application Entry Point
 //!
-//! Application entry point with system tray integration.
-//! Runs as a background application with no GUI window.
+//! This is the main entry point for LiteClip Replay. The application runs as a
+//! background process with system tray integration, providing screen recording
+//! with replay buffer functionality.
+//!
+//! # Architecture
+//!
+//! The entry point performs the following initialization sequence:
+//!
+//! 1. Initialize FFmpeg libraries
+//! 2. Set up logging via tracing
+//! 3. Configure Windows timer resolution for precise frame timing
+//! 4. Create a job object for child process management
+//! 5. Load configuration from `%APPDATA%\liteclip-replay\config.toml`
+//! 6. Initialize application state and recording pipeline
+//! 7. Spawn platform thread for hotkeys and tray
+//! 8. Enter main event loop
+//!
+//! # Threading Model
+//!
+//! - **Main Thread**: Async runtime with tokio, handles event loop
+//! - **Platform Thread**: Windows message loop for hotkeys and tray
+//! - **Capture Thread**: DXGI frame acquisition (spawned by pipeline)
+//! - **Encode Thread**: Video/audio encoding (spawned by pipeline)
+//!
+//! # Exit Handling
+//!
+//! The application supports graceful shutdown via:
+//! - Ctrl+C signal
+//! - Tray menu "Exit" option
+//! - Tray menu "Restart" option (spawns new instance)
+//!
+//! A 2-second watchdog ensures cleanup doesn't hang indefinitely.
 
 // Hide console window on Windows in release, but keep console in debug so logs are visible.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
@@ -21,14 +51,46 @@ use windows::Win32::Media::{timeBeginPeriod, timeEndPeriod, TIMERR_NOERROR};
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x01000000;
 
+/// Guard for Windows multimedia timer resolution.
+///
+/// Windows defaults to 15.6ms timer resolution, which is too coarse for
+/// precise frame timing at 60+ FPS. This guard requests a higher resolution
+/// (typically 1ms) and automatically restores the original resolution on drop.
+///
+/// # Example
+///
+/// ```ignore
+/// let _guard = TimerResolutionGuard::new(1);
+/// // Timer resolution is now 1ms
+/// // When _guard goes out of scope, resolution is restored
+/// ```
 #[cfg(windows)]
 struct TimerResolutionGuard {
+    /// Whether the timer resolution change was successful.
     active: bool,
+    /// The requested resolution in milliseconds.
     period_ms: u32,
 }
 
 #[cfg(windows)]
 impl TimerResolutionGuard {
+    /// Creates a new timer resolution guard.
+    ///
+    /// Requests the specified timer resolution from Windows via `timeBeginPeriod`.
+    /// The resolution is automatically restored when the guard is dropped.
+    ///
+    /// # Arguments
+    ///
+    /// * `period_ms` - The requested timer resolution in milliseconds (typically 1).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let guard = TimerResolutionGuard::new(1);
+    /// if guard.active {
+    ///     // Timer resolution successfully set to 1ms
+    /// }
+    /// ```
     fn new(period_ms: u32) -> Self {
         let result = unsafe { timeBeginPeriod(period_ms) };
         let active = result == TIMERR_NOERROR;
@@ -56,6 +118,27 @@ impl Drop for TimerResolutionGuard {
     }
 }
 
+/// Application entry point.
+///
+/// Initializes and runs the LiteClip Replay application. The function:
+///
+/// 1. Initializes FFmpeg libraries for encoding/muxing
+/// 2. Configures environment variables for Vulkan/FFmpeg
+/// 3. Sets up structured logging with tracing
+/// 4. Configures Windows timer resolution for precise frame timing
+/// 5. Creates a job object to manage child processes (FFmpeg)
+/// 6. Loads configuration from disk or uses defaults
+/// 7. Starts the recording pipeline
+/// 8. Enters the main event loop handling hotkeys and tray events
+///
+/// # Exit Codes
+///
+/// The application exits with code 0 on normal termination.
+/// Restart is handled by spawning a new process before exit.
+///
+/// # Errors
+///
+/// Returns an error if critical initialization fails (FFmpeg, configuration, etc.).
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize FFmpeg
@@ -234,192 +317,192 @@ async fn main() -> Result<()> {
     // Main event loop
     loop {
         tokio::select! {
-            // Handle platform events (hotkeys and tray)
-            result = tokio::time::timeout(
-                tokio::time::Duration::from_millis(100),
-                tokio_rx.recv()
-            ) => {
-                match result {
-                    Ok(Some(event)) => {
-                        match event {
-                            liteclip_replay::platform::AppEvent::Hotkey(action) => {
-                                match action {
-liteclip_replay::platform::HotkeyAction::SaveClip => {
-                                        info!("Hotkey: save clip");
-                                        let overlay_enabled = app_state.read().await.config().advanced.overlay_enabled;
-                                        spawn_save_clip_task(
-                                            &app_state,
-                                            &platform_handle,
-                                            &save_in_progress,
-                                            &game_detector,
-                                            overlay_enabled,
-                                        )
-                                        .await;
-                                    }
-                                    liteclip_replay::platform::HotkeyAction::ToggleRecording => {
-                                        info!("Hotkey: toggle recording");
-                                        let mut state = app_state.write().await;
-                                        let notifications_enabled = state.config().general.notifications;
-                                        if state.is_recording() {
-                                            if let Err(e) = state.stop_recording().await {
-                                                error!("Failed to stop recording: {}", e);
-                                                if notifications_enabled {
-                                                    let _ = platform_handle.show_notification(
-                                                        "Recording Error",
-                                                        &format!("Failed to stop: {}", e),
-                                                    );
-                                                }
-                                            } else {
-                                                let _ = platform_handle.update_recording_state(false);
-                                                if notifications_enabled {
-                                                    let _ = platform_handle.show_notification(
-                                                        "Recording Stopped",
-                                                        "Recording has been stopped",
-                                                    );
+                    // Handle platform events (hotkeys and tray)
+                    result = tokio::time::timeout(
+                        tokio::time::Duration::from_millis(100),
+                        tokio_rx.recv()
+                    ) => {
+                        match result {
+                            Ok(Some(event)) => {
+                                match event {
+                                    liteclip_replay::platform::AppEvent::Hotkey(action) => {
+                                        match action {
+        liteclip_replay::platform::HotkeyAction::SaveClip => {
+                                                info!("Hotkey: save clip");
+                                                let overlay_enabled = app_state.read().await.config().advanced.overlay_enabled;
+                                                spawn_save_clip_task(
+                                                    &app_state,
+                                                    &platform_handle,
+                                                    &save_in_progress,
+                                                    &game_detector,
+                                                    overlay_enabled,
+                                                )
+                                                .await;
+                                            }
+                                            liteclip_replay::platform::HotkeyAction::ToggleRecording => {
+                                                info!("Hotkey: toggle recording");
+                                                let mut state = app_state.write().await;
+                                                let notifications_enabled = state.config().general.notifications;
+                                                if state.is_recording() {
+                                                    if let Err(e) = state.stop_recording().await {
+                                                        error!("Failed to stop recording: {}", e);
+                                                        if notifications_enabled {
+                                                            let _ = platform_handle.show_notification(
+                                                                "Recording Error",
+                                                                &format!("Failed to stop: {}", e),
+                                                            );
+                                                        }
+                                                    } else {
+                                                        let _ = platform_handle.update_recording_state(false);
+                                                        if notifications_enabled {
+                                                            let _ = platform_handle.show_notification(
+                                                                "Recording Stopped",
+                                                                "Recording has been stopped",
+                                                            );
+                                                        }
+                                                    }
+                                                } else if let Err(e) = state.start_recording().await {
+                                                    error!("Failed to start recording: {}", e);
+                                                    if notifications_enabled {
+                                                        let _ = platform_handle.show_notification(
+                                                            "Recording Error",
+                                                            &format!("Failed to start: {}", e),
+                                                        );
+                                                    }
+                                                } else {
+                                                    let _ = platform_handle.update_recording_state(true);
+                                                    if notifications_enabled {
+                                                        let _ = platform_handle.show_notification(
+                                                            "Recording Started",
+                                                            "Now capturing replay buffer",
+                                                        );
+                                                    }
                                                 }
                                             }
-                                        } else if let Err(e) = state.start_recording().await {
-                                            error!("Failed to start recording: {}", e);
-                                            if notifications_enabled {
-                                                let _ = platform_handle.show_notification(
-                                                    "Recording Error",
-                                                    &format!("Failed to start: {}", e),
-                                                );
+                                            liteclip_replay::platform::HotkeyAction::Screenshot => {
+                                                info!("Hotkey: screenshot (not implemented)");
+                                                warn!("Screenshot feature not yet implemented");
                                             }
-                                        } else {
-                                            let _ = platform_handle.update_recording_state(true);
-                                            if notifications_enabled {
-                                                let _ = platform_handle.show_notification(
-                                                    "Recording Started",
-                                                    "Now capturing replay buffer",
-                                                );
+                                            liteclip_replay::platform::HotkeyAction::OpenGallery => {
+                                                info!("Hotkey: open gallery");
+                                                liteclip_replay::gui::show_gallery_gui(tokio_tx.clone());
                                             }
                                         }
                                     }
-                                    liteclip_replay::platform::HotkeyAction::Screenshot => {
-                                        info!("Hotkey: screenshot (not implemented)");
-                                        warn!("Screenshot feature not yet implemented");
+                                    liteclip_replay::platform::AppEvent::Tray(tray_event) => {
+                                        match tray_event {
+        liteclip_replay::platform::TrayEvent::SaveClip => {
+                                                info!("Tray: Save Clip selected");
+                                                let overlay_enabled = app_state.read().await.config().advanced.overlay_enabled;
+                                                spawn_save_clip_task(
+                                                    &app_state,
+                                                    &platform_handle,
+                                                    &save_in_progress,
+                                                    &game_detector,
+                                                    overlay_enabled,
+                                                )
+                                                .await;
+                                            }
+                                            liteclip_replay::platform::TrayEvent::Exit => {
+                                                info!("Tray: Exit selected");
+                                                break;
+                                            }
+                                            liteclip_replay::platform::TrayEvent::Restart => {
+                                                info!("Tray: Restart selected");
+                                                should_restart = true;
+                                                break;
+                                            }
+        liteclip_replay::platform::TrayEvent::OpenSettings => {
+                                                 info!("Tray: Open Settings selected");
+                                                 liteclip_replay::gui::show_settings_gui(tokio_tx.clone());
+                                             }
+                                             liteclip_replay::platform::TrayEvent::OpenGallery => {
+                                                 info!("Tray: Open Gallery selected");
+                                                 liteclip_replay::gui::show_gallery_gui(tokio_tx.clone());
+                                             }
+                                            _ => {
+                                                // Other tray events are not used (StartRecording, StopRecording,
+                                                // ToggleRecording)
+                                            }
+                                        }
                                     }
-                                    liteclip_replay::platform::HotkeyAction::OpenGallery => {
-                                        info!("Hotkey: open gallery");
-                                        liteclip_replay::gui::show_gallery_gui(tokio_tx.clone());
-                                    }
-                                }
-                            }
-                            liteclip_replay::platform::AppEvent::Tray(tray_event) => {
-                                match tray_event {
-liteclip_replay::platform::TrayEvent::SaveClip => {
-                                        info!("Tray: Save Clip selected");
-                                        let overlay_enabled = app_state.read().await.config().advanced.overlay_enabled;
-                                        spawn_save_clip_task(
-                                            &app_state,
-                                            &platform_handle,
-                                            &save_in_progress,
-                                            &game_detector,
-                                            overlay_enabled,
-                                        )
-                                        .await;
-                                    }
-                                    liteclip_replay::platform::TrayEvent::Exit => {
-                                        info!("Tray: Exit selected");
+                                    liteclip_replay::platform::AppEvent::Quit => {
+                                        info!("Quit signal received");
                                         break;
                                     }
-                                    liteclip_replay::platform::TrayEvent::Restart => {
-                                        info!("Tray: Restart selected");
+        liteclip_replay::platform::AppEvent::Restart => {
+                                        info!("Restart signal received");
                                         should_restart = true;
                                         break;
                                     }
-liteclip_replay::platform::TrayEvent::OpenSettings => {
-                                         info!("Tray: Open Settings selected");
-                                         liteclip_replay::gui::show_settings_gui(tokio_tx.clone());
-                                     }
-                                     liteclip_replay::platform::TrayEvent::OpenGallery => {
-                                         info!("Tray: Open Gallery selected");
-                                         liteclip_replay::gui::show_gallery_gui(tokio_tx.clone());
-                                     }
-                                    _ => {
-                                        // Other tray events are not used (StartRecording, StopRecording,
-                                        // ToggleRecording)
+                                    liteclip_replay::platform::AppEvent::ConfigUpdated(new_config) => {
+                                        info!("ConfigUpdated event received from settings GUI");
+                                        let mut state = app_state.write().await;
+                                        match state.apply_config((*new_config).clone()).await {
+                                            Ok(needs_hotkey_reregister) => {
+                                                if let Err(e) = state.config().save_sync() {
+                                                    error!("Failed to save config: {}", e);
+                                                }
+                                                if needs_hotkey_reregister {
+                                                    let hk = hotkey_config_from_config(state.config());
+                                                    if let Err(e) = platform_handle.re_register_hotkeys(hk) {
+                                                        error!("Failed to re-register hotkeys: {}", e);
+                                                    }
+        }
+                                                let _ = platform_handle.update_recording_state(true);
+                                                if state.config().general.notifications {
+                                                    let _ = platform_handle.show_notification(
+                                                        "Settings Applied",
+                                                        "Settings have been applied",
+                                                    );
+                                                }
+                                            }
+                                            Err(e) => {
+                                                error!("Failed to apply config: {}", e);
+                                                if state.config().general.notifications {
+                                                    let _ = platform_handle.show_notification(
+                                                        "Settings Error",
+                                                        &format!("Failed to apply: {}", e),
+                                                    );
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
-                            liteclip_replay::platform::AppEvent::Quit => {
-                                info!("Quit signal received");
+                            Ok(None) => {
+                                info!("Event channel closed");
                                 break;
                             }
-liteclip_replay::platform::AppEvent::Restart => {
-                                info!("Restart signal received");
-                                should_restart = true;
-                                break;
-                            }
-                            liteclip_replay::platform::AppEvent::ConfigUpdated(new_config) => {
-                                info!("ConfigUpdated event received from settings GUI");
+                            Err(_) => {
+                                // Timeout tick: poll worker health and fail-closed when needed.
                                 let mut state = app_state.write().await;
-                                match state.apply_config((*new_config).clone()).await {
-                                    Ok(needs_hotkey_reregister) => {
-                                        if let Err(e) = state.config().save_sync() {
-                                            error!("Failed to save config: {}", e);
-                                        }
-                                        if needs_hotkey_reregister {
-                                            let hk = hotkey_config_from_config(state.config());
-                                            if let Err(e) = platform_handle.re_register_hotkeys(hk) {
-                                                error!("Failed to re-register hotkeys: {}", e);
-                                            }
-}
-                                        let _ = platform_handle.update_recording_state(true);
+                                match state.enforce_pipeline_health().await {
+                                    Ok(Some(reason)) => {
+                                        error!("Recording stopped due to fatal pipeline error: {}", reason);
+                                        let _ = platform_handle.update_recording_state(false);
                                         if state.config().general.notifications {
                                             let _ = platform_handle.show_notification(
-                                                "Settings Applied",
-                                                "Settings have been applied",
+                                                "Recording Stopped",
+                                                &format!("Pipeline error: {}", reason),
                                             );
                                         }
                                     }
+                                    Ok(None) => {}
                                     Err(e) => {
-                                        error!("Failed to apply config: {}", e);
-                                        if state.config().general.notifications {
-                                            let _ = platform_handle.show_notification(
-                                                "Settings Error",
-                                                &format!("Failed to apply: {}", e),
-                                            );
-                                        }
+                                        error!("Failed to enforce pipeline health: {}", e);
                                     }
                                 }
                             }
                         }
                     }
-                    Ok(None) => {
-                        info!("Event channel closed");
+
+                    // Handle Ctrl+C
+                    _ = tokio::signal::ctrl_c() => {
+                        info!("Ctrl+C received");
                         break;
                     }
-                    Err(_) => {
-                        // Timeout tick: poll worker health and fail-closed when needed.
-                        let mut state = app_state.write().await;
-                        match state.enforce_pipeline_health().await {
-                            Ok(Some(reason)) => {
-                                error!("Recording stopped due to fatal pipeline error: {}", reason);
-                                let _ = platform_handle.update_recording_state(false);
-                                if state.config().general.notifications {
-                                    let _ = platform_handle.show_notification(
-                                        "Recording Stopped",
-                                        &format!("Pipeline error: {}", reason),
-                                    );
-                                }
-                            }
-                            Ok(None) => {}
-                            Err(e) => {
-                                error!("Failed to enforce pipeline health: {}", e);
-                            }
-                        }
-                    }
                 }
-            }
-
-            // Handle Ctrl+C
-            _ = tokio::signal::ctrl_c() => {
-                info!("Ctrl+C received");
-                break;
-            }
-        }
     }
 
     // Cleanup
@@ -492,12 +575,44 @@ liteclip_replay::platform::AppEvent::Restart => {
     std::process::exit(0);
 }
 
-/// Get HotkeyConfig from Config
+/// Extracts hotkey configuration from the application config.
+///
+/// # Arguments
+///
+/// * `config` - Reference to the application configuration.
+///
+/// # Returns
+///
+/// A [`HotkeyConfig`] struct containing hotkey strings for all actions.
 fn hotkey_config_from_config(config: &Config) -> liteclip_replay::platform::HotkeyConfig {
     config.hotkeys.clone()
 }
 
-/// Spawns an async task to save the clip with proper concurrency guard.
+/// Spawns an async task to save the current replay buffer to disk.
+///
+/// This function provides concurrency protection to ensure only one save
+/// operation runs at a time. If a save is already in progress, the request
+/// is ignored.
+///
+/// # Arguments
+///
+/// * `app_state` - Shared application state containing the replay buffer.
+/// * `platform_handle` - Handle to the platform layer for notifications.
+/// * `save_in_progress` - Atomic flag for concurrency control.
+/// * `game_detector` - Optional game detector for organizing clips by game.
+/// * `overlay_enabled` - Whether to show the clip saved overlay.
+///
+/// # Example
+///
+/// ```ignore
+/// spawn_save_clip_task(
+///     &app_state,
+///     &platform_handle,
+///     &save_in_progress,
+///     &game_detector,
+///     config.advanced.overlay_enabled,
+/// ).await;
+/// ```
 async fn spawn_save_clip_task(
     app_state: &Arc<RwLock<AppState>>,
     platform_handle: &Arc<liteclip_replay::platform::PlatformHandle>,
@@ -516,43 +631,45 @@ async fn spawn_save_clip_task(
     let (config, buffer, notifications_enabled) = app_state.read().await.save_context();
     let platform_handle_clone = platform_handle.clone();
     let save_in_progress_clone = save_in_progress.clone();
-    
-    let game_name = game_detector.as_ref().map(|d| {
-        let app = d.get_detected_app();
-        if app.is_game {
-            Some(app.folder_name.clone())
-        } else {
-            None
-        }
-    }).flatten();
+
+    let game_name = game_detector
+        .as_ref()
+        .map(|d| {
+            let app = d.get_detected_app();
+            if app.is_game {
+                Some(app.folder_name.clone())
+            } else {
+                None
+            }
+        })
+        .flatten();
 
     tokio::spawn(async move {
-        let result = liteclip_replay::app::ClipManager::save_clip(&config, &buffer, game_name.as_deref()).await;
+        let result =
+            liteclip_replay::app::ClipManager::save_clip(&config, &buffer, game_name.as_deref())
+                .await;
 
         match result {
             Ok(path) => {
                 info!("Clip saved: {:?}", path);
-                
+
                 if overlay_enabled {
-                    let filename = path.file_name()
-                        .map(|n| n.to_string_lossy().to_string());
+                    let filename = path.file_name().map(|n| n.to_string_lossy().to_string());
                     liteclip_replay::gui::run_clip_saved_overlay(filename);
                 }
-                
+
                 if notifications_enabled {
                     let _ = platform_handle_clone.show_notification(
                         "Clip Saved",
-                        &format!(
-                            "Saved to {:?}",
-                            path.file_name().unwrap_or_default()
-                        ),
+                        &format!("Saved to {:?}", path.file_name().unwrap_or_default()),
                     );
                 }
             }
             Err(e) => {
                 error!("Failed to save clip: {:#}", e);
                 if notifications_enabled {
-                    let _ = platform_handle_clone.show_notification("Save Failed", &format!("{:#}", e));
+                    let _ =
+                        platform_handle_clone.show_notification("Save Failed", &format!("{:#}", e));
                 }
             }
         }

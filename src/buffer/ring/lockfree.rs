@@ -1,7 +1,45 @@
 //! Lock-free replay buffer implementation
 //!
-//! Uses a ring buffer with atomic indices for single-producer, multi-consumer access.
-//! The producer writes atomically; consumers read via optimistic locking (seqlock pattern).
+//! This module provides a high-performance, lock-free ring buffer for storing
+//! encoded video and audio packets in memory.
+//!
+//! # Design
+//!
+//! The buffer uses atomic indices for single-producer, multi-consumer (SPMC) access:
+//!
+//! - **Single Producer**: The encoder thread pushes packets atomically via `fetch_add`
+//! - **Multiple Consumers**: Clip saving reads snapshots via optimistic locking
+//!
+//! # Features
+//!
+//! - Lock-free push operations (O(1))
+//! - Lock-free snapshot operations (O(n))
+//! - Parameter set caching (SPS/PPS/VPS) for proper clip decoding
+//! - Keyframe tracking for seekable clips
+//! - Memory and duration-based eviction
+//!
+//! # Thread Safety
+//!
+//! The buffer is designed for the SPMC pattern:
+//! - Push operations are thread-safe from a single producer
+//! - Snapshot operations can be called from multiple consumers
+//! - Clear operations are safe but should be coordinated
+//!
+//! # Example
+//!
+//! ```ignore
+//! use liteclip_replay::buffer::ring::LockFreeReplayBuffer;
+//! use liteclip_replay::config::Config;
+//!
+//! let config = Config::default();
+//! let buffer = LockFreeReplayBuffer::new(&config)?;
+//!
+//! // Push encoded packets
+//! buffer.push(encoded_packet);
+//!
+//! // Snapshot for clip saving
+//! let packets = buffer.snapshot()?;
+//! ```
 
 use crate::encode::{EncodedPacket, StreamType};
 use anyhow::Result;
@@ -14,10 +52,17 @@ use tracing::{debug, info, trace};
 use super::functions::{h264_nal_type, hevc_nal_type, qpc_frequency};
 use super::types::BufferStats;
 
+/// Cached codec parameter sets.
+///
+/// Stores H.264 SPS/PPS or HEVC VPS/SPS/PPS for inclusion in clip exports.
+/// This ensures clips are playable even if the parameter sets were generated
+/// before the clip start time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CodecKind {
+    /// H.264/AVC codec.
     #[default]
     H264,
+    /// HEVC/H.265 codec.
     Hevc,
 }
 
@@ -43,19 +88,41 @@ impl Default for ParameterCache {
     }
 }
 
+/// Identifies the first video NAL unit type.
+///
+/// Used to detect whether the first video packet is a parameter set
+/// (SPS for H.264, VPS for HEVC) or regular encoded data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FirstVideoKind {
+    /// H.264 Sequence Parameter Set (NAL type 7).
     H264Sps,
+    /// HEVC Video Parameter Set (NAL type 32).
     HevcVps,
+    /// Regular encoded data (not a parameter set).
     Other,
 }
 
 impl FirstVideoKind {
+    /// Checks if this represents a parameter set.
+    ///
+    /// # Returns
+    ///
+    /// `true` if this is a parameter set (SPS or VPS).
     pub fn is_parameter_set(&self) -> bool {
         matches!(self, FirstVideoKind::H264Sps | FirstVideoKind::HevcVps)
     }
 }
 
+/// Lock-free replay buffer.
+///
+/// A high-performance ring buffer for storing encoded video and audio packets.
+/// Uses atomic indices for lock-free single-producer, multi-consumer access.
+///
+/// # Thread Safety
+///
+/// - Push operations are safe from a single producer thread
+/// - Snapshot/clear operations can be called from multiple consumer threads
+/// - Clone is cheap (shallow copy of Arc)
 #[derive(Clone)]
 pub struct LockFreeReplayBuffer {
     inner: Arc<LockFreeInner>,
@@ -88,6 +155,25 @@ impl Slot {
 }
 
 impl LockFreeReplayBuffer {
+    /// Creates a new lock-free replay buffer.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - Configuration with replay duration and memory limits.
+    ///
+    /// # Returns
+    ///
+    /// A new LockFreeReplayBuffer instance.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use liteclip_replay::buffer::ring::LockFreeReplayBuffer;
+    /// use liteclip_replay::config::Config;
+    ///
+    /// let config = Config::default();
+    /// let buffer = LockFreeReplayBuffer::new(&config)?;
+    /// ```
     pub fn new(config: &crate::config::Config) -> Result<Self> {
         let duration = Duration::from_secs(config.general.replay_duration_secs as u64 + 1);
         let effective_memory_limit_mb = config.effective_replay_memory_limit_mb();
@@ -133,12 +219,26 @@ impl LockFreeReplayBuffer {
         })
     }
 
+    /// Pushes a batch of packets into the buffer.
+    ///
+    /// Thread-safe for single producer.
+    ///
+    /// # Arguments
+    ///
+    /// * `packets` - Iterator of encoded packets.
     pub fn push_batch(&self, packets: impl IntoIterator<Item = EncodedPacket>) {
         for packet in packets {
             self.push_single(packet);
         }
     }
 
+    /// Pushes a single packet into the buffer.
+    ///
+    /// Thread-safe for single producer. Uses atomic fetch_add for the write index.
+    ///
+    /// # Arguments
+    ///
+    /// * `packet` - The encoded packet to push.
     pub fn push(&self, packet: EncodedPacket) {
         self.push_single(packet);
     }
@@ -282,6 +382,19 @@ impl LockFreeReplayBuffer {
         FirstVideoKind::Other
     }
 
+    /// Gets a snapshot of all packets in the buffer.
+    ///
+    /// Returns all packets from the oldest to newest, including prepended
+    /// parameter sets (SPS/PPS or VPS/SPS/PPS) if the first video packet
+    /// is not a parameter set.
+    ///
+    /// # Returns
+    ///
+    /// Vector of all encoded packets in chronological order.
+    ///
+    /// # Thread Safety
+    ///
+    /// Safe to call from multiple consumer threads.
     pub fn snapshot(&self) -> Result<Vec<EncodedPacket>> {
         let inner = &self.inner;
         let write_idx = inner.write_idx.load(Ordering::Acquire);
@@ -395,6 +508,22 @@ impl LockFreeReplayBuffer {
         Ok(result)
     }
 
+    /// Gets a snapshot starting from a specific PTS.
+    ///
+    /// Finds the nearest keyframe at or after the given PTS and returns
+    /// all packets from that keyframe onward.
+    ///
+    /// # Arguments
+    ///
+    /// * `start_pts` - The starting presentation timestamp (in stream timebase).
+    ///
+    /// # Returns
+    ///
+    /// Vector of encoded packets starting from a keyframe.
+    ///
+    /// # Thread Safety
+    ///
+    /// Safe to call from multiple consumer threads.
     pub fn snapshot_from(&self, start_pts: i64) -> Result<Vec<EncodedPacket>> {
         let all_packets = self.snapshot()?;
 
@@ -552,6 +681,14 @@ impl LockFreeReplayBuffer {
         Ok(result)
     }
 
+    /// Clears all packets from the buffer.
+    ///
+    /// Resets the write index and clears all packet slots.
+    /// Parameter set cache is preserved for efficient reuse.
+    ///
+    /// # Thread Safety
+    ///
+    /// Should be called when no producer is actively pushing packets.
     pub fn clear(&self) {
         let inner = &self.inner;
 
@@ -578,10 +715,21 @@ impl LockFreeReplayBuffer {
         );
     }
 
+    /// Clears the buffer (alias for [`clear()`][Self::clear]).
     pub fn soft_clear(&self) {
         self.clear();
     }
 
+    /// Gets current buffer statistics.
+    ///
+    /// # Returns
+    ///
+    /// BufferStats containing:
+    /// - `duration_secs`: Duration of buffered content
+    /// - `total_bytes`: Total memory usage
+    /// - `packet_count`: Number of packets in buffer
+    /// - `keyframe_count`: Number of keyframes
+    /// - `memory_usage_percent`: Percentage of max memory used
     pub fn stats(&self) -> BufferStats {
         let inner = &self.inner;
         let write_idx = inner.write_idx.load(Ordering::Acquire);
@@ -614,6 +762,11 @@ impl LockFreeReplayBuffer {
         }
     }
 
+    /// Checks if the buffer is full.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the write index has reached capacity.
     pub fn is_full(&self) -> bool {
         let inner = &self.inner;
         inner.write_idx.load(Ordering::Relaxed) >= inner.capacity

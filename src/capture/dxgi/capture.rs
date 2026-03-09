@@ -709,21 +709,55 @@ impl DxgiCaptureState {
     }
 }
 
-/// DXGI-based screen capture
+/// DXGI-based screen capture implementation.
+///
+/// Captures screen content using Windows DXGI Desktop Duplication API.
+/// Runs on a dedicated thread, producing captured frames via a channel.
+///
+/// # Features
+///
+/// - GPU-accelerated capture via DXGI
+/// - GPU-side scaling and format conversion (NV12)
+/// - Cross-device texture sharing for zero-copy encoding
+/// - Frame queue with configurable depth
+///
+/// # Thread Safety
+///
+/// The capture runs on its own thread. The public methods for start/stop
+/// can be called from any thread, but typically from the main application.
 pub struct DxgiCapture {
+    /// Capture configuration.
     pub(super) config: CaptureConfig,
+    /// Atomic flag indicating if capture is running.
     pub(super) running: Arc<AtomicBool>,
+    /// Channel sender for captured frames.
     pub(super) _frame_tx: Sender<CapturedFrame>,
+    /// Channel receiver for captured frames.
     pub(super) frame_rx: Receiver<CapturedFrame>,
+    /// Channel for fatal error reporting.
     pub(super) fatal_tx: Sender<String>,
+    /// Receiver for fatal errors.
     pub(super) fatal_rx: Receiver<String>,
+    /// Handle to the capture thread.
     pub(super) capture_thread: Option<JoinHandle<()>>,
-    /// Cached result of NV12 conversion capability check
+    /// Cached result of NV12 conversion capability check.
     pub(super) nv12_conversion_capable: bool,
 }
 
 impl DxgiCapture {
-    /// Create a new DXGI capture instance
+    /// Creates a new DXGI capture instance.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if DXGI initialization fails.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use liteclip_replay::capture::dxgi::DxgiCapture;
+    ///
+    /// let capture = DxgiCapture::new()?;
+    /// ```
     pub fn new() -> Result<Self> {
         // 32 frames at 1920x1080 BGRA is ~253MB worst case, but GPU NV12 transport greatly
         // reduces steady-state memory usage. The extra queue depth helps absorb encoder jitter
