@@ -70,14 +70,15 @@ pub fn set_autostart(enabled: bool) -> Result<()> {
                     info!("Auto-start enabled: registry key set to {:?}", exe_path);
                     Ok(())
                 }
-                Err(e) => Err(anyhow::anyhow!("Failed to write auto-start registry value: {}", e)),
+                Err(e) => Err(anyhow::anyhow!(
+                    "Failed to write auto-start registry value: {}",
+                    e
+                )),
             }
         } else {
             use windows::Win32::Foundation::ERROR_FILE_NOT_FOUND;
 
-            let res = unsafe {
-                RegDeleteValueW(hkey, PCWSTR(value_name_wide.as_ptr()))
-            };
+            let res = unsafe { RegDeleteValueW(hkey, PCWSTR(value_name_wide.as_ptr())) };
 
             // ERROR_FILE_NOT_FOUND means the key simply wasn't there — that's fine.
             if res == ERROR_FILE_NOT_FOUND || res.is_ok() {
@@ -91,7 +92,9 @@ pub fn set_autostart(enabled: bool) -> Result<()> {
             }
         };
 
-        unsafe { let _ = RegCloseKey(hkey).ok(); };
+        unsafe {
+            let _ = RegCloseKey(hkey).ok();
+        };
         result
     }
 
@@ -103,4 +106,3 @@ pub fn set_autostart(enabled: bool) -> Result<()> {
         Ok(())
     }
 }
-

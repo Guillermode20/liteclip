@@ -268,12 +268,40 @@ impl Config {
         recommended_mb as u32
     }
 
-    pub fn effective_replay_memory_limit_mb(&self) -> u32 {
+pub fn effective_replay_memory_limit_mb(&self) -> u32 {
         self.advanced
             .memory_limit_mb
             .clamp(MIN_MEMORY_LIMIT_MB, MAX_MEMORY_LIMIT_MB)
     }
+
+    pub fn requires_pipeline_restart(&self, other: &Config) -> bool {
+        self.video.encoder != other.video.encoder
+            || self.video.resolution != other.video.resolution
+            || self.video.use_native_resolution != other.video.use_native_resolution
+            || self.video.framerate != other.video.framerate
+            || self.video.bitrate_mbps != other.video.bitrate_mbps
+            || self.video.quality_preset != other.video.quality_preset
+            || self.video.rate_control != other.video.rate_control
+            || self.video.quality_value != other.video.quality_value
+            || self.audio.capture_system != other.audio.capture_system
+            || self.audio.capture_mic != other.audio.capture_mic
+            || self.audio.mic_device != other.audio.mic_device
+            || self.audio.mic_noise_reduction != other.audio.mic_noise_reduction
+            || self.advanced.gpu_index != other.advanced.gpu_index
+            || self.advanced.keyframe_interval_secs != other.advanced.keyframe_interval_secs
+            || self.advanced.use_cpu_readback != other.advanced.use_cpu_readback
+            || self.general.replay_duration_secs != other.general.replay_duration_secs
+            || self.advanced.memory_limit_mb != other.advanced.memory_limit_mb
+    }
+
+    pub fn requires_hotkey_reregister(&self, other: &Config) -> bool {
+        self.hotkeys.save_clip != other.hotkeys.save_clip
+            || self.hotkeys.toggle_recording != other.hotkeys.toggle_recording
+            || self.hotkeys.screenshot != other.hotkeys.screenshot
+            || self.hotkeys.open_gallery != other.hotkeys.open_gallery
+    }
 }
+
 /// Rate control mode preference
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -384,4 +412,147 @@ pub struct GeneralConfig {
     pub notifications: bool,
     #[serde(default = "default_true")]
     pub auto_detect_game: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn default_config() -> Config {
+        Config::default()
+    }
+
+    #[test]
+    fn test_requires_pipeline_restart_video_encoder() {
+        let mut config1 = default_config();
+        let mut config2 = default_config();
+        
+        config1.video.encoder = EncoderType::Nvenc;
+        config2.video.encoder = EncoderType::Amf;
+        
+        assert!(config1.requires_pipeline_restart(&config2));
+    }
+
+    #[test]
+    fn test_requires_pipeline_restart_video_framerate() {
+        let mut config1 = default_config();
+        let mut config2 = default_config();
+        
+        config1.video.framerate = 30;
+        config2.video.framerate = 60;
+        
+        assert!(config1.requires_pipeline_restart(&config2));
+    }
+
+    #[test]
+    fn test_requires_pipeline_restart_video_bitrate() {
+        let mut config1 = default_config();
+        let mut config2 = default_config();
+        
+        config1.video.bitrate_mbps = 20;
+        config2.video.bitrate_mbps = 50;
+        
+        assert!(config1.requires_pipeline_restart(&config2));
+    }
+
+    #[test]
+    fn test_requires_pipeline_restart_audio_capture_system() {
+        let mut config1 = default_config();
+        let mut config2 = default_config();
+        
+        config1.audio.capture_system = true;
+        config2.audio.capture_system = false;
+        
+        assert!(config1.requires_pipeline_restart(&config2));
+    }
+
+    #[test]
+    fn test_requires_pipeline_restart_audio_capture_mic() {
+        let mut config1 = default_config();
+        let mut config2 = default_config();
+        
+        config1.audio.capture_mic = true;
+        config2.audio.capture_mic = false;
+        
+        assert!(config1.requires_pipeline_restart(&config2));
+    }
+
+    #[test]
+    fn test_requires_pipeline_restart_replay_duration() {
+        let mut config1 = default_config();
+        let mut config2 = default_config();
+        
+        config1.general.replay_duration_secs = 30;
+        config2.general.replay_duration_secs = 60;
+        
+        assert!(config1.requires_pipeline_restart(&config2));
+    }
+
+    #[test]
+    fn test_requires_pipeline_restart_no_change() {
+        let config1 = default_config();
+        let config2 = default_config();
+        
+        assert!(!config1.requires_pipeline_restart(&config2));
+    }
+
+    #[test]
+    fn test_requires_pipeline_restart_general_settings_dont_trigger() {
+        let mut config1 = default_config();
+        let mut config2 = default_config();
+        
+        config1.general.notifications = true;
+        config2.general.notifications = false;
+        config1.general.auto_start_with_windows = true;
+        config2.general.auto_start_with_windows = false;
+        
+        assert!(!config1.requires_pipeline_restart(&config2));
+    }
+
+    #[test]
+    fn test_requires_hotkey_reregister_changed() {
+        let mut config1 = default_config();
+        let mut config2 = default_config();
+        
+        config1.hotkeys.save_clip = "Alt+F9".to_string();
+        config2.hotkeys.save_clip = "Alt+F10".to_string();
+        
+        assert!(config1.requires_hotkey_reregister(&config2));
+    }
+
+    #[test]
+    fn test_requires_hotkey_reregister_no_change() {
+        let config1 = default_config();
+        let config2 = default_config();
+        
+        assert!(!config1.requires_hotkey_reregister(&config2));
+    }
+
+    #[test]
+    fn test_requires_hotkey_reregister_all_fields() {
+        let mut config1 = default_config();
+        let mut config2 = default_config();
+        
+        config1.hotkeys.save_clip = "Alt+F1".to_string();
+        config2.hotkeys.save_clip = "Alt+F2".to_string();
+        assert!(config1.requires_hotkey_reregister(&config2));
+        
+        config1 = default_config();
+        config2 = default_config();
+        config1.hotkeys.toggle_recording = "Alt+F3".to_string();
+        config2.hotkeys.toggle_recording = "Alt+F4".to_string();
+        assert!(config1.requires_hotkey_reregister(&config2));
+        
+        config1 = default_config();
+        config2 = default_config();
+        config1.hotkeys.screenshot = "Alt+F5".to_string();
+        config2.hotkeys.screenshot = "Alt+F6".to_string();
+        assert!(config1.requires_hotkey_reregister(&config2));
+        
+        config1 = default_config();
+        config2 = default_config();
+        config1.hotkeys.open_gallery = "Alt+F7".to_string();
+        config2.hotkeys.open_gallery = "Alt+F8".to_string();
+        assert!(config1.requires_hotkey_reregister(&config2));
+    }
 }

@@ -14,7 +14,12 @@ pub fn run_clip_saved_overlay(filename: Option<String>) {
     crate::gui::manager::send_gui_message(crate::gui::manager::GuiMessage::ShowOverlay(filename));
 }
 
-pub fn render_overlay_direct(ctx: &egui::Context, filename: &Option<String>, shown_at: Instant, close_after_secs: f32) {
+pub fn render_overlay_direct(
+    ctx: &egui::Context,
+    filename: &Option<String>,
+    shown_at: Instant,
+    close_after_secs: f32,
+) {
     let elapsed = shown_at.elapsed().as_secs_f32();
 
     if elapsed >= close_after_secs {
@@ -49,42 +54,30 @@ pub fn render_overlay_direct(ctx: &egui::Context, filename: &Option<String>, sho
             frame.show(ui, |ui| {
                 ui.horizontal(|ui| {
                     // Green check icon
-                    ui.label(
-                        egui::RichText::new("✓")
-                            .size(22.0)
-                            .color(egui::Color32::from_rgba_premultiplied(
-                                80,
-                                200,
-                                80,
-                                (255.0 * alpha) as u8,
-                            )),
-                    );
+                    ui.label(egui::RichText::new("✓").size(22.0).color(
+                        egui::Color32::from_rgba_premultiplied(80, 200, 80, (255.0 * alpha) as u8),
+                    ));
 
                     ui.add_space(6.0);
 
                     ui.vertical(|ui| {
-                        ui.label(
-                            egui::RichText::new("Clip Saved")
-                                .size(14.0)
-                                .strong()
-                                .color(egui::Color32::from_rgba_premultiplied(
-                                    240,
-                                    240,
-                                    240,
-                                    (255.0 * alpha) as u8,
-                                )),
-                        );
+                        ui.label(egui::RichText::new("Clip Saved").size(14.0).strong().color(
+                            egui::Color32::from_rgba_premultiplied(
+                                240,
+                                240,
+                                240,
+                                (255.0 * alpha) as u8,
+                            ),
+                        ));
                         if let Some(name) = filename {
-                            ui.label(
-                                egui::RichText::new(name)
-                                    .size(11.0)
-                                    .color(egui::Color32::from_rgba_premultiplied(
-                                        160,
-                                        160,
-                                        160,
-                                        (255.0 * alpha) as u8,
-                                    )),
-                            );
+                            ui.label(egui::RichText::new(name).size(11.0).color(
+                                egui::Color32::from_rgba_premultiplied(
+                                    160,
+                                    160,
+                                    160,
+                                    (255.0 * alpha) as u8,
+                                ),
+                            ));
                         }
                     });
                 });

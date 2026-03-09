@@ -11,10 +11,10 @@ use tracing::{info, warn};
 pub struct ClipManager;
 
 impl ClipManager {
-    pub async fn save_clip(config: &Config, buffer: &ReplayBuffer) -> Result<PathBuf> {
+    pub async fn save_clip(config: &Config, buffer: &ReplayBuffer, game_name: Option<&str>) -> Result<PathBuf> {
         info!("Clip: saving replay buffer");
 
-        let output_path = Self::generate_output_path(config)?;
+        let output_path = Self::generate_output_path(config, game_name)?;
 
         let stats = buffer.stats();
         info!(
@@ -61,15 +61,27 @@ impl ClipManager {
         Ok(final_path)
     }
 
-    fn generate_output_path(config: &Config) -> Result<PathBuf> {
+fn generate_output_path(config: &Config, game_name: Option<&str>) -> Result<PathBuf> {
         use chrono::Local;
 
-        let timestamp = Local::now().format("%Y-%m-%d_%H-%M-%S_%3f");
-        let filename = format!("clip_{}.mp4", timestamp);
+        let timestamp = Local::now();
+        let filename = format!("{}.mp4", timestamp.format("%Y-%m-%d_%H-%M-%S_%3f"));
 
         let save_dir = PathBuf::from(&config.general.save_directory);
-        std::fs::create_dir_all(&save_dir)?;
+        
+        let output_dir = if let Some(game) = game_name {
+            if game.is_empty() || !config.general.auto_detect_game {
+                save_dir
+            } else {
+                save_dir.join(game)
+            }
+        } else {
+            save_dir
+        };
 
-        Ok(save_dir.join(filename))
+        std::fs::create_dir_all(&output_dir)?;
+
+        Ok(output_dir.join(filename))
     }
+}
 }

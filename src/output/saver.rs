@@ -7,8 +7,8 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 use super::{
-    calculate_clip_start_pts, extract_thumbnail, generate_output_path, h264_nal_type, hevc_nal_type,
-    Muxer, MuxerConfig,
+    calculate_clip_start_pts, extract_thumbnail, generate_output_path, h264_nal_type,
+    hevc_nal_type, Muxer, MuxerConfig,
 };
 
 pub fn spawn_clip_saver(
@@ -73,7 +73,10 @@ pub fn spawn_clip_saver(
                 if matches!(h264_nal_type(packet.data.as_ref()), Some(1 | 5 | 7 | 8)) {
                     return true;
                 }
-                if matches!(hevc_nal_type(packet.data.as_ref()), Some(19 | 20 | 32 | 33 | 34)) {
+                if matches!(
+                    hevc_nal_type(packet.data.as_ref()),
+                    Some(19 | 20 | 32 | 33 | 34)
+                ) {
                     return true;
                 }
                 false
@@ -168,11 +171,12 @@ pub fn spawn_clip_saver_with_defaults(
     buffer: SharedReplayBuffer,
     duration: Duration,
     save_directory: PathBuf,
+    game_name: Option<String>,
     width: u32,
     height: u32,
     fps: f64,
 ) -> Result<JoinHandle<Result<PathBuf>>> {
-    let output_path = generate_output_path(&save_directory)
+    let output_path = generate_output_path(&save_directory, game_name.as_deref())
         .context("Failed to generate clip output path")?;
 
     let config = MuxerConfig::new(width, height, fps, &output_path);

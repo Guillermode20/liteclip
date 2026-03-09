@@ -1,23 +1,68 @@
 use eframe::egui;
-
+use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
 
 use crate::config::{config_mod::types::*, Config};
 use crate::platform::AppEvent;
 
-
-
 pub fn show_settings_gui(event_tx: Sender<AppEvent>) {
     crate::gui::manager::send_gui_message(crate::gui::manager::GuiMessage::ShowSettings(event_tx));
+}
+
+#[derive(Default)]
+struct HotkeyValidationErrors {
+    save_clip: Option<String>,
+    toggle_recording: Option<String>,
+    screenshot: Option<String>,
+    open_gallery: Option<String>,
+}
+
+fn validate_hotkey(hotkey: &str) -> Result<(), String> {
+    if hotkey.trim().is_empty() {
+        return Err("Hotkey cannot be empty".to_string());
+    }
+    crate::platform::msg_loop::parse_hotkey(hotkey)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+fn render_hotkey_field(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut String,
+    error: &mut Option<String>,
+) {
+    ui.horizontal(|ui| {
+        ui.label(label);
+        let response = ui.text_edit_singleline(value);
+
+        if response.changed() {
+            *error = validate_hotkey(value).err();
+        }
+
+        if let Some(ref err) = error {
+            ui.colored_label(egui::Color32::RED, "⚠").on_hover_text(err);
+        }
+    });
 }
 
 pub struct SettingsApp {
     pub config: Config,
     pub event_tx: Sender<AppEvent>,
     pub save_status: Option<String>,
+    hotkey_errors: HotkeyValidationErrors,
 }
 
 impl SettingsApp {
+    pub fn new(config: Config, event_tx: Sender<AppEvent>) -> Self {
+        Self {
+            config,
+            event_tx,
+            save_status: None,
+            hotkey_errors: HotkeyValidationErrors::default(),
+        }
+    }
+
     pub fn update(&mut self, ctx: &egui::Context, is_open: &mut bool) {
         self.render(ctx, is_open);
     }
@@ -202,22 +247,10 @@ impl SettingsApp {
 
                 // Hotkey Settings
                 ui.collapsing("Hotkeys", |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label("Save Clip:");
-                        ui.text_edit_singleline(&mut self.config.hotkeys.save_clip);
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Toggle Recording:");
-                        ui.text_edit_singleline(&mut self.config.hotkeys.toggle_recording);
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Screenshot:");
-                        ui.text_edit_singleline(&mut self.config.hotkeys.screenshot);
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Open Gallery:");
-                        ui.text_edit_singleline(&mut self.config.hotkeys.open_gallery);
-                    });
+                    render_hotkey_field(ui, "Save Clip:", &mut self.config.hotkeys.save_clip, &mut self.hotkey_errors.save_clip);
+                    render_hotkey_field(ui, "Toggle Recording:", &mut self.config.hotkeys.toggle_recording, &mut self.hotkey_errors.toggle_recording);
+                    render_hotkey_field(ui, "Screenshot:", &mut self.config.hotkeys.screenshot, &mut self.hotkey_errors.screenshot);
+                    render_hotkey_field(ui, "Open Gallery:", &mut self.config.hotkeys.open_gallery, &mut self.hotkey_errors.open_gallery);
                 });
 
                 // Advanced Settings
@@ -294,29 +327,22 @@ impl SettingsApp {
             ui.add_space(5.0);
 
             ui.horizontal(|ui| {
-                if ui.button("Save").clicked() {
+                if ui.button("Apply").clicked() {
                     self.config.validate();
-                    match self.config.save_sync() {
-                        Ok(_) => self.save_status = Some("Saved successfully!".to_string()),
-                        Err(e) => self.save_status = Some(format!("Error: {}", e)),
+                    match self.event_tx.try_send(AppEvent::ConfigUpdated(Arc::new(self.config.clone()))) {
+                        Ok(_) => {
+                            *is_open = false;
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                        Err(e) => {
+                            self.save_status = Some(format!("Error: {}", e));
+                        }
                     }
                 }
 
-                if ui.button("Save & Restart App").clicked() {
-                    self.config.validate();
-                    match self.config.save_sync() {
-                        Ok(_) => match self.event_tx.try_send(AppEvent::Restart) {
-                            Ok(_) => {
-                                 *is_open = false;
-                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                            }
-                            Err(e) => {
-                                self.save_status =
-                                    Some(format!("Saved, but restart signal failed: {}", e));
-                            }
-                        },
-                        Err(e) => self.save_status = Some(format!("Error: {}", e)),
-                    }
+                if ui.button("Cancel").clicked() {
+                    *is_open = false;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
 
                 if let Some(status) = &self.save_status {

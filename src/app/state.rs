@@ -5,7 +5,7 @@ use crate::{
 };
 use anyhow::Result;
 use std::path::PathBuf;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 pub struct AppState {
     config: Config,
@@ -114,6 +114,51 @@ impl AppState {
 
         info!("Runtime configuration changes applied successfully");
         Ok(())
+    }
+
+pub async fn apply_config(&mut self, new_config: Config) -> Result<bool> {
+        let needs_restart = self.config.requires_pipeline_restart(&new_config);
+        let needs_hotkey_reregister = self.config.requires_hotkey_reregister(&new_config);
+
+        if needs_restart {
+            let old_config = self.config.clone();
+            
+            info!("Stopping pipeline for configuration change...");
+            self.pipeline.stop().await?;
+
+            info!("Restarting pipeline with new configuration...");
+            self.config = new_config;
+            self.config.validate();
+
+            self.buffer = ReplayBuffer::new(&self.config)?;
+            
+            if let Err(e) = self.pipeline.start(&self.config, &self.buffer).await {
+                error!("Failed to start pipeline with new config: {}", e);
+                error!("Rolling back to previous configuration...");
+                
+                self.config = old_config;
+                self.buffer = ReplayBuffer::new(&self.config)?;
+                
+                match self.pipeline.start(&self.config, &self.buffer).await {
+                    Ok(()) => {
+                        warn!("Rollback successful - using previous configuration");
+                    }
+                    Err(rollback_err) => {
+                        error!("CRITICAL: Rollback also failed: {}", rollback_err);
+                    }
+                }
+                
+                return Err(anyhow::anyhow!(
+                    "Config rejected: {}. Previous settings restored.",
+                    e
+                ));
+            }
+        } else {
+            self.config = new_config;
+            self.config.validate();
+        }
+
+Ok(needs_hotkey_reregister)
     }
 
     pub fn config(&self) -> &Config {

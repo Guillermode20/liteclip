@@ -131,12 +131,23 @@ pub fn generate_output_filename() -> String {
     format!("{}.mp4", timestamp.format("%Y-%m-%d_%H-%M-%S_%3f"))
 }
 
-pub fn generate_output_path(base_dir: &Path) -> Result<PathBuf> {
+pub fn generate_output_path(base_dir: &Path, game_name: Option<&str>) -> Result<PathBuf> {
     let filename = generate_output_filename();
-    let output_path = base_dir.join(&filename);
-    std::fs::create_dir_all(base_dir)
-        .with_context(|| format!("Failed to create output directory: {:?}", base_dir))?;
-    Ok(output_path)
+
+    let output_dir = if let Some(game) = game_name {
+        if game.is_empty() {
+            base_dir.to_path_buf()
+        } else {
+            base_dir.join(game)
+        }
+    } else {
+        base_dir.to_path_buf()
+    };
+
+    std::fs::create_dir_all(&output_dir)
+        .with_context(|| format!("Failed to create output directory: {:?}", output_dir))?;
+
+    Ok(output_dir.join(&filename))
 }
 
 pub fn extract_thumbnail(_packet: &EncodedPacket, output_path: &Path) -> Result<PathBuf> {

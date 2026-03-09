@@ -330,10 +330,43 @@ liteclip_replay::platform::HotkeyAction::SaveClip => {
                                 info!("Quit signal received");
                                 break;
                             }
-                            liteclip_replay::platform::AppEvent::Restart => {
+liteclip_replay::platform::AppEvent::Restart => {
                                 info!("Restart signal received");
                                 should_restart = true;
                                 break;
+                            }
+                            liteclip_replay::platform::AppEvent::ConfigUpdated(new_config) => {
+                                info!("ConfigUpdated event received from settings GUI");
+                                let mut state = app_state.write().await;
+                                match state.apply_config((*new_config).clone()).await {
+                                    Ok(needs_hotkey_reregister) => {
+                                        if let Err(e) = state.config().save_sync() {
+                                            error!("Failed to save config: {}", e);
+                                        }
+                                        if needs_hotkey_reregister {
+                                            let hk = hotkey_config_from_config(state.config());
+                                            if let Err(e) = platform_handle.re_register_hotkeys(hk) {
+                                                error!("Failed to re-register hotkeys: {}", e);
+                                            }
+}
+                                        let _ = platform_handle.update_recording_state(true);
+                                        if state.config().general.notifications {
+                                            let _ = platform_handle.show_notification(
+                                                "Settings Applied",
+                                                "Settings have been applied",
+                                            );
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!("Failed to apply config: {}", e);
+                                        if state.config().general.notifications {
+                                            let _ = platform_handle.show_notification(
+                                                "Settings Error",
+                                                &format!("Failed to apply: {}", e),
+                                            );
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -442,14 +475,9 @@ liteclip_replay::platform::HotkeyAction::SaveClip => {
     std::process::exit(0);
 }
 
-/// Convert Config to HotkeyConfig
+/// Get HotkeyConfig from Config
 fn hotkey_config_from_config(config: &Config) -> liteclip_replay::platform::HotkeyConfig {
-    liteclip_replay::platform::HotkeyConfig {
-        save_clip: config.hotkeys.save_clip.clone(),
-        toggle_recording: config.hotkeys.toggle_recording.clone(),
-        screenshot: config.hotkeys.screenshot.clone(),
-        open_gallery: config.hotkeys.open_gallery.clone(),
-    }
+    config.hotkeys.clone()
 }
 
 /// Spawns an async task to save the clip with proper concurrency guard.

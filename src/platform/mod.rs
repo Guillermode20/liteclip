@@ -4,6 +4,7 @@
 
 use anyhow::Result;
 use crossbeam::channel::{Receiver, Sender};
+use std::sync::Arc;
 
 pub mod autostart;
 pub mod hotkeys;
@@ -56,7 +57,7 @@ pub enum TrayEvent {
 }
 
 /// Application events from platform layer
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum AppEvent {
     /// Hotkey event with specific action
     Hotkey(HotkeyAction),
@@ -66,31 +67,11 @@ pub enum AppEvent {
     Quit,
     /// Restart application
     Restart,
+    /// Configuration updated from settings GUI
+    ConfigUpdated(Arc<crate::config::Config>),
 }
 
-/// Hotkey configuration for registration
-#[derive(Debug, Clone)]
-pub struct HotkeyConfig {
-    /// Hotkey for saving clips (e.g., "Alt+F9")
-    pub save_clip: String,
-    /// Hotkey for toggling recording
-    pub toggle_recording: String,
-    /// Hotkey for screenshots
-    pub screenshot: String,
-    /// Hotkey for opening gallery
-    pub open_gallery: String,
-}
-
-impl Default for HotkeyConfig {
-    fn default() -> Self {
-        Self {
-            save_clip: "Alt+F9".to_string(),
-            toggle_recording: "Alt+F10".to_string(),
-            screenshot: "Alt+F8".to_string(),
-            open_gallery: "Ctrl+Shift+S".to_string(),
-        }
-    }
-}
+pub use crate::config::HotkeyConfig;
 
 /// Platform handle containing the thread handle and command sender
 pub struct PlatformHandle {
