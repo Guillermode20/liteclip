@@ -23,9 +23,9 @@ impl FfmpegEncoder {
         let peak_bitrate_bps = self.peak_bitrate_bps().to_string();
         let (preanalysis, vbaq, rc_lookahead, me_half_pel, me_quarter_pel, high_motion_quality_boost) =
             match self.config.quality_preset {
-                QualityPreset::Performance => ("0", "0", "0", "0", "0", "0"),
-                QualityPreset::Balanced => ("0", "0", "0", "1", "0", "0"),
-                QualityPreset::Quality => ("0", "1", "0", "1", "1", "0"),
+                QualityPreset::Performance => ("0", "0", "0", "1", "0", "0"),
+                QualityPreset::Balanced => ("0", "1", "0", "1", "1", "0"),
+                QualityPreset::Quality => ("0", "1", "0", "1", "1", "1"),
             };
 
         options.set("usage", "lowlatency");
@@ -44,10 +44,10 @@ impl FfmpegEncoder {
         options.set("me_half_pel", me_half_pel);
         options.set("me_quarter_pel", me_quarter_pel);
         options.set("high_motion_quality_boost_enable", high_motion_quality_boost);
-        options.set("min_qp_i", "18");
-        options.set("max_qp_i", "51");
-        options.set("min_qp_p", "20");
-        options.set("max_qp_p", "51");
+        options.set("min_qp_i", "16");
+        options.set("max_qp_i", "48");
+        options.set("min_qp_p", "18");
+        options.set("max_qp_p", "48");
         options.set("profile_tier", "high");
         options.set("b", &bitrate_bps);
         options.set("max_bitrate", &peak_bitrate_bps);
@@ -132,7 +132,7 @@ impl FfmpegEncoder {
                 anyhow::bail!("Failed to initialize FFmpeg D3D11 device context: {}", init_result);
             }
 
-            let pool_sizes: &[i32] = &[4, 2, 0];
+            let pool_sizes: &[i32] = &[0, 4, 2];
             let mut frames_ctx_ref_result = Err(anyhow::anyhow!("no pool sizes tried"));
             for &pool_size in pool_sizes {
                 match Self::create_hw_frames_ctx_with_pool_size(device_ctx_ref, width, height, pool_size) {
@@ -182,6 +182,7 @@ impl FfmpegEncoder {
                 reusable_hw_frame,
                 encoder_device,
                 encoder_fence: None,
+                cached_shared_textures: Vec::with_capacity(4),
             })
         }
     }
@@ -298,13 +299,28 @@ impl FfmpegEncoder {
                 }
             }
 
-            let mut shared_nv12_opt: Option<ID3D11Texture2D> = None;
-            hw_context
-                .encoder_device
-                .OpenSharedResource(gpu_frame.shared_handle, &mut shared_nv12_opt)
-                .context("Failed to open shared NV12 texture on encoder device")?;
-            let shared_nv12 = shared_nv12_opt
-                .context("OpenSharedResource returned null for shared NV12 texture")?;
+            let shared_nv12 = if let Some((_, texture)) = hw_context
+                .cached_shared_textures
+                .iter()
+                .find(|(shared_handle, _)| *shared_handle == gpu_frame.shared_handle)
+            {
+                texture.clone()
+            } else {
+                let mut shared_nv12_opt: Option<ID3D11Texture2D> = None;
+                hw_context
+                    .encoder_device
+                    .OpenSharedResource(gpu_frame.shared_handle, &mut shared_nv12_opt)
+                    .context("Failed to open shared NV12 texture on encoder device")?;
+                let shared_nv12 = shared_nv12_opt
+                    .context("OpenSharedResource returned null for shared NV12 texture")?;
+                if hw_context.cached_shared_textures.len() >= 4 {
+                    hw_context.cached_shared_textures.remove(0);
+                }
+                hw_context
+                    .cached_shared_textures
+                    .push((gpu_frame.shared_handle, shared_nv12.clone()));
+                shared_nv12
+            };
 
             let source_resource: ID3D11Resource = shared_nv12
                 .cast()

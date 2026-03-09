@@ -34,8 +34,6 @@ impl DxgiCapture {
             if state.staging_texture.is_some() {
                 return Ok(());
             }
-            // When GPU scaling, staging texture is at target resolution (smaller)
-            // When no scaling, staging texture is at native resolution
             let (width, height) = if state.scale_texture.is_some() {
                 (state.target_width, state.target_height)
             } else {
@@ -73,8 +71,9 @@ impl DxgiCapture {
         state: &DxgiCaptureState,
         captured_texture: &ID3D11Texture2D,
     ) -> Result<(ID3D11Texture2D, (u32, u32))> {
-        let needs_gpu_scale = state.scale_texture.is_some();
-        let source_texture = if needs_gpu_scale {
+        let has_target_scaling = state.scale_texture.is_some();
+        let needs_separate_gpu_scale = has_target_scaling && !state.nv12_conversion_available;
+        let source_texture = if needs_separate_gpu_scale {
             state
                 .scale_texture
                 .as_ref()
@@ -83,7 +82,7 @@ impl DxgiCapture {
         } else {
             captured_texture.clone()
         };
-        let resolution = if needs_gpu_scale {
+        let resolution = if has_target_scaling {
             (state.target_width, state.target_height)
         } else {
             (state.frame_width, state.frame_height)
@@ -121,19 +120,6 @@ impl DxgiCapture {
                 .context("Failed to create video processor input view")?;
             input_view.context("Input view is null")
         }
-    }
-
-    pub(super) fn ensure_nv12_cached_views(state: &mut DxgiCaptureState) -> Result<()> {
-        if state.scale_input_view.is_none() {
-            if let Some(scale_texture) = state.scale_texture.as_ref() {
-                state.scale_input_view = Some(Self::create_video_processor_input_view(
-                    state,
-                    scale_texture,
-                )?);
-            }
-        }
-
-        Ok(())
     }
 
     pub(super) fn create_nv12_pool_item(
@@ -230,7 +216,6 @@ impl DxgiCapture {
         bgra_texture: &ID3D11Texture2D,
     ) -> Result<D3d11TexturePoolItem> {
         unsafe {
-            Self::ensure_nv12_cached_views(state)?;
             let pooled_output = Self::acquire_nv12_pool_item(state)?;
             let Some(ref video_processor) = state.video_processor else {
                 bail!("Video processor not initialized");
@@ -241,6 +226,21 @@ impl DxgiCapture {
                     .d3d_context
                     .cast()
                     .context("Failed to get video context from device context")?;
+
+                let input_color_space = DxgiCaptureState::video_processor_color_space(
+                    true,
+                    true,
+                    D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255.0 as u32,
+                );
+                let output_color_space = DxgiCaptureState::video_processor_color_space(
+                    true,
+                    true,
+                    D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_16_235.0 as u32,
+                );
+                video_context
+                    .VideoProcessorSetStreamColorSpace(video_processor, 0, &input_color_space);
+                video_context.VideoProcessorSetOutputColorSpace(video_processor, &output_color_space);
+
                 state.video_context = Some(video_context);
             }
             let video_context = state
@@ -252,6 +252,12 @@ impl DxgiCapture {
                 .as_ref()
                 .is_some_and(|scale_texture| scale_texture.as_raw() == bgra_texture.as_raw());
             let input_view = if using_cached_scale_input {
+                if state.scale_input_view.is_none() {
+                    state.scale_input_view = Some(Self::create_video_processor_input_view(
+                        state,
+                        bgra_texture,
+                    )?);
+                }
                 state
                     .scale_input_view
                     .as_ref()
@@ -260,19 +266,6 @@ impl DxgiCapture {
             } else {
                 Self::create_video_processor_input_view(state, bgra_texture)?
             };
-
-            let input_color_space = DxgiCaptureState::video_processor_color_space(
-                true,
-                true,
-                D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255.0 as u32,
-            );
-            let output_color_space = DxgiCaptureState::video_processor_color_space(
-                true,
-                true,
-                D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_16_235.0 as u32,
-            );
-            video_context.VideoProcessorSetStreamColorSpace(video_processor, 0, &input_color_space);
-            video_context.VideoProcessorSetOutputColorSpace(video_processor, &output_color_space);
 
             let stream_data = D3D11_VIDEO_PROCESSOR_STREAM {
                 Enable: BOOL(1),
@@ -306,8 +299,9 @@ impl DxgiCapture {
                     .context("Failed to get ID3D11DeviceContext4 for fence signal")?;
                 ctx4.Signal(sync_fence, state.nv12_fence_value)
                     .context("Failed to signal NV12 sync fence")?;
+            } else {
+                state.d3d_context.Flush();
             }
-            state.d3d_context.Flush();
 
             Ok(pooled_output)
         }

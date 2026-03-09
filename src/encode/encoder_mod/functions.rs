@@ -38,19 +38,19 @@ pub trait Encoder: Send + 'static {
 fn spawn_buffer_writer(
     buffer: crate::buffer::ring::SharedReplayBuffer,
 ) -> (Sender<EncodedPacket>, std::thread::JoinHandle<(u64, usize)>) {
-    let (packet_tx, packet_rx) = bounded::<EncodedPacket>(512);
+    let (packet_tx, packet_rx) = bounded::<EncodedPacket>(2048);
     let thread = std::thread::Builder::new()
         .name("encoder-buffer-writer".to_string())
         .spawn(move || {
             let mut total_packets = 0u64;
             let mut flush_batches = 0usize;
-            let mut packet_batch = Vec::with_capacity(128);
+            let mut packet_batch = Vec::with_capacity(256);
 
             while let Ok(packet) = packet_rx.recv() {
                 packet_batch.push(packet);
                 total_packets = total_packets.saturating_add(1);
 
-                while packet_batch.len() < 128 {
+                while packet_batch.len() < 256 {
                     match packet_rx.try_recv() {
                         Ok(packet) => {
                             packet_batch.push(packet);
@@ -74,6 +74,20 @@ fn spawn_buffer_writer(
         .expect("failed to spawn encoder buffer writer thread");
 
     (packet_tx, thread)
+}
+
+fn forward_ready_packets(
+    packet_rx: &Receiver<EncodedPacket>,
+    buffer_packet_tx: &Sender<EncodedPacket>,
+) -> u64 {
+    let mut forwarded = 0u64;
+    while let Ok(packet) = packet_rx.try_recv() {
+        if buffer_packet_tx.send(packet).is_err() {
+            break;
+        }
+        forwarded = forwarded.saturating_add(1);
+    }
+    forwarded
 }
 
 fn resolve_encoder_config(config: &EncoderConfig) -> EncoderConfig {
@@ -296,31 +310,46 @@ pub fn spawn_encoder(
             let mut frames_encoded = 0u64;
             let mut packets_received = 0u64;
             let mut consecutive_encode_errors = 0u32;
+            const MAX_FRAME_BURST: usize = 8;
             loop {
-                while let Ok(packet) = packet_rx.try_recv() {
-                    packets_received += 1;
-                    buffer_packet_tx.send(packet).unwrap();
-                }
-                match frame_rx.recv_timeout(std::time::Duration::from_millis(20)) {
+                packets_received += forward_ready_packets(&packet_rx, &buffer_packet_tx);
+                match frame_rx.recv_timeout(std::time::Duration::from_millis(8)) {
                     Ok(frame) => {
-                        frames_encoded += 1;
-                        if let Err(e) = encoder.encode_frame(&frame) {
-                            warn!("Failed to encode frame: {}", e);
-                            consecutive_encode_errors = consecutive_encode_errors.saturating_add(1);
-                            if consecutive_encode_errors >= MAX_CONSECUTIVE_ENCODE_ERRORS {
-                                let reason = format!(
-                                    "{} consecutive frame encode failures",
-                                    consecutive_encode_errors
-                                );
-                                let _ =
-                                    health_tx.try_send(EncoderHealthEvent::Fatal(reason.clone()));
-                                return Err(anyhow::anyhow!(reason));
+                        let mut encode_one = |frame: crate::capture::CapturedFrame| -> Result<()> {
+                            frames_encoded += 1;
+                            if let Err(e) = encoder.encode_frame(&frame) {
+                                warn!("Failed to encode frame: {}", e);
+                                consecutive_encode_errors =
+                                    consecutive_encode_errors.saturating_add(1);
+                                if consecutive_encode_errors >= MAX_CONSECUTIVE_ENCODE_ERRORS {
+                                    let reason = format!(
+                                        "{} consecutive frame encode failures",
+                                        consecutive_encode_errors
+                                    );
+                                    let _ = health_tx
+                                        .try_send(EncoderHealthEvent::Fatal(reason.clone()));
+                                    return Err(anyhow::anyhow!(reason));
+                                }
+                            } else {
+                                consecutive_encode_errors = 0;
                             }
-                        } else {
-                            consecutive_encode_errors = 0;
+                            packets_received +=
+                                forward_ready_packets(&packet_rx, &buffer_packet_tx);
+                            Ok(())
+                        };
+
+                        encode_one(frame)?;
+
+                        for _ in 1..MAX_FRAME_BURST {
+                            let Ok(frame) = frame_rx.try_recv() else {
+                                break;
+                            };
+                            encode_one(frame)?;
                         }
                     }
-                    Err(crossbeam::channel::RecvTimeoutError::Timeout) => {}
+                    Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
+                        packets_received += forward_ready_packets(&packet_rx, &buffer_packet_tx);
+                    }
                     Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
                         debug!("Frame channel closed, shutting down encoder");
                         break;
@@ -413,29 +442,44 @@ pub fn spawn_encoder_with_receiver(
             let packet_rx = encoder.packet_rx();
             let (buffer_packet_tx, buffer_writer_thread) = spawn_buffer_writer(buffer.clone());
             let mut consecutive_encode_errors = 0u32;
+            const MAX_FRAME_BURST: usize = 8;
             loop {
-                while let Ok(packet) = packet_rx.try_recv() {
-                    buffer_packet_tx.send(packet).unwrap();
-                }
-                match frame_rx.recv_timeout(std::time::Duration::from_millis(20)) {
+                let _ = forward_ready_packets(&packet_rx, &buffer_packet_tx);
+                match frame_rx.recv_timeout(std::time::Duration::from_millis(8)) {
                     Ok(frame) => {
-                        if let Err(e) = encoder.encode_frame(&frame) {
-                            warn!("Failed to encode frame: {}", e);
-                            consecutive_encode_errors = consecutive_encode_errors.saturating_add(1);
-                            if consecutive_encode_errors >= MAX_CONSECUTIVE_ENCODE_ERRORS {
-                                let reason = format!(
-                                    "{} consecutive frame encode failures",
-                                    consecutive_encode_errors
-                                );
-                                let _ =
-                                    health_tx.try_send(EncoderHealthEvent::Fatal(reason.clone()));
-                                return Err(anyhow::anyhow!(reason));
+                        let mut encode_one = |frame: crate::capture::CapturedFrame| -> Result<()> {
+                            if let Err(e) = encoder.encode_frame(&frame) {
+                                warn!("Failed to encode frame: {}", e);
+                                consecutive_encode_errors =
+                                    consecutive_encode_errors.saturating_add(1);
+                                if consecutive_encode_errors >= MAX_CONSECUTIVE_ENCODE_ERRORS {
+                                    let reason = format!(
+                                        "{} consecutive frame encode failures",
+                                        consecutive_encode_errors
+                                    );
+                                    let _ = health_tx
+                                        .try_send(EncoderHealthEvent::Fatal(reason.clone()));
+                                    return Err(anyhow::anyhow!(reason));
+                                }
+                            } else {
+                                consecutive_encode_errors = 0;
                             }
-                        } else {
-                            consecutive_encode_errors = 0;
+                            let _ = forward_ready_packets(&packet_rx, &buffer_packet_tx);
+                            Ok(())
+                        };
+
+                        encode_one(frame)?;
+
+                        for _ in 1..MAX_FRAME_BURST {
+                            let Ok(frame) = frame_rx.try_recv() else {
+                                break;
+                            };
+                            encode_one(frame)?;
                         }
                     }
-                    Err(crossbeam::channel::RecvTimeoutError::Timeout) => {}
+                    Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
+                        let _ = forward_ready_packets(&packet_rx, &buffer_packet_tx);
+                    }
                     Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
                         debug!("Frame channel closed, shutting down encoder");
                         break;

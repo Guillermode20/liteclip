@@ -50,6 +50,12 @@ pub(super) struct Nv12TexturePool {
     pub(super) height: u32,
 }
 
+enum CaptureOutcome {
+    Frame(CapturedFrame),
+    Timeout,
+    Dropped,
+}
+
 impl Nv12TexturePool {
     fn new(width: u32, height: u32) -> Self {
         let (return_tx, return_rx) = unbounded();
@@ -94,8 +100,8 @@ pub(super) struct DxgiCaptureState {
     pub(super) nv12_retry_after: Option<Instant>,
     pub(super) nv12_unavailable_logged: bool,
     /// Shared ID3D11Fence used for GPU-side cross-device synchronization.
-    /// After VideoProcessorBlt the capture GPU queue signals this fence; the encoder GPU queue
-    /// waits on it before CopySubresourceRegion. No CPU stall — ordering is fully on the GPU.
+    /// After VideoProcessorBlt the capture GPU queue signals this fence; the encoder GPU
+    /// queue waits on it before CopySubresourceRegion. No CPU stall — ordering is fully on the GPU.
     pub(super) nv12_sync_fence: Option<ID3D11Fence>,
     /// NT kernel handle for `nv12_sync_fence` (D3D11_FENCE_FLAG_SHARED).
     /// Passed through D3d11Frame so the encoder can call OpenSharedFence once on its own device.
@@ -309,7 +315,13 @@ impl DxgiCaptureState {
                 video_processor_enumerator,
                 scale_input_view,
                 nv12_conversion_available,
-            ) = Self::init_nv12_conversion_resources(&d3d_device, target_width, target_height)
+            ) = Self::init_nv12_conversion_resources(
+                &d3d_device,
+                frame_width,
+                frame_height,
+                target_width,
+                target_height,
+            )
                 .unwrap_or_else(|e| {
                     warn!(
                         "NV12 conversion unavailable during capture init: {}; GPU-preferred capture will fall back to CPU readback",
@@ -449,8 +461,10 @@ impl DxgiCaptureState {
     /// Initialize NV12 conversion resources using D3D11 Video Processor
     fn init_nv12_conversion_resources(
         d3d_device: &ID3D11Device,
-        width: u32,
-        height: u32,
+        input_width: u32,
+        input_height: u32,
+        output_width: u32,
+        output_height: u32,
     ) -> Result<(
         Option<Nv12TexturePool>,
         Option<ID3D11VideoDevice>,
@@ -474,14 +488,14 @@ impl DxgiCaptureState {
                     Numerator: 60,
                     Denominator: 1,
                 },
-                InputWidth: width,
-                InputHeight: height,
+                InputWidth: input_width,
+                InputHeight: input_height,
                 OutputFrameRate: DXGI_RATIONAL {
                     Numerator: 60,
                     Denominator: 1,
                 },
-                OutputWidth: width,
-                OutputHeight: height,
+                OutputWidth: output_width,
+                OutputHeight: output_height,
                 Usage: windows::Win32::Graphics::Direct3D11::D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
             };
             let video_processor_enumerator = video_device
@@ -521,20 +535,20 @@ impl DxgiCaptureState {
                 .CreateVideoProcessor(&video_processor_enumerator, 0)
                 .context("Failed to create video processor")?;
 
-            let mut nv12_pool = Nv12TexturePool::new(width, height);
+            let mut nv12_pool = Nv12TexturePool::new(output_width, output_height);
             for _ in 0..4 {
                 nv12_pool.available.push(DxgiCapture::create_nv12_pool_item(
                     d3d_device,
                     &video_device,
                     &video_processor_enumerator,
-                    width,
-                    height,
+                    output_width,
+                    output_height,
                 )?);
             }
 
             info!(
-                "NV12 video processor initialized successfully for {}x{}",
-                width, height
+                "NV12 video processor initialized successfully for {}x{} -> {}x{}",
+                input_width, input_height, output_width, output_height
             );
 
             Ok((
@@ -758,9 +772,10 @@ impl DxgiCapture {
     fn capture_frame(
         state: &mut DxgiCaptureState,
         timeout_ms: u32,
+        drop_before_process: bool,
         perform_cpu_readback: bool,
         _target_resolution: Option<(u32, u32)>,
-    ) -> Result<Option<CapturedFrame>> {
+    ) -> Result<CaptureOutcome> {
         unsafe {
             let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
             let mut desktop_resource: Option<IDXGIResource> = None;
@@ -771,6 +786,10 @@ impl DxgiCapture {
             );
             match hr {
                 Ok(_) => {
+                    if drop_before_process {
+                        state.duplication.ReleaseFrame().ok();
+                        return Ok(CaptureOutcome::Dropped);
+                    }
                     let timestamp = Self::get_qpc_timestamp();
                     let resource = desktop_resource.context("Desktop resource is null")?;
                     let captured_texture: ID3D11Texture2D = resource
@@ -778,8 +797,10 @@ impl DxgiCapture {
                         .context("Failed to cast resource to texture")?;
 
                     let needs_gpu_scale = state.scale_texture.is_some();
+                    let needs_separate_gpu_scale =
+                        needs_gpu_scale && (perform_cpu_readback || !state.nv12_conversion_available);
 
-                    if needs_gpu_scale {
+                    if needs_separate_gpu_scale {
                         Self::perform_gpu_scale(state, &captured_texture)
                             .context("GPU scaling failed")?;
                     }
@@ -791,7 +812,7 @@ impl DxgiCapture {
                             timestamp,
                         )?;
                         state.duplication.ReleaseFrame().ok();
-                        return Ok(Some(frame));
+                        return Ok(CaptureOutcome::Frame(frame));
                     }
 
                     Self::ensure_staging_texture(state)?;
@@ -882,11 +903,11 @@ impl DxgiCapture {
                             timestamp,
                             resolution: (read_w as u32, read_h as u32),
                         };
-                        return Ok(Some(frame));
+                        return Ok(CaptureOutcome::Frame(frame));
                     }
                     bail!("Staging texture unavailable for CPU readback")
                 }
-                Err(e) if e.code().0 == DXGI_ERROR_WAIT_TIMEOUT.0 => Ok(None),
+                Err(e) if e.code().0 == DXGI_ERROR_WAIT_TIMEOUT.0 => Ok(CaptureOutcome::Timeout),
                 Err(e) if e.code().0 == DXGI_ERROR_ACCESS_LOST.0 => {
                     warn!("DXGI access lost - need to reinitialize");
                     bail!("DXGI access lost")
@@ -910,15 +931,15 @@ impl DxgiCapture {
         let perform_cpu_readback = config.perform_cpu_readback;
         let target_resolution = config.target_resolution;
         let base_fps = config.target_fps.max(1);
-        let timeout_ms = (1000u32 / base_fps) * 2; // Wait up to two frames for an update before duplicating
-        let frame_interval = Duration::from_nanos(1_000_000_000u64 / base_fps as u64);
-        let mut next_frame_deadline = Instant::now();
+        let timeout_ms = (1000u32.saturating_add(base_fps).saturating_sub(1) / base_fps).max(1);
         let mut frame_count = 0u64;
         let mut dropped_count = 0u64;
+        let mut duplicated_count = 0u64;
         let mut last_frame: Option<CapturedFrame> = None;
         let mut window_start = Instant::now();
         let mut window_frames = 0u64;
         let mut window_drops = 0u64;
+        let mut window_duplicates = 0u64;
         let mut error_count = 0u32;
         let max_errors = 10;
         let mut reinit_backoff_ms = 100u64;
@@ -954,29 +975,33 @@ impl DxgiCapture {
         info!("DXGI capture initialized and running");
         let mut log_counter = 0u64;
         const LOG_INTERVAL: u64 = 1800; // Log every 1800 frames (~30s at 60fps)
+        const DROP_LOG_INTERVAL: u64 = 300;
+        let frame_period = Duration::from_nanos(1_000_000_000u64 / base_fps as u64);
+        let mut next_frame_time = std::time::Instant::now();
         while running.load(Ordering::Relaxed) {
+            let mut drop_before_process = false;
+            let queue_len = frame_tx.len() as u32;
+            let queue_cap = frame_tx.capacity().unwrap_or(32) as u32;
+            let fps_divisor = backpressure.current_fps_divisor();
+            if fps_divisor > 0 {
+                adaptive_skip_counter = adaptive_skip_counter.wrapping_add(1);
+                drop_before_process = !adaptive_skip_counter.is_multiple_of(fps_divisor + 1);
+            }
+            if !drop_before_process && queue_len.saturating_add(1) >= queue_cap {
+                drop_before_process = true;
+            }
             match Self::capture_frame(
                 &mut state,
                 timeout_ms,
+                drop_before_process,
                 perform_cpu_readback,
                 target_resolution,
             ) {
-                Ok(Some(frame)) => {
-                    last_frame = Some(frame.clone());
-                    let now = Instant::now();
-                    if now > next_frame_deadline + Duration::from_millis(500) {
-                        next_frame_deadline = now;
-                    }
-                    Self::wait_until_deadline(next_frame_deadline);
-                    next_frame_deadline += frame_interval;
-                    let fps_divisor = backpressure.current_fps_divisor();
-                    if fps_divisor > 0 {
-                        adaptive_skip_counter = adaptive_skip_counter.wrapping_add(1);
-                        if !adaptive_skip_counter.is_multiple_of(fps_divisor + 1) {
-                            dropped_count += 1;
-                            window_drops += 1;
-                            continue;
-                        }
+                Ok(CaptureOutcome::Frame(frame)) => {
+                    if frame.d3d11.is_some() {
+                        last_frame = None;
+                    } else {
+                        last_frame = Some(frame.clone());
                     }
                     match frame_tx.try_send(frame) {
                         Ok(()) => {
@@ -998,7 +1023,7 @@ impl DxgiCapture {
                             window_drops += 1;
                             error_count = 0;
                             backpressure.set_encoder_overloaded(true);
-                            if dropped_count % 60 == 0 {
+                            if dropped_count % DROP_LOG_INTERVAL == 0 {
                                 warn!("Dropped {} frames (encoder behind)", dropped_count);
                             }
                         }
@@ -1008,17 +1033,21 @@ impl DxgiCapture {
                         }
                     }
                 }
-                Ok(None) => {
+                Ok(CaptureOutcome::Dropped) => {
+                    dropped_count += 1;
+                    window_drops += 1;
+                    error_count = 0;
+                }
+                Ok(CaptureOutcome::Timeout) => {
                     let Some(ref last) = last_frame else {
-                        std::thread::sleep(Duration::from_millis(1));
                         continue;
                     };
-                    let now = Instant::now();
-                    if now > next_frame_deadline + Duration::from_millis(500) {
-                        next_frame_deadline = now;
+                    if backpressure.is_encoder_overloaded() || frame_tx.len() > 0 {
+                        continue;
                     }
-                    Self::wait_until_deadline(next_frame_deadline);
-                    next_frame_deadline += frame_interval;
+                    if last.d3d11.is_some() {
+                        continue;
+                    }
                     let fps_divisor = backpressure.current_fps_divisor();
                     if fps_divisor > 0 {
                         adaptive_skip_counter = adaptive_skip_counter.wrapping_add(1);
@@ -1041,7 +1070,9 @@ impl DxgiCapture {
                     match frame_tx.try_send(frame) {
                         Ok(()) => {
                             frame_count += 1;
+                            duplicated_count += 1;
                             window_frames += 1;
+                            window_duplicates += 1;
                             error_count = 0;
                             backpressure.set_encoder_overloaded(false);
                         }
@@ -1050,7 +1081,7 @@ impl DxgiCapture {
                             window_drops += 1;
                             error_count = 0;
                             backpressure.set_encoder_overloaded(true);
-                            if dropped_count % 60 == 0 {
+                            if dropped_count % DROP_LOG_INTERVAL == 0 {
                                 warn!("Dropped {} frames (encoder behind)", dropped_count);
                             }
                         }
@@ -1146,41 +1177,37 @@ impl DxgiCapture {
             }
             if window_start.elapsed() >= Duration::from_secs(30) {
                 debug!(
-                    "Capture: {}fps, drops={}, divisor={}",
+                    "Capture: {}fps, drops={}, duplicates={}, divisor={}",
                     window_frames / 30,
                     window_drops,
+                    window_duplicates,
                     backpressure.current_fps_divisor()
                 );
                 window_start = Instant::now();
                 window_frames = 0;
                 window_drops = 0;
+                window_duplicates = 0;
+            }
+            // Precise pacing: sleep until next frame time
+            let now = std::time::Instant::now();
+            if now < next_frame_time {
+                std::thread::sleep(next_frame_time - now);
+            }
+            next_frame_time += frame_period;
+            // If we're significantly behind, reset the schedule
+            if std::time::Instant::now() > next_frame_time + frame_period {
+                next_frame_time = std::time::Instant::now() + frame_period;
             }
         }
         info!(
-            "DXGI capture thread stopped ({} frames captured, {} dropped)",
-            frame_count, dropped_count
+            "DXGI capture thread stopped ({} frames captured, {} dropped, {} duplicated)",
+            frame_count, dropped_count, duplicated_count
         );
     }
 
     /// Get current QPC timestamp
     fn get_qpc_timestamp() -> i64 {
         DxgiCaptureState::get_qpc_timestamp()
-    }
-
-    fn wait_until_deadline(deadline: Instant) {
-        const SPIN_THRESHOLD: Duration = Duration::from_millis(1);
-        loop {
-            let now = Instant::now();
-            if now >= deadline {
-                break;
-            }
-            let remaining = deadline - now;
-            if remaining > SPIN_THRESHOLD {
-                std::thread::sleep(remaining - SPIN_THRESHOLD);
-            } else {
-                std::hint::spin_loop();
-            }
-        }
     }
 
     fn set_capture_thread_priority() {

@@ -43,7 +43,7 @@ pub(super) fn default_framerate() -> u32 {
     60
 }
 pub(super) fn default_bitrate() -> u32 {
-    10
+    25
 }
 pub(super) fn default_encoder() -> EncoderType {
     EncoderType::Auto

@@ -3,8 +3,9 @@ use std::ffi::c_void;
 use anyhow::Result;
 use ffmpeg::format::Pixel;
 use ffmpeg_next as ffmpeg;
+use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Graphics::Direct3D11::{
-    ID3D11Device, ID3D11DeviceContext, ID3D11Fence,
+    ID3D11Device, ID3D11DeviceContext, ID3D11Fence, ID3D11Texture2D,
 };
 
 use super::FfmpegEncoder;
@@ -27,6 +28,7 @@ pub(super) struct D3d11HardwareContext {
     pub reusable_hw_frame: *mut ffmpeg::ffi::AVFrame,
     pub encoder_device: ID3D11Device,
     pub encoder_fence: Option<ID3D11Fence>,
+    pub cached_shared_textures: Vec<(HANDLE, ID3D11Texture2D)>,
 }
 
 unsafe impl Send for D3d11HardwareContext {}

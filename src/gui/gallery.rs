@@ -16,6 +16,7 @@ pub fn show_gallery_gui(event_tx: Sender<AppEvent>) {
 struct VideoEntry {
     path: PathBuf,
     filename: String,
+    #[allow(dead_code)]
     game: String,
     size_mb: f64,
     modified: SystemTime,
