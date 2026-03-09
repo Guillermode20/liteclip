@@ -42,6 +42,8 @@ pub enum HotkeyAction {
 pub enum TrayEvent {
     /// Open settings window
     OpenSettings,
+    /// Open gallery window
+    OpenGallery,
     /// Save current clip
     SaveClip,
     /// Toggle recording on/off

@@ -15,6 +15,7 @@ pub mod clip;
 pub mod config;
 pub mod core;
 pub mod d3d;
+pub mod detection;
 pub mod encode;
 pub mod gui;
 pub mod metrics;

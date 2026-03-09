@@ -1,7 +1,6 @@
 use eframe::egui;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::mpsc::Sender;
 use tracing::{debug, error, info};
@@ -17,41 +16,50 @@ pub fn show_gallery_gui(event_tx: Sender<AppEvent>) {
 struct VideoEntry {
     path: PathBuf,
     filename: String,
-    folder: String,
+    game: String,
     size_mb: f64,
     modified: SystemTime,
-    thumbnail_path: Option<PathBuf>,
-    thumbnail_loaded: bool,
 }
 
 pub struct GalleryApp {
-    event_tx: Sender<AppEvent>,
     save_directory: PathBuf,
-    videos: Vec<VideoEntry>,
-    selected: Option<usize>,
+    cache_directory: PathBuf,
+    videos_by_game: Vec<(String, Vec<VideoEntry>)>,
+    expanded_games: HashMap<String, bool>,
+    selected: Option<(String, usize)>,
     loaded: bool,
     thumbnails: HashMap<PathBuf, egui::TextureHandle>,
-    loading_thumbnails: bool,
-    scroll_offset: f32,
+    thumbnails_generating: HashSet<PathBuf>,
 }
 
 impl GalleryApp {
-    pub fn new(config: &Config, event_tx: Sender<AppEvent>) -> Self {
+    pub fn new(config: &Config, _event_tx: Sender<AppEvent>) -> Self {
+        let save_directory = PathBuf::from(&config.general.save_directory);
+        let cache_directory = save_directory.join(".cache");
         Self {
-            event_tx,
-            save_directory: PathBuf::from(&config.general.save_directory),
-            videos: Vec::new(),
+            save_directory,
+            cache_directory,
+            videos_by_game: Vec::new(),
+            expanded_games: HashMap::new(),
             selected: None,
             loaded: false,
             thumbnails: HashMap::new(),
-            loading_thumbnails: false,
-            scroll_offset: 0.0,
+            thumbnails_generating: HashSet::new(),
         }
+    }
+
+    fn get_thumb_path(&self, video_path: &PathBuf) -> PathBuf {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        video_path.hash(&mut hasher);
+        let hash = hasher.finish();
+        self.cache_directory.join(format!("{:016x}.jpg", hash))
     }
 
     fn scan_videos(&mut self, ctx: &egui::Context) {
         info!("Scanning videos in: {:?}", self.save_directory);
-        self.videos.clear();
+        self.videos_by_game.clear();
+        self.thumbnails.clear();
 
         if !self.save_directory.exists() {
             debug!("Save directory does not exist yet");
@@ -59,14 +67,22 @@ impl GalleryApp {
             return;
         }
 
-        let mut entries = Vec::new();
+        let mut videos_by_game: HashMap<String, Vec<VideoEntry>> = HashMap::new();
 
-        fn scan_dir(dir: &PathBuf, entries: &mut Vec<VideoEntry>, base_dir: &PathBuf) {
+        fn scan_dir(
+            dir: &PathBuf,
+            videos: &mut HashMap<String, Vec<VideoEntry>>,
+            base_dir: &PathBuf,
+            cache_dir: &PathBuf,
+        ) {
             if let Ok(read_dir) = std::fs::read_dir(dir) {
                 for entry in read_dir.flatten() {
                     let path = entry.path();
                     if path.is_dir() {
-                        scan_dir(&path, entries, base_dir);
+                        if path == *cache_dir {
+                            continue;
+                        }
+                        scan_dir(&path, videos, base_dir, cache_dir);
                     } else if path.extension().map(|e| e == "mp4").unwrap_or(false) {
                         if let Ok(metadata) = entry.metadata() {
                             let filename = path
@@ -75,24 +91,21 @@ impl GalleryApp {
                                 .unwrap_or_default();
 
                             let relative = path.strip_prefix(base_dir).unwrap_or(&path);
-                            let folder = relative
+                            let game = relative
                                 .parent()
                                 .map(|p| p.to_string_lossy().to_string())
-                                .unwrap_or_default();
+                                .filter(|s| !s.is_empty())
+                                .unwrap_or_else(|| "Desktop".to_string());
 
                             let size_mb = metadata.len() as f64 / (1024.0 * 1024.0);
                             let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
 
-                            let thumb_path = path.with_extension("thumb.jpg");
-
-                            entries.push(VideoEntry {
+                            videos.entry(game.clone()).or_default().push(VideoEntry {
                                 path,
                                 filename,
-                                folder,
+                                game,
                                 size_mb,
                                 modified,
-                                thumbnail_path: Some(thumb_path).filter(|p| p.exists()),
-                                thumbnail_loaded: false,
                             });
                         }
                     }
@@ -100,50 +113,95 @@ impl GalleryApp {
             }
         }
 
-        scan_dir(&self.save_directory, &mut entries, &self.save_directory);
+        scan_dir(
+            &self.save_directory,
+            &mut videos_by_game,
+            &self.save_directory,
+            &self.cache_directory,
+        );
 
-        entries.sort_by(|a, b| b.modified.cmp(&a.modified));
+        let mut sorted: Vec<_> = videos_by_game.into_iter().collect();
+        sorted.sort_by(|a, b| {
+            if a.0 == "Desktop" {
+                std::cmp::Ordering::Less
+            } else if b.0 == "Desktop" {
+                std::cmp::Ordering::Greater
+            } else {
+                a.0.cmp(&b.0)
+            }
+        });
 
-        self.videos = entries;
+        for (_, videos) in &mut sorted {
+            videos.sort_by(|a, b| b.modified.cmp(&a.modified));
+        }
+
+        self.videos_by_game = sorted;
         self.loaded = true;
-        info!("Found {} videos", self.videos.len());
+
+        let total: usize = self.videos_by_game.iter().map(|(_, v)| v.len()).sum();
+        info!(
+            "Found {} videos in {} games",
+            total,
+            self.videos_by_game.len()
+        );
 
         self.load_thumbnails(ctx);
     }
 
     fn load_thumbnails(&mut self, ctx: &egui::Context) {
-        if self.loading_thumbnails {
-            return;
-        }
-        self.loading_thumbnails = true;
+        for (_, videos) in &self.videos_by_game {
+            for video in videos {
+                if self.thumbnails.contains_key(&video.path) {
+                    continue;
+                }
 
-        for video in &mut self.videos {
-            if video.thumbnail_loaded {
-                continue;
-            }
+                let thumb_path = self.get_thumb_path(&video.path);
+                if thumb_path.exists() {
+                    if let Ok(img_data) = std::fs::read(&thumb_path) {
+                        if let Ok(img) = image::load_from_memory(&img_data) {
+                            let rgba = img.into_rgba8();
+                            let size = [rgba.width() as _, rgba.height() as _];
+                            let pixels = rgba.into_raw();
 
-            if let Some(thumb_path) = &video.thumbnail_path {
-                if let Ok(img_data) = std::fs::read(thumb_path) {
-                    if let Ok(img) = image::load_from_memory(&img_data) {
-                        let rgba = img.into_rgba8();
-                        let size = [rgba.width() as _, rgba.height() as _];
-                        let pixels = rgba.into_raw();
+                            let color_image =
+                                egui::ColorImage::from_rgba_unmultiplied(size, &pixels);
+                            let texture = ctx.load_texture(
+                                &video.filename,
+                                color_image,
+                                egui::TextureOptions::default(),
+                            );
 
-                        let color_image = egui::ColorImage::from_rgba_unmultiplied(size, &pixels);
-                        let texture = ctx.load_texture(
-                            &video.filename,
-                            color_image,
-                            egui::TextureOptions::default(),
-                        );
-
-                        self.thumbnails.insert(video.path.clone(), texture);
-                        video.thumbnail_loaded = true;
+                            self.thumbnails.insert(video.path.clone(), texture);
+                        }
                     }
                 }
             }
         }
+    }
 
-        self.loading_thumbnails = false;
+    fn generate_thumbnail(video_path: PathBuf, thumb_path: PathBuf) {
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            let _ = std::process::Command::new("ffmpeg")
+                .args([
+                    "-y",
+                    "-i",
+                    &video_path.to_string_lossy(),
+                    "-ss",
+                    "00:00:01",
+                    "-vframes",
+                    "1",
+                    "-vf",
+                    "scale=320:-1",
+                    "-q:v",
+                    "5",
+                    &thumb_path.to_string_lossy(),
+                ])
+                .creation_flags(CREATE_NO_WINDOW)
+                .spawn();
+        }
     }
 
     pub fn update(&mut self, ctx: &egui::Context, _is_open: &mut bool) {
@@ -152,156 +210,162 @@ impl GalleryApp {
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
+            let total: usize = self.videos_by_game.iter().map(|(_, v)| v.len()).sum();
             ui.horizontal(|ui| {
                 ui.heading("Video Gallery");
-                ui.label(format!("({} videos)", self.videos.len()));
+                ui.label(format!("({} videos, {} games)", total, self.videos_by_game.len()));
             });
             ui.separator();
 
-            if self.videos.is_empty() {
+            if self.videos_by_game.is_empty() {
                 ui.vertical_centered(|ui| {
                     ui.add_space(50.0);
                     ui.label(egui::RichText::new("No videos found").size(18.0).weak());
-                    ui.label(
-                        egui::RichText::new("Save some clips to see them here")
-                            .size(14.0)
-                            .weak(),
-                    );
+                    ui.label(egui::RichText::new("Save some clips to see them here").size(14.0).weak());
                 });
-            } else {
-                let available_width = ui.available_width();
-                let tile_width = 200.0;
-                let tile_height = 150.0;
-                let spacing = 10.0;
-                let cols = ((available_width + spacing) / (tile_width + spacing)).floor() as usize;
-                let cols = cols.max(1);
+                return;
+            }
 
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        let rows = (self.videos.len() + cols - 1) / cols;
+            let tile_width = 180.0;
+            let thumb_height = 100.0;
+            let spacing = 8.0;
+            let available_width = ui.available_width();
+            let cols = ((available_width + spacing) / (tile_width + spacing)).floor() as usize;
+            let cols = cols.max(1);
 
-                        for row in 0..rows {
-                            ui.horizontal(|ui| {
-                                for col in 0..cols {
-                                    let idx = row * cols + col;
-                                    if idx >= self.videos.len() {
-                                        break;
-                                    }
+            let videos_by_game = self.videos_by_game.clone();
+            let expanded_games = self.expanded_games.clone();
+            let selected = self.selected.clone();
+            let thumbnails = self.thumbnails.clone();
+            let cache_dir = self.cache_directory.clone();
+            let mut new_expanded = self.expanded_games.clone();
+            let mut new_selected = self.selected.clone();
+            let mut thumbs_to_generate: Vec<(PathBuf, PathBuf)> = Vec::new();
 
-                                    let video = &self.videos[idx];
-                                    let is_selected = self.selected == Some(idx);
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    for (game, videos) in &videos_by_game {
+                        let is_expanded = expanded_games.get(game).copied().unwrap_or(true);
 
-                                    let mut frame = egui::Frame::default()
-                                        .inner_margin(egui::Margin::same(5.0))
-                                        .outer_margin(egui::Margin::same(2.0))
-                                        .corner_radius(egui::CornerRadius::same(8));
+                        ui.horizontal(|ui| {
+                            let icon = if is_expanded { "▼" } else { "▶" };
+                            let label = format!("{} {} ({} videos)", icon, game, videos.len());
 
-                                    if is_selected {
-                                        frame = frame.fill(egui::Color32::from_rgb(40, 60, 80));
-                                    }
+                            if ui.button(&label).clicked() {
+                                new_expanded.insert(game.clone(), !is_expanded);
+                            }
+                        });
 
-                                    let response = frame
-                                        .show(ui, |ui| {
+                        if is_expanded {
+                            ui.add_space(4.0);
+
+                            let rows = (videos.len() + cols - 1) / cols;
+
+                            for row in 0..rows {
+                                ui.horizontal(|ui| {
+                                    for col in 0..cols {
+                                        let idx = row * cols + col;
+                                        if idx >= videos.len() {
+                                            break;
+                                        }
+
+                                        let video = &videos[idx];
+                                        let is_selected = selected == Some((game.clone(), idx));
+
+                                        let response = ui.scope(|ui| {
                                             ui.set_min_width(tile_width);
                                             ui.set_max_width(tile_width);
 
-                                            let (rect, _) = ui.allocate_exact_size(
-                                                egui::vec2(tile_width - 10.0, 90.0),
-                                                egui::Sense::click(),
-                                            );
-
-                                            if let Some(texture) = self.thumbnails.get(&video.path)
-                                            {
-                                                let mut job = egui::epaint::MeshJob::default();
-                                                job.texture_id = texture.id();
-                                                ui.painter().add(job);
-                                                ui.image(texture);
+                                            let bg_color = if is_selected {
+                                                egui::Color32::from_rgb(40, 60, 90)
                                             } else {
-                                                ui.allocate_ui_with_layout(
-                                                    egui::vec2(tile_width - 10.0, 90.0),
-                                                    egui::Layout::centered_and_justified(
-                                                        egui::Direction::TopDown,
-                                                    ),
-                                                    |ui| {
-                                                        ui.label(
-                                                            egui::RichText::new("▶")
-                                                                .size(30.0)
-                                                                .weak(),
+                                                egui::Color32::from_rgb(35, 35, 40)
+                                            };
+
+                                            egui::Frame::default()
+                                                .fill(bg_color)
+                                                .corner_radius(egui::CornerRadius::same(6))
+                                                .inner_margin(egui::Margin::same(5))
+                                                .show(ui, |ui| {
+                                                    let thumb_size = egui::vec2(tile_width - 10.0, thumb_height);
+
+                                                    if let Some(texture) = thumbnails.get(&video.path) {
+                                                        let (rect, _) = ui.allocate_exact_size(thumb_size, egui::Sense::click());
+                                                        let img_size = texture.size_vec2();
+                                                        let scale = (thumb_size.x / img_size.x).min(thumb_size.y / img_size.y);
+                                                        let display_size = egui::vec2(img_size.x * scale, img_size.y * scale);
+                                                        let img_rect = egui::Rect::from_center_size(rect.center(), display_size);
+                                                        ui.scope_builder(egui::UiBuilder::new().max_rect(img_rect), |ui| {
+                                                            ui.image(texture);
+                                                        });
+                                                    } else {
+                                                        let (rect, _) = ui.allocate_exact_size(thumb_size, egui::Sense::click());
+                                                        ui.painter().rect_filled(rect, egui::CornerRadius::same(4), egui::Color32::from_rgb(25, 25, 30));
+                                                        ui.painter().text(
+                                                            rect.center(),
+                                                            egui::Align2::CENTER_CENTER,
+                                                            "▶",
+                                                            egui::FontId::proportional(28.0),
+                                                            egui::Color32::from_rgb(70, 70, 80),
                                                         );
-                                                    },
-                                                );
-                                            }
+                                                        use std::hash::{Hash, Hasher};
+                                                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                                                        video.path.hash(&mut hasher);
+                                                        let hash = hasher.finish();
+                                                        let thumb_path = cache_dir.join(format!("{:016x}.jpg", hash));
+                                                        thumbs_to_generate.push((video.path.clone(), thumb_path));
+                                                    }
 
-                                            ui.add_space(4.0);
+                                                    ui.add_space(4.0);
 
-                                            ui.with_layout(
-                                                egui::Layout::left_to_right(egui::Align::TOP)
-                                                    .with_main_wrap(true),
-                                                |ui| {
-                                                    let display_name = if video.filename.len() > 20
-                                                    {
-                                                        format!("{}...", &video.filename[..17])
+                                                    let display_name = if video.filename.len() > 22 {
+                                                        format!("{}...", &video.filename[..19])
                                                     } else {
                                                         video.filename.clone()
                                                     };
-                                                    ui.label(
-                                                        egui::RichText::new(display_name)
-                                                            .size(11.0)
-                                                            .strong(),
-                                                    );
-                                                },
-                                            );
-
-                                            ui.horizontal(|ui| {
-                                                ui.label(
-                                                    egui::RichText::new(format!(
-                                                        "{:.1} MB",
-                                                        video.size_mb
-                                                    ))
-                                                    .size(10.0)
-                                                    .weak(),
-                                                );
-                                                if !video.folder.is_empty() {
-                                                    ui.label(
-                                                        egui::RichText::new(format!(
-                                                            "• {}",
-                                                            video.folder
-                                                        ))
+                                                    ui.label(egui::RichText::new(display_name)
                                                         .size(10.0)
-                                                        .weak(),
-                                                    );
-                                                }
-                                            });
-                                        })
-                                        .response;
+                                                        .strong()
+                                                        .color(egui::Color32::from_rgb(220, 220, 220)));
 
-                                    if response.clicked() {
-                                        self.selected = Some(idx);
-                                    }
+                                                    ui.label(egui::RichText::new(format!("{:.1} MB", video.size_mb))
+                                                        .size(9.0)
+                                                        .color(egui::Color32::from_rgb(110, 110, 120)));
+                                                });
+                                        }).response;
 
-                                    if response.double_clicked() {
-                                        self.open_video(idx);
-                                    }
+                                        if response.clicked() {
+                                            new_selected = Some((game.clone(), idx));
+                                        }
+                                        if response.double_clicked() {
+                                            Self::open_video(video);
+                                        }
 
-                                    if response.secondary_clicked() {
-                                        self.show_context_menu(idx, ui);
+                                        ui.add_space(spacing);
                                     }
-                                }
-                            });
-                            ui.add_space(spacing);
+                                });
+                                ui.add_space(spacing);
+                            }
                         }
-                    });
+                        ui.add_space(8.0);
+                    }
+                });
+
+            self.expanded_games = new_expanded;
+            self.selected = new_selected;
+
+            for (video_path, thumb_path) in thumbs_to_generate {
+                if !self.thumbnails_generating.contains(&video_path) {
+                    self.thumbnails_generating.insert(video_path.clone());
+                    let _ = std::fs::create_dir_all(&self.cache_directory);
+                    Self::generate_thumbnail(video_path, thumb_path);
+                }
             }
         });
     }
 
-    fn open_video(&self, idx: usize) {
-        if idx >= self.videos.len() {
-            return;
-        }
-
-        let video = &self.videos[idx];
+    fn open_video(video: &VideoEntry) {
         info!("Opening video: {:?}", video.path);
 
         #[cfg(target_os = "windows")]
@@ -316,69 +380,11 @@ impl GalleryApp {
                 error!("Failed to open video: {}", e);
             }
         }
-
-        #[cfg(not(target_os = "windows"))]
-        {
-            if let Err(e) = open::that(&video.path) {
-                error!("Failed to open video: {}", e);
-            }
-        }
-    }
-
-    fn show_context_menu(&self, idx: usize, ui: &mut egui::Ui) {
-        if idx >= self.videos.len() {
-            return;
-        }
-
-        let video = &self.videos[idx];
-
-        egui::widgets::popup::popup_above_or_below_widget(
-            ui,
-            egui::Id::new("video_context_menu"),
-            ui.next_widget_position(),
-            egui::AboveOrBelow::Below,
-            |ui| {
-                ui.set_min_width(150.0);
-
-                if ui.button("Open").clicked() {
-                    self.open_video(idx);
-                    ui.close_menu();
-                }
-
-                if ui.button("Open Folder").clicked() {
-                    if let Some(parent) = video.path.parent() {
-                        #[cfg(target_os = "windows")]
-                        {
-                            use std::os::windows::process::CommandExt;
-                            const CREATE_NO_WINDOW: u32 = 0x08000000;
-                            let _ = std::process::Command::new("explorer")
-                                .arg(parent)
-                                .creation_flags(CREATE_NO_WINDOW)
-                                .spawn();
-                        }
-                    }
-                    ui.close_menu();
-                }
-
-                ui.separator();
-
-                if ui.button("Delete").clicked() {
-                    if let Err(e) = std::fs::remove_file(&video.path) {
-                        error!("Failed to delete video: {}", e);
-                    }
-                    if let Some(thumb) = &video.thumbnail_path {
-                        let _ = std::fs::remove_file(thumb);
-                    }
-                    ui.close_menu();
-                }
-            },
-            egui::PopupCloseBehavior::CloseOnClickOutside,
-        );
     }
 
     pub fn refresh(&mut self) {
         self.loaded = false;
-        self.videos.clear();
+        self.videos_by_game.clear();
         self.thumbnails.clear();
         self.selected = None;
     }

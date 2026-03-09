@@ -84,4 +84,3 @@ fn generate_output_path(config: &Config, game_name: Option<&str>) -> Result<Path
         Ok(output_dir.join(filename))
     }
 }
-}

@@ -36,8 +36,8 @@ impl AppState {
         self.pipeline.enforce_health().await
     }
 
-    pub async fn save_clip(&self) -> Result<PathBuf> {
-        ClipManager::save_clip(&self.config, &self.buffer).await
+    pub async fn save_clip(&self, game_name: Option<&str>) -> Result<PathBuf> {
+        ClipManager::save_clip(&self.config, &self.buffer, game_name).await
     }
 
     pub fn save_context(&self) -> (Config, ReplayBuffer, bool) {

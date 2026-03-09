@@ -2,134 +2,25 @@ use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-use tracing::{debug, trace, warn};
+use tracing::debug;
 
-use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT, TRUE};
+use windows::Win32::Foundation::{BOOL, HWND, RECT};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
 use windows::Win32::System::Threading::{
-    GetProcessId, OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetForegroundWindow, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
+    GetForegroundWindow, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
     GetWindowThreadProcessId, IsWindowVisible,
 };
-
-const KNOWN_GAMES: &[&str] = &[
-    "valorant",
-    "cs2",
-    "csgo",
-    "fortnite",
-    "fortniteclient",
-    "apex",
-    "r5apex",
-    "dota2",
-    "dota",
-    "league of legends",
-    "lol",
-    "leagueclient",
-    "overwatch",
-    "overwatch2",
-    "minecraft",
-    "javaw",
-    "java",
-    "gta5",
-    "gtaiv",
-    "gtav",
-    "eldenring",
-    "wow",
-    "world of warcraft",
-    "destiny2",
-    "destiny",
-    "warframe",
-    "pubg",
-    "tslg",
-    "thecycle",
-    "caldera",
-    "roblox",
-    "rbxfpsunlocker",
-    "csgo",
-    "counter-strike",
-    "halo",
-    "haloinfinite",
-    "starfield",
-    "cyberpunk2077",
-    "cyberpunk",
-    "reddeadredemption2",
-    "rdr2",
-    "bg3",
-    "baldursgate3",
-    "diablo4",
-    "diablo iv",
-    "pathofexile",
-    "poegame",
-    "lostark",
-    "newworld",
-    "gw2",
-    "guildwars2",
-    "ffxiv",
-    "ffxiv_dx11",
-    "final fantasy xiv",
-    "eso",
-    "elderscrollsonline",
-    "rocketleague",
-    "rl",
-    "valorant",
-    "fallguys",
-    "amongus",
-    "battlefield",
-    "bf2042",
-    "bfv",
-    "callofduty",
-    "cod",
-    "mw2",
-    "mw3",
-    "warzone",
-    "blackops",
-    "sekiro",
-    "darksouls3",
-    "darksouls",
-    "monsterhunter",
-    "mhrise",
-    "mhw",
-    "streetfighter6",
-    "tekken8",
-    "tekken7",
-    "dbfz",
-    "guiltygear",
-    "lol",
-    "hearthstone",
-    "starcraft",
-    "sc2",
-    "ageofempires",
-    "aoe4",
-    "aoe2",
-    "civ6",
-    "civilizationvi",
-    "totalwar",
-    "warhammer",
-    "phasmophobia",
-    "lethalcompany",
-    "sons of the forest",
-    "valheim",
-    "terraria",
-    "stardewvalley",
-    "subnautica",
-    "factorio",
-    "satisfactory",
-    "no man's sky",
-    "sekiro",
-    "hogwarts legacy",
-    "hogwartslegacy",
-];
 
 #[derive(Debug, Clone)]
 pub struct DetectedApp {
     pub name: String,
     pub folder_name: String,
     pub is_game: bool,
-    pub is_fullscreen: bool,
 }
 
 pub struct GameDetector {
@@ -143,7 +34,6 @@ impl GameDetector {
             name: String::new(),
             folder_name: String::new(),
             is_game: false,
-            is_fullscreen: false,
         }))));
 
         Self {
@@ -192,7 +82,6 @@ impl GameDetector {
                 name: String::new(),
                 folder_name: String::new(),
                 is_game: false,
-                is_fullscreen: false,
             }
         } else {
             unsafe { (*ptr).clone() }
@@ -215,7 +104,7 @@ impl Drop for GameDetector {
 fn detect_foreground_app() -> Option<DetectedApp> {
     unsafe {
         let hwnd = GetForegroundWindow();
-        if hwnd.0 == 0 {
+        if hwnd.0.is_null() {
             return None;
         }
 
@@ -231,21 +120,14 @@ fn detect_foreground_app() -> Option<DetectedApp> {
         }
 
         let exe_name = get_process_name(process_id)?;
-        let window_title = get_window_title(hwnd);
         let is_fullscreen = is_window_fullscreen(hwnd);
-
-        let exe_lower = exe_name.to_lowercase();
-        let title_lower = window_title.to_lowercase();
-
-        let is_game = is_known_game(&exe_lower, &title_lower);
 
         let folder_name = sanitize_folder_name(&exe_name);
 
         Some(DetectedApp {
             name: exe_name,
             folder_name,
-            is_game,
-            is_fullscreen,
+            is_game: is_fullscreen,
         })
     }
 }
@@ -256,7 +138,14 @@ unsafe fn get_process_name(process_id: u32) -> Option<String> {
     let mut buffer = [0u16; 260];
     let mut size = buffer.len() as u32;
 
-    if QueryFullProcessImageNameW(handle, 0, &mut buffer, &mut size).is_err() {
+    if QueryFullProcessImageNameW(
+        handle,
+        PROCESS_NAME_FORMAT(0),
+        windows::core::PWSTR(buffer.as_mut_ptr()),
+        &mut size,
+    )
+    .is_err()
+    {
         return None;
     }
 
@@ -267,18 +156,6 @@ unsafe fn get_process_name(process_id: u32) -> Option<String> {
         .to_string();
 
     Some(name)
-}
-
-unsafe fn get_window_title(hwnd: HWND) -> String {
-    let len = GetWindowTextLengthW(hwnd);
-    if len == 0 {
-        return String::new();
-    }
-
-    let mut buffer = vec![0u16; (len + 1) as usize];
-    GetWindowTextW(hwnd, &mut buffer);
-
-    String::from_utf16_lossy(&buffer[..len as usize])
 }
 
 unsafe fn is_window_fullscreen(hwnd: HWND) -> bool {
@@ -307,22 +184,6 @@ unsafe fn is_window_fullscreen(hwnd: HWND) -> bool {
     }
 }
 
-fn is_known_game(exe_name: &str, window_title: &str) -> bool {
-    for game in KNOWN_GAMES {
-        if exe_name.contains(game) {
-            return true;
-        }
-    }
-
-    for game in KNOWN_GAMES {
-        if window_title.contains(game) {
-            return true;
-        }
-    }
-
-    false
-}
-
 fn sanitize_folder_name(name: &str) -> String {
     let invalid_chars = ['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
     let mut result = String::with_capacity(name.len());
@@ -339,33 +200,5 @@ fn sanitize_folder_name(name: &str) -> String {
         return "Unknown".to_string();
     }
 
-    let trimmed: String = result.trim().to_string();
-    if trimmed.is_empty() {
-        "Unknown".to_string()
-    } else {
-        trimmed
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_sanitize_folder_name() {
-        assert_eq!(sanitize_folder_name("Game: Name"), "Game_ Name");
-        assert_eq!(sanitize_folder_name("Test<>Game"), "Test__Game");
-        assert_eq!(sanitize_folder_name("Normal Game"), "Normal Game");
-        assert_eq!(sanitize_folder_name(""), "Unknown");
-    }
-
-    #[test]
-    fn test_is_known_game() {
-        assert!(is_known_game("valorant", ""));
-        assert!(is_known_game("cs2", ""));
-        assert!(is_known_game("javaw", ""));
-        assert!(is_known_game("", "Minecraft"));
-        assert!(!is_known_game("notepad", ""));
-        assert!(!is_known_game("chrome", "Google Chrome"));
-    }
+    result.trim().to_string()
 }

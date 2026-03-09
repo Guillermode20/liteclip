@@ -19,6 +19,7 @@ use super::{AppEvent, TrayEvent};
 /// Tray menu item IDs.
 const ID_SAVE_CLIP: &str = "tray_save_clip";
 const ID_OPEN_SETTINGS: &str = "tray_open_settings";
+const ID_OPEN_GALLERY: &str = "tray_open_gallery";
 const ID_RESTART: &str = "tray_restart";
 const ID_EXIT: &str = "tray_exit";
 
@@ -40,6 +41,7 @@ impl TrayManager {
 
         let item_save = MenuItem::with_id(ID_SAVE_CLIP, "Save Clip", true, None);
         let item_settings = MenuItem::with_id(ID_OPEN_SETTINGS, "Open Settings", true, None);
+        let item_gallery = MenuItem::with_id(ID_OPEN_GALLERY, "Open Gallery", true, None);
         let separator1 = PredefinedMenuItem::separator();
         let item_restart = MenuItem::with_id(ID_RESTART, "Restart", true, None);
         let item_exit = MenuItem::with_id(ID_EXIT, "Exit", true, None);
@@ -47,6 +49,7 @@ impl TrayManager {
         let menu = Menu::new();
         menu.append(&item_save).ok();
         menu.append(&item_settings).ok();
+        menu.append(&item_gallery).ok();
         menu.append(&separator1).ok();
         menu.append(&item_restart).ok();
         menu.append(&item_exit).ok();
@@ -86,6 +89,7 @@ impl TrayManager {
                     let tray_event = match ev.id.0.as_str() {
                         ID_SAVE_CLIP => Some(TrayEvent::SaveClip),
                         ID_OPEN_SETTINGS => Some(TrayEvent::OpenSettings),
+                        ID_OPEN_GALLERY => Some(TrayEvent::OpenGallery),
                         ID_RESTART => Some(TrayEvent::Restart),
                         ID_EXIT => {
                             info!("Exit menu item clicked - sending Exit event");

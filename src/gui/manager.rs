@@ -167,6 +167,7 @@ impl eframe::App for GuiManagerApp {
 
         let overlay_clone = self.overlay.clone();
         let overlay_active = overlay_clone.lock().unwrap().is_some();
+        let overlay_position = overlay_clone.lock().unwrap().as_ref().map(|o| o.position);
         if overlay_active {
             ctx.show_viewport_deferred(
                 egui::ViewportId::from_hash_of("overlay"),
@@ -175,11 +176,9 @@ impl eframe::App for GuiManagerApp {
                     .with_always_on_top()
                     .with_taskbar(false)
                     .with_transparent(true)
-                    .with_inner_size([200.0, 60.0])
+                    .with_inner_size([140.0, 40.0])
                     .with_resizable(false)
-                    .with_position(get_overlay_position(
-                        overlay_clone.lock().unwrap().as_ref().map(|o| o.position),
-                    )),
+                    .with_position(get_overlay_position(overlay_position)),
                 move |ctx, class| {
                     if class == egui::ViewportClass::Embedded {
                         return;
@@ -216,7 +215,7 @@ impl eframe::App for GuiManagerApp {
 }
 
 fn get_overlay_position(position: Option<OverlayPosition>) -> egui::Pos2 {
-    use windows::Win32::Graphics::Gdi::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
+    use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
 
     let (screen_w, screen_h) = unsafe {
         (

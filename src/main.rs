@@ -7,7 +7,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 use anyhow::{Context, Result};
-use liteclip_replay::{app::AppState, config::Config};
+use liteclip_replay::{app::AppState, config::Config, detection::GameDetector};
 use std::env;
 use std::os::windows::process::CommandExt;
 use std::process::Command;
@@ -162,10 +162,7 @@ async fn main() -> Result<()> {
         Err(e) => warn!("Failed to configure auto-start: {}", e),
     }
     if config.general.auto_detect_game {
-        warn!("Config: auto_detect_game=true, but game detection is not implemented yet");
-    }
-    if config.advanced.overlay_enabled {
-        warn!("Config: overlay_enabled=true, but overlay rendering is not implemented yet");
+        info!("Game detection enabled");
     }
 
     // Show welcome notification if not starting minimized
@@ -178,6 +175,16 @@ async fn main() -> Result<()> {
 
     // Initialize application state
     let app_state = Arc::new(RwLock::new(AppState::new(config.clone())?));
+
+    // Initialize game detector if enabled
+    let game_detector = if config.general.auto_detect_game {
+        let detector = GameDetector::new();
+        detector.start();
+        info!("Game detector started");
+        Some(Arc::new(detector))
+    } else {
+        None
+    };
 
     // Start the platform message loop for hotkeys and tray
     let hotkey_config = hotkey_config_from_config(&config);
@@ -239,10 +246,13 @@ async fn main() -> Result<()> {
                                 match action {
 liteclip_replay::platform::HotkeyAction::SaveClip => {
                                         info!("Hotkey: save clip");
+                                        let overlay_enabled = app_state.read().await.config().advanced.overlay_enabled;
                                         spawn_save_clip_task(
                                             &app_state,
                                             &platform_handle,
                                             &save_in_progress,
+                                            &game_detector,
+                                            overlay_enabled,
                                         )
                                         .await;
                                     }
@@ -291,19 +301,22 @@ liteclip_replay::platform::HotkeyAction::SaveClip => {
                                         warn!("Screenshot feature not yet implemented");
                                     }
                                     liteclip_replay::platform::HotkeyAction::OpenGallery => {
-                                        info!("Hotkey: open gallery (not implemented)");
-                                        warn!("Gallery feature not yet implemented");
+                                        info!("Hotkey: open gallery");
+                                        liteclip_replay::gui::show_gallery_gui(tokio_tx.clone());
                                     }
                                 }
                             }
                             liteclip_replay::platform::AppEvent::Tray(tray_event) => {
                                 match tray_event {
-                                    liteclip_replay::platform::TrayEvent::SaveClip => {
+liteclip_replay::platform::TrayEvent::SaveClip => {
                                         info!("Tray: Save Clip selected");
+                                        let overlay_enabled = app_state.read().await.config().advanced.overlay_enabled;
                                         spawn_save_clip_task(
                                             &app_state,
                                             &platform_handle,
                                             &save_in_progress,
+                                            &game_detector,
+                                            overlay_enabled,
                                         )
                                         .await;
                                     }
@@ -316,10 +329,14 @@ liteclip_replay::platform::HotkeyAction::SaveClip => {
                                         should_restart = true;
                                         break;
                                     }
-                                     liteclip_replay::platform::TrayEvent::OpenSettings => {
-                                        info!("Tray: Open Settings selected");
-                                        liteclip_replay::gui::show_settings_gui(tokio_tx.clone());
-                                    }
+liteclip_replay::platform::TrayEvent::OpenSettings => {
+                                         info!("Tray: Open Settings selected");
+                                         liteclip_replay::gui::show_settings_gui(tokio_tx.clone());
+                                     }
+                                     liteclip_replay::platform::TrayEvent::OpenGallery => {
+                                         info!("Tray: Open Gallery selected");
+                                         liteclip_replay::gui::show_gallery_gui(tokio_tx.clone());
+                                     }
                                     _ => {
                                         // Other tray events are not used (StartRecording, StopRecording,
                                         // ToggleRecording)
@@ -485,6 +502,8 @@ async fn spawn_save_clip_task(
     app_state: &Arc<RwLock<AppState>>,
     platform_handle: &Arc<liteclip_replay::platform::PlatformHandle>,
     save_in_progress: &Arc<AtomicBool>,
+    game_detector: &Option<Arc<GameDetector>>,
+    overlay_enabled: bool,
 ) {
     if save_in_progress
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -497,13 +516,29 @@ async fn spawn_save_clip_task(
     let (config, buffer, notifications_enabled) = app_state.read().await.save_context();
     let platform_handle_clone = platform_handle.clone();
     let save_in_progress_clone = save_in_progress.clone();
+    
+    let game_name = game_detector.as_ref().map(|d| {
+        let app = d.get_detected_app();
+        if app.is_game {
+            Some(app.folder_name.clone())
+        } else {
+            None
+        }
+    }).flatten();
 
     tokio::spawn(async move {
-        let result = liteclip_replay::app::ClipManager::save_clip(&config, &buffer).await;
+        let result = liteclip_replay::app::ClipManager::save_clip(&config, &buffer, game_name.as_deref()).await;
 
         match result {
             Ok(path) => {
                 info!("Clip saved: {:?}", path);
+                
+                if overlay_enabled {
+                    let filename = path.file_name()
+                        .map(|n| n.to_string_lossy().to_string());
+                    liteclip_replay::gui::run_clip_saved_overlay(filename);
+                }
+                
                 if notifications_enabled {
                     let _ = platform_handle_clone.show_notification(
                         "Clip Saved",
