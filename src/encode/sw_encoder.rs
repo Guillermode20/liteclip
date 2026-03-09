@@ -227,13 +227,10 @@ struct WorkItem {
 pub struct SoftwareEncoder {
     config: EncoderConfig,
     packet_rx: Receiver<EncodedPacket>,
-    #[allow(dead_code)]
-    packet_tx: Sender<EncodedPacket>,
     frame_count: u64,
     running: bool,
     worker_tx: Sender<WorkItem>,
     worker_rx: Receiver<WorkItem>,
-    #[allow(dead_code)]
     worker_threads: Vec<thread::JoinHandle<()>>,
     dropped_oldest_count: u64,
     dropped_newest_count: u64,
@@ -313,7 +310,6 @@ impl SoftwareEncoder {
         Ok(Self {
             config: config.clone(),
             packet_rx,
-            packet_tx,
             frame_count: 0,
             running: false,
             worker_tx,

@@ -24,8 +24,6 @@ pub fn show_gallery_gui(event_tx: Sender<AppEvent>) {
 struct VideoEntry {
     path: PathBuf,
     filename: String,
-    #[allow(dead_code)]
-    game: String,
     size_mb: f64,
     modified: SystemTime,
 }
@@ -109,10 +107,9 @@ impl GalleryApp {
                             let size_mb = metadata.len() as f64 / (1024.0 * 1024.0);
                             let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
 
-                            videos.entry(game.clone()).or_default().push(VideoEntry {
+                            videos.entry(game).or_default().push(VideoEntry {
                                 path,
                                 filename,
-                                game,
                                 size_mb,
                                 modified,
                             });
