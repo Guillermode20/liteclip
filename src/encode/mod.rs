@@ -61,13 +61,5 @@ pub mod packet;
 pub mod spawn;
 pub mod sw_encoder;
 
-#[allow(unused_imports)]
-pub use config::*;
 pub use encoder_mod::*;
-#[allow(unused_imports)]
-pub use ffmpeg::*;
-#[allow(unused_imports)]
-pub use packet::*;
-#[allow(unused_imports)]
-pub use spawn::*;
 pub use sw_encoder::*;

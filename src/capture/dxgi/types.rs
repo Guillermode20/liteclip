@@ -1,2 +1,1 @@
-#[allow(unused_imports)]
-pub use super::capture::*;
+// Types module - contains DXGI-specific type definitions

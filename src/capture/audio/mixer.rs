@@ -1,2 +1,1 @@
-#[allow(unused_imports)]
-pub(crate) use super::manager::apply_volume_to_packet;
+// Audio mixer module - mixing functionality is handled directly in manager.rs

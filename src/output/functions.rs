@@ -1,6 +1,4 @@
-use crate::encode::EncodedPacket;
 use anyhow::{Context, Result};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
@@ -13,67 +11,6 @@ pub const AUDIO_CHANNELS: u16 = 2;
 /// Audio bitrate for AAC encoding.
 #[cfg(feature = "ffmpeg")]
 pub const AUDIO_BITRATE: &str = "192k";
-
-/// Converts a QPC (QueryPerformanceCounter) delta to aligned PCM byte count.
-///
-/// Ensures the byte count is aligned to audio frame boundaries for proper
-/// encoding.
-///
-/// # Arguments
-///
-/// * `delta_qpc` - Time delta in QPC units.
-/// * `qpc_freq` - QPC frequency in Hz.
-/// * `bytes_per_second` - Bytes per second for the audio stream.
-/// * `bytes_per_frame` - Bytes per audio frame.
-///
-/// # Returns
-///
-/// Aligned byte count as i64.
-#[cfg(feature = "ffmpeg")]
-pub fn qpc_delta_to_aligned_pcm_bytes(
-    delta_qpc: i64,
-    qpc_freq: f64,
-    bytes_per_second: f64,
-    bytes_per_frame: usize,
-) -> i64 {
-    if qpc_freq <= 0.0 || bytes_per_second <= 0.0 || bytes_per_frame == 0 {
-        return 0;
-    }
-    let raw_bytes = ((delta_qpc as f64 / qpc_freq) * bytes_per_second).round() as i64;
-    let frame_size = bytes_per_frame as i64;
-    if raw_bytes >= 0 {
-        raw_bytes - (raw_bytes % frame_size)
-    } else {
-        raw_bytes + ((-raw_bytes) % frame_size)
-    }
-}
-
-/// Writes silence (zeros) to a file.
-///
-/// Used for padding audio when there's a gap between streams.
-///
-/// # Arguments
-///
-/// * `file` - File to write to.
-/// * `byte_count` - Number of silence bytes to write.
-///
-/// # Errors
-///
-/// Returns an error if file write fails.
-#[cfg(feature = "ffmpeg")]
-pub fn write_silence_bytes(file: &mut std::fs::File, mut byte_count: usize) -> Result<()> {
-    if byte_count == 0 {
-        return Ok(());
-    }
-    let silence = [0u8; 8192];
-    while byte_count > 0 {
-        let chunk = byte_count.min(silence.len());
-        file.write_all(&silence[..chunk])
-            .context("Failed writing PCM silence padding")?;
-        byte_count -= chunk;
-    }
-    Ok(())
-}
 
 /// Checks if the data appears to be H.264 format.
 ///
@@ -335,37 +272,4 @@ pub fn generate_thumbnail(video_path: &Path, save_directory: &Path) -> Result<Pa
     }
 
     Ok(thumb_path)
-}
-
-/// Legacy function kept for API compatibility. Use `generate_thumbnail` instead.
-pub fn extract_thumbnail(_packet: &EncodedPacket, output_path: &Path) -> Result<PathBuf> {
-    debug!("extract_thumbnail called - attempting to derive save directory from output path");
-
-    // Try to derive the save directory from the output path
-    // Videos can be in: save_dir/game_name/video.mp4 or save_dir/video.mp4
-    // We need to find the save directory (which contains .cache)
-    let save_dir = output_path
-        .parent()
-        .context("Output path has no parent directory")?;
-
-    // Check if parent contains .cache (video is directly in save_dir)
-    // or if grandparent contains .cache (video is in game subdirectory)
-    let cache_check = save_dir.join(".cache");
-    let actual_save_dir = if cache_check.exists() || !save_dir.join(".cache").exists() {
-        // Check grandparent
-        if let Some(grandparent) = save_dir.parent() {
-            if grandparent.join(".cache").exists() {
-                grandparent.to_path_buf()
-            } else {
-                // Assume save_dir is correct (will create .cache there)
-                save_dir.to_path_buf()
-            }
-        } else {
-            save_dir.to_path_buf()
-        }
-    } else {
-        save_dir.to_path_buf()
-    };
-
-    generate_thumbnail(output_path, &actual_save_dir)
 }
