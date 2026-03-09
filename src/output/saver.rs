@@ -7,7 +7,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 use super::{
-    calculate_clip_start_pts, extract_thumbnail, generate_output_path, h264_nal_type,
+    calculate_clip_start_pts, generate_thumbnail, generate_output_path, h264_nal_type,
     hevc_nal_type, Muxer, MuxerConfig,
 };
 
@@ -16,6 +16,7 @@ pub fn spawn_clip_saver(
     duration: Duration,
     output_path: PathBuf,
     config: MuxerConfig,
+    save_directory: PathBuf,
 ) -> JoinHandle<Result<PathBuf>> {
     tokio::task::spawn_blocking(move || {
         info!(
@@ -151,15 +152,14 @@ pub fn spawn_clip_saver(
             duration.as_secs()
         );
 
-        if let Some(first_keyframe) = clip_packets.iter().find(|p| p.is_keyframe) {
-            debug!("Extracting thumbnail from first keyframe");
-            match extract_thumbnail(first_keyframe, &final_path) {
-                Ok(thumb_path) => {
-                    debug!("Thumbnail extracted: {:?}", thumb_path);
-                }
-                Err(e) => {
-                    warn!("Failed to extract thumbnail: {}", e);
-                }
+        // Generate thumbnail immediately after saving
+        debug!("Generating thumbnail for saved clip");
+        match generate_thumbnail(&final_path, &save_directory) {
+            Ok(thumb_path) => {
+                info!("Thumbnail generated: {:?}", thumb_path);
+            }
+            Err(e) => {
+                warn!("Failed to generate thumbnail: {}", e);
             }
         }
 
@@ -181,5 +181,11 @@ pub fn spawn_clip_saver_with_defaults(
 
     let config = MuxerConfig::new(width, height, fps, &output_path);
 
-    Ok(spawn_clip_saver(buffer, duration, output_path, config))
+    Ok(spawn_clip_saver(
+        buffer,
+        duration,
+        output_path,
+        config,
+        save_directory,
+    ))
 }

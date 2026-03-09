@@ -2,7 +2,7 @@ use crate::encode::EncodedPacket;
 use anyhow::{Context, Result};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use tracing::debug;
+use tracing::{debug, info, warn};
 
 #[cfg(feature = "ffmpeg")]
 pub const AUDIO_SAMPLE_RATE: u32 = 48_000;
@@ -150,8 +150,135 @@ pub fn generate_output_path(base_dir: &Path, game_name: Option<&str>) -> Result<
     Ok(output_dir.join(&filename))
 }
 
-pub fn extract_thumbnail(_packet: &EncodedPacket, output_path: &Path) -> Result<PathBuf> {
-    debug!("Thumbnail extraction not implemented (optional Phase 1)");
-    let thumb_path = output_path.with_extension("jpg");
+/// Generates a thumbnail for a video file using FFmpeg.
+/// 
+/// The thumbnail is saved to `<save_directory>/.cache/<hash>.jpg` where the hash
+/// is computed from the video path, matching the gallery's thumbnail lookup scheme.
+pub fn generate_thumbnail(video_path: &Path, save_directory: &Path) -> Result<PathBuf> {
+    use std::hash::{Hash, Hasher};
+    use std::process::Command;
+
+    // Compute the cache directory path (same as gallery)
+    let cache_dir = save_directory.join(".cache");
+
+    // Create cache directory if it doesn't exist
+    std::fs::create_dir_all(&cache_dir)
+        .with_context(|| format!("Failed to create cache directory: {:?}", cache_dir))?;
+
+    // Hash the video path to get the thumbnail filename (same as gallery)
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    video_path.hash(&mut hasher);
+    let hash = hasher.finish();
+    let thumb_path = cache_dir.join(format!("{:016x}.jpg", hash));
+
+    // Skip if thumbnail already exists
+    if thumb_path.exists() {
+        debug!("Thumbnail already exists: {:?}", thumb_path);
+        return Ok(thumb_path);
+    }
+
+    debug!(
+        "Generating thumbnail for {:?} -> {:?}",
+        video_path, thumb_path
+    );
+
+    // Use FFmpeg to extract a frame at 1 second into the video
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+        let status = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-i",
+                &video_path.to_string_lossy(),
+                "-ss",
+                "00:00:01",
+                "-vframes",
+                "1",
+                "-vf",
+                "scale=320:-1",
+                "-q:v",
+                "5",
+                &thumb_path.to_string_lossy(),
+            ])
+            .creation_flags(CREATE_NO_WINDOW)
+            .status()
+            .context("Failed to spawn ffmpeg for thumbnail generation")?;
+
+        if status.success() {
+            info!("Generated thumbnail: {:?}", thumb_path);
+        } else {
+            warn!(
+                "FFmpeg thumbnail extraction failed with status: {:?}",
+                status
+            );
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let status = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-i",
+                &video_path.to_string_lossy(),
+                "-ss",
+                "00:00:01",
+                "-vframes",
+                "1",
+                "-vf",
+                "scale=320:-1",
+                "-q:v",
+                "5",
+                &thumb_path.to_string_lossy(),
+            ])
+            .status()
+            .context("Failed to spawn ffmpeg for thumbnail generation")?;
+
+        if status.success() {
+            info!("Generated thumbnail: {:?}", thumb_path);
+        } else {
+            warn!(
+                "FFmpeg thumbnail extraction failed with status: {:?}",
+                status
+            );
+        }
+    }
+
     Ok(thumb_path)
+}
+
+/// Legacy function kept for API compatibility. Use `generate_thumbnail` instead.
+pub fn extract_thumbnail(_packet: &EncodedPacket, output_path: &Path) -> Result<PathBuf> {
+    debug!("extract_thumbnail called - attempting to derive save directory from output path");
+    
+    // Try to derive the save directory from the output path
+    // Videos can be in: save_dir/game_name/video.mp4 or save_dir/video.mp4
+    // We need to find the save directory (which contains .cache)
+    let save_dir = output_path
+        .parent()
+        .context("Output path has no parent directory")?;
+    
+    // Check if parent contains .cache (video is directly in save_dir)
+    // or if grandparent contains .cache (video is in game subdirectory)
+    let cache_check = save_dir.join(".cache");
+    let actual_save_dir = if cache_check.exists() || !save_dir.join(".cache").exists() {
+        // Check grandparent
+        if let Some(grandparent) = save_dir.parent() {
+            if grandparent.join(".cache").exists() {
+                grandparent.to_path_buf()
+            } else {
+                // Assume save_dir is correct (will create .cache there)
+                save_dir.to_path_buf()
+            }
+        } else {
+            save_dir.to_path_buf()
+        }
+    } else {
+        save_dir.to_path_buf()
+    };
+    
+    generate_thumbnail(output_path, &actual_save_dir)
 }

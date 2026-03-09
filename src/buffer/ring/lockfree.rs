@@ -93,7 +93,12 @@ impl LockFreeReplayBuffer {
         let effective_memory_limit_mb = config.effective_replay_memory_limit_mb();
         let max_memory_bytes = (effective_memory_limit_mb as usize).saturating_mul(1024 * 1024);
 
-        let estimated_packets = (duration.as_secs_f32() * 60.0).max(100.0) as usize;
+        let video_packets_per_sec = config.video.framerate as f32;
+        let audio_streams =
+            (config.audio.capture_system as u8 + config.audio.capture_mic as u8) as f32;
+        let audio_packets_per_sec = audio_streams * 50.0;
+        let packets_per_sec = video_packets_per_sec + audio_packets_per_sec;
+        let estimated_packets = (duration.as_secs_f32() * packets_per_sec).max(100.0) as usize;
         let capacity = estimated_packets.next_power_of_two();
         let mask = capacity - 1;
 
@@ -103,10 +108,12 @@ impl LockFreeReplayBuffer {
         }
 
         debug!(
-            "Creating LockFreeReplayBuffer: {} seconds, {} MB max, {} slots",
+            "Creating LockFreeReplayBuffer: {} seconds, {} MB max, {} slots ({} video + {} audio pps)",
             duration.as_secs(),
             effective_memory_limit_mb,
-            capacity
+            capacity,
+            video_packets_per_sec as u32,
+            audio_packets_per_sec as u32
         );
 
         Ok(Self {

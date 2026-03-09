@@ -407,9 +407,16 @@ impl ClipManager {
 
         let buffer_clone = buffer.clone();
         let duration = Duration::from_secs(config.general.replay_duration_secs as u64);
+        let save_directory = PathBuf::from(&config.general.save_directory);
 
         info!("Spawning clip saver task...");
-        let handle = spawn_clip_saver(buffer_clone, duration, output_path.clone(), muxer_config);
+        let handle = spawn_clip_saver(
+            buffer_clone,
+            duration,
+            output_path.clone(),
+            muxer_config,
+            save_directory,
+        );
 
         info!("Waiting for clip saver task to complete...");
         let result = handle.await.context("Clip saver task panicked")?;

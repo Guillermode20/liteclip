@@ -195,7 +195,7 @@ impl GalleryApp {
                     "-vframes",
                     "1",
                     "-vf",
-                    "scale=320:-1",
+                    "scale=400:-1",
                     "-q:v",
                     "5",
                     &thumb_path.to_string_lossy(),
@@ -227,9 +227,9 @@ impl GalleryApp {
                 return;
             }
 
-            let tile_width = 180.0;
-            let thumb_height = 100.0;
-            let spacing = 8.0;
+            let tile_width = 200.0;
+            let thumb_height = 120.0;
+            let spacing = 10.0;
             let available_width = ui.available_width();
             let cols = ((available_width + spacing) / (tile_width + spacing)).floor() as usize;
             let cols = cols.max(1);
@@ -259,7 +259,7 @@ impl GalleryApp {
                         });
 
                         if is_expanded {
-                            ui.add_space(4.0);
+                            ui.add_space(6.0);
 
                             let rows = (videos.len() + cols - 1) / cols;
 
@@ -278,6 +278,7 @@ impl GalleryApp {
                                             ui.set_min_width(tile_width);
                                             ui.set_max_width(tile_width);
 
+                                            let mut hovered_tile = false;
                                             let bg_color = if is_selected {
                                                 egui::Color32::from_rgb(40, 60, 90)
                                             } else {
@@ -287,52 +288,76 @@ impl GalleryApp {
                                             egui::Frame::default()
                                                 .fill(bg_color)
                                                 .corner_radius(egui::CornerRadius::same(6))
-                                                .inner_margin(egui::Margin::same(5))
+                                                .inner_margin(egui::Margin::same(8))
                                                 .show(ui, |ui| {
-                                                    let thumb_size = egui::vec2(tile_width - 10.0, thumb_height);
+                                                    ui.vertical(|ui| {
+                                                        ui.set_width(tile_width - 16.0);
+                                                        
+                                                        let thumb_size = egui::vec2(tile_width - 16.0, thumb_height);
 
-                                                    if let Some(texture) = thumbnails.get(&video.path) {
-                                                        let (rect, _) = ui.allocate_exact_size(thumb_size, egui::Sense::click());
-                                                        let img_size = texture.size_vec2();
-                                                        let scale = (thumb_size.x / img_size.x).min(thumb_size.y / img_size.y);
-                                                        let display_size = egui::vec2(img_size.x * scale, img_size.y * scale);
-                                                        let img_rect = egui::Rect::from_center_size(rect.center(), display_size);
-                                                        ui.scope_builder(egui::UiBuilder::new().max_rect(img_rect), |ui| {
-                                                            ui.image(texture);
-                                                        });
-                                                    } else {
-                                                        let (rect, _) = ui.allocate_exact_size(thumb_size, egui::Sense::click());
-                                                        ui.painter().rect_filled(rect, egui::CornerRadius::same(4), egui::Color32::from_rgb(25, 25, 30));
-                                                        ui.painter().text(
-                                                            rect.center(),
-                                                            egui::Align2::CENTER_CENTER,
-                                                            "▶",
-                                                            egui::FontId::proportional(28.0),
-                                                            egui::Color32::from_rgb(70, 70, 80),
+                                                        if let Some(texture) = thumbnails.get(&video.path) {
+                                                            let img_response = ui.add(
+                                                                egui::Image::from_texture(texture)
+                                                                    .fit_to_exact_size(thumb_size)
+                                                                    .maintain_aspect_ratio(true)
+                                                                    .sense(egui::Sense::click())
+                                                            );
+
+                                                            hovered_tile |= img_response.hovered();
+
+                                                            if img_response.double_clicked() {
+                                                                Self::open_video(video);
+                                                            }
+                                                        } else {
+                                                            let (rect, response) = ui.allocate_exact_size(egui::vec2(tile_width - 16.0, thumb_height), egui::Sense::click());
+                                                            ui.painter().rect_filled(rect, egui::CornerRadius::same(4), egui::Color32::from_rgb(25, 25, 30));
+                                                            ui.painter().text(
+                                                                rect.center(),
+                                                                egui::Align2::CENTER_CENTER,
+                                                                "▶",
+                                                                egui::FontId::proportional(28.0),
+                                                                egui::Color32::from_rgb(70, 70, 80),
+                                                            );
+                                                            use std::hash::{Hash, Hasher};
+                                                            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                                                            video.path.hash(&mut hasher);
+                                                            let hash = hasher.finish();
+                                                            let thumb_path = cache_dir.join(format!("{:016x}.jpg", hash));
+                                                            thumbs_to_generate.push((video.path.clone(), thumb_path));
+
+                                                            hovered_tile |= response.hovered();
+                                                            
+                                                            if response.double_clicked() {
+                                                                Self::open_video(video);
+                                                            }
+                                                        }
+
+                                                        ui.add_space(6.0);
+
+                                                        let display_name = if video.filename.len() > 25 {
+                                                            format!("{}...", &video.filename[..22])
+                                                        } else {
+                                                            video.filename.clone()
+                                                        };
+                                                        ui.label(egui::RichText::new(display_name)
+                                                            .size(11.0)
+                                                            .strong()
+                                                            .color(egui::Color32::from_rgb(220, 220, 220)));
+
+                                                        ui.add_space(2.0);
+
+                                                        ui.label(egui::RichText::new(format!("{:.1} MB", video.size_mb))
+                                                            .size(10.0)
+                                                            .color(egui::Color32::from_rgb(110, 110, 120)));
+                                                    });
+                                                    if hovered_tile && !is_selected {
+                                                        let hover_rect = ui.min_rect();
+                                                        ui.painter().rect_filled(
+                                                            hover_rect,
+                                                            egui::CornerRadius::same(6),
+                                                            egui::Color32::from_rgba_unmultiplied(60, 90, 140, 30),
                                                         );
-                                                        use std::hash::{Hash, Hasher};
-                                                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                                                        video.path.hash(&mut hasher);
-                                                        let hash = hasher.finish();
-                                                        let thumb_path = cache_dir.join(format!("{:016x}.jpg", hash));
-                                                        thumbs_to_generate.push((video.path.clone(), thumb_path));
                                                     }
-
-                                                    ui.add_space(4.0);
-
-                                                    let display_name = if video.filename.len() > 22 {
-                                                        format!("{}...", &video.filename[..19])
-                                                    } else {
-                                                        video.filename.clone()
-                                                    };
-                                                    ui.label(egui::RichText::new(display_name)
-                                                        .size(10.0)
-                                                        .strong()
-                                                        .color(egui::Color32::from_rgb(220, 220, 220)));
-
-                                                    ui.label(egui::RichText::new(format!("{:.1} MB", video.size_mb))
-                                                        .size(9.0)
-                                                        .color(egui::Color32::from_rgb(110, 110, 120)));
                                                 });
                                         }).response;
 

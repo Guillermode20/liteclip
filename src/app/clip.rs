@@ -51,8 +51,15 @@ impl ClipManager {
 
         let buffer_clone = buffer.clone();
         let duration = Duration::from_secs(config.general.replay_duration_secs as u64);
+        let save_directory = PathBuf::from(&config.general.save_directory);
 
-        let handle = spawn_clip_saver(buffer_clone, duration, output_path.clone(), muxer_config);
+        let handle = spawn_clip_saver(
+            buffer_clone,
+            duration,
+            output_path.clone(),
+            muxer_config,
+            save_directory,
+        );
         let result = handle.await?;
         let final_path = result?;
 
