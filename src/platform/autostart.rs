@@ -5,6 +5,8 @@
 
 use anyhow::{Context, Result};
 use tracing::info;
+#[cfg(not(windows))]
+use tracing::warn;
 
 #[cfg(windows)]
 const REG_APP_NAME: &str = "LiteClipReplay";

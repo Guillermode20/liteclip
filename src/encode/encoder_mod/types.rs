@@ -65,26 +65,6 @@ impl EncodedPacket {
             resolution: None,
         }
     }
-
-    /// Creates a video keyframe packet.
-    ///
-    /// # Arguments
-    ///
-    /// * `data` - The encoded keyframe data.
-    /// * `pts` - Presentation timestamp.
-    pub fn video_keyframe(data: impl Into<Bytes>, pts: i64) -> Self {
-        Self::new(data, pts, pts, true, StreamType::Video)
-    }
-
-    /// Creates a video delta frame packet.
-    ///
-    /// # Arguments
-    ///
-    /// * `data` - The encoded delta frame data.
-    /// * `pts` - Presentation timestamp.
-    pub fn video_delta(data: impl Into<Bytes>, pts: i64) -> Self {
-        Self::new(data, pts, pts, false, StreamType::Video)
-    }
 }
 
 /// Stream type for multiplexed output.
@@ -200,10 +180,8 @@ impl EncoderConfig {
 pub struct EncoderHandle {
     /// Join handle for the encoder thread
     pub thread: std::thread::JoinHandle<Result<()>>,
-    /// Channel sender for frames
+    /// Channel sender for frames (dropped to signal encoder thread to stop)
     pub frame_tx: Sender<crate::capture::CapturedFrame>,
-    /// Channel receiver for packets
-    pub packet_rx: Receiver<EncodedPacket>,
     /// Health events emitted by encoder worker thread
     pub health_rx: Receiver<EncoderHealthEvent>,
     /// Effective encoder configuration after auto-selection/fallback decisions

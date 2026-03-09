@@ -66,7 +66,6 @@ pub mod buffer;
 pub mod capture;
 pub mod clip;
 pub mod config;
-pub mod core;
 pub mod detection;
 pub mod encode;
 pub mod gui;

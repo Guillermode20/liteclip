@@ -172,10 +172,6 @@ impl Muxer {
         info!("MP4 finalized natively: {:?}", self.output_path);
         Ok(self.output_path)
     }
-
-    pub fn output_path(&self) -> &Path {
-        &self.output_path
-    }
 }
 
 /// Configuration for the MP4 muxer.

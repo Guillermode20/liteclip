@@ -42,7 +42,6 @@
 pub mod device_info;
 pub mod manager;
 pub mod mic;
-pub mod mixer;
 pub mod system;
 
 pub use manager::WasapiAudioManager;

@@ -110,11 +110,6 @@ impl WasapiSystemCapture {
         self.packet_rx.clone()
     }
 
-    /// Get the number of samples processed
-    pub fn samples_processed(&self) -> u64 {
-        self.processed_samples.load(Ordering::SeqCst)
-    }
-
     /// Main capture loop
     fn capture_loop(
         running: Arc<AtomicBool>,

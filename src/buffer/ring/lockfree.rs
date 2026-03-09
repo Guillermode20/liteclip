@@ -322,9 +322,7 @@ impl LockFreeReplayBuffer {
             i = nal_start + 1;
         }
 
-        for (idx, (start, sc_len, hevc_nal, h264_nal)) in nals.iter().enumerate() {
-            let _nal_start = start + sc_len;
-
+        for (idx, (start, _sc_len, hevc_nal, h264_nal)) in nals.iter().enumerate() {
             let next_start = nals
                 .get(idx + 1)
                 .map(|(s, _, _, _)| *s)
@@ -715,11 +713,6 @@ impl LockFreeReplayBuffer {
         );
     }
 
-    /// Clears the buffer (alias for [`clear()`][Self::clear]).
-    pub fn soft_clear(&self) {
-        self.clear();
-    }
-
     /// Gets current buffer statistics.
     ///
     /// # Returns
@@ -760,16 +753,6 @@ impl LockFreeReplayBuffer {
             keyframe_count,
             memory_usage_percent: memory_usage_percent.min(100.0),
         }
-    }
-
-    /// Checks if the buffer is full.
-    ///
-    /// # Returns
-    ///
-    /// `true` if the write index has reached capacity.
-    pub fn is_full(&self) -> bool {
-        let inner = &self.inner;
-        inner.write_idx.load(Ordering::Relaxed) >= inner.capacity
     }
 
     pub fn oldest_pts(&self) -> Option<i64> {

@@ -133,16 +133,6 @@ impl WasapiMicCapture {
         self.packet_rx.clone()
     }
 
-    /// Check if the capture loop has successfully initialized WASAPI
-    pub fn is_initialized(&self) -> bool {
-        self.initialized.load(Ordering::SeqCst)
-    }
-
-    /// Get the number of samples processed
-    pub fn samples_processed(&self) -> u64 {
-        self.processed_samples.load(Ordering::SeqCst)
-    }
-
     /// Main capture loop
     fn capture_loop(
         running: Arc<AtomicBool>,

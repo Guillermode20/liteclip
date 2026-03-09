@@ -54,7 +54,6 @@ use anyhow::Result;
 use bytes::Bytes;
 use crossbeam::channel::{Receiver, Sender};
 use std::sync::Arc;
-use std::time::Duration;
 #[cfg(windows)]
 use windows::Win32::Foundation::HANDLE;
 #[cfg(windows)]
@@ -65,7 +64,6 @@ use windows::Win32::Graphics::Direct3D11::{
 pub mod audio;
 pub mod backpressure;
 pub mod dxgi;
-pub mod frame;
 
 pub use dxgi::DxgiCapture;
 
@@ -292,46 +290,4 @@ pub trait CaptureBackend: Send + 'static {
     ///
     /// Frames are sent to this channel as they are captured.
     fn frame_rx(&self) -> Receiver<CapturedFrame>;
-}
-
-/// Calculate frame duration from target FPS.
-///
-/// Returns the duration between frames at the given framerate.
-/// Clamps FPS to a minimum of 1 to prevent division by zero.
-///
-/// # Arguments
-///
-/// * `fps` - Target frames per second.
-///
-/// # Returns
-///
-/// Duration between frames.
-///
-/// # Example
-///
-/// ```
-/// use liteclip_replay::capture::frame_duration;
-///
-/// let duration = frame_duration(60);
-/// assert_eq!(duration.as_nanos(), 16_666_666);
-/// ```
-pub fn frame_duration(fps: u32) -> Duration {
-    Duration::from_nanos(1_000_000_000 / fps.max(1) as u64)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_frame_duration() {
-        let duration = frame_duration(30);
-        assert_eq!(duration.as_millis(), 33);
-    }
-
-    #[test]
-    fn test_frame_duration_60fps() {
-        let duration = frame_duration(60);
-        assert_eq!(duration.as_nanos(), 16_666_666);
-    }
 }

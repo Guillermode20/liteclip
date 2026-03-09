@@ -45,8 +45,6 @@
 pub mod capture;
 pub mod device;
 pub mod dxgicapture_traits;
-mod functions;
 pub mod texture;
-mod types;
 
 pub use capture::*;

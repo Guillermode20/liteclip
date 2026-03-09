@@ -54,11 +54,8 @@
 //! }
 //! ```
 
-pub mod config;
 pub mod encoder_mod;
 pub mod ffmpeg;
-pub mod packet;
-pub mod spawn;
 pub mod sw_encoder;
 
 pub use encoder_mod::*;

@@ -22,18 +22,6 @@ impl BackpressureState {
         }
     }
 
-    pub fn should_drop_frame(&self) -> bool {
-        self.queued_frames.load(Ordering::Relaxed) >= self.max_queued_frames.load(Ordering::Relaxed)
-    }
-
-    pub fn on_frame_queued(&self) {
-        self.queued_frames.fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub fn on_frame_processed(&self) {
-        self.queued_frames.fetch_sub(1, Ordering::Relaxed);
-    }
-
     pub fn current_fps_divisor(&self) -> u32 {
         self.fps_divisor.load(Ordering::Relaxed)
     }
@@ -49,10 +37,6 @@ impl BackpressureState {
     pub fn set_encoder_overloaded(&self, overloaded: bool) {
         self.encoder_overloaded.store(overloaded, Ordering::Relaxed);
     }
-
-    pub fn queued_count(&self) -> u32 {
-        self.queued_frames.load(Ordering::Relaxed)
-    }
 }
 
 impl Default for BackpressureState {
@@ -64,31 +48,6 @@ impl Default for BackpressureState {
 #[cfg(test)]
 mod tests {
     use super::BackpressureState;
-
-    #[test]
-    fn drop_threshold_respects_max_queue() {
-        let state = BackpressureState::new();
-        state
-            .max_queued_frames
-            .store(2, std::sync::atomic::Ordering::Relaxed);
-
-        assert!(!state.should_drop_frame());
-        state.on_frame_queued();
-        assert!(!state.should_drop_frame());
-        state.on_frame_queued();
-        assert!(state.should_drop_frame());
-    }
-
-    #[test]
-    fn queued_count_tracks_queue_events() {
-        let state = BackpressureState::new();
-        state.on_frame_queued();
-        state.on_frame_queued();
-        assert_eq!(state.queued_count(), 2);
-
-        state.on_frame_processed();
-        assert_eq!(state.queued_count(), 1);
-    }
 
     #[test]
     fn fps_divisor_round_trip() {

@@ -48,10 +48,6 @@ pub enum TrayEvent {
     SaveClip,
     /// Toggle recording on/off
     ToggleRecording,
-    /// Start recording explicitly
-    StartRecording,
-    /// Stop recording explicitly
-    StopRecording,
     /// Exit the application
     Exit,
     /// Restart the application
@@ -81,8 +77,6 @@ pub struct PlatformHandle {
     thread: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
     /// Command sender for sending commands to the platform thread
     pub command_tx: Sender<PlatformCommand>,
-    /// Recording state for tray menu display
-    recording_state: std::sync::atomic::AtomicBool,
 }
 
 impl PlatformHandle {
@@ -91,7 +85,6 @@ impl PlatformHandle {
         Self {
             thread: std::sync::Mutex::new(Some(thread)),
             command_tx,
-            recording_state: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -109,10 +102,6 @@ impl PlatformHandle {
 
     /// Update recording state for tray menu display
     pub fn update_recording_state(&self, is_recording: bool) -> Result<()> {
-        // Update local state for quick reads
-        self.recording_state
-            .store(is_recording, std::sync::atomic::Ordering::SeqCst);
-        // Notify platform thread
         self.send_command(PlatformCommand::UpdateRecordingState(is_recording))
     }
 

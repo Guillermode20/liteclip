@@ -8,31 +8,6 @@ pub const AUDIO_SAMPLE_RATE: u32 = 48_000;
 /// Number of audio channels (stereo).
 #[cfg(feature = "ffmpeg")]
 pub const AUDIO_CHANNELS: u16 = 2;
-/// Audio bitrate for AAC encoding.
-#[cfg(feature = "ffmpeg")]
-pub const AUDIO_BITRATE: &str = "192k";
-
-/// Checks if the data appears to be H.264 format.
-///
-/// # Arguments
-///
-/// * `data` - Byte slice to check.
-///
-/// # Returns
-///
-/// `true` if the data appears to be H.264 encoded.
-pub fn is_h264_format(data: &[u8]) -> bool {
-    if data.len() < 4 {
-        return false;
-    }
-    if data.len() >= 4 && data[0] == 0x00 && data[1] == 0x00 && data[2] == 0x00 && data[3] == 0x01 {
-        return true;
-    }
-    if data.len() >= 3 && data[0] == 0x00 && data[1] == 0x00 && data[2] == 0x01 {
-        return true;
-    }
-    matches!(h264_nal_type(data), Some(1..=23))
-}
 
 /// Extracts the H.264 NAL unit type from byte data.
 ///
@@ -138,7 +113,7 @@ pub fn calculate_clip_start_pts(
 /// # Returns
 ///
 /// Filename string in format "YYYY-MM-DD_HH-MM-SSS.mp4".
-pub fn generate_output_filename() -> String {
+fn generate_output_filename() -> String {
     let timestamp = chrono::Local::now();
     format!("{}.mp4", timestamp.format("%Y-%m-%d_%H-%M-%S_%3f"))
 }

@@ -51,5 +51,5 @@ pub use functions::{
     calculate_clip_start_pts, generate_output_path, generate_thumbnail, h264_nal_type,
     hevc_nal_type,
 };
-pub use saver::{spawn_clip_saver, spawn_clip_saver_with_defaults};
+pub use saver::spawn_clip_saver;
 pub use types::{Muxer, MuxerConfig};

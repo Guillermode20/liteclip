@@ -39,16 +39,8 @@ impl SharedReplayBuffer {
         self.inner.clear();
     }
 
-    pub fn soft_clear(&self) {
-        self.inner.soft_clear();
-    }
-
     pub fn stats(&self) -> BufferStats {
         self.inner.stats()
-    }
-
-    pub fn is_full(&self) -> bool {
-        self.inner.is_full()
     }
 
     pub fn oldest_pts(&self) -> Option<i64> {

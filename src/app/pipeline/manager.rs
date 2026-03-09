@@ -70,7 +70,6 @@ impl RecordingPipeline {
             let crate::encode::EncoderHandle {
                 thread,
                 frame_tx,
-                packet_rx: _,
                 health_rx: _,
                 effective_config: _,
             } = handle;
@@ -149,7 +148,6 @@ impl RecordingPipeline {
             let crate::encode::EncoderHandle {
                 thread,
                 frame_tx,
-                packet_rx: _,
                 health_rx: _,
                 effective_config: _,
             } = handle;
@@ -229,7 +227,6 @@ impl Drop for RecordingPipeline {
                 let crate::encode::EncoderHandle {
                     thread,
                     frame_tx,
-                    packet_rx: _,
                     health_rx: _,
                     effective_config: _,
                 } = handle;

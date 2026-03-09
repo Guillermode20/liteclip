@@ -375,12 +375,10 @@ pub fn spawn_encoder_with_receiver(
             debug!("Encoder thread stopped");
             Ok(())
         })?;
-    let (_, dummy_packet_rx) = bounded(1);
     let (dummy_frame_tx, _) = bounded(1);
     let handle = EncoderHandle {
         thread,
         frame_tx: dummy_frame_tx,
-        packet_rx: dummy_packet_rx,
         health_rx,
         effective_config,
     };

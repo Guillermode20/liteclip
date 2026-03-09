@@ -5,7 +5,6 @@
 use super::types::{EncoderType, OverlayPosition, QualityPreset, RateControl, Resolution};
 
 pub const MAX_FRAMERATE: u32 = 240;
-pub const CURRENT_CONFIG_VERSION: u32 = 1;
 pub const MIN_MEMORY_LIMIT_MB: u32 = 64;
 pub const MAX_MEMORY_LIMIT_MB: u32 = 16_384;
 pub const LEGACY_DEFAULT_MEMORY_LIMIT_MB: u32 = 2048;
@@ -107,7 +106,7 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.general.replay_duration_secs, 30);
         assert_eq!(config.video.framerate, 60);
-        assert_eq!(config.video.bitrate_mbps, 10);
+        assert_eq!(config.video.bitrate_mbps, 25);
         assert_eq!(config.video.quality_preset, QualityPreset::Performance);
         assert_eq!(config.video.rate_control, RateControl::Vbr);
         assert_eq!(config.video.quality_value, None);

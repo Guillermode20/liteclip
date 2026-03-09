@@ -28,7 +28,7 @@ use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIOutput1, IDXGIResource, DXGI_ERROR_ACCESS_DENIED,
     DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_INVALID_CALL, DXGI_ERROR_NON_COMPOSITED_UI,
     DXGI_ERROR_NOT_CURRENTLY_AVAILABLE, DXGI_ERROR_UNSUPPORTED, DXGI_ERROR_WAIT_TIMEOUT,
-    DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTPUT_DESC,
+    DXGI_OUTDUPL_FRAME_INFO,
 };
 use windows::Win32::System::Performance::QueryPerformanceCounter;
 use windows_core::Interface;
@@ -75,8 +75,6 @@ pub(super) struct DxgiCaptureState {
     pub(super) d3d_device: ID3D11Device,
     pub(super) d3d_context: ID3D11DeviceContext,
     pub(super) duplication: windows::Win32::Graphics::Dxgi::IDXGIOutputDuplication,
-    #[allow(dead_code)]
-    pub(super) output_desc: DXGI_OUTPUT_DESC,
     pub(super) staging_texture: Option<ID3D11Texture2D>,
     pub(super) frame_width: u32,
     pub(super) frame_height: u32,
@@ -415,7 +413,6 @@ impl DxgiCaptureState {
                 d3d_device,
                 d3d_context,
                 duplication,
-                output_desc,
                 staging_texture: None,
                 frame_width,
                 frame_height,
@@ -984,7 +981,6 @@ impl DxgiCapture {
         let mut adaptive_adjust_tick = Instant::now();
         let mut pressure_high_streak = 0u32;
         let mut pressure_low_streak = 0u32;
-        let mut _adaptive_level_changes = 0u64;
         // Use GPU scaling if target resolution is provided
         let mut state = match target_resolution {
             Some(res) => match Self::init_capture_with_target(config.output_index, res) {
@@ -1173,7 +1169,6 @@ impl DxgiCapture {
                     if fps_divisor < 3 {
                         fps_divisor += 1;
                         backpressure.set_fps_divisor(fps_divisor);
-                        _adaptive_level_changes += 1;
                         warn!(
                             "Adaptive throttling increased: fps_divisor={} queue={}/{}",
                             fps_divisor, queue_len, queue_cap
@@ -1185,7 +1180,6 @@ impl DxgiCapture {
                     if pressure_high_streak >= 2 && fps_divisor < 3 {
                         fps_divisor += 1;
                         backpressure.set_fps_divisor(fps_divisor);
-                        _adaptive_level_changes += 1;
                         pressure_high_streak = 0;
                         warn!(
                             "Adaptive throttling increased: fps_divisor={} queue={}/{}",
@@ -1198,7 +1192,6 @@ impl DxgiCapture {
                     if pressure_low_streak >= 3 && fps_divisor > 0 {
                         fps_divisor -= 1;
                         backpressure.set_fps_divisor(fps_divisor);
-                        _adaptive_level_changes += 1;
                         pressure_low_streak = 0;
                         info!(
                             "Adaptive throttling reduced: fps_divisor={} queue={}/{}",

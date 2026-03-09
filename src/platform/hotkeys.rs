@@ -147,7 +147,7 @@ fn register_single_hotkey(hwnd: HWND, id: i32, hotkey_str: &str) -> Result<()> {
 /// Unregister a single hotkey
 ///
 /// Calls Win32 UnregisterHotKey for the given hotkey ID
-pub fn unregister_hotkey(hwnd: HWND, id: i32) -> Result<()> {
+fn unregister_hotkey(hwnd: HWND, id: i32) -> Result<()> {
     unsafe {
         UnregisterHotKey(hwnd, id)
             .ok()

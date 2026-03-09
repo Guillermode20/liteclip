@@ -1,10 +1,9 @@
 use crate::{
-    app::{ClipManager, RecordingLifecycle, RecordingPipeline},
-    buffer::{BufferStats, ReplayBuffer},
+    app::RecordingPipeline,
+    buffer::ReplayBuffer,
     config::Config,
 };
 use anyhow::Result;
-use std::path::PathBuf;
 use tracing::{error, info, warn};
 
 /// Application state manager.
@@ -98,23 +97,6 @@ impl AppState {
         self.pipeline.enforce_health().await
     }
 
-    /// Saves the current replay buffer to disk as an MP4 file.
-    ///
-    /// # Arguments
-    ///
-    /// * `game_name` - Optional game name for organizing output folder.
-    ///
-    /// # Returns
-    ///
-    /// Path to the saved clip file.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if saving fails.
-    pub async fn save_clip(&self, game_name: Option<&str>) -> Result<PathBuf> {
-        ClipManager::save_clip(&self.config, &self.buffer, game_name).await
-    }
-
     /// Gets the context needed for clip saving.
     ///
     /// Returns a tuple of (config, buffer, notifications_enabled) that can
@@ -134,15 +116,6 @@ impl AppState {
         )
     }
 
-    /// Gets current buffer statistics.
-    ///
-    /// # Returns
-    ///
-    /// BufferStats with duration, memory usage, packet count, etc.
-    pub fn buffer_stats(&self) -> BufferStats {
-        self.buffer.stats()
-    }
-
     /// Checks if recording is currently active.
     ///
     /// # Returns
@@ -150,88 +123,6 @@ impl AppState {
     /// `true` if the recording pipeline is running.
     pub fn is_recording(&self) -> bool {
         self.pipeline.is_recording()
-    }
-
-    /// Gets the current lifecycle state of the recording pipeline.
-    ///
-    /// # Returns
-    ///
-    /// The current [`RecordingLifecycle`] state.
-    pub fn lifecycle(&self) -> RecordingLifecycle {
-        self.pipeline.lifecycle()
-    }
-
-    /// Handles a hotkey action.
-    ///
-    /// # Arguments
-    ///
-    /// * `action` - The hotkey action that was triggered.
-    pub fn handle_hotkey(&mut self, action: crate::platform::HotkeyAction) {
-        match action {
-            crate::platform::HotkeyAction::SaveClip => {
-                info!("Hotkey: SaveClip");
-            }
-            crate::platform::HotkeyAction::ToggleRecording => {
-                info!("Hotkey: ToggleRecording");
-            }
-            _ => {}
-        }
-    }
-
-    /// Applies runtime configuration changes that don't require pipeline restart.
-    ///
-    /// Settings like volume changes take effect immediately. Settings that
-    /// require restart (like capture device changes) are logged as warnings.
-    ///
-    /// # Arguments
-    ///
-    /// * `new_config` - The new configuration to apply.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if configuration is invalid.
-    pub fn apply_runtime_config(&mut self, new_config: &Config) -> Result<()> {
-        info!("Applying runtime configuration changes...");
-
-        if self.config.audio.system_volume != new_config.audio.system_volume {
-            info!(
-                "Audio: System volume changed from {}% to {}%",
-                self.config.audio.system_volume, new_config.audio.system_volume
-            );
-        }
-
-        if self.config.audio.mic_volume != new_config.audio.mic_volume {
-            info!(
-                "Audio: Mic volume changed from {}% to {}%",
-                self.config.audio.mic_volume, new_config.audio.mic_volume
-            );
-        }
-
-        if self.config.audio.capture_system != new_config.audio.capture_system {
-            warn!(
-                "Audio: System capture toggle changed ({} -> {}), requires restart",
-                self.config.audio.capture_system, new_config.audio.capture_system
-            );
-        }
-
-        if self.config.audio.capture_mic != new_config.audio.capture_mic {
-            warn!(
-                "Audio: Mic capture toggle changed ({} -> {}), requires restart",
-                self.config.audio.capture_mic, new_config.audio.capture_mic
-            );
-        }
-
-        if self.config.general.replay_duration_secs != new_config.general.replay_duration_secs {
-            info!(
-                "Buffer: Replay duration changed from {}s to {}s (effective on next buffer creation)",
-                self.config.general.replay_duration_secs, new_config.general.replay_duration_secs
-            );
-        }
-
-        self.config = new_config.clone();
-
-        info!("Runtime configuration changes applied successfully");
-        Ok(())
     }
 
     /// Applies configuration changes, restarting pipeline if needed.
@@ -304,14 +195,5 @@ impl AppState {
     /// Reference to the configuration.
     pub fn config(&self) -> &Config {
         &self.config
-    }
-
-    /// Gets a mutable reference to the current configuration.
-    ///
-    /// # Returns
-    ///
-    /// Mutable reference to the configuration.
-    pub fn config_mut(&mut self) -> &mut Config {
-        &mut self.config
     }
 }

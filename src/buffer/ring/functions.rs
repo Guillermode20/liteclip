@@ -127,46 +127,6 @@ mod tests {
     }
 
     #[test]
-    fn test_soft_clear_clears_all_state() {
-        let buffer = LockFreeReplayBuffer::new(&make_config(120, 512)).unwrap();
-
-        for i in 0..10 {
-            let is_keyframe = i % 3 == 0;
-            buffer.push(create_test_packet(i * 1_000_000, is_keyframe, 1024));
-        }
-
-        let stats_before = buffer.stats();
-        assert_eq!(stats_before.packet_count, 10);
-        assert!(
-            stats_before.keyframe_count > 0,
-            "Should have keyframes before soft clear"
-        );
-
-        // Soft clear should clear all state including keyframe index
-        buffer.soft_clear();
-
-        let stats_after = buffer.stats();
-        assert_eq!(stats_after.packet_count, 0, "Packets should be cleared");
-        assert_eq!(stats_after.total_bytes, 0, "Bytes should be cleared");
-        assert_eq!(
-            stats_after.keyframe_count, 0,
-            "Keyframe index should be cleared to prevent stale indices"
-        );
-
-        // Add more packets and verify keyframe tracking works from fresh state
-        for i in 10..20 {
-            let is_keyframe = i % 3 == 0;
-            buffer.push(create_test_packet(i * 1_000_000, is_keyframe, 1024));
-        }
-
-        let stats_final = buffer.stats();
-        assert!(
-            stats_final.keyframe_count > 0,
-            "Should have keyframes after adding new packets"
-        );
-    }
-
-    #[test]
     fn test_eviction_keyframe_index_correctness() {
         let buffer = LockFreeReplayBuffer::new(&make_config(120, 10)).unwrap();
         let mut last_keyframe_pts = 0i64;
@@ -305,7 +265,7 @@ mod tests {
         buffer.push(create_hevc_pps_packet(2_000_000));
         buffer.push(create_hevc_idr_packet(3_000_000));
 
-        buffer.soft_clear();
+        buffer.clear();
 
         buffer.push(create_hevc_idr_packet(4_000_000));
 
@@ -332,14 +292,14 @@ mod tests {
     }
 
     #[test]
-    fn test_soft_clear_preserves_hevc_parameter_sets() {
+    fn test_clear_preserves_hevc_parameter_sets() {
         let buffer = LockFreeReplayBuffer::new(&make_config(120, 512)).unwrap();
 
         buffer.push(create_hevc_vps_packet(0));
         buffer.push(create_hevc_sps_packet(1_000_000));
         buffer.push(create_hevc_pps_packet(2_000_000));
 
-        buffer.soft_clear();
+        buffer.clear();
 
         assert_eq!(buffer.stats().packet_count, 0);
         assert_eq!(buffer.stats().keyframe_count, 0);
