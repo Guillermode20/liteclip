@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "dgSpecHash": "4w0LE2y5NCc=",
+  "success": true,
+  "projectFilePath": "C:\\Coding\\liteclip-recorder\\installer\\LiteClipReplay.wixproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\willi\\.nuget\\packages\\wixtoolset.ui.wixext\\4.0.0\\wixtoolset.ui.wixext.4.0.0.nupkg.sha512"
+  ],
+  "logs": []
+}

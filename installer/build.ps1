@@ -9,8 +9,19 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 Push-Location $PSScriptRoot
 
+$releaseDir = Resolve-Path "..\target\release"
+$appExe = Join-Path $releaseDir "liteclip-replay.exe"
+$outputDir = Join-Path $PSScriptRoot "output"
+$portableRoot = Join-Path $outputDir "portable"
+$portableDir = Join-Path $portableRoot "LiteClipReplay-portable"
+$portableZip = Join-Path $portableRoot "LiteClipReplay-portable.zip"
+
 Write-Host "1) Building Rust release (ffmpeg feature)"
 cargo build --release --features ffmpeg
+
+if (-not (Test-Path $appExe)) {
+  throw "Release executable not found at $appExe"
+}
 
 # Check for FFmpeg DLLs (required for native ffmpeg-next linking)
 if (-not (Test-Path "..\ffmpeg\bin\avcodec*.dll")) {
@@ -43,11 +54,35 @@ if (Test-Path $msi) {
   Write-Error "MSI not found at $msi"
 }
 
+Write-Host "4) Creating portable build"
+New-Item -ItemType Directory -Force -Path $portableRoot | Out-Null
+if (Test-Path $portableDir) {
+  Remove-Item -Recurse -Force $portableDir
+}
+New-Item -ItemType Directory -Force -Path $portableDir | Out-Null
+
+Copy-Item $appExe -Destination $portableDir
+Get-ChildItem -Path $releaseDir -Filter "*.dll" | ForEach-Object {
+  Copy-Item $_.FullName -Destination $portableDir
+}
+
+if (Test-Path $portableZip) {
+  Remove-Item -Force $portableZip
+}
+Compress-Archive -Path (Join-Path $portableDir '*') -DestinationPath $portableZip -CompressionLevel Optimal
+
+if (-not (Test-Path $portableZip)) {
+  throw "Portable zip not found at $portableZip"
+}
+
+Write-Host "Portable directory produced: $portableDir"
+Write-Host "Portable zip produced: $portableZip"
+
 if ($Sign) {
   if (-not $env:SIGN_CERT_PATH) { Throw "SIGN_CERT_PATH environment variable required to sign" }
   Write-Host "Signing MSI..."
   & signtool sign /f $env:SIGN_CERT_PATH /p $env:SIGN_CERT_PASS /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $msi
 }
 
-Write-Host "Build complete - outputs are in: $PSScriptRoot\output"
+Write-Host "Build complete - outputs are in: $outputDir"
 Pop-Location

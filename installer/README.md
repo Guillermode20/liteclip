@@ -9,7 +9,7 @@ This folder contains a WiX Toolset v4 installer project for LiteClip Replay.
 - `Bundle.wxs` — bootstrapper (Burn) stub chaining prerequisites + MSI
 - `License.rtf` — license placeholder (MIT)
 - `en-US.wxl`, `Variables.wxs` — localization / variables
-- `build.ps1`, `build.cmd` — build scripts that run `cargo` then MSBuild
+- `build.ps1`, `build.cmd` — build scripts that run `cargo`, build the MSI, and create a portable package
 
 ## Build (local)
 1. Ensure WiX Toolset v4 and dotnet SDK are available (WiX MSBuild package is referenced by the project).
@@ -20,6 +20,11 @@ This folder contains a WiX Toolset v4 installer project for LiteClip Replay.
 
 Or use the convenience script in `installer/`:
    powershell -ExecutionPolicy Bypass -File installer\build.ps1
+
+This produces:
+- `installer\output\en-US\LiteClipReplay.msi`
+- `installer\output\portable\LiteClipReplay-portable\`
+- `installer\output\portable\LiteClipReplay-portable.zip`
 
 ## CI / Versioning
 - Override `ProductVersion` via MSBuild `/p:ProductVersion=1.2.3.0`.

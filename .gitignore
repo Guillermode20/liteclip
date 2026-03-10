@@ -31,3 +31,7 @@ ffmpeg_dev/
 
 .kilocode/
 .opencode/
+
+# Installer build outputs
+installer/output/
+installer/Generated/
