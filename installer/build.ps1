@@ -37,7 +37,7 @@ dotnet restore .\LiteClipReplay.wixproj
 
 Write-Host "3) Building WiX installer project"
 $msbuildStarted = Get-Date
-dotnet msbuild .\LiteClipReplay.wixproj /t:Build /p:Configuration=$Configuration /p:Platform=$Platform /p:ProductVersion=$ProductVersion
+dotnet msbuild .\LiteClipReplay.wixproj /t:Rebuild /p:Configuration=$Configuration /p:Platform=$Platform /p:ProductVersion=$ProductVersion
 if ($LASTEXITCODE -ne 0) {
   throw "dotnet msbuild failed with exit code $LASTEXITCODE"
 }
@@ -62,8 +62,21 @@ if (Test-Path $portableDir) {
 New-Item -ItemType Directory -Force -Path $portableDir | Out-Null
 
 Copy-Item $appExe -Destination $portableDir
-Get-ChildItem -Path $releaseDir -Filter "*.dll" | ForEach-Object {
-  Copy-Item $_.FullName -Destination $portableDir
+
+$requiredDlls = @(
+  "avcodec-61.dll",
+  "avformat-61.dll",
+  "avutil-59.dll",
+  "swresample-5.dll",
+  "swscale-8.dll"
+)
+foreach ($dll in $requiredDlls) {
+  $dllPath = Join-Path $releaseDir $dll
+  if (Test-Path $dllPath) {
+    Copy-Item $dllPath -Destination $portableDir
+  } else {
+    Write-Host "Warning: Required DLL not found: $dll"
+  }
 }
 
 if (Test-Path $portableZip) {

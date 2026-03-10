@@ -5,7 +5,7 @@ This folder contains a WiX Toolset v4 installer project for LiteClip Replay.
 ## What is included
 - `LiteClipReplay.wixproj` — MSBuild-based WiX v4 project (x64, Debug/Release support)
 - `Product.wxs`, `Directories.wxs`, `Components.wxs`, `Features.wxs`, `Shortcuts.wxs`, `Registry.wxs`, `UI.wxs` — WiX fragments
-- `Harvest.targets` — runs `heat.exe` to harvest optional `ffmpeg/bin/*` files into WiX fragments
+- `Harvest.targets` — generates WiX fragments for required FFmpeg DLLs from `ffmpeg_dev/sdk/bin`
 - `Bundle.wxs` — bootstrapper (Burn) stub chaining prerequisites + MSI
 - `License.rtf` — license placeholder (MIT)
 - `en-US.wxl`, `Variables.wxs` — localization / variables
@@ -28,12 +28,12 @@ This produces:
 
 ## CI / Versioning
 - Override `ProductVersion` via MSBuild `/p:ProductVersion=1.2.3.0`.
-- `Harvest.targets` uses `heat.exe` to gather files from `target/release` and `ffmpeg/bin`.
+- `Harvest.targets` generates WiX fragments for the required FFmpeg DLLs from `ffmpeg_dev/sdk/bin`.
 
 ## Notes & validation checklist
 - All component GUIDs are explicit and unique.
 - Installer scope is per-machine only.
-- FFmpeg payload: DLLs are harvested from `..\ffmpeg\bin\` for native `ffmpeg-next` linking. Required DLLs include avcodec, avformat, avutil, swscale, swresample, etc.
+- FFmpeg payload: Only the required DLLs are included (avcodec-61, avformat-61, avutil-59, swresample-5, swscale-8) from `ffmpeg_dev/sdk/bin/` for native `ffmpeg-next` linking.
 - File association `.lcr` is registered per-machine.
 - Desktop shortcut is optional (feature-controlled).
 
