@@ -28,17 +28,10 @@ pub fn render_overlay_direct(
 
     ctx.request_repaint();
 
-    // Use a fixed-size window to ensure the background doesn't extend beyond the popup
-    let popup_width = 180.0;
     let frame = egui::Frame::default()
-        .fill(egui::Color32::from_rgba_premultiplied(
-            30,
-            30,
-            35,
-            (220.0 * alpha) as u8,
-        ))
+        .fill(egui::Color32::TRANSPARENT)
         .corner_radius(egui::CornerRadius::same(6))
-        .inner_margin(egui::Margin::symmetric(10, 6))
+        .inner_margin(egui::Margin::symmetric(20, 6))
         .stroke(egui::Stroke::new(
             1.0,
             egui::Color32::from_rgba_premultiplied(70, 180, 70, (180.0 * alpha) as u8),
@@ -48,17 +41,20 @@ pub fn render_overlay_direct(
         .id(egui::Id::new("clip_saved_overlay_window"))
         .title_bar(false)
         .frame(frame)
-        .fixed_size(egui::vec2(popup_width, 0.0))
         .collapsible(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
         .show(ctx, |ui| {
-            ui.horizontal_centered(|ui| {
-                ui.label(egui::RichText::new("✓").size(14.0).color(
+            ui.spacing_mut().item_spacing.x = 4.0;
+            ui.spacing_mut().item_spacing.y = 2.0;
+            
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("✓").size(13.0).color(
                     egui::Color32::from_rgba_premultiplied(70, 200, 70, (255.0 * alpha) as u8),
                 ));
 
                 ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 1.0;
                     ui.label(egui::RichText::new("Clip Saved").size(11.0).strong().color(
                         egui::Color32::from_rgba_premultiplied(
                             230,
