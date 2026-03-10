@@ -1,5 +1,5 @@
 use super::{
-    functions::{h264_nal_type, hevc_nal_type},
+    functions::{ffmpeg_executable_path, h264_nal_type, hevc_nal_type, remux_fragmented_mp4},
     mp4::FfmpegMuxer,
 };
 use crate::encode::{EncodedPacket, StreamType};
@@ -21,16 +21,10 @@ pub struct Muxer {
     #[cfg(not(feature = "ffmpeg"))]
     #[allow(dead_code)]
     stub_mode: bool,
-    /// Collected video packets for muxing.
-    #[cfg(feature = "ffmpeg")]
-    video_packets: Vec<EncodedPacket>,
-    /// Collected audio packets for muxing.
-    #[cfg(feature = "ffmpeg")]
-    audio_packets: Vec<EncodedPacket>,
 }
 
 impl Muxer {
-    fn detect_video_codec(video_packets: &[EncodedPacket], fallback: &str) -> String {
+    fn detect_video_codec(video_packets: &[&EncodedPacket], fallback: &str) -> String {
         let mut saw_h264_parameter_sets = false;
         let mut saw_hevc_parameter_sets = false;
 
@@ -72,8 +66,6 @@ impl Muxer {
             Ok(Self {
                 output_path: path,
                 config: config.clone(),
-                video_packets: Vec::new(),
-                audio_packets: Vec::new(),
             })
         }
         #[cfg(not(feature = "ffmpeg"))]
@@ -94,8 +86,8 @@ impl Muxer {
         }
         #[cfg(feature = "ffmpeg")]
         {
-            self.video_packets.push(packet.clone());
-            Ok(())
+            let _ = packet;
+            bail!("Incremental packet buffering is no longer supported; use Muxer::mux_clip")
         }
         #[cfg(not(feature = "ffmpeg"))]
         {
@@ -112,8 +104,8 @@ impl Muxer {
     pub fn write_audio_packet(&mut self, packet: &EncodedPacket) -> Result<()> {
         #[cfg(feature = "ffmpeg")]
         {
-            self.audio_packets.push(packet.clone());
-            Ok(())
+            let _ = packet;
+            bail!("Incremental packet buffering is no longer supported; use Muxer::mux_clip")
         }
         #[cfg(not(feature = "ffmpeg"))]
         {
@@ -131,7 +123,7 @@ impl Muxer {
         info!("Finalizing MP4: {:?}", self.output_path);
         #[cfg(feature = "ffmpeg")]
         {
-            self.finalize_ffmpeg()
+            bail!("No packet set provided for MP4 generation")
         }
         #[cfg(not(feature = "ffmpeg"))]
         {
@@ -141,37 +133,202 @@ impl Muxer {
     }
 
     #[cfg(feature = "ffmpeg")]
-    fn finalize_ffmpeg(mut self) -> Result<PathBuf> {
-        if self.video_packets.is_empty() {
+    pub fn mux_clip(
+        output_path: &Path,
+        config: &MuxerConfig,
+        packets: &[EncodedPacket],
+    ) -> Result<PathBuf> {
+        let mut raw_video_packets: Vec<&EncodedPacket> = packets
+            .iter()
+            .filter(|packet| matches!(packet.stream, StreamType::Video))
+            .collect();
+        if raw_video_packets.is_empty() {
             bail!("No video packets available for MP4 generation");
         }
 
-        self.video_packets.sort_by_key(|packet| packet.pts);
-        self.audio_packets.sort_by_key(|packet| packet.pts);
+        let mut audio_packets: Vec<&EncodedPacket> = packets
+            .iter()
+            .filter(|packet| {
+                matches!(
+                    packet.stream,
+                    StreamType::SystemAudio | StreamType::Microphone
+                )
+            })
+            .collect();
 
-        let detected_video_codec =
-            Self::detect_video_codec(&self.video_packets, &self.config.video_codec);
-        if detected_video_codec != self.config.video_codec {
+        raw_video_packets.sort_by_key(|packet| packet.pts);
+        audio_packets.sort_by_key(|packet| packet.pts);
+
+        let normalized_video_storage = normalize_video_packets_for_mp4(&raw_video_packets);
+        let video_packets: Vec<&EncodedPacket> = normalized_video_storage.iter().collect();
+        if video_packets.is_empty() {
+            bail!("No muxable video packets available for MP4 generation");
+        }
+
+        let detected_video_codec = Self::detect_video_codec(&video_packets, &config.video_codec);
+        if detected_video_codec != config.video_codec {
             warn!(
                 "Muxer video codec override: configured={}, detected={} from buffered packets",
-                self.config.video_codec, detected_video_codec
+                config.video_codec, detected_video_codec
             );
         }
 
+        let fragmented_output_path = fragmented_output_path(output_path);
+        info!(
+            "Writing fragmented intermediate clip to {:?} before final remux",
+            fragmented_output_path
+        );
+
         let mut muxer = FfmpegMuxer::new(
-            &self.output_path,
+            &fragmented_output_path,
             &detected_video_codec,
-            self.config.width,
-            self.config.height,
-            self.config.fps,
-            &self.config,
+            config.width,
+            config.height,
+            config.fps,
+            config,
         )?;
 
-        muxer.write_packets(&self.video_packets, &self.audio_packets)?;
+        let mux_result = muxer.write_packets(&video_packets, &audio_packets);
+        drop(muxer);
 
-        info!("MP4 finalized natively: {:?}", self.output_path);
-        Ok(self.output_path)
+        let fragmented_size = fragmented_output_path
+            .metadata()
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+
+        let (video_count, audio_count) = match mux_result {
+            Ok(counts) => counts,
+            Err(err) if fragmented_size > 0 => {
+                warn!(
+                    "Fragmented MP4 trailer/finalize failed but intermediate file exists ({} bytes); attempting external remux anyway: {}",
+                    fragmented_size,
+                    err
+                );
+                (video_packets.len(), audio_packets.len())
+            }
+            Err(err) => return Err(err),
+        };
+
+        remux_fragmented_mp4(&fragmented_output_path, output_path, config.faststart).with_context(
+            || {
+                format!(
+                    "Failed to remux fragmented intermediate {:?} to final output {:?} using {:?}",
+                    fragmented_output_path,
+                    output_path,
+                    ffmpeg_executable_path()
+                )
+            },
+        )?;
+
+        if let Err(err) = std::fs::remove_file(&fragmented_output_path) {
+            warn!(
+                "Failed to remove temporary fragmented MP4 {:?}: {}",
+                fragmented_output_path, err
+            );
+        }
+
+        info!(
+            "MP4 finalized natively: {:?} ({} video packets, {} audio packets)",
+            output_path, video_count, audio_count
+        );
+        Ok(output_path.to_path_buf())
     }
+}
+
+fn normalize_video_packets_for_mp4(video_packets: &[&EncodedPacket]) -> Vec<EncodedPacket> {
+    let mut normalized = Vec::with_capacity(video_packets.len());
+    let mut pending_param_sets: Vec<&EncodedPacket> = Vec::new();
+    let mut merged_prefix_groups = 0usize;
+    let mut merged_param_set_packets = 0usize;
+    let mut dropped_param_set_packets = 0usize;
+
+    for packet in video_packets {
+        if is_parameter_set_packet(packet) {
+            pending_param_sets.push(*packet);
+            continue;
+        }
+
+        if pending_param_sets.is_empty() {
+            normalized.push((*packet).clone());
+            continue;
+        }
+
+        let same_timestamp = pending_param_sets
+            .iter()
+            .all(|param| param.pts == packet.pts && param.dts == packet.dts);
+
+        if same_timestamp {
+            let merged_len = pending_param_sets
+                .iter()
+                .map(|param| param.data.len())
+                .sum::<usize>()
+                .saturating_add(packet.data.len());
+            let mut merged_data = Vec::with_capacity(merged_len);
+            for param in &pending_param_sets {
+                merged_data.extend_from_slice(param.data.as_ref());
+            }
+            merged_data.extend_from_slice(packet.data.as_ref());
+
+            let mut merged_packet = (*packet).clone();
+            merged_packet.data = merged_data.into();
+            normalized.push(merged_packet);
+
+            merged_prefix_groups += 1;
+            merged_param_set_packets += pending_param_sets.len();
+            pending_param_sets.clear();
+        } else {
+            dropped_param_set_packets += pending_param_sets.len();
+            warn!(
+                "Dropping {} standalone parameter-set packets before video packet at pts={} because timestamps differ",
+                pending_param_sets.len(),
+                packet.pts
+            );
+            pending_param_sets.clear();
+            normalized.push((*packet).clone());
+        }
+    }
+
+    if !pending_param_sets.is_empty() {
+        dropped_param_set_packets += pending_param_sets.len();
+        warn!(
+            "Dropping {} trailing standalone parameter-set packets with no following video frame",
+            pending_param_sets.len()
+        );
+    }
+
+    if merged_param_set_packets > 0 {
+        info!(
+            "Merged {} standalone parameter-set packets into {} MP4 video samples",
+            merged_param_set_packets, merged_prefix_groups
+        );
+    }
+
+    if dropped_param_set_packets > 0 {
+        warn!(
+            "Dropped {} standalone parameter-set packets from MP4 timed samples",
+            dropped_param_set_packets
+        );
+    }
+
+    normalized
+}
+
+fn is_parameter_set_packet(packet: &EncodedPacket) -> bool {
+    if !matches!(packet.stream, StreamType::Video) {
+        return false;
+    }
+
+    let data = packet.data.as_ref();
+    matches!(h264_nal_type(data), Some(7 | 8)) || matches!(hevc_nal_type(data), Some(32 | 33 | 34))
+}
+
+fn fragmented_output_path(output_path: &Path) -> PathBuf {
+    let parent = output_path.parent().unwrap_or_else(|| Path::new("."));
+    let stem = output_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("clip");
+    parent.join(format!("{}.fragmented.mp4", stem))
 }
 
 /// Configuration for the MP4 muxer.

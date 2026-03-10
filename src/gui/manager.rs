@@ -25,6 +25,12 @@ pub fn init_gui_manager() {
 
         std::thread::spawn(move || {
             let options = eframe::NativeOptions {
+                // The GUI manager mostly hosts small settings/gallery windows and a tiny
+                // clip-saved overlay. Auto-selecting wgpu here spins up a full graphics
+                // backend on first successful save, which keeps a large amount of graphics
+                // memory resident for the rest of the session. Prefer Glow to keep this
+                // helper thread lightweight.
+                renderer: eframe::Renderer::Glow,
                 viewport: egui::ViewportBuilder::default()
                     .with_visible(false)
                     .with_active(false)

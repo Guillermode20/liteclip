@@ -18,6 +18,7 @@ pub fn spawn_clip_saver(
     save_directory: PathBuf,
 ) -> JoinHandle<Result<PathBuf>> {
     tokio::task::spawn_blocking(move || {
+        log_save_memory("start", Some(&buffer), None);
         info!(
             "Clip saver started: duration={}s, output={:?}",
             duration.as_secs(),
@@ -41,6 +42,7 @@ pub fn spawn_clip_saver(
         let mut clip_packets = buffer
             .snapshot_from(start_pts)
             .context("Failed to get packets from buffer")?;
+        log_save_memory("after snapshot", Some(&buffer), Some(&clip_packets));
 
         let video_packets: Vec<_> = clip_packets
             .iter()
@@ -111,27 +113,11 @@ pub fn spawn_clip_saver(
             warn!("No keyframes in clip range - video may not be playable");
         }
 
-        let mut muxer = Muxer::new(&output_path, &config).context("Failed to create muxer")?;
-
-        let mut video_count = 0;
-        let mut audio_count = 0;
-
-        for packet in &clip_packets {
-            match packet.stream {
-                crate::encode::StreamType::Video => {
-                    muxer
-                        .write_video_packet(packet)
-                        .context("Failed to write video packet")?;
-                    video_count += 1;
-                }
-                crate::encode::StreamType::SystemAudio | crate::encode::StreamType::Microphone => {
-                    muxer
-                        .write_audio_packet(packet)
-                        .context("Failed to write audio packet")?;
-                    audio_count += 1;
-                }
-            }
-        }
+        let video_count = clip_packets
+            .iter()
+            .filter(|packet| matches!(packet.stream, crate::encode::StreamType::Video))
+            .count();
+        let audio_count = clip_packets.len().saturating_sub(video_count);
 
         info!(
             "Prepared clip packet set: {} video packets, {} audio packets",
@@ -142,7 +128,11 @@ pub fn spawn_clip_saver(
             bail!("No video packets in selected clip range");
         }
 
-        let final_path = muxer.finalize().context("Failed to finalize MP4")?;
+        let final_path = Muxer::mux_clip(&output_path, &config, &clip_packets)
+            .context("Failed to finalize MP4")?;
+        log_save_memory("after mux", Some(&buffer), Some(&clip_packets));
+        drop(clip_packets);
+        log_save_memory("after packet release", Some(&buffer), None);
 
         info!(
             "Clip saved successfully: {:?} ({} video packets, {} audio packets, ~{} seconds)",
@@ -162,7 +152,74 @@ pub fn spawn_clip_saver(
                 warn!("Failed to generate thumbnail: {}", e);
             }
         }
+        log_save_memory("after thumbnail", Some(&buffer), None);
 
         Ok(final_path)
     })
+}
+
+fn log_save_memory(
+    stage: &str,
+    buffer: Option<&SharedReplayBuffer>,
+    clip_packets: Option<&[crate::encode::EncodedPacket]>,
+) {
+    let buffer_stats = buffer.map(SharedReplayBuffer::stats);
+    let clip_packet_count = clip_packets.map(|packets| packets.len()).unwrap_or(0);
+    let clip_packet_bytes = clip_packets
+        .map(|packets| packets.iter().map(|packet| packet.data.len()).sum::<usize>())
+        .unwrap_or(0);
+
+    if let Some((working_set_mb, private_mb)) = process_memory_mb() {
+        if let Some(stats) = buffer_stats {
+            info!(
+                "Save memory [{}]: process_working_set_mb={:.1}, process_private_mb={:.1}, buffer_mb={:.1}, buffer_packets={}, clip_packets={}, clip_packet_mb={:.1}",
+                stage,
+                working_set_mb,
+                private_mb,
+                stats.total_bytes as f64 / (1024.0 * 1024.0),
+                stats.packet_count,
+                clip_packet_count,
+                clip_packet_bytes as f64 / (1024.0 * 1024.0)
+            );
+        } else {
+            info!(
+                "Save memory [{}]: process_working_set_mb={:.1}, process_private_mb={:.1}, clip_packets={}, clip_packet_mb={:.1}",
+                stage,
+                working_set_mb,
+                private_mb,
+                clip_packet_count,
+                clip_packet_bytes as f64 / (1024.0 * 1024.0)
+            );
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn process_memory_mb() -> Option<(f64, f64)> {
+    use std::mem::size_of;
+    use windows::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS_EX};
+    use windows::Win32::System::Threading::GetCurrentProcess;
+
+    unsafe {
+        let mut counters = PROCESS_MEMORY_COUNTERS_EX::default();
+        if K32GetProcessMemoryInfo(
+            GetCurrentProcess(),
+            &mut counters as *mut _ as *mut _,
+            size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
+        )
+        .as_bool()
+        {
+            return Some((
+                counters.WorkingSetSize as f64 / (1024.0 * 1024.0),
+                counters.PrivateUsage as f64 / (1024.0 * 1024.0),
+            ));
+        }
+    }
+
+    None
+}
+
+#[cfg(not(target_os = "windows"))]
+fn process_memory_mb() -> Option<(f64, f64)> {
+    None
 }

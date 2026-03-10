@@ -2,6 +2,9 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
 /// Audio sample rate for encoded audio (48 kHz).
 #[cfg(feature = "ffmpeg")]
 pub const AUDIO_SAMPLE_RATE: u32 = 48_000;
@@ -149,6 +152,98 @@ pub fn generate_output_path(base_dir: &Path, game_name: Option<&str>) -> Result<
     Ok(output_dir.join(&filename))
 }
 
+pub fn ffmpeg_executable_path() -> PathBuf {
+    let mut candidates = Vec::new();
+
+    if let Ok(current_exe) = std::env::current_exe() {
+        if let Some(exe_dir) = current_exe.parent() {
+            candidates.push(exe_dir.join("ffmpeg.exe"));
+            if let Some(workspace_root) = exe_dir.parent().and_then(|p| p.parent()) {
+                candidates.push(
+                    workspace_root
+                        .join("ffmpeg_dev")
+                        .join("sdk")
+                        .join("bin")
+                        .join("ffmpeg.exe"),
+                );
+            }
+        }
+    }
+
+    candidates.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("ffmpeg_dev")
+            .join("sdk")
+            .join("bin")
+            .join("ffmpeg.exe"),
+    );
+
+    candidates
+        .into_iter()
+        .find(|path| path.exists())
+        .unwrap_or_else(|| PathBuf::from("ffmpeg"))
+}
+
+pub fn remux_fragmented_mp4(input_path: &Path, output_path: &Path, faststart: bool) -> Result<()> {
+    use std::process::Command;
+
+    let ffmpeg = ffmpeg_executable_path();
+    let mut args = vec![
+        "-y".to_string(),
+        "-i".to_string(),
+        input_path.to_string_lossy().into_owned(),
+        "-map".to_string(),
+        "0".to_string(),
+        "-c".to_string(),
+        "copy".to_string(),
+    ];
+
+    if faststart {
+        args.push("-movflags".to_string());
+        args.push("+faststart".to_string());
+    }
+
+    args.push(output_path.to_string_lossy().into_owned());
+
+    debug!(
+        "Remuxing fragmented MP4 {:?} -> {:?} via {:?}",
+        input_path, output_path, ffmpeg
+    );
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+
+        let status = Command::new(&ffmpeg)
+            .args(args.iter().map(|s| s.as_str()))
+            .creation_flags(CREATE_NO_WINDOW)
+            .status()
+            .with_context(|| format!("Failed to spawn ffmpeg remux process via {:?}", ffmpeg))?;
+
+        if status.success() {
+            info!("Remuxed fragmented MP4 to regular MP4: {:?}", output_path);
+            return Ok(());
+        }
+
+        anyhow::bail!("FFmpeg remux failed with status {:?}", status);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let status = Command::new(&ffmpeg)
+            .args(args.iter().map(|s| s.as_str()))
+            .status()
+            .with_context(|| format!("Failed to spawn ffmpeg remux process via {:?}", ffmpeg))?;
+
+        if status.success() {
+            info!("Remuxed fragmented MP4 to regular MP4: {:?}", output_path);
+            return Ok(());
+        }
+
+        anyhow::bail!("FFmpeg remux failed with status {:?}", status);
+    }
+}
+
 /// Generates a thumbnail for a video file using FFmpeg.
 ///
 /// The thumbnail is saved to `<save_directory>/.cache/<hash>.jpg` where the hash
@@ -181,13 +276,14 @@ pub fn generate_thumbnail(video_path: &Path, save_directory: &Path) -> Result<Pa
         video_path, thumb_path
     );
 
+    let ffmpeg = ffmpeg_executable_path();
+
     // Use FFmpeg to extract a frame at 1 second into the video
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-        let status = Command::new("ffmpeg")
+        let status = Command::new(&ffmpeg)
             .args([
                 "-y",
                 "-i",
@@ -204,7 +300,12 @@ pub fn generate_thumbnail(video_path: &Path, save_directory: &Path) -> Result<Pa
             ])
             .creation_flags(CREATE_NO_WINDOW)
             .status()
-            .context("Failed to spawn ffmpeg for thumbnail generation")?;
+            .with_context(|| {
+                format!(
+                    "Failed to spawn ffmpeg for thumbnail generation via {:?}",
+                    ffmpeg
+                )
+            })?;
 
         if status.success() {
             info!("Generated thumbnail: {:?}", thumb_path);
@@ -218,7 +319,7 @@ pub fn generate_thumbnail(video_path: &Path, save_directory: &Path) -> Result<Pa
 
     #[cfg(not(target_os = "windows"))]
     {
-        let status = Command::new("ffmpeg")
+        let status = Command::new(&ffmpeg)
             .args([
                 "-y",
                 "-i",
@@ -234,7 +335,12 @@ pub fn generate_thumbnail(video_path: &Path, save_directory: &Path) -> Result<Pa
                 &thumb_path.to_string_lossy(),
             ])
             .status()
-            .context("Failed to spawn ffmpeg for thumbnail generation")?;
+            .with_context(|| {
+                format!(
+                    "Failed to spawn ffmpeg for thumbnail generation via {:?}",
+                    ffmpeg
+                )
+            })?;
 
         if status.success() {
             info!("Generated thumbnail: {:?}", thumb_path);

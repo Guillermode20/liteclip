@@ -133,10 +133,12 @@ struct LockFreeInner {
     capacity: usize,
     mask: usize,
     write_idx: AtomicUsize,
+    /// Index of the next slot to be considered for memory-budget eviction.
+    /// Advances ahead of the natural ring wrap when total_bytes > max_memory_bytes.
+    evict_frontier: AtomicUsize,
     max_memory_bytes: usize,
     total_bytes: AtomicUsize,
     keyframe_count: AtomicUsize,
-    oldest_pts: AtomicI64,
     newest_pts: AtomicI64,
     param_cache: std::sync::Mutex<ParameterCache>,
     first_video_info: std::sync::Mutex<Option<(usize, FirstVideoKind)>>,
@@ -208,10 +210,10 @@ impl LockFreeReplayBuffer {
                 capacity,
                 mask,
                 write_idx: AtomicUsize::new(0),
+                evict_frontier: AtomicUsize::new(0),
                 max_memory_bytes,
                 total_bytes: AtomicUsize::new(0),
                 keyframe_count: AtomicUsize::new(0),
-                oldest_pts: AtomicI64::new(0),
                 newest_pts: AtomicI64::new(0),
                 param_cache: std::sync::Mutex::new(ParameterCache::default()),
                 first_video_info: std::sync::Mutex::new(None),
@@ -285,6 +287,35 @@ impl LockFreeReplayBuffer {
         }
 
         inner.newest_pts.store(packet_pts, Ordering::Release);
+
+        // Enforce memory budget: if total_bytes exceeds max_memory_bytes, proactively
+        // evict the oldest packets (those the ring would discard next anyway) until we
+        // are back under the limit.  This prevents the initial fill phase from growing
+        // RAM unboundedly when the configured bitrate generates packets larger than the
+        // packet-count estimate assumed when sizing the ring capacity.
+        if inner.max_memory_bytes > 0 {
+            while inner.total_bytes.load(Ordering::Relaxed) > inner.max_memory_bytes {
+                let evict = inner.evict_frontier.load(Ordering::Relaxed);
+                // Never evict the packet we just wrote (at index `write_idx`).
+                if evict >= write_idx {
+                    break;
+                }
+                let evict_slot_idx = evict & inner.mask;
+                let slot = &inner.slots[evict_slot_idx];
+                {
+                    let mut guard = slot.packet.lock().unwrap();
+                    if let Some(old) = guard.take() {
+                        inner
+                            .total_bytes
+                            .fetch_sub(old.data.len(), Ordering::Relaxed);
+                        if old.is_keyframe {
+                            inner.keyframe_count.fetch_sub(1, Ordering::Relaxed);
+                        }
+                    }
+                }
+                inner.evict_frontier.fetch_add(1, Ordering::Release);
+            }
+        }
     }
 
     fn cache_parameter_sets(&self, packet: &EncodedPacket) {
@@ -402,7 +433,8 @@ impl LockFreeReplayBuffer {
         }
 
         let capacity = inner.capacity;
-        let start_idx = write_idx.saturating_sub(capacity);
+        let evict_frontier = inner.evict_frontier.load(Ordering::Acquire);
+        let start_idx = write_idx.saturating_sub(capacity).max(evict_frontier);
         let count = write_idx - start_idx;
 
         let mut result = Vec::with_capacity(count);
@@ -523,49 +555,74 @@ impl LockFreeReplayBuffer {
     ///
     /// Safe to call from multiple consumer threads.
     pub fn snapshot_from(&self, start_pts: i64) -> Result<Vec<EncodedPacket>> {
-        let all_packets = self.snapshot()?;
+        let inner = &self.inner;
+        let write_idx = inner.write_idx.load(Ordering::Acquire);
 
-        if all_packets.is_empty() {
+        if write_idx == 0 {
             return Ok(vec![]);
         }
 
-        let video_count = all_packets
-            .iter()
-            .filter(|p| matches!(p.stream, StreamType::Video))
-            .count();
-        let audio_count = all_packets.len() - video_count;
-        let keyframe_count = all_packets.iter().filter(|p| p.is_keyframe).count();
+        let first_idx = write_idx.saturating_sub(inner.capacity);
+        let evict_frontier = inner.evict_frontier.load(Ordering::Acquire);
+        let first_idx = first_idx.max(evict_frontier);
+        let mut first_keyframe_at_or_after = None;
+        let mut last_keyframe_at_or_before = None;
+        let mut packet_count = 0usize;
+        let mut video_count = 0usize;
+        let mut keyframe_count = 0usize;
+
+        for i in first_idx..write_idx {
+            let slot_idx = i & inner.mask;
+            let slot = &inner.slots[slot_idx];
+
+            if let Ok(packet_guard) = slot.packet.try_lock() {
+                if let Some(ref packet) = *packet_guard {
+                    packet_count += 1;
+                    if matches!(packet.stream, StreamType::Video) {
+                        video_count += 1;
+                    }
+                    if packet.is_keyframe {
+                        keyframe_count += 1;
+                        if packet.pts >= start_pts && first_keyframe_at_or_after.is_none() {
+                            first_keyframe_at_or_after = Some(i);
+                        }
+                        if packet.pts <= start_pts {
+                            last_keyframe_at_or_before = Some(i);
+                        }
+                    }
+                }
+            }
+        }
+
+        let audio_count = packet_count.saturating_sub(video_count);
         debug!(
             "snapshot_from: all_packets={} ({} video, {} audio, {} keyframes), start_pts={}",
-            all_packets.len(),
-            video_count,
-            audio_count,
-            keyframe_count,
-            start_pts
+            packet_count, video_count, audio_count, keyframe_count, start_pts
         );
 
-        let keyframe_idx = all_packets
-            .iter()
-            .position(|p| p.is_keyframe && p.pts >= start_pts)
-            .or_else(|| {
-                all_packets
-                    .iter()
-                    .enumerate()
-                    .rev()
-                    .find(|(_, p)| p.is_keyframe && p.pts <= start_pts)
-                    .map(|(i, _)| i)
-            });
+        let start_idx = first_keyframe_at_or_after
+            .or(last_keyframe_at_or_before)
+            .unwrap_or(first_idx);
 
-        let start_idx = keyframe_idx.unwrap_or(0);
-
-        if start_idx > 0 {
+        if start_idx > first_idx {
             debug!(
                 "snapshot_from: skipping {} packets to reach keyframe at idx {}",
-                start_idx, start_idx
+                start_idx - first_idx,
+                start_idx
             );
         }
 
-        let result: Vec<EncodedPacket> = all_packets.into_iter().skip(start_idx).collect();
+        let mut result = Vec::with_capacity(write_idx.saturating_sub(start_idx));
+        for i in start_idx..write_idx {
+            let slot_idx = i & inner.mask;
+            let slot = &inner.slots[slot_idx];
+
+            if let Ok(packet_guard) = slot.packet.try_lock() {
+                if let Some(ref packet) = *packet_guard {
+                    result.push(packet.clone());
+                }
+            }
+        }
 
         let result_video = result
             .iter()
@@ -698,6 +755,7 @@ impl LockFreeReplayBuffer {
         }
 
         inner.write_idx.store(0, Ordering::Release);
+        inner.evict_frontier.store(0, Ordering::Release);
         inner.total_bytes.store(0, Ordering::Release);
         inner.keyframe_count.store(0, Ordering::Release);
         *inner.first_video_info.lock().unwrap() = None;
@@ -728,6 +786,8 @@ impl LockFreeReplayBuffer {
         let write_idx = inner.write_idx.load(Ordering::Acquire);
         let total_bytes = inner.total_bytes.load(Ordering::Relaxed);
         let keyframe_count = inner.keyframe_count.load(Ordering::Relaxed);
+        let evict_frontier = inner.evict_frontier.load(Ordering::Acquire);
+        let actual_start = write_idx.saturating_sub(inner.capacity).max(evict_frontier);
 
         let memory_usage_percent = if inner.max_memory_bytes > 0 {
             (total_bytes as f32 / inner.max_memory_bytes as f32) * 100.0
@@ -736,15 +796,25 @@ impl LockFreeReplayBuffer {
         };
 
         let duration_secs = if write_idx >= 2 {
-            let oldest = inner.oldest_pts.load(Ordering::Relaxed);
+            // Read actual oldest packet's PTS from its slot (evict_frontier aware).
+            let oldest_slot = &inner.slots[actual_start & inner.mask];
+            let oldest_pts = if let Ok(g) = oldest_slot.packet.try_lock() {
+                g.as_ref().map(|p| p.pts).unwrap_or(0)
+            } else {
+                0
+            };
             let newest = inner.newest_pts.load(Ordering::Relaxed);
             let qpc_freq = qpc_frequency() as f64;
-            ((newest - oldest) as f64) / qpc_freq
+            if newest > oldest_pts && qpc_freq > 0.0 {
+                (newest - oldest_pts) as f64 / qpc_freq
+            } else {
+                0.0
+            }
         } else {
             0.0
         };
 
-        let packet_count = write_idx.min(inner.capacity);
+        let packet_count = write_idx.saturating_sub(actual_start);
 
         BufferStats {
             duration_secs,
@@ -763,6 +833,8 @@ impl LockFreeReplayBuffer {
         }
 
         let oldest_idx = write_idx.saturating_sub(inner.capacity);
+        let evict_frontier = inner.evict_frontier.load(Ordering::Acquire);
+        let oldest_idx = oldest_idx.max(evict_frontier);
         let slot_idx = oldest_idx & inner.mask;
         let slot = &inner.slots[slot_idx];
 
@@ -799,6 +871,8 @@ impl LockFreeReplayBuffer {
         }
 
         let start_idx = write_idx.saturating_sub(inner.capacity);
+        let evict_frontier = inner.evict_frontier.load(Ordering::Acquire);
+        let start_idx = start_idx.max(evict_frontier);
         let slot_idx = start_idx & inner.mask;
         let slot = &inner.slots[slot_idx];
 
