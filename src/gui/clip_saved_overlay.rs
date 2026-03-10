@@ -12,6 +12,7 @@ pub fn render_overlay_direct(
     filename: &Option<String>,
     shown_at: Instant,
     close_after_secs: f32,
+    transparent_background: bool,
 ) {
     let elapsed = shown_at.elapsed().as_secs_f32();
 
@@ -31,6 +32,11 @@ pub fn render_overlay_direct(
     let shadow_color = with_alpha(egui::Color32::from_rgb(0, 0, 0), alpha * 0.28);
     let border_color = with_alpha(egui::Color32::from_rgb(58, 67, 82), alpha * 0.92);
     let panel_color = with_alpha(egui::Color32::from_rgb(17, 21, 28), alpha * 0.98);
+    let window_fill = if transparent_background {
+        egui::Color32::TRANSPARENT
+    } else {
+        panel_color
+    };
     let subtitle = filename
         .as_deref()
         .map(|name| truncate_middle(name, 26))
@@ -41,7 +47,7 @@ pub fn render_overlay_direct(
     egui::CentralPanel::default()
         .frame(
             egui::Frame::default()
-                .fill(egui::Color32::TRANSPARENT)
+                .fill(window_fill)
                 .inner_margin(egui::Margin::symmetric(0, 0)),
         )
         .show(ctx, |ui| {
@@ -51,10 +57,8 @@ pub fn render_overlay_direct(
                 (bounds.width() - 12.0).clamp(164.0, 260.0),
                 (bounds.height() - 8.0).clamp(58.0, 100.0),
             );
-            let card_rect = egui::Rect::from_center_size(
-                bounds.center() + egui::vec2(0.0, slide_y),
-                card_size,
-            );
+            let card_rect =
+                egui::Rect::from_center_size(bounds.center() + egui::vec2(0.0, slide_y), card_size);
             let shadow_rect = card_rect.translate(egui::vec2(0.0, 3.0));
             let inner_rect = card_rect.shrink(1.0);
             let stripe_rect = egui::Rect::from_min_max(

@@ -76,6 +76,7 @@ struct GuiManagerApp {
     gallery: Arc<Mutex<Option<crate::gui::gallery::GalleryApp>>>,
     overlay: Arc<Mutex<Option<OverlayState>>>,
     overlay_position: OverlayPosition,
+    transparent_overlay_supported: bool,
 }
 
 impl GuiManagerApp {
@@ -90,6 +91,7 @@ impl GuiManagerApp {
             gallery: Arc::new(Mutex::new(None)),
             overlay: Arc::new(Mutex::new(None)),
             overlay_position,
+            transparent_overlay_supported: false,
         }
     }
 }
@@ -174,6 +176,7 @@ impl eframe::App for GuiManagerApp {
         let overlay_clone = self.overlay.clone();
         let overlay_active = overlay_clone.lock().unwrap().is_some();
         let overlay_position = overlay_clone.lock().unwrap().as_ref().map(|o| o.position);
+        let transparent_overlay_supported = self.transparent_overlay_supported;
         if overlay_active {
             ctx.show_viewport_deferred(
                 egui::ViewportId::from_hash_of("overlay"),
@@ -181,8 +184,8 @@ impl eframe::App for GuiManagerApp {
                     .with_decorations(false)
                     .with_always_on_top()
                     .with_taskbar(false)
-                    .with_transparent(true)
-                    .with_inner_size([140.0, 40.0])
+                    .with_transparent(transparent_overlay_supported)
+                    .with_inner_size([200.0, 64.0])
                     .with_resizable(false)
                     .with_position(get_overlay_position(overlay_position)),
                 move |ctx, class| {
@@ -206,6 +209,7 @@ impl eframe::App for GuiManagerApp {
                             &state.filename,
                             state.shown_at,
                             display_duration,
+                            transparent_overlay_supported,
                         );
                     }
                 },
