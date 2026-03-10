@@ -49,8 +49,19 @@ pub fn set_autostart(enabled: bool) -> Result<()> {
         let result = if enabled {
             let exe_path = std::env::current_exe()
                 .context("Failed to get current executable path for autostart")?;
-            let exe_str = exe_path.to_string_lossy();
-            let exe_wide: Vec<u16> = format!("{}\0", exe_str).encode_utf16().collect();
+
+            let exe_path_str = exe_path.to_string_lossy();
+            let is_installed = exe_path_str.to_lowercase().contains("program files");
+
+            if !is_installed {
+                info!(
+                    "Skipping auto-start setup: not running from installed location (path: {:?})",
+                    exe_path
+                );
+                return Ok(());
+            }
+
+            let exe_wide: Vec<u16> = format!("{}\0", exe_path_str).encode_utf16().collect();
             let byte_count = (exe_wide.len() * 2) as u32;
 
             let res = unsafe {
