@@ -9,7 +9,7 @@
     <MajorUpgrade DowngradeErrorMessage="A newer version of LiteClip Replay is already installed." Schedule="afterInstallValidate" AllowSameVersionUpgrades="no" />
     <MediaTemplate />
     <Property Id="ARPNOREMOVE" Value="0" />
-    <Icon Id="AppIcon" SourceFile="..\app.ico" />
+    <Icon Id="AppIcon" SourceFile="..\logo.ico" />
     <Property Id="ARPPRODUCTICON" Value="AppIcon" />
 
     <!-- Feature tree references component groups declared elsewhere -->
