@@ -1,3 +1,4 @@
+use anyhow::{bail, Result};
 use ffmpeg_next::format::Pixel;
 
 use crate::config::{EncoderType, QualityPreset, RateControl};
@@ -5,11 +6,30 @@ use crate::config::{EncoderType, QualityPreset, RateControl};
 use super::FfmpegEncoder;
 
 impl FfmpegEncoder {
+    pub(super) fn apply_codec_specific_options(
+        &self,
+        options: &mut ffmpeg_next::Dictionary<'_>,
+        bitrate: usize,
+    ) -> Result<()> {
+        match self.config.encoder_type {
+            EncoderType::Nvenc => self.apply_nvenc_options(options, bitrate),
+            EncoderType::Amf => self.apply_amf_options(options, bitrate),
+            EncoderType::Qsv => self.apply_qsv_options(options, bitrate),
+            EncoderType::Auto => bail!("auto encoder type should be resolved before init"),
+        }
+
+        Ok(())
+    }
+
     pub(super) fn encoder_pixel_format(&self) -> Pixel {
         match self.config.encoder_type {
             EncoderType::Nvenc => Pixel::BGRA,
             EncoderType::Amf | EncoderType::Qsv | EncoderType::Auto => Pixel::NV12,
         }
+    }
+
+    pub(super) fn hardware_frame_sw_format(&self) -> Pixel {
+        self.encoder_pixel_format()
     }
 
     pub(super) fn bitrate_bps(&self) -> usize {

@@ -54,6 +54,7 @@ impl FfmpegEncoder {
         device_ctx_ref: *mut ffmpeg::ffi::AVBufferRef,
         width: u32,
         height: u32,
+        sw_format: Pixel,
         initial_pool_size: i32,
     ) -> Result<*mut ffmpeg::ffi::AVBufferRef> {
         unsafe {
@@ -64,7 +65,7 @@ impl FfmpegEncoder {
 
             let frames_ctx = (*frames_ctx_ref).data as *mut ffmpeg::ffi::AVHWFramesContext;
             (*frames_ctx).format = Pixel::D3D11.into();
-            (*frames_ctx).sw_format = Pixel::NV12.into();
+            (*frames_ctx).sw_format = sw_format.into();
             (*frames_ctx).width = width as i32;
             (*frames_ctx).height = height as i32;
             (*frames_ctx).initial_pool_size = initial_pool_size;

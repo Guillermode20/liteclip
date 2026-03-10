@@ -93,6 +93,9 @@ pub struct CaptureConfig {
     /// Whether to perform CPU readback of GPU textures.
     /// Required for software encoders; optional for hardware encoders.
     pub perform_cpu_readback: bool,
+    /// Preferred GPU texture format when CPU readback is disabled.
+    #[cfg(windows)]
+    pub gpu_texture_format: GpuTextureFormat,
     /// Target resolution for captured frames.
     /// If None, uses native desktop resolution.
     pub target_resolution: Option<(u32, u32)>,
@@ -104,6 +107,8 @@ impl Default for CaptureConfig {
             target_fps: 60,
             output_index: 0,
             perform_cpu_readback: true,
+            #[cfg(windows)]
+            gpu_texture_format: GpuTextureFormat::Nv12,
             target_resolution: None,
         }
     }
@@ -116,6 +121,8 @@ impl From<&crate::config::Config> for CaptureConfig {
             target_fps: config.video.framerate,
             output_index: config.advanced.gpu_index,
             perform_cpu_readback: config.advanced.use_cpu_readback,
+            #[cfg(windows)]
+            gpu_texture_format: GpuTextureFormat::Nv12,
             target_resolution,
         }
     }
@@ -149,8 +156,8 @@ pub enum GpuTextureFormat {
 pub(crate) struct D3d11TexturePoolItem {
     /// The D3D11 texture containing frame data.
     pub texture: ID3D11Texture2D,
-    /// Video processor output view for GPU-side processing.
-    pub output_view: ID3D11VideoProcessorOutputView,
+    /// Video processor output view for GPU-side NV12 conversion.
+    pub output_view: Option<ID3D11VideoProcessorOutputView>,
     /// DXGI shared resource handle for cross-device sharing.
     ///
     /// Allows the encoder to open this texture on its own D3D11 device.

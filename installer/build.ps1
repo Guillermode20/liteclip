@@ -10,6 +10,7 @@ $ErrorActionPreference = 'Stop'
 Push-Location $PSScriptRoot
 
 $releaseDir = Resolve-Path "..\target\release"
+$ffmpegBinDir = Join-Path $PSScriptRoot "..\ffmpeg_dev\sdk\bin"
 $appExe = Join-Path $releaseDir "liteclip-replay.exe"
 $outputDir = Join-Path $PSScriptRoot "output"
 $portableRoot = Join-Path $outputDir "portable"
@@ -24,8 +25,8 @@ if (-not (Test-Path $appExe)) {
 }
 
 # Check for FFmpeg DLLs (required for native ffmpeg-next linking)
-if (-not (Test-Path "..\ffmpeg\bin\avcodec*.dll")) {
-  Write-Host "Warning: FFmpeg DLLs not found in ..\ffmpeg\bin\. Native FFmpeg may not work correctly."
+if (-not (Test-Path (Join-Path $ffmpegBinDir "avcodec-61.dll"))) {
+  Write-Host "Warning: FFmpeg DLLs not found in $ffmpegBinDir. Native FFmpeg may not work correctly."
 }
 
 Write-Host "2) Restoring NuGet packages for WiX project"
@@ -71,7 +72,7 @@ $requiredDlls = @(
   "swscale-8.dll"
 )
 foreach ($dll in $requiredDlls) {
-  $dllPath = Join-Path $releaseDir $dll
+  $dllPath = Join-Path $ffmpegBinDir $dll
   if (Test-Path $dllPath) {
     Copy-Item $dllPath -Destination $portableDir
   } else {

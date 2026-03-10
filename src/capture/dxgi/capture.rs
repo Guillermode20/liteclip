@@ -51,6 +51,14 @@ pub(super) struct Nv12TexturePool {
     pub(super) height: u32,
 }
 
+pub(super) struct BgraTexturePool {
+    pub(super) available: Vec<D3d11TexturePoolItem>,
+    pub(super) return_tx: Sender<D3d11TexturePoolItem>,
+    pub(super) return_rx: Receiver<D3d11TexturePoolItem>,
+    pub(super) width: u32,
+    pub(super) height: u32,
+}
+
 enum CaptureOutcome {
     Frame(CapturedFrame),
     Timeout,
@@ -58,6 +66,19 @@ enum CaptureOutcome {
 }
 
 impl Nv12TexturePool {
+    fn new(width: u32, height: u32) -> Self {
+        let (return_tx, return_rx) = unbounded();
+        Self {
+            available: Vec::new(),
+            return_tx,
+            return_rx,
+            width,
+            height,
+        }
+    }
+}
+
+impl BgraTexturePool {
     fn new(width: u32, height: u32) -> Self {
         let (return_tx, return_rx) = unbounded();
         Self {
@@ -88,6 +109,7 @@ pub(super) struct DxgiCaptureState {
     pub(super) rtv: Option<ID3D11RenderTargetView>,
     pub(super) scale_texture: Option<ID3D11Texture2D>,
     pub(super) native_buffer: BytesMut,
+    pub(super) bgra_pool: Option<BgraTexturePool>,
     pub(super) nv12_pool: Option<Nv12TexturePool>,
     pub(super) video_device: Option<ID3D11VideoDevice>,
     pub(super) video_context: Option<ID3D11VideoContext>,
@@ -107,6 +129,9 @@ pub(super) struct DxgiCaptureState {
     pub(super) nv12_fence_shared_handle: Option<HANDLE>,
     /// Monotonically increasing value. Incremented and signaled before each frame hand-off.
     pub(super) nv12_fence_value: u64,
+    pub(super) bgra_sync_fence: Option<ID3D11Fence>,
+    pub(super) bgra_fence_shared_handle: Option<HANDLE>,
+    pub(super) bgra_fence_value: u64,
 }
 
 impl DxgiCaptureState {
@@ -333,6 +358,51 @@ impl DxgiCaptureState {
                 info!("NV12 conversion enabled for GPU zero-copy encoding");
             }
 
+            let mut bgra_pool = BgraTexturePool::new(target_width, target_height);
+            for _ in 0..4 {
+                bgra_pool.available.push(DxgiCapture::create_bgra_pool_item(
+                    &d3d_device,
+                    target_width,
+                    target_height,
+                )?);
+            }
+
+            let (bgra_sync_fence, bgra_fence_shared_handle) = match d3d_device.cast::<ID3D11Device5>() {
+                Ok(device5) => {
+                    let mut fence_opt: Option<ID3D11Fence> = None;
+                    match device5.CreateFence(0, D3D11_FENCE_FLAG_SHARED, &mut fence_opt) {
+                        Ok(()) => match fence_opt {
+                            Some(fence) => match fence.CreateSharedHandle(
+                                None,
+                                0x10000000u32,
+                                windows_core::PCWSTR::null(),
+                            ) {
+                                Ok(handle) => {
+                                    info!("BGRA sync fence created for cross-device GPU copies");
+                                    (Some(fence), Some(handle))
+                                }
+                                Err(e) => {
+                                    warn!("Failed to create shared BGRA fence handle, BGRA sync will fall back to Flush-only: {}", e);
+                                    (None, None)
+                                }
+                            },
+                            None => {
+                                warn!("CreateFence returned null, BGRA sync will fall back to Flush-only");
+                                (None, None)
+                            }
+                        },
+                        Err(e) => {
+                            warn!("Failed to create BGRA sync fence, BGRA sync will fall back to Flush-only: {}", e);
+                            (None, None)
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("ID3D11Device5 unavailable, BGRA sync will fall back to Flush-only: {}", e);
+                    (None, None)
+                }
+            };
+
             // Create a shared ID3D11Fence for GPU-side cross-device synchronization.
             // After VideoProcessorBlt the capture GPU queue signals the fence; the encoder GPU
             // queue waits on it before CopySubresourceRegion. This replaces the CPU spin loop
@@ -426,6 +496,7 @@ impl DxgiCaptureState {
                 rtv,
                 scale_texture,
                 native_buffer,
+                bgra_pool: Some(bgra_pool),
                 nv12_pool,
                 video_device,
                 video_context,
@@ -439,6 +510,9 @@ impl DxgiCaptureState {
                 nv12_sync_fence,
                 nv12_fence_shared_handle,
                 nv12_fence_value: 0,
+                bgra_sync_fence,
+                bgra_fence_shared_handle,
+                bgra_fence_value: 0,
             })
         }
     }
@@ -806,6 +880,7 @@ impl DxgiCapture {
         timeout_ms: u32,
         drop_before_process: bool,
         perform_cpu_readback: bool,
+        #[cfg(windows)] gpu_texture_format: crate::capture::GpuTextureFormat,
         _target_resolution: Option<(u32, u32)>,
     ) -> Result<CaptureOutcome> {
         unsafe {
@@ -833,7 +908,9 @@ impl DxgiCapture {
 
                     let needs_gpu_scale = state.scale_texture.is_some();
                     let needs_separate_gpu_scale = needs_gpu_scale
-                        && (perform_cpu_readback || !state.nv12_conversion_available);
+                        && (perform_cpu_readback
+                            || gpu_texture_format != crate::capture::GpuTextureFormat::Nv12
+                            || !state.nv12_conversion_available);
 
                     if needs_separate_gpu_scale {
                         Self::perform_gpu_scale(state, &captured_texture)
@@ -841,8 +918,12 @@ impl DxgiCapture {
                     }
 
                     if !perform_cpu_readback {
-                        let frame =
-                            DxgiCapture::capture_gpu_frame(state, &captured_texture, timestamp)?;
+                        let frame = DxgiCapture::capture_gpu_frame(
+                            state,
+                            &captured_texture,
+                            timestamp,
+                            gpu_texture_format,
+                        )?;
                         state.duplication.ReleaseFrame().ok();
                         return Ok(CaptureOutcome::Frame(frame));
                     }
@@ -853,8 +934,11 @@ impl DxgiCapture {
                             .cast()
                             .context("Failed to cast staging texture to resource")?;
 
-                        let (source_texture, resolution) =
-                            DxgiCapture::source_texture_for_frame(state, &captured_texture)?;
+                        let (source_texture, resolution) = DxgiCapture::source_texture_for_frame(
+                            state,
+                            &captured_texture,
+                            None,
+                        )?;
                         let source_resource: ID3D11Resource = source_texture
                             .cast()
                             .context("Failed to cast source texture to resource")?;
@@ -961,6 +1045,8 @@ impl DxgiCapture {
         Self::set_capture_thread_priority();
         info!("DXGI capture thread started: {} FPS", config.target_fps);
         let perform_cpu_readback = config.perform_cpu_readback;
+        #[cfg(windows)]
+        let gpu_texture_format = config.gpu_texture_format;
         let target_resolution = config.target_resolution;
         let base_fps = config.target_fps.max(1);
         let timeout_ms = (1000u32.saturating_add(base_fps).saturating_sub(1) / base_fps).max(1);
@@ -1026,6 +1112,8 @@ impl DxgiCapture {
                 timeout_ms,
                 drop_before_process,
                 perform_cpu_readback,
+                #[cfg(windows)]
+                gpu_texture_format,
                 target_resolution,
             ) {
                 Ok(CaptureOutcome::Frame(frame)) => {

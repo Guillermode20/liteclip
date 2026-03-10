@@ -2,7 +2,7 @@
 //!
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use crossbeam::channel::{bounded, Receiver, Sender};
 #[cfg(feature = "ffmpeg")]
 use ffmpeg::format::Pixel;
@@ -90,17 +90,51 @@ fn forward_ready_packets(
     forwarded
 }
 
-fn resolve_encoder_config(config: &EncoderConfig) -> EncoderConfig {
+#[cfg(feature = "ffmpeg")]
+fn encoder_name_for_type(encoder_type: crate::config::EncoderType) -> Option<&'static str> {
+    match encoder_type {
+        crate::config::EncoderType::Nvenc => Some("hevc_nvenc"),
+        crate::config::EncoderType::Amf => Some("hevc_amf"),
+        crate::config::EncoderType::Qsv => Some("hevc_qsv"),
+        crate::config::EncoderType::Auto => None,
+    }
+}
+
+#[cfg(feature = "ffmpeg")]
+fn ensure_requested_encoder_available(config: &EncoderConfig) -> Result<()> {
+    if let Some(codec_name) = encoder_name_for_type(config.encoder_type) {
+        if !probe_encoder_available(codec_name) {
+            bail!(
+                "Selected encoder {:?} is not available in the current FFmpeg/runtime environment",
+                config.encoder_type
+            );
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(not(feature = "ffmpeg"))]
+fn ensure_requested_encoder_available(_config: &EncoderConfig) -> Result<()> {
+    Ok(())
+}
+
+fn resolve_encoder_config(config: &EncoderConfig) -> Result<EncoderConfig> {
     let mut resolved = config.clone();
     if resolved.encoder_type == crate::config::EncoderType::Auto {
         let detected_encoder = detect_hardware_encoder();
+        if matches!(detected_encoder, HardwareEncoder::None) {
+            bail!("Auto encoder selection could not find NVENC, AMF, or QSV on this system");
+        }
         apply_auto_encoder_selection(&mut resolved, detected_encoder);
         info!("Auto-detected encoder: {:?}", resolved.encoder_type);
     }
-    resolved
+
+    ensure_requested_encoder_available(&resolved)?;
+    Ok(resolved)
 }
 
-pub fn resolve_effective_encoder_config(config: &EncoderConfig) -> EncoderConfig {
+pub fn resolve_effective_encoder_config(config: &EncoderConfig) -> Result<EncoderConfig> {
     resolve_encoder_config(config)
 }
 
@@ -250,7 +284,7 @@ pub(super) fn apply_auto_encoder_selection(
 /// If encoder_type is Auto, performs hardware detection.
 /// Falls back to software encoder if hardware initialization fails.
 pub fn create_encoder(config: &EncoderConfig) -> Result<Box<dyn Encoder>> {
-    let config = resolve_encoder_config(config);
+    let config = resolve_encoder_config(config)?;
 
     info!("Creating native FFmpeg encoder: {:?}", config.encoder_type);
     Ok(Box::new(crate::encode::ffmpeg::FfmpegEncoder::new(
@@ -268,7 +302,7 @@ pub fn spawn_encoder_with_receiver(
     frame_rx: Receiver<crate::capture::CapturedFrame>,
 ) -> Result<EncoderHandle> {
     const MAX_CONSECUTIVE_ENCODE_ERRORS: u32 = 8;
-    let effective_config = resolve_encoder_config(&config);
+    let effective_config = resolve_encoder_config(&config)?;
     let thread_config = effective_config.clone();
     let (health_tx, health_rx) = bounded(8);
     let thread = std::thread::Builder::new()
@@ -404,7 +438,7 @@ impl From<HardwareEncoder> for crate::config::EncoderType {
             HardwareEncoder::Nvenc => crate::config::EncoderType::Nvenc,
             HardwareEncoder::Amf => crate::config::EncoderType::Amf,
             HardwareEncoder::Qsv => crate::config::EncoderType::Qsv,
-            HardwareEncoder::None => crate::config::EncoderType::Amf, // Default to AMF as fallback
+            HardwareEncoder::None => crate::config::EncoderType::Auto,
         }
     }
 }

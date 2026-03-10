@@ -3,6 +3,8 @@
 //! This module provides core types for the encoding subsystem, including
 //! packet types, configuration, and encoder handles.
 
+#[cfg(windows)]
+use crate::capture::GpuTextureFormat;
 use anyhow::Result;
 use bytes::Bytes;
 use crossbeam::channel::{Receiver, Sender};
@@ -160,7 +162,11 @@ impl EncoderConfig {
             crate::config::EncoderType::Nvenc => "hevc_nvenc",
             crate::config::EncoderType::Amf => "hevc_amf",
             crate::config::EncoderType::Qsv => "hevc_qsv",
-            crate::config::EncoderType::Auto => "hevc_amf", // Default fallback for Auto
+            crate::config::EncoderType::Auto => {
+                unreachable!(
+                    "auto encoder selection must be resolved before choosing an FFmpeg codec"
+                )
+            }
         }
     }
     /// Calculate keyframe interval in frames
@@ -169,11 +175,19 @@ impl EncoderConfig {
     }
 
     pub fn supports_gpu_frame_transport(&self) -> bool {
-        // AMF encoder accepts NV12 hardware frames via D3D11.
-        // The capture produces NV12 textures tagged with D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX
-        // so the encoder can open them on its own isolated D3D11 device without sharing the
-        // capture thread's command context or multithread lock.
-        matches!(self.encoder_type, crate::config::EncoderType::Amf)
+        matches!(
+            self.encoder_type,
+            crate::config::EncoderType::Nvenc | crate::config::EncoderType::Amf
+        )
+    }
+
+    #[cfg(windows)]
+    pub fn gpu_texture_format(&self) -> Option<GpuTextureFormat> {
+        match self.encoder_type {
+            crate::config::EncoderType::Nvenc => Some(GpuTextureFormat::Bgra),
+            crate::config::EncoderType::Amf => Some(GpuTextureFormat::Nv12),
+            crate::config::EncoderType::Qsv | crate::config::EncoderType::Auto => None,
+        }
     }
 }
 /// Encoder thread handle

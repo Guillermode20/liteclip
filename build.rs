@@ -2,6 +2,24 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
+fn generate_windows_icon(source: &str, output: &PathBuf) {
+    let image = image::open(source).expect("failed to open logo.ico for windows icon generation");
+    let rgba = image.into_rgba8();
+    let mut icon_dir = ico::IconDir::new(ico::ResourceType::Icon);
+
+    for size in [16u32, 32, 48, 64, 128, 256] {
+        let resized = image::imageops::resize(&rgba, size, size, image::imageops::FilterType::Lanczos3);
+        let icon_image = ico::IconImage::from_rgba_data(size, size, resized.into_raw());
+        let icon_entry = ico::IconDirEntry::encode(&icon_image).expect("failed to encode icon entry");
+        icon_dir.add_entry(icon_entry);
+    }
+
+    let icon_file = fs::File::create(output).expect("failed to create generated windows icon");
+    icon_dir
+        .write(icon_file)
+        .expect("failed to write generated windows icon");
+}
+
 fn find_fxc_exe() -> Option<PathBuf> {
     // Try to find fxc.exe in Windows SDK
     let kits_root = PathBuf::from("C:/Program Files (x86)/Windows Kits/10/bin");
@@ -45,6 +63,10 @@ fn main() {
     // Windows-specific linking
     #[cfg(windows)]
     {
+        let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
+        let generated_icon = out_dir.join("logo.windows.ico");
+        generate_windows_icon("logo.ico", &generated_icon);
+
         // Link required Windows libraries for D3D11
         println!("cargo:rustc-link-lib=d3d11");
         println!("cargo:rustc-link-lib=dxgi");
@@ -57,7 +79,7 @@ fn main() {
         println!("cargo:rustc-link-lib=gdi32");
 
         let mut res = winres::WindowsResource::new();
-        res.set_icon("logo.ico");
+        res.set_icon(generated_icon.to_str().expect("generated icon path must be valid utf-8"));
         res.compile().unwrap();
     }
 
@@ -109,6 +131,7 @@ fn main() {
     // Tell Cargo to re-run if shaders change
     println!("cargo:rerun-if-changed=shaders/vs_simple.hlsl");
     println!("cargo:rerun-if-changed=shaders/ps_simple.hlsl");
+    println!("cargo:rerun-if-changed=logo.ico");
 
     // Re-run if build.rs changes
     println!("cargo:rerun-if-changed=build.rs");

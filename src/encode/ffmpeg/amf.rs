@@ -145,12 +145,14 @@ impl FfmpegEncoder {
             }
 
             let pool_sizes: &[i32] = &[0, 4, 2];
+            let sw_format = self.hardware_frame_sw_format();
             let mut frames_ctx_ref_result = Err(anyhow::anyhow!("no pool sizes tried"));
             for &pool_size in pool_sizes {
                 match Self::create_hw_frames_ctx_with_pool_size(
                     device_ctx_ref,
                     width,
                     height,
+                    sw_format,
                     pool_size,
                 ) {
                     Ok(frames_ctx_ref) => {
@@ -252,7 +254,7 @@ impl FfmpegEncoder {
 
         let mut options = ffmpeg::Dictionary::new();
         options.set("bf", "0");
-        self.apply_amf_options(&mut options, bitrate);
+        self.apply_codec_specific_options(&mut options, bitrate)?;
 
         let encoder = encoder
             .open_with(options)

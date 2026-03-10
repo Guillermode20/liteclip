@@ -118,7 +118,7 @@ impl TrayManager {
 
 /// Load the tray icon, falling back to a solid-colour square if no file is found.
 fn load_tray_icon() -> tray_icon::Icon {
-    let icon_data = include_bytes!("../../app.png");
+    let icon_data = include_bytes!("../../logo.ico");
     if let Ok(img) = image::load_from_memory(icon_data) {
         let rgba = img.into_rgba8();
         let (w, h) = (rgba.width(), rgba.height());

@@ -7,7 +7,6 @@ pub mod software;
 
 use self::context::D3d11HardwareContext;
 use super::{EncodedPacket, Encoder, EncoderConfig, StreamType};
-use crate::capture::GpuTextureFormat;
 use anyhow::{Context, Result};
 use crossbeam::channel::{unbounded, Receiver, Sender};
 use ffmpeg::color::{Primaries, Range, Space, TransferCharacteristic};
@@ -87,6 +86,13 @@ impl FfmpegEncoder {
     fn next_encoder_pts(&self) -> i64 {
         self.frame_count
     }
+
+    fn gpu_frame_matches_encoder(&self, gpu_frame: &crate::capture::D3d11Frame) -> bool {
+        match self.config.gpu_texture_format() {
+            Some(expected_format) => gpu_frame.format == expected_format,
+            None => false,
+        }
+    }
 }
 
 impl Encoder for FfmpegEncoder {
@@ -99,10 +105,9 @@ impl Encoder for FfmpegEncoder {
         let gpu_frame = frame.d3d11.as_deref();
 
         // Check if we can use GPU frame transport
-        // Only accept NV12 hardware frames - BGRA frames must use CPU path
         let can_use_gpu = gpu_frame.is_some()
             && self.supports_gpu_frames()
-            && gpu_frame.unwrap().format == GpuTextureFormat::Nv12;
+            && self.gpu_frame_matches_encoder(gpu_frame.unwrap());
         let needs_transport_reinit = if can_use_gpu {
             self.hw_context.is_none()
         } else {
@@ -127,11 +132,13 @@ impl Encoder for FfmpegEncoder {
                     self.init_hardware_encoder(gpu_frame, frame.resolution.0, frame.resolution.1)?;
                 }
             } else if gpu_frame.is_some() && self.supports_gpu_frames() {
-                // GPU frame present but format is not NV12 - fall back to CPU path
+                // GPU frame present but format does not match the selected encoder transport.
                 if let Some(gpu_frame) = gpu_frame {
                     warn!(
-                        "GPU frame format is {:?}, expected NV12 for hardware encoder. Falling back to CPU path.",
-                        gpu_frame.format
+                        "GPU frame format is {:?}, expected {:?} for encoder {:?}. Falling back to CPU path.",
+                        gpu_frame.format,
+                        self.config.gpu_texture_format(),
+                        self.config.encoder_type
                     );
                 }
                 self.hw_context = None;

@@ -38,15 +38,7 @@ impl FfmpegEncoder {
 
         let mut options = ffmpeg::Dictionary::new();
         options.set("bf", "0");
-
-        match self.config.encoder_type {
-            crate::config::EncoderType::Nvenc => self.apply_nvenc_options(&mut options, bitrate),
-            crate::config::EncoderType::Amf => self.apply_amf_options(&mut options, bitrate),
-            crate::config::EncoderType::Qsv => self.apply_qsv_options(&mut options, bitrate),
-            crate::config::EncoderType::Auto => {
-                anyhow::bail!("Auto encoder type should be resolved before init")
-            }
-        }
+        self.apply_codec_specific_options(&mut options, bitrate)?;
 
         let encoder = encoder
             .open_with(options)

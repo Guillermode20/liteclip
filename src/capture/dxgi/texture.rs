@@ -69,9 +69,11 @@ impl DxgiCapture {
     pub(super) fn source_texture_for_frame(
         state: &DxgiCaptureState,
         captured_texture: &ID3D11Texture2D,
+        preferred_gpu_format: Option<GpuTextureFormat>,
     ) -> Result<(ID3D11Texture2D, (u32, u32))> {
         let has_target_scaling = state.scale_texture.is_some();
-        let needs_separate_gpu_scale = has_target_scaling && !state.nv12_conversion_available;
+        let needs_separate_gpu_scale = has_target_scaling
+            && !matches!(preferred_gpu_format, Some(GpuTextureFormat::Nv12) if state.nv12_conversion_available);
         let source_texture = if needs_separate_gpu_scale {
             state
                 .scale_texture
@@ -175,10 +177,74 @@ impl DxgiCapture {
 
             Ok(D3d11TexturePoolItem {
                 texture,
-                output_view: output_view.context("Pooled NV12 output view is null")?,
+                output_view: Some(output_view.context("Pooled NV12 output view is null")?),
                 shared_handle,
             })
         }
+    }
+
+    pub(super) fn create_bgra_pool_item(
+        d3d_device: &ID3D11Device,
+        width: u32,
+        height: u32,
+    ) -> Result<D3d11TexturePoolItem> {
+        unsafe {
+            let bgra_desc = windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE2D_DESC {
+                Width: width,
+                Height: height,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
+                Usage: windows::Win32::Graphics::Direct3D11::D3D11_USAGE_DEFAULT,
+                BindFlags: 0,
+                CPUAccessFlags: 0,
+                MiscFlags: D3D11_RESOURCE_MISC_SHARED.0 as u32,
+            };
+            let mut texture: Option<ID3D11Texture2D> = None;
+            d3d_device
+                .CreateTexture2D(&bgra_desc, None, Some(&mut texture))
+                .ok()
+                .context("Failed to create pooled BGRA shared texture")?;
+            let texture = texture.context("Pooled BGRA texture is null")?;
+
+            let dxgi_resource: IDXGIResource = texture
+                .cast()
+                .context("Failed to get IDXGIResource from pooled BGRA texture")?;
+            let shared_handle = dxgi_resource
+                .GetSharedHandle()
+                .context("Failed to get shared handle for pooled BGRA texture")?;
+
+            Ok(D3d11TexturePoolItem {
+                texture,
+                output_view: None,
+                shared_handle,
+            })
+        }
+    }
+
+    pub(super) fn acquire_bgra_pool_item(
+        state: &mut DxgiCaptureState,
+    ) -> Result<D3d11TexturePoolItem> {
+        let (width, height, maybe_item) = {
+            let pool = state
+                .bgra_pool
+                .as_mut()
+                .context("BGRA pool is not initialized")?;
+            while let Ok(item) = pool.return_rx.try_recv() {
+                pool.available.push(item);
+            }
+            (pool.width, pool.height, pool.available.pop())
+        };
+
+        if let Some(item) = maybe_item {
+            return Ok(item);
+        }
+
+        Self::create_bgra_pool_item(&state.d3d_device, width, height)
     }
 
     pub(super) fn acquire_nv12_pool_item(
@@ -250,6 +316,10 @@ impl DxgiCapture {
                 .video_context
                 .as_ref()
                 .context("Video context is None")?;
+            let pooled_output_view = pooled_output
+                .output_view
+                .as_ref()
+                .context("NV12 pooled output view is missing")?;
             let using_cached_scale_input = state
                 .scale_texture
                 .as_ref()
@@ -287,7 +357,7 @@ impl DxgiCapture {
             video_context
                 .VideoProcessorBlt(
                     video_processor,
-                    &pooled_output.output_view,
+                    pooled_output_view,
                     0,
                     &[stream_data],
                 )
@@ -314,9 +384,60 @@ impl DxgiCapture {
         state: &mut DxgiCaptureState,
         captured_texture: &ID3D11Texture2D,
         timestamp: i64,
+        gpu_texture_format: GpuTextureFormat,
     ) -> Result<CapturedFrame> {
-        let (source_texture, resolution) = Self::source_texture_for_frame(state, captured_texture)?;
+        let (source_texture, resolution) =
+            Self::source_texture_for_frame(state, captured_texture, Some(gpu_texture_format))?;
         let now = Instant::now();
+
+        if gpu_texture_format == GpuTextureFormat::Bgra {
+            let pooled_output = Self::acquire_bgra_pool_item(state)?;
+            unsafe {
+                let source_resource = source_texture
+                    .cast()
+                    .context("Failed to cast BGRA source texture to resource")?;
+                let output_resource = pooled_output
+                    .texture
+                    .cast()
+                    .context("Failed to cast BGRA pooled texture to resource")?;
+                state
+                    .d3d_context
+                    .CopyResource(Some(&output_resource), Some(&source_resource));
+
+                if let Some(ref sync_fence) = state.bgra_sync_fence {
+                    state.bgra_fence_value += 1;
+                    let ctx4: ID3D11DeviceContext4 = state
+                        .d3d_context
+                        .cast()
+                        .context("Failed to get ID3D11DeviceContext4 for BGRA fence signal")?;
+                    ctx4.Signal(sync_fence, state.bgra_fence_value)
+                        .context("Failed to signal BGRA sync fence")?;
+                } else {
+                    state.d3d_context.Flush();
+                }
+            }
+
+            let return_tx = state
+                .bgra_pool
+                .as_ref()
+                .context("BGRA pool is not initialized")?
+                .return_tx
+                .clone();
+
+            return Ok(CapturedFrame {
+                bgra: Bytes::new(),
+                d3d11: Some(Arc::new(D3d11Frame::from_pooled(
+                    state.d3d_device.clone(),
+                    GpuTextureFormat::Bgra,
+                    return_tx,
+                    pooled_output,
+                    state.bgra_fence_value,
+                    state.bgra_fence_shared_handle,
+                ))),
+                timestamp,
+                resolution,
+            });
+        }
 
         let should_try_nv12 = state.nv12_conversion_available
             && match state.nv12_retry_after {
