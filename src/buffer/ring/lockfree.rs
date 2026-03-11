@@ -115,17 +115,17 @@ struct LockFreeInner {
     capacity: usize,
     mask: usize,
     write_idx: AtomicUsize,
-    /// Index of the next slot to be considered for memory-budget eviction.
-    /// Advances ahead of the natural ring wrap when total_bytes > max_memory_bytes.
     evict_frontier: AtomicUsize,
     max_memory_bytes: usize,
     total_bytes: AtomicUsize,
     keyframe_count: AtomicUsize,
     newest_pts: AtomicI64,
     param_cache: std::sync::Mutex<ParameterCache>,
+    param_cache_complete: std::sync::atomic::AtomicBool,
     first_video_info: std::sync::Mutex<Option<(usize, FirstVideoKind)>>,
 }
 
+#[repr(align(64))]
 struct Slot {
     packet: std::sync::Mutex<Option<EncodedPacket>>,
 }
@@ -198,6 +198,7 @@ impl LockFreeReplayBuffer {
                 keyframe_count: AtomicUsize::new(0),
                 newest_pts: AtomicI64::new(0),
                 param_cache: std::sync::Mutex::new(ParameterCache::default()),
+                param_cache_complete: std::sync::atomic::AtomicBool::new(false),
                 first_video_info: std::sync::Mutex::new(None),
             }),
         })
@@ -305,6 +306,10 @@ impl LockFreeReplayBuffer {
             return;
         }
 
+        if self.inner.param_cache_complete.load(Ordering::Relaxed) {
+            return;
+        }
+
         let inner = &self.inner;
         let data = packet.data.as_ref();
 
@@ -380,6 +385,16 @@ impl LockFreeReplayBuffer {
                     }
                 }
             }
+        }
+
+        let complete = match cache.codec_kind {
+            CodecKind::H264 => cache.h264_sps.is_some() && cache.h264_pps.is_some(),
+            CodecKind::Hevc => {
+                cache.hevc_vps.is_some() && cache.hevc_sps.is_some() && cache.hevc_pps.is_some()
+            }
+        };
+        if complete {
+            inner.param_cache_complete.store(true, Ordering::Release);
         }
     }
 
@@ -740,6 +755,7 @@ impl LockFreeReplayBuffer {
         inner.evict_frontier.store(0, Ordering::Release);
         inner.total_bytes.store(0, Ordering::Release);
         inner.keyframe_count.store(0, Ordering::Release);
+        inner.param_cache_complete.store(false, Ordering::Release);
         *inner.first_video_info.lock().unwrap() = None;
 
         let cache = inner.param_cache.lock().unwrap();
