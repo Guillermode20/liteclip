@@ -95,7 +95,7 @@ impl AppState {
 
     /// Gets the context needed for clip saving.
     ///
-    /// Returns a tuple of (config, buffer, notifications_enabled) that can
+    /// Returns a tuple of (config, buffer) that can
     /// be passed to a background task for clip saving.
     ///
     /// # Returns
@@ -103,13 +103,8 @@ impl AppState {
     /// Tuple of:
     /// - Clone of the configuration
     /// - Clone of the replay buffer
-    /// - Whether notifications are enabled
-    pub fn save_context(&self) -> (Config, ReplayBuffer, bool) {
-        (
-            self.config.clone(),
-            self.buffer.clone(),
-            self.config.general.notifications,
-        )
+    pub fn save_context(&self) -> (Config, ReplayBuffer) {
+        (self.config.clone(), self.buffer.clone())
     }
 
     /// Checks if recording is currently active.

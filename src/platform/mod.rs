@@ -18,8 +18,6 @@ pub enum PlatformCommand {
     ReRegisterHotkeys(HotkeyConfig),
     /// Update recording state for tray menu
     UpdateRecordingState(bool),
-    /// Show a notification
-    ShowNotification(String, String),
     /// Request the platform thread to stop its message loop and exit
     Quit,
 }
@@ -103,14 +101,6 @@ impl PlatformHandle {
     /// Update recording state for tray menu display
     pub fn update_recording_state(&self, is_recording: bool) -> Result<()> {
         self.send_command(PlatformCommand::UpdateRecordingState(is_recording))
-    }
-
-    /// Show a notification to the user
-    pub fn show_notification(&self, title: &str, message: &str) -> Result<()> {
-        self.send_command(PlatformCommand::ShowNotification(
-            title.to_string(),
-            message.to_string(),
-        ))
     }
 
     /// Signal the platform thread to quit its message loop

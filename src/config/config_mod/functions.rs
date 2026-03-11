@@ -2,12 +2,9 @@
 //!
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
-use super::types::{EncoderType, OverlayPosition, QualityPreset, RateControl, Resolution};
+use super::types::{EncoderType, QualityPreset, RateControl, Resolution};
 
 pub const MAX_FRAMERATE: u32 = 240;
-pub const MIN_MEMORY_LIMIT_MB: u32 = 64;
-pub const MAX_MEMORY_LIMIT_MB: u32 = 16_384;
-pub const LEGACY_DEFAULT_MEMORY_LIMIT_MB: u32 = 2048;
 pub const RECOMMENDED_BUFFER_HEADROOM_PERCENT: u64 = 135;
 pub const RECOMMENDED_BUFFER_BASE_OVERHEAD_MB: u64 = 24;
 pub const ESTIMATED_SYSTEM_AUDIO_BITRATE_BPS: u64 = 192_000;
@@ -84,17 +81,11 @@ pub(super) fn default_hotkey_screenshot() -> String {
 pub(super) fn default_hotkey_gallery() -> String {
     "Alt+G".to_string()
 }
-pub(super) fn default_memory_limit() -> u32 {
-    0
-}
 pub(super) fn default_gpu_index() -> u32 {
     0
 }
 pub(super) fn default_keyframe_interval() -> u32 {
     2
-}
-pub(super) fn default_overlay_position() -> OverlayPosition {
-    OverlayPosition::TopLeft
 }
 
 #[cfg(test)]
@@ -156,19 +147,5 @@ mod tests {
 
         assert!(estimated_mb >= 140);
         assert!(recommended_mb > estimated_mb);
-    }
-
-    #[test]
-    fn test_validate_migrates_legacy_memory_limit() {
-        let mut config = Config::default();
-        config.general.replay_duration_secs = 30;
-        config.video.bitrate_mbps = 10;
-        config.advanced.memory_limit_mb = LEGACY_DEFAULT_MEMORY_LIMIT_MB;
-
-        let expected_limit = config.recommended_replay_memory_limit_mb();
-
-        config.validate();
-
-        assert_eq!(config.advanced.memory_limit_mb, expected_limit);
     }
 }

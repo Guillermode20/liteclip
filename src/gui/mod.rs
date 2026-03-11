@@ -1,13 +1,12 @@
 //! Graphical User Interface
 //!
-//! This module provides GUI components built with egui for settings,
-//! clip gallery, and overlay notifications.
+//! This module provides GUI components built with egui for settings
+//! and clip gallery.
 //!
 //! # Components
 //!
 //! - **Settings GUI**: Configuration interface for video, audio, and hotkeys
 //! - **Gallery GUI**: Browse and manage saved clips
-//! - **Clip Saved Overlay**: Transient overlay showing clip save confirmation
 //!
 //! # Architecture
 //!
@@ -19,7 +18,6 @@
 //!
 //! - [`show_settings_gui`] - Open the settings window
 //! - [`show_gallery_gui`] - Open the clip gallery window
-//! - [`run_clip_saved_overlay`] - Show a temporary "clip saved" overlay
 //!
 //! # Example
 //!
@@ -43,6 +41,3 @@ pub use settings::show_settings_gui;
 
 pub mod gallery;
 pub use gallery::show_gallery_gui;
-
-pub mod clip_saved_overlay;
-pub use clip_saved_overlay::run_clip_saved_overlay;

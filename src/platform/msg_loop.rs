@@ -97,11 +97,6 @@ fn run_platform_loop(
                         // Recording state updates are no longer needed for the tray menu
                         // since we removed the start/stop recording buttons
                     }
-                    PlatformCommand::ShowNotification(title, message) => {
-                        // Tray icon notifications are not supported by tray-icon crate directly
-                        // Logging the notification instead
-                        info!("Notification: {} - {}", title, message);
-                    }
                     PlatformCommand::Quit => {
                         info!("Platform: Quit received, posting WM_QUIT");
                         PostQuitMessage(0);

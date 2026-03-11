@@ -329,54 +329,27 @@ async fn main() -> Result<()> {
                                         match action {
         liteclip_replay::platform::HotkeyAction::SaveClip => {
                                                 info!("Hotkey: save clip");
-                                                let overlay_enabled = app_state.read().await.config().advanced.overlay_enabled;
                                                 spawn_save_clip_task(
                                                     &app_state,
                                                     &platform_handle,
                                                     &save_in_progress,
                                                     &game_detector,
-                                                    overlay_enabled,
                                                 )
                                                 .await;
                                             }
                                             liteclip_replay::platform::HotkeyAction::ToggleRecording => {
                                                 info!("Hotkey: toggle recording");
                                                 let mut state = app_state.write().await;
-                                                let notifications_enabled = state.config().general.notifications;
                                                 if state.is_recording() {
                                                     if let Err(e) = state.stop_recording().await {
                                                         error!("Failed to stop recording: {}", e);
-                                                        if notifications_enabled {
-                                                            let _ = platform_handle.show_notification(
-                                                                "Recording Error",
-                                                                &format!("Failed to stop: {}", e),
-                                                            );
-                                                        }
                                                     } else {
                                                         let _ = platform_handle.update_recording_state(false);
-                                                        if notifications_enabled {
-                                                            let _ = platform_handle.show_notification(
-                                                                "Recording Stopped",
-                                                                "Recording has been stopped",
-                                                            );
-                                                        }
                                                     }
                                                 } else if let Err(e) = state.start_recording().await {
                                                     error!("Failed to start recording: {}", e);
-                                                    if notifications_enabled {
-                                                        let _ = platform_handle.show_notification(
-                                                            "Recording Error",
-                                                            &format!("Failed to start: {}", e),
-                                                        );
-                                                    }
                                                 } else {
                                                     let _ = platform_handle.update_recording_state(true);
-                                                    if notifications_enabled {
-                                                        let _ = platform_handle.show_notification(
-                                                            "Recording Started",
-                                                            "Now capturing replay buffer",
-                                                        );
-                                                    }
                                                 }
                                             }
                                             liteclip_replay::platform::HotkeyAction::Screenshot => {
@@ -393,13 +366,11 @@ async fn main() -> Result<()> {
                                         match tray_event {
         liteclip_replay::platform::TrayEvent::SaveClip => {
                                                 info!("Tray: Save Clip selected");
-                                                let overlay_enabled = app_state.read().await.config().advanced.overlay_enabled;
                                                 spawn_save_clip_task(
                                                     &app_state,
                                                     &platform_handle,
                                                     &save_in_progress,
                                                     &game_detector,
-                                                    overlay_enabled,
                                                 )
                                                 .await;
                                             }
@@ -450,21 +421,9 @@ async fn main() -> Result<()> {
                                                     }
         }
                                                 let _ = platform_handle.update_recording_state(true);
-                                                if state.config().general.notifications {
-                                                    let _ = platform_handle.show_notification(
-                                                        "Settings Applied",
-                                                        "Settings have been applied",
-                                                    );
-                                                }
                                             }
                                             Err(e) => {
                                                 error!("Failed to apply config: {}", e);
-                                                if state.config().general.notifications {
-                                                    let _ = platform_handle.show_notification(
-                                                        "Settings Error",
-                                                        &format!("Failed to apply: {}", e),
-                                                    );
-                                                }
                                             }
                                         }
                                     }
@@ -481,12 +440,6 @@ async fn main() -> Result<()> {
                                     Ok(Some(reason)) => {
                                         error!("Recording stopped due to fatal pipeline error: {}", reason);
                                         let _ = platform_handle.update_recording_state(false);
-                                        if state.config().general.notifications {
-                                            let _ = platform_handle.show_notification(
-                                                "Recording Stopped",
-                                                &format!("Pipeline error: {}", reason),
-                                            );
-                                        }
                                     }
                                     Ok(None) => {}
                                     Err(e) => {
@@ -597,10 +550,9 @@ fn hotkey_config_from_config(config: &Config) -> liteclip_replay::platform::Hotk
 /// # Arguments
 ///
 /// * `app_state` - Shared application state containing the replay buffer.
-/// * `platform_handle` - Handle to the platform layer for notifications.
+/// * `platform_handle` - Handle to the platform layer.
 /// * `save_in_progress` - Atomic flag for concurrency control.
 /// * `game_detector` - Optional game detector for organizing clips by game.
-/// * `overlay_enabled` - Whether to show the clip saved overlay.
 ///
 /// # Example
 ///
@@ -610,15 +562,13 @@ fn hotkey_config_from_config(config: &Config) -> liteclip_replay::platform::Hotk
 ///     &platform_handle,
 ///     &save_in_progress,
 ///     &game_detector,
-///     config.advanced.overlay_enabled,
 /// ).await;
 /// ```
 async fn spawn_save_clip_task(
     app_state: &Arc<RwLock<AppState>>,
-    platform_handle: &Arc<liteclip_replay::platform::PlatformHandle>,
+    _platform_handle: &Arc<liteclip_replay::platform::PlatformHandle>,
     save_in_progress: &Arc<AtomicBool>,
     game_detector: &Option<Arc<GameDetector>>,
-    overlay_enabled: bool,
 ) {
     if save_in_progress
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -628,8 +578,7 @@ async fn spawn_save_clip_task(
         return;
     }
 
-    let (config, buffer, notifications_enabled) = app_state.read().await.save_context();
-    let platform_handle_clone = platform_handle.clone();
+    let (config, buffer) = app_state.read().await.save_context();
     let save_in_progress_clone = save_in_progress.clone();
 
     let game_name = game_detector.as_ref().and_then(|d| {
@@ -649,25 +598,9 @@ async fn spawn_save_clip_task(
         match result {
             Ok(path) => {
                 info!("Clip saved: {:?}", path);
-
-                if overlay_enabled {
-                    let filename = path.file_name().map(|n| n.to_string_lossy().to_string());
-                    liteclip_replay::gui::run_clip_saved_overlay(filename);
-                }
-
-                if notifications_enabled {
-                    let _ = platform_handle_clone.show_notification(
-                        "Clip Saved",
-                        &format!("Saved to {:?}", path.file_name().unwrap_or_default()),
-                    );
-                }
             }
             Err(e) => {
                 error!("Failed to save clip: {:#}", e);
-                if notifications_enabled {
-                    let _ =
-                        platform_handle_clone.show_notification("Save Failed", &format!("{:#}", e));
-                }
             }
         }
 

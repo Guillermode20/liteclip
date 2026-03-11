@@ -10,13 +10,11 @@ use std::path::PathBuf;
 use super::functions::{
     default_bitrate, default_encoder, default_false, default_framerate, default_gpu_index,
     default_hotkey_gallery, default_hotkey_save, default_hotkey_screenshot, default_hotkey_toggle,
-    default_keyframe_interval, default_memory_limit, default_mic_device, default_mic_volume,
-    default_overlay_position, default_quality_preset, default_quality_value,
-    default_quality_value_for_preset, default_rate_control, default_replay_duration,
-    default_resolution, default_save_directory, default_system_volume, default_true,
-    ESTIMATED_MIC_AUDIO_BITRATE_BPS, ESTIMATED_SYSTEM_AUDIO_BITRATE_BPS,
-    LEGACY_DEFAULT_MEMORY_LIMIT_MB, MAX_FRAMERATE, MAX_MEMORY_LIMIT_MB, MIN_MEMORY_LIMIT_MB,
-    RECOMMENDED_BUFFER_BASE_OVERHEAD_MB, RECOMMENDED_BUFFER_HEADROOM_PERCENT,
+    default_keyframe_interval, default_mic_device, default_mic_volume, default_quality_preset,
+    default_quality_value, default_quality_value_for_preset, default_rate_control,
+    default_replay_duration, default_resolution, default_save_directory, default_system_volume,
+    default_true, ESTIMATED_MIC_AUDIO_BITRATE_BPS, ESTIMATED_SYSTEM_AUDIO_BITRATE_BPS,
+    MAX_FRAMERATE, RECOMMENDED_BUFFER_BASE_OVERHEAD_MB, RECOMMENDED_BUFFER_HEADROOM_PERCENT,
 };
 
 /// Encoder selection for video encoding.
@@ -189,28 +187,6 @@ impl Config {
             );
             self.video.framerate = MAX_FRAMERATE;
         }
-        if self.advanced.memory_limit_mb == LEGACY_DEFAULT_MEMORY_LIMIT_MB {
-            let recommended = self.recommended_replay_memory_limit_mb();
-            warn!(
-                "Config: migrating legacy memory_limit_mb={} to recommended {} MB",
-                LEGACY_DEFAULT_MEMORY_LIMIT_MB, recommended
-            );
-            self.advanced.memory_limit_mb = recommended;
-        } else if self.advanced.memory_limit_mb > 0
-            && self.advanced.memory_limit_mb < MIN_MEMORY_LIMIT_MB
-        {
-            warn!(
-                "Config: memory_limit_mb was {}, clamping to {}",
-                self.advanced.memory_limit_mb, MIN_MEMORY_LIMIT_MB
-            );
-            self.advanced.memory_limit_mb = MIN_MEMORY_LIMIT_MB;
-        } else if self.advanced.memory_limit_mb > MAX_MEMORY_LIMIT_MB {
-            warn!(
-                "Config: memory_limit_mb was {}, clamping to {}",
-                self.advanced.memory_limit_mb, MAX_MEMORY_LIMIT_MB
-            );
-            self.advanced.memory_limit_mb = MAX_MEMORY_LIMIT_MB;
-        }
         if self.video.bitrate_mbps == 0 {
             warn!("Config: bitrate_mbps was 0, clamping to 20");
             self.video.bitrate_mbps = 20;
@@ -304,18 +280,12 @@ impl Config {
         let recommended_mb = with_headroom
             .saturating_add((1024 * 1024) - 1)
             .checked_div(1024 * 1024)
-            .unwrap_or(u64::MAX)
-            .clamp(MIN_MEMORY_LIMIT_MB as u64, MAX_MEMORY_LIMIT_MB as u64);
+            .unwrap_or(u64::MAX);
         recommended_mb as u32
     }
 
     pub fn effective_replay_memory_limit_mb(&self) -> u32 {
-        let limit = self.advanced.memory_limit_mb;
-        if limit == 0 {
-            0
-        } else {
-            limit.clamp(MIN_MEMORY_LIMIT_MB, MAX_MEMORY_LIMIT_MB)
-        }
+        self.advanced.memory_limit_mb
     }
 
     pub fn requires_pipeline_restart(&self, other: &Config) -> bool {
@@ -419,28 +389,16 @@ impl VideoConfig {
 /// Advanced settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdvancedConfig {
-    #[serde(default = "default_memory_limit")]
+    #[serde(default)]
     pub memory_limit_mb: u32,
     #[serde(default = "default_gpu_index")]
     pub gpu_index: u32,
     #[serde(default = "default_keyframe_interval")]
     pub keyframe_interval_secs: u32,
-    #[serde(default = "default_true")]
-    pub overlay_enabled: bool,
-    #[serde(default = "default_overlay_position")]
-    pub overlay_position: OverlayPosition,
     #[serde(default = "default_false")]
     pub use_cpu_readback: bool,
 }
-/// Overlay position options
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum OverlayPosition {
-    TopLeft,
-    TopRight,
-    BottomLeft,
-    BottomRight,
-}
+/// General application settings
 /// General application settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GeneralConfig {

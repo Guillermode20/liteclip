@@ -104,10 +104,6 @@ impl SettingsApp {
                     );
                     ui.checkbox(&mut self.config.general.start_minimised, "Start Minimised");
                     ui.checkbox(
-                        &mut self.config.general.notifications,
-                        "Enable Notifications",
-                    );
-                    ui.checkbox(
                         &mut self.config.general.auto_detect_game,
                         "Auto Detect Game",
                     );
@@ -255,36 +251,34 @@ impl SettingsApp {
 
                 // Hotkey Settings
                 ui.collapsing("Hotkeys", |ui| {
-                    render_hotkey_field(ui, "Save Clip:", &mut self.config.hotkeys.save_clip, &mut self.hotkey_errors.save_clip);
-                    render_hotkey_field(ui, "Toggle Recording:", &mut self.config.hotkeys.toggle_recording, &mut self.hotkey_errors.toggle_recording);
-                    render_hotkey_field(ui, "Screenshot:", &mut self.config.hotkeys.screenshot, &mut self.hotkey_errors.screenshot);
-                    render_hotkey_field(ui, "Open Gallery:", &mut self.config.hotkeys.open_gallery, &mut self.hotkey_errors.open_gallery);
+                    render_hotkey_field(
+                        ui,
+                        "Save Clip:",
+                        &mut self.config.hotkeys.save_clip,
+                        &mut self.hotkey_errors.save_clip,
+                    );
+                    render_hotkey_field(
+                        ui,
+                        "Toggle Recording:",
+                        &mut self.config.hotkeys.toggle_recording,
+                        &mut self.hotkey_errors.toggle_recording,
+                    );
+                    render_hotkey_field(
+                        ui,
+                        "Screenshot:",
+                        &mut self.config.hotkeys.screenshot,
+                        &mut self.hotkey_errors.screenshot,
+                    );
+                    render_hotkey_field(
+                        ui,
+                        "Open Gallery:",
+                        &mut self.config.hotkeys.open_gallery,
+                        &mut self.hotkey_errors.open_gallery,
+                    );
                 });
 
                 // Advanced Settings
                 ui.collapsing("Advanced", |ui| {
-                    let estimated_storage_mb = self.config.estimated_replay_storage_mb();
-                    let recommended_limit_mb = self.config.recommended_replay_memory_limit_mb();
-
-                    ui.label(format!(
-                        "Estimated replay payload: ~{} MB for the current duration/bitrate",
-                        estimated_storage_mb
-                    ));
-                    ui.label(format!(
-                        "Recommended buffer cap: {} MB",
-                        recommended_limit_mb
-                    ));
-
-                    ui.add(
-                        egui::Slider::new(&mut self.config.advanced.memory_limit_mb, 64..=4096)
-                            .text("Memory Limit (MB)"),
-                    );
-                    if self.config.advanced.memory_limit_mb < recommended_limit_mb {
-                        ui.colored_label(
-                            egui::Color32::from_rgb(196, 120, 64),
-                            "The cap is below the estimated requirement, so the replay window may be shorter than configured.",
-                        );
-                    }
                     ui.add(
                         egui::Slider::new(&mut self.config.advanced.gpu_index, 0..=4)
                             .text("GPU Index"),
@@ -297,36 +291,6 @@ impl SettingsApp {
                         &mut self.config.advanced.use_cpu_readback,
                         "Use CPU Readback for HW Encoding",
                     );
-                    ui.checkbox(
-                        &mut self.config.advanced.overlay_enabled,
-                        "Enable In-Game Overlay",
-                    );
-                    if self.config.advanced.overlay_enabled {
-                        egui::ComboBox::from_label("Overlay Position")
-                            .selected_text(format!("{:?}", self.config.advanced.overlay_position))
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(
-                                    &mut self.config.advanced.overlay_position,
-                                    OverlayPosition::TopLeft,
-                                    "Top Left",
-                                );
-                                ui.selectable_value(
-                                    &mut self.config.advanced.overlay_position,
-                                    OverlayPosition::TopRight,
-                                    "Top Right",
-                                );
-                                ui.selectable_value(
-                                    &mut self.config.advanced.overlay_position,
-                                    OverlayPosition::BottomLeft,
-                                    "Bottom Left",
-                                );
-                                ui.selectable_value(
-                                    &mut self.config.advanced.overlay_position,
-                                    OverlayPosition::BottomRight,
-                                    "Bottom Right",
-                                );
-                            });
-                    }
                 });
             });
 
@@ -337,7 +301,10 @@ impl SettingsApp {
             ui.horizontal(|ui| {
                 if ui.button("Apply").clicked() {
                     self.config.validate();
-                    match self.event_tx.try_send(AppEvent::ConfigUpdated(Arc::new(self.config.clone()))) {
+                    match self
+                        .event_tx
+                        .try_send(AppEvent::ConfigUpdated(Arc::new(self.config.clone())))
+                    {
                         Ok(_) => {
                             *is_open = false;
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
