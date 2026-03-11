@@ -146,7 +146,7 @@ mod tests {
     fn test_duration_eviction_keyframe_continuity() {
         use super::qpc_frequency;
 
-        let qpc = qpc_frequency() as i64;
+        let qpc = qpc_frequency();
         let fps = 30i64;
         let keyframe_every_n_frames = 60i64;
         let buffer = LockFreeReplayBuffer::new(&make_config(5, 1024)).unwrap();
