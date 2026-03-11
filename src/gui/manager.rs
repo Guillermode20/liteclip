@@ -9,8 +9,8 @@ use std::time::Duration;
 use tokio::sync::mpsc::Sender as TokioSender;
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetSystemMetrics, GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, SM_CXSCREEN,
-    SM_CYSCREEN, WS_EX_TRANSPARENT,
+    GetSystemMetrics, GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, SM_CXSCREEN, SM_CYSCREEN,
+    WS_EX_TRANSPARENT,
 };
 
 pub enum GuiMessage {
@@ -74,10 +74,10 @@ fn get_toast_window_pos() -> [f32; 2] {
         let screen_width = unsafe { GetSystemMetrics(SM_CXSCREEN) }.max(0) as f32;
         let screen_height = unsafe { GetSystemMetrics(SM_CYSCREEN) }.max(0) as f32;
 
-        return [
+        [
             (screen_width - TOAST_WINDOW_SIZE[0] - TOAST_WINDOW_MARGIN[0]).max(0.0),
             TOAST_WINDOW_MARGIN[1].min((screen_height - TOAST_WINDOW_MARGIN[1]).max(0.0)),
-        ];
+        ]
     }
 
     #[cfg(not(target_os = "windows"))]
