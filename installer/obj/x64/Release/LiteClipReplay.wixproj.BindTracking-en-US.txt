@@ -1,6 +1,11 @@
 BuiltContentOutput	C:\Coding\liteclip-recorder\installer\obj\x64\Release\en-US\cab1.cab
 BuiltPdbOutput	C:\Coding\liteclip-recorder\installer\obj\x64\Release\en-US\LiteClipReplay.wixpdb
 BuiltTargetOutput	C:\Coding\liteclip-recorder\installer\obj\x64\Release\en-US\LiteClipReplay.msi
+Input	..\ffmpeg_dev\sdk\bin\avcodec-61.dll
+Input	..\ffmpeg_dev\sdk\bin\avformat-61.dll
+Input	..\ffmpeg_dev\sdk\bin\avutil-59.dll
+Input	..\ffmpeg_dev\sdk\bin\swresample-5.dll
+Input	..\ffmpeg_dev\sdk\bin\swscale-8.dll
 Input	..\logo.ico
 Input	..\target\release\liteclip-replay.exe
 Intermediate	C:\Coding\liteclip-recorder\installer\obj\x64\Release\en-US\cab1.cab
