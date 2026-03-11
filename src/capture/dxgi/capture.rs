@@ -49,6 +49,7 @@ pub(super) struct Nv12TexturePool {
     pub(super) return_rx: Receiver<D3d11TexturePoolItem>,
     pub(super) width: u32,
     pub(super) height: u32,
+    pub(super) max_capacity: usize,
 }
 
 pub(super) struct BgraTexturePool {
@@ -57,6 +58,7 @@ pub(super) struct BgraTexturePool {
     pub(super) return_rx: Receiver<D3d11TexturePoolItem>,
     pub(super) width: u32,
     pub(super) height: u32,
+    pub(super) max_capacity: usize,
 }
 
 enum CaptureOutcome {
@@ -74,6 +76,7 @@ impl Nv12TexturePool {
             return_rx,
             width,
             height,
+            max_capacity: 12, // Sufficient for jitter but caps VRAM usage
         }
     }
 }
@@ -87,6 +90,7 @@ impl BgraTexturePool {
             return_rx,
             width,
             height,
+            max_capacity: 12, // Sufficient for jitter but caps VRAM usage
         }
     }
 }
@@ -1043,6 +1047,12 @@ impl DxgiCapture {
         config: CaptureConfig,
     ) {
         Self::set_capture_thread_priority();
+
+        // Use high-resolution timer for precise sleep on Windows
+        unsafe {
+            let _ = windows::Win32::Media::timeBeginPeriod(1);
+        }
+
         info!("DXGI capture thread started: {} FPS", config.target_fps);
         let perform_cpu_readback = config.perform_cpu_readback;
         #[cfg(windows)]
@@ -1305,10 +1315,19 @@ impl DxgiCapture {
                 window_drops = 0;
                 window_duplicates = 0;
             }
-            // Precise pacing: sleep until next frame time
+
+            // Precise pacing: hybrid sleep + spin-wait
             let now = std::time::Instant::now();
             if now < next_frame_time {
-                std::thread::sleep(next_frame_time - now);
+                let diff = next_frame_time - now;
+                // Sleep for the majority of the time, leaving a 2ms buffer for spin-wait precision
+                if diff > Duration::from_millis(2) {
+                    std::thread::sleep(diff - Duration::from_millis(2));
+                }
+                // Final precision spin-wait
+                while std::time::Instant::now() < next_frame_time {
+                    std::hint::spin_loop();
+                }
             }
             next_frame_time += frame_period;
             // If we're significantly behind, reset the schedule
@@ -1316,6 +1335,11 @@ impl DxgiCapture {
                 next_frame_time = std::time::Instant::now() + frame_period;
             }
         }
+
+        unsafe {
+            let _ = windows::Win32::Media::timeEndPeriod(1);
+        }
+
         info!(
             "DXGI capture thread stopped ({} frames captured, {} dropped, {} duplicated)",
             frame_count, dropped_count, duplicated_count

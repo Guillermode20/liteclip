@@ -8,6 +8,7 @@ pub mod software;
 use self::context::D3d11HardwareContext;
 use super::{EncodedPacket, Encoder, EncoderConfig, StreamType};
 use anyhow::{Context, Result};
+use bytes::BytesMut;
 use crossbeam::channel::{unbounded, Receiver, Sender};
 use ffmpeg::color::{Primaries, Range, Space, TransferCharacteristic};
 use ffmpeg_next as ffmpeg;
@@ -29,6 +30,7 @@ pub struct FfmpegEncoder {
     hw_context: Option<D3d11HardwareContext>,
     last_input_res: (u32, u32),
     pending_packet_timestamps: VecDeque<i64>,
+    packet_buffer: BytesMut,
 }
 
 const WARMUP_FRAMES: i64 = 60;
@@ -76,6 +78,7 @@ impl FfmpegEncoder {
             hw_context: None,
             last_input_res: (0, 0),
             pending_packet_timestamps: VecDeque::with_capacity(256),
+            packet_buffer: BytesMut::with_capacity(1024 * 1024), // 1MB initial capacity
         })
     }
 

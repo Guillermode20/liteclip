@@ -235,7 +235,9 @@ impl DxgiCapture {
                 .as_mut()
                 .context("BGRA pool is not initialized")?;
             while let Ok(item) = pool.return_rx.try_recv() {
-                pool.available.push(item);
+                if pool.available.len() < pool.max_capacity {
+                    pool.available.push(item);
+                }
             }
             (pool.width, pool.height, pool.available.pop())
         };
@@ -256,7 +258,9 @@ impl DxgiCapture {
                 .as_mut()
                 .context("NV12 pool is not initialized")?;
             while let Ok(item) = pool.return_rx.try_recv() {
-                pool.available.push(item);
+                if pool.available.len() < pool.max_capacity {
+                    pool.available.push(item);
+                }
             }
             (pool.width, pool.height, pool.available.pop())
         };

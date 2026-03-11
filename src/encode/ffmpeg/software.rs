@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use bytes::Bytes;
 use ffmpeg::format::Pixel;
 use ffmpeg_next as ffmpeg;
 use tracing::info;
@@ -96,12 +97,14 @@ impl FfmpegEncoder {
     }
 
     pub(super) fn drain_encoder_packets(&mut self, fallback_timestamp: i64) -> Result<()> {
-        let mut packets_data: Vec<(Vec<u8>, bool)> = Vec::with_capacity(8);
+        let mut packets_data: Vec<(Bytes, bool)> = Vec::with_capacity(8);
 
         if let Some(ref mut encoder) = self.encoder {
             let mut packet = ffmpeg::Packet::empty();
             while encoder.receive_packet(&mut packet).is_ok() {
-                let data = packet.data().unwrap_or(&[]).to_vec();
+                let data_slice = packet.data().unwrap_or(&[]);
+                self.packet_buffer.extend_from_slice(data_slice);
+                let data = self.packet_buffer.split_to(data_slice.len()).freeze();
                 let packet_is_key = packet.is_key();
                 packets_data.push((data, packet_is_key));
             }
