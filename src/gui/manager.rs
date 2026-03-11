@@ -102,28 +102,35 @@ struct GuiManagerApp {
     settings: Arc<Mutex<Option<crate::gui::settings::SettingsApp>>>,
     gallery: Arc<Mutex<Option<crate::gui::gallery::GalleryApp>>>,
     toasts: Toasts,
+    #[cfg(target_os = "windows")]
+    hwnd: Option<windows::Win32::Foundation::HWND>,
 }
 
 impl GuiManagerApp {
+    #[cfg(target_os = "windows")]
     fn new(cc: &eframe::CreationContext<'_>, rx: Receiver<GuiMessage>) -> Self {
-        #[cfg(target_os = "windows")]
-        {
-            use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-            if let Ok(handle) = cc.window_handle() {
-                if let RawWindowHandle::Win32(win32) = handle.as_raw() {
-                    use windows::Win32::Foundation::HWND;
-                    let hwnd = HWND(win32.hwnd.get() as _);
-                    unsafe {
-                        let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-                        SetWindowLongPtrW(
-                            hwnd,
-                            GWL_EXSTYLE,
-                            ex_style | WS_EX_TRANSPARENT.0 as isize,
-                        );
-                    }
-                }
+        use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let hwnd = if let Ok(handle) = cc.window_handle() {
+            if let RawWindowHandle::Win32(win32) = handle.as_raw() {
+                Some(windows::Win32::Foundation::HWND(win32.hwnd.get() as _))
+            } else {
+                None
             }
+        } else {
+            None
+        };
+
+        Self {
+            rx,
+            settings: Arc::new(Mutex::new(None)),
+            gallery: Arc::new(Mutex::new(None)),
+            toasts: Toasts::default().with_anchor(Anchor::TopRight),
+            hwnd,
         }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn new(_cc: &eframe::CreationContext<'_>, rx: Receiver<GuiMessage>) -> Self {
         Self {
             rx,
             settings: Arc::new(Mutex::new(None)),
@@ -131,6 +138,27 @@ impl GuiManagerApp {
             toasts: Toasts::default().with_anchor(Anchor::TopRight),
         }
     }
+
+    #[cfg(target_os = "windows")]
+    fn set_click_through(&self, click_through: bool) {
+        if let Some(hwnd) = self.hwnd {
+            unsafe {
+                let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+                if click_through {
+                    SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex_style | WS_EX_TRANSPARENT.0 as isize);
+                } else {
+                    SetWindowLongPtrW(
+                        hwnd,
+                        GWL_EXSTYLE,
+                        ex_style & !(WS_EX_TRANSPARENT.0 as isize),
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn set_click_through(&self, _click_through: bool) {}
 }
 
 impl eframe::App for GuiManagerApp {
@@ -238,6 +266,8 @@ impl eframe::App for GuiManagerApp {
         } else {
             ctx.request_repaint_after(Duration::from_millis(16));
         }
+
+        self.set_click_through(true);
 
         self.toasts.show(ctx);
     }
