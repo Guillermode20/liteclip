@@ -29,22 +29,16 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
 //! use liteclip_replay::buffer::ReplayBuffer;
 //! use liteclip_replay::config::Config;
 //!
 //! let config = Config::default();
-//! let buffer = ReplayBuffer::new(&config)?;
-//!
-//! // Push encoded packets
-//! buffer.push(packet);
-//!
-//! // Get a snapshot for saving
-//! let packets = buffer.snapshot()?;
+//! let buffer = ReplayBuffer::new(&config).unwrap();
 //!
 //! // Check statistics
 //! let stats = buffer.stats();
-//! println!("Duration: {:.1}s", stats.duration_secs);
+//! println!("Buffer: {:.1}s, {} MB", stats.duration_secs, stats.total_bytes / 1024 / 1024);
 //! ```
 
 pub mod ring;

@@ -27,19 +27,12 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
 //! use liteclip_replay::capture::dxgi::DxgiCapture;
 //! use liteclip_replay::capture::CaptureConfig;
 //!
-//! let mut capture = DxgiCapture::new();
-//! let config = CaptureConfig::default();
-//!
-//! capture.start(config)?;
-//!
-//! // Receive captured frames
-//! while let Ok(frame) = capture.frame_rx().recv() {
-//!     // Process frame
-//! }
+//! let capture = DxgiCapture::new().unwrap();
+//! // capture.start(config).unwrap();
 //! ```
 
 pub mod capture;

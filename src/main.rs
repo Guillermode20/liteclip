@@ -632,17 +632,14 @@ async fn spawn_save_clip_task(
     let platform_handle_clone = platform_handle.clone();
     let save_in_progress_clone = save_in_progress.clone();
 
-    let game_name = game_detector
-        .as_ref()
-        .map(|d| {
-            let app = d.get_detected_app();
-            if app.is_game {
-                Some(app.folder_name.clone())
-            } else {
-                None
-            }
-        })
-        .flatten();
+    let game_name = game_detector.as_ref().and_then(|d| {
+        let app = d.get_detected_app();
+        if app.is_game {
+            Some(app.folder_name.clone())
+        } else {
+            None
+        }
+    });
 
     tokio::spawn(async move {
         let result =

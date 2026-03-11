@@ -1,8 +1,4 @@
-use crate::{
-    app::RecordingPipeline,
-    buffer::ReplayBuffer,
-    config::Config,
-};
+use crate::{app::RecordingPipeline, buffer::ReplayBuffer, config::Config};
 use anyhow::Result;
 use tracing::{error, info, warn};
 
@@ -42,12 +38,12 @@ impl AppState {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
     /// use liteclip_replay::config::Config;
     /// use liteclip_replay::app::AppState;
     ///
     /// let config = Config::default();
-    /// let state = AppState::new(config)?;
+    /// let state = AppState::new(config).unwrap();
     /// ```
     pub fn new(config: Config) -> Result<Self> {
         let buffer = ReplayBuffer::new(&config)?;

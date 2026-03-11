@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn cargo_target_profile_dir() -> Option<PathBuf> {
@@ -87,7 +87,7 @@ fn find_fxc_exe() -> Option<PathBuf> {
 }
 
 fn compile_shader(
-    fxc_path: &PathBuf,
+    fxc_path: &Path,
     shader_type: &str,
     entry_point: &str,
     input: &str,

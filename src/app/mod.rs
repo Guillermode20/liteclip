@@ -13,18 +13,15 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
 //! use liteclip_replay::app::AppState;
 //! use liteclip_replay::config::Config;
 //!
 //! let config = Config::default();
-//! let mut state = AppState::new(config)?;
+//! let mut state = AppState::new(config).unwrap();
 //!
 //! // Start recording
-//! state.start_recording().await?;
-//!
-//! // Save a clip
-//! let path = state.save_clip(None).await?;
+//! // state.start_recording().await.unwrap();
 //! ```
 
 pub mod clip;

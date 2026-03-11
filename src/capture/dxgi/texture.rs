@@ -359,12 +359,7 @@ impl DxgiCapture {
             };
 
             video_context
-                .VideoProcessorBlt(
-                    video_processor,
-                    pooled_output_view,
-                    0,
-                    &[stream_data],
-                )
+                .VideoProcessorBlt(video_processor, pooled_output_view, 0, &[stream_data])
                 .ok()
                 .context("VideoProcessorBlt failed")?;
 

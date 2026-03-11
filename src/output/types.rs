@@ -38,7 +38,7 @@ impl Muxer {
                 _ => {}
             }
 
-            if matches!(hevc_nal_type(data), Some(32 | 33 | 34)) {
+            if matches!(hevc_nal_type(data), Some(32..=34)) {
                 saw_hevc_parameter_sets = true;
             }
 
@@ -319,7 +319,7 @@ fn is_parameter_set_packet(packet: &EncodedPacket) -> bool {
     }
 
     let data = packet.data.as_ref();
-    matches!(h264_nal_type(data), Some(7 | 8)) || matches!(hevc_nal_type(data), Some(32 | 33 | 34))
+    matches!(h264_nal_type(data), Some(7 | 8)) || matches!(hevc_nal_type(data), Some(32..=34))
 }
 
 fn fragmented_output_path(output_path: &Path) -> PathBuf {

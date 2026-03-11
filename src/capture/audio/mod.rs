@@ -26,17 +26,12 @@
 //!
 //! # Example
 //!
-//! ```ignore
-//! use liteclip_replay::capture::audio::AudioManager;
+//! ```no_run
+//! use liteclip_replay::capture::audio::WasapiAudioManager;
 //! use liteclip_replay::config::AudioConfig;
 //!
-//! let mut manager = AudioManager::new();
-//! manager.start(&audio_config)?;
-//!
-//! // Receive encoded audio packets
-//! while let Ok(packet) = manager.packet_rx().recv() {
-//!     buffer.push(packet);
-//! }
+//! let manager = WasapiAudioManager::new();
+//! // manager.start(&audio_config).unwrap();
 //! ```
 
 pub mod device_info;

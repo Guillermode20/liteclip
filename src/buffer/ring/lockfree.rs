@@ -27,18 +27,12 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
 //! use liteclip_replay::buffer::ring::LockFreeReplayBuffer;
 //! use liteclip_replay::config::Config;
 //!
 //! let config = Config::default();
-//! let buffer = LockFreeReplayBuffer::new(&config)?;
-//!
-//! // Push encoded packets
-//! buffer.push(encoded_packet);
-//!
-//! // Snapshot for clip saving
-//! let packets = buffer.snapshot()?;
+//! let buffer = LockFreeReplayBuffer::new(&config).unwrap();
 //! ```
 
 use crate::encode::{EncodedPacket, StreamType};
@@ -66,6 +60,7 @@ pub enum CodecKind {
     Hevc,
 }
 
+#[derive(Default)]
 struct ParameterCache {
     codec_kind: CodecKind,
     h264_sps: Option<Bytes>,
@@ -73,19 +68,6 @@ struct ParameterCache {
     hevc_vps: Option<Bytes>,
     hevc_sps: Option<Bytes>,
     hevc_pps: Option<Bytes>,
-}
-
-impl Default for ParameterCache {
-    fn default() -> Self {
-        Self {
-            codec_kind: CodecKind::default(),
-            h264_sps: None,
-            h264_pps: None,
-            hevc_vps: None,
-            hevc_sps: None,
-            hevc_pps: None,
-        }
-    }
 }
 
 /// Identifies the first video NAL unit type.
@@ -169,12 +151,12 @@ impl LockFreeReplayBuffer {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
     /// use liteclip_replay::buffer::ring::LockFreeReplayBuffer;
     /// use liteclip_replay::config::Config;
     ///
     /// let config = Config::default();
-    /// let buffer = LockFreeReplayBuffer::new(&config)?;
+    /// let buffer = LockFreeReplayBuffer::new(&config).unwrap();
     /// ```
     pub fn new(config: &crate::config::Config) -> Result<Self> {
         let duration = Duration::from_secs(config.general.replay_duration_secs as u64 + 1);

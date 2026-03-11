@@ -39,9 +39,7 @@ pub fn start_video_pipeline(
         }
         info!(
             "GPU transport enabled: encoder={:?}, output={}, format={:?}",
-            encoder_config.encoder_type,
-            capture_config.output_index,
-            requested_gpu_format
+            encoder_config.encoder_type, capture_config.output_index, requested_gpu_format
         );
         capture_config.perform_cpu_readback = false;
         #[cfg(windows)]

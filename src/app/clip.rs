@@ -41,11 +41,12 @@ impl ClipManager {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
     /// use liteclip_replay::app::ClipManager;
+    /// use liteclip_replay::config::Config;
+    /// use liteclip_replay::buffer::ReplayBuffer;
     ///
-    /// let path = ClipManager::save_clip(&config, &buffer, Some("Valorant")).await?;
-    /// println!("Saved clip to: {:?}", path);
+    /// // let path = ClipManager::save_clip(&config, &buffer, Some("Valorant")).await.unwrap();
     /// ```
     pub async fn save_clip(
         config: &Config,

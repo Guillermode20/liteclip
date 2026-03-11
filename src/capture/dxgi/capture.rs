@@ -371,7 +371,9 @@ impl DxgiCaptureState {
                 )?);
             }
 
-            let (bgra_sync_fence, bgra_fence_shared_handle) = match d3d_device.cast::<ID3D11Device5>() {
+            let (bgra_sync_fence, bgra_fence_shared_handle) = match d3d_device
+                .cast::<ID3D11Device5>()
+            {
                 Ok(device5) => {
                     let mut fence_opt: Option<ID3D11Fence> = None;
                     match device5.CreateFence(0, D3D11_FENCE_FLAG_SHARED, &mut fence_opt) {
@@ -402,7 +404,10 @@ impl DxgiCaptureState {
                     }
                 }
                 Err(e) => {
-                    warn!("ID3D11Device5 unavailable, BGRA sync will fall back to Flush-only: {}", e);
+                    warn!(
+                        "ID3D11Device5 unavailable, BGRA sync will fall back to Flush-only: {}",
+                        e
+                    );
                     (None, None)
                 }
             };
@@ -535,6 +540,7 @@ impl DxgiCaptureState {
     }
 
     /// Initialize NV12 conversion resources using D3D11 Video Processor
+    #[allow(clippy::type_complexity)]
     fn init_nv12_conversion_resources(
         d3d_device: &ID3D11Device,
         input_width: u32,
@@ -640,6 +646,8 @@ impl DxgiCaptureState {
     }
 
     /// Initialize GPU scaling resources (shaders, vertex buffer)
+    #[allow(clippy::type_complexity)]
+    #[allow(clippy::manual_c_str_literals)]
     fn init_gpu_scaling_resources(
         d3d_device: &ID3D11Device,
         _src_width: u32,
@@ -828,10 +836,10 @@ impl DxgiCapture {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
     /// use liteclip_replay::capture::dxgi::DxgiCapture;
     ///
-    /// let capture = DxgiCapture::new()?;
+    /// let capture = DxgiCapture::new().unwrap();
     /// ```
     pub fn new() -> Result<Self> {
         // 32 frames at 1920x1080 BGRA is ~253MB worst case, but GPU NV12 transport greatly
@@ -938,11 +946,8 @@ impl DxgiCapture {
                             .cast()
                             .context("Failed to cast staging texture to resource")?;
 
-                        let (source_texture, resolution) = DxgiCapture::source_texture_for_frame(
-                            state,
-                            &captured_texture,
-                            None,
-                        )?;
+                        let (source_texture, resolution) =
+                            DxgiCapture::source_texture_for_frame(state, &captured_texture, None)?;
                         let source_resource: ID3D11Resource = source_texture
                             .cast()
                             .context("Failed to cast source texture to resource")?;
@@ -1172,7 +1177,7 @@ impl DxgiCapture {
                     let Some(ref last) = last_frame else {
                         continue;
                     };
-                    if backpressure.is_encoder_overloaded() || frame_tx.len() > 0 {
+                    if backpressure.is_encoder_overloaded() || !frame_tx.is_empty() {
                         continue;
                     }
                     let fps_divisor = backpressure.current_fps_divisor();

@@ -5,9 +5,8 @@ use ffmpeg::format::Pixel;
 use ffmpeg_next as ffmpeg;
 use tracing::{info, warn};
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11DeviceContext4,
-    ID3D11Resource, ID3D11Texture2D, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-    D3D11_SDK_VERSION,
+    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
+    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
 };
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 use windows_core::Interface;
@@ -72,6 +71,7 @@ impl FfmpegEncoder {
         }
     }
 
+    #[allow(dead_code)]
     pub(super) fn create_d3d11_hardware_context(
         &self,
         gpu_frame: &crate::capture::D3d11Frame,
@@ -225,7 +225,8 @@ impl FfmpegEncoder {
         };
 
         // Reuse capture device (Optimization 4)
-        let hw_context = self.create_d3d11_hardware_context_from_device(&gpu_frame.device, out_w, out_h)
+        let hw_context = self
+            .create_d3d11_hardware_context_from_device(&gpu_frame.device, out_w, out_h)
             .context("Failed to create hardware context from shared device")?;
 
         let mut encoder = ffmpeg::codec::context::Context::new_with_codec(codec)
@@ -294,7 +295,8 @@ impl FfmpegEncoder {
             let hw_frame = hw_context.reusable_hw_frame;
             ffmpeg::ffi::av_frame_unref(hw_frame);
 
-            let get_buffer_res = ffmpeg::ffi::av_hwframe_get_buffer(hw_context.frames_ctx_ref, hw_frame, 0);
+            let get_buffer_res =
+                ffmpeg::ffi::av_hwframe_get_buffer(hw_context.frames_ctx_ref, hw_frame, 0);
             if get_buffer_res < 0 {
                 anyhow::bail!("Failed to get hardware frame buffer: {}", get_buffer_res);
             }
@@ -310,7 +312,7 @@ impl FfmpegEncoder {
                 let texture_ptr = (*hw_frame).data[0] as *mut ID3D11Texture2D;
                 let dst_texture = &*texture_ptr;
                 let dest_subresource = (*hw_frame).data[1] as usize as u32;
-                
+
                 let shared_texture = if let Some(found) = hw_context
                     .cached_shared_textures
                     .iter()
@@ -325,7 +327,9 @@ impl FfmpegEncoder {
                             .OpenSharedResource(gpu_frame.shared_handle, &mut opened_opt)
                             .context("Failed to open shared texture on encoder device")?;
                     } else {
-                        anyhow::bail!("No encoder device available for cross-device texture sharing");
+                        anyhow::bail!(
+                            "No encoder device available for cross-device texture sharing"
+                        );
                     }
                     let opened = opened_opt.context("OpenSharedResource returned null")?;
                     hw_context
@@ -337,10 +341,11 @@ impl FfmpegEncoder {
                 if let (Some(ref fence), Some(_handle)) =
                     (&hw_context.encoder_fence, gpu_frame.fence_shared_handle)
                 {
-                    let ctx4: windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext4 = hw_context
-                        .copy_context
-                        .cast()
-                        .context("Failed to get ID3D11DeviceContext4 for encoder wait")?;
+                    let ctx4: windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext4 =
+                        hw_context
+                            .copy_context
+                            .cast()
+                            .context("Failed to get ID3D11DeviceContext4 for encoder wait")?;
                     ctx4.Wait(fence, gpu_frame.fence_value)
                         .context("Failed to wait on shared fence in encoder")?;
                 }

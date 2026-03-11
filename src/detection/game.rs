@@ -35,22 +35,27 @@ pub struct DetectedApp {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
 /// use liteclip_replay::detection::GameDetector;
 ///
 /// let detector = GameDetector::new();
 /// detector.start();
 ///
 /// // Later, check detection result
-/// if let Some(app) = detector.get_detected_app() {
-///     if app.is_game {
-///         println!("Playing: {}", app.name);
-///     }
+/// let app = detector.get_detected_app();
+/// if app.is_game {
+///     println!("Playing: {}", app.name);
 /// }
 /// ```
 pub struct GameDetector {
     detected: Arc<AtomicPtr<DetectedApp>>,
     running: Arc<AtomicBool>,
+}
+
+impl Default for GameDetector {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl GameDetector {
