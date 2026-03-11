@@ -598,9 +598,21 @@ async fn spawn_save_clip_task(
         match result {
             Ok(path) => {
                 info!("Clip saved: {:?}", path);
+                let filename = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "clip".to_string());
+                liteclip_replay::gui::show_toast(
+                    liteclip_replay::gui::ToastKind::Success,
+                    format!("Clip saved: {}", filename),
+                );
             }
             Err(e) => {
                 error!("Failed to save clip: {:#}", e);
+                liteclip_replay::gui::show_toast(
+                    liteclip_replay::gui::ToastKind::Error,
+                    format!("Failed to save clip: {}", e),
+                );
             }
         }
 

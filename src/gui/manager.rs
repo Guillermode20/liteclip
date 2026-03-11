@@ -1,19 +1,36 @@
 use crate::platform::AppEvent;
 use eframe::egui;
+use egui_notify::{Anchor, Toasts};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::LazyLock;
 use std::sync::Once;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc::Sender as TokioSender;
+#[cfg(target_os = "windows")]
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetSystemMetrics, GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, SM_CXSCREEN,
+    SM_CYSCREEN, WS_EX_TRANSPARENT,
+};
 
 pub enum GuiMessage {
     ShowSettings(TokioSender<AppEvent>),
     ShowGallery(TokioSender<AppEvent>),
+    Toast(ToastKind, String),
+}
+
+pub enum ToastKind {
+    Success,
+    Error,
+    Info,
+    Warning,
 }
 
 static GUI_TX: LazyLock<Mutex<Option<Sender<GuiMessage>>>> = LazyLock::new(|| Mutex::new(None));
 static GUI_INIT: Once = Once::new();
+
+const TOAST_WINDOW_SIZE: [f32; 2] = [350.0, 300.0];
+const TOAST_WINDOW_MARGIN: [f32; 2] = [20.0, 20.0];
 
 pub fn init_gui_manager() {
     GUI_INIT.call_once(|| {
@@ -21,19 +38,17 @@ pub fn init_gui_manager() {
         *GUI_TX.lock().unwrap() = Some(tx);
 
         std::thread::spawn(move || {
+            let pos = get_toast_window_pos();
+
             let options = eframe::NativeOptions {
-                // The GUI manager hosts small settings/gallery windows.
-                // Auto-selecting wgpu here spins up a full graphics backend,
-                // which keeps a large amount of graphics memory resident.
-                // Prefer Glow to keep this helper thread lightweight.
                 renderer: eframe::Renderer::Glow,
                 viewport: egui::ViewportBuilder::default()
-                    .with_visible(false)
-                    .with_active(false)
-                    .with_position([-10000.0, -10000.0])
-                    .with_taskbar(false)
+                    .with_transparent(true)
+                    .with_always_on_top()
                     .with_decorations(false)
-                    .with_inner_size([1.0, 1.0]),
+                    .with_taskbar(false)
+                    .with_inner_size(TOAST_WINDOW_SIZE)
+                    .with_position(pos),
                 event_loop_builder: Some(Box::new(|builder| {
                     #[cfg(target_os = "windows")]
                     {
@@ -45,12 +60,30 @@ pub fn init_gui_manager() {
             };
 
             let _ = eframe::run_native(
-                "liteclip_gui_manager",
+                "liteclip_overlay",
                 options,
                 Box::new(|cc| Ok(Box::new(GuiManagerApp::new(cc, rx)))),
             );
         });
     });
+}
+
+fn get_toast_window_pos() -> [f32; 2] {
+    #[cfg(target_os = "windows")]
+    {
+        let screen_width = unsafe { GetSystemMetrics(SM_CXSCREEN) }.max(0) as f32;
+        let screen_height = unsafe { GetSystemMetrics(SM_CYSCREEN) }.max(0) as f32;
+
+        return [
+            (screen_width - TOAST_WINDOW_SIZE[0] - TOAST_WINDOW_MARGIN[0]).max(0.0),
+            TOAST_WINDOW_MARGIN[1].min((screen_height - TOAST_WINDOW_MARGIN[1]).max(0.0)),
+        ];
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        [TOAST_WINDOW_MARGIN[0], TOAST_WINDOW_MARGIN[1]]
+    }
 }
 
 pub fn send_gui_message(msg: GuiMessage) {
@@ -60,23 +93,51 @@ pub fn send_gui_message(msg: GuiMessage) {
     }
 }
 
+pub fn show_toast(kind: ToastKind, message: impl Into<String>) {
+    send_gui_message(GuiMessage::Toast(kind, message.into()));
+}
+
 struct GuiManagerApp {
     rx: Receiver<GuiMessage>,
     settings: Arc<Mutex<Option<crate::gui::settings::SettingsApp>>>,
     gallery: Arc<Mutex<Option<crate::gui::gallery::GalleryApp>>>,
+    toasts: Toasts,
 }
 
 impl GuiManagerApp {
-    fn new(_cc: &eframe::CreationContext<'_>, rx: Receiver<GuiMessage>) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>, rx: Receiver<GuiMessage>) -> Self {
+        #[cfg(target_os = "windows")]
+        {
+            use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            if let Ok(handle) = cc.window_handle() {
+                if let RawWindowHandle::Win32(win32) = handle.as_raw() {
+                    use windows::Win32::Foundation::HWND;
+                    let hwnd = HWND(win32.hwnd.get() as _);
+                    unsafe {
+                        let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+                        SetWindowLongPtrW(
+                            hwnd,
+                            GWL_EXSTYLE,
+                            ex_style | WS_EX_TRANSPARENT.0 as isize,
+                        );
+                    }
+                }
+            }
+        }
         Self {
             rx,
             settings: Arc::new(Mutex::new(None)),
             gallery: Arc::new(Mutex::new(None)),
+            toasts: Toasts::default().with_anchor(Anchor::TopRight),
         }
     }
 }
 
 impl eframe::App for GuiManagerApp {
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        [0.0, 0.0, 0.0, 0.0]
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
@@ -90,8 +151,34 @@ impl eframe::App for GuiManagerApp {
                     *self.gallery.lock().unwrap() =
                         Some(crate::gui::gallery::GalleryApp::new(&config, tx));
                 }
+                GuiMessage::Toast(kind, message) => {
+                    match kind {
+                        ToastKind::Success => {
+                            self.toasts
+                                .success(message)
+                                .duration(Duration::from_secs(3));
+                        }
+                        ToastKind::Error => {
+                            self.toasts.error(message).duration(Duration::from_secs(5));
+                        }
+                        ToastKind::Info => {
+                            self.toasts.info(message).duration(Duration::from_secs(3));
+                        }
+                        ToastKind::Warning => {
+                            self.toasts
+                                .warning(message)
+                                .duration(Duration::from_secs(4));
+                        }
+                    }
+                    ctx.request_repaint();
+                }
             }
         }
+
+        let frame = egui::Frame::NONE.fill(egui::Color32::TRANSPARENT);
+        egui::CentralPanel::default()
+            .frame(frame)
+            .show(ctx, |_ui| {});
 
         let settings_clone = self.settings.clone();
         let show_settings = settings_clone.lock().unwrap().is_some();
@@ -149,7 +236,9 @@ impl eframe::App for GuiManagerApp {
         if show_settings || show_gallery {
             ctx.request_repaint();
         } else {
-            ctx.request_repaint_after(Duration::from_millis(250));
+            ctx.request_repaint_after(Duration::from_millis(16));
         }
+
+        self.toasts.show(ctx);
     }
 }
