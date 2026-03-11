@@ -28,6 +28,7 @@ impl FfmpegEncoder {
         }
     }
 
+    #[allow(dead_code)]
     pub(super) fn hardware_frame_sw_format(&self) -> Pixel {
         self.encoder_pixel_format()
     }

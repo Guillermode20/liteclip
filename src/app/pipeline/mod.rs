@@ -27,22 +27,17 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
 //! use liteclip_replay::app::pipeline::RecordingPipeline;
 //! use liteclip_replay::buffer::ReplayBuffer;
 //! use liteclip_replay::config::Config;
 //!
 //! let mut pipeline = RecordingPipeline::new();
-//! let buffer = ReplayBuffer::new(&config)?;
+//! let config = Config::default();
+//! let buffer = ReplayBuffer::new(&config).unwrap();
 //!
 //! // Start recording
-//! pipeline.start(&config, &buffer).await?;
-//!
-//! // Check lifecycle
-//! assert!(matches!(pipeline.lifecycle(), RecordingLifecycle::Running));
-//!
-//! // Stop recording
-//! pipeline.stop().await?;
+//! // pipeline.start(&config, &buffer).await.unwrap();
 //! ```
 
 pub mod audio;

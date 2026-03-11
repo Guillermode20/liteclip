@@ -16,17 +16,16 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
 //! use liteclip_replay::detection::GameDetector;
 //!
 //! let detector = GameDetector::new();
 //! detector.start();
 //!
 //! // Later, check if a game is running
-//! if let Some(app) = detector.get_detected_app() {
-//!     if app.is_game {
-//!         println!("Detected game: {}", app.folder_name);
-//!     }
+//! let app = detector.get_detected_app();
+//! if app.is_game {
+//!     println!("Detected game: {}", app.folder_name);
 //! }
 //! ```
 

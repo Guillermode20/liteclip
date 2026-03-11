@@ -25,21 +25,15 @@
 //!
 //! # Example
 //!
-//! ```ignore
-//! use liteclip_replay::output::{spawn_clip_saver, MuxerConfig, generate_output_path};
+//! ```no_run
+//! use liteclip_replay::output::{MuxerConfig, generate_output_path};
+//! use std::path::Path;
 //!
 //! // Generate output path
-//! let output_path = generate_output_path(&config, Some("game_name"))?;
+//! let output_path = generate_output_path(Path::new("C:/Videos"), Some("game_name")).unwrap();
 //!
 //! // Configure muxer
-//! let muxer_config = MuxerConfig {
-//!     video_codec: "hevc",
-//!     framerate: 60,
-//!     ..Default::default()
-//! };
-//!
-//! // Save clip in background
-//! spawn_clip_saver(muxer_config, packets, output_path, None).await?;
+//! let muxer_config = MuxerConfig::new(1920, 1080, 60.0, output_path);
 //! ```
 
 pub mod functions;

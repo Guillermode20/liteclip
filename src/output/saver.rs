@@ -166,7 +166,12 @@ fn log_save_memory(
     let buffer_stats = buffer.map(SharedReplayBuffer::stats);
     let clip_packet_count = clip_packets.map(|packets| packets.len()).unwrap_or(0);
     let clip_packet_bytes = clip_packets
-        .map(|packets| packets.iter().map(|packet| packet.data.len()).sum::<usize>())
+        .map(|packets| {
+            packets
+                .iter()
+                .map(|packet| packet.data.len())
+                .sum::<usize>()
+        })
         .unwrap_or(0);
 
     if let Some((working_set_mb, private_mb)) = process_memory_mb() {
@@ -197,7 +202,9 @@ fn log_save_memory(
 #[cfg(target_os = "windows")]
 fn process_memory_mb() -> Option<(f64, f64)> {
     use std::mem::size_of;
-    use windows::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS_EX};
+    use windows::Win32::System::ProcessStatus::{
+        K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS_EX,
+    };
     use windows::Win32::System::Threading::GetCurrentProcess;
 
     unsafe {

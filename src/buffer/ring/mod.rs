@@ -34,18 +34,12 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
 //! use liteclip_replay::buffer::ring::ReplayBuffer;
 //! use liteclip_replay::config::Config;
 //!
 //! let config = Config::default();
-//! let buffer = ReplayBuffer::new(&config)?;
-//!
-//! // Push a packet
-//! buffer.push(encoded_packet);
-//!
-//! // Get all packets for a clip
-//! let packets = buffer.snapshot()?;
+//! let buffer = ReplayBuffer::new(&config).unwrap();
 //!
 //! // Check statistics
 //! let stats = buffer.stats();

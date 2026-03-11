@@ -31,27 +31,18 @@
 //!
 //! # Example
 //!
-//! ```ignore
-//! use liteclip_replay::encode::{Encoder, EncodeConfig};
+//! ```no_run
+//! use liteclip_replay::encode::EncodedPacket;
+//! use liteclip_replay::encode::StreamType;
+//! use bytes::Bytes;
 //!
-//! let config = EncodeConfig {
-//!     encoder: EncoderType::Nvenc,
-//!     codec: VideoCodec::Hevc,
-//!     bitrate_mbps: 10,
-//!     framerate: 60,
-//!     ..Default::default()
-//! };
-//!
-//! let encoder = Encoder::new(config)?;
-//! encoder.start()?;
-//!
-//! // Send frames for encoding
-//! encoder.send_frame(frame)?;
-//!
-//! // Receive encoded packets
-//! while let Ok(packet) = encoder.packet_rx().recv() {
-//!     buffer.push(packet);
-//! }
+//! let packet = EncodedPacket::new(
+//!     Bytes::from(&b"data"[..]),
+//!     0,  // pts
+//!     0,  // dts
+//!     true,  // is_keyframe
+//!     StreamType::Video,
+//! );
 //! ```
 
 pub mod encoder_mod;

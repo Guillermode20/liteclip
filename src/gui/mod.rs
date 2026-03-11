@@ -23,14 +23,16 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
 //! use liteclip_replay::gui::{show_settings_gui, init_gui_manager};
+//! use tokio::sync::mpsc::channel;
 //!
 //! // Initialize the GUI manager (call once at startup)
 //! init_gui_manager();
 //!
 //! // Show settings window
-//! show_settings_gui(event_tx);
+//! let (tx, rx) = channel(1);
+//! show_settings_gui(tx);
 //! ```
 
 pub mod manager;

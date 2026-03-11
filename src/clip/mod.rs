@@ -25,18 +25,11 @@
 //!
 //! # Example
 //!
-//! ```ignore
-//! use liteclip_replay::clip::{spawn_clip_saver, MuxerConfig};
+//! ```no_run
+//! use liteclip_replay::output::MuxerConfig;
+//! use std::path::PathBuf;
 //!
-//! let config = MuxerConfig {
-//!     video_codec: "hevc",
-//!     framerate: 60,
-//!     ..Default::default()
-//! };
-//!
-//! spawn_clip_saver(config, packets, output_path, |progress| {
-//!     println!("Progress: {}%", progress);
-//! }).await?;
+//! let config = MuxerConfig::new(1920, 1080, 60.0, PathBuf::from("output.mp4"));
 //! ```
 
 pub use crate::output::{

@@ -31,23 +31,12 @@
 //!
 //! # Example
 //!
-//! ```ignore
-//! use liteclip_replay::capture::{DxgiCapture, CaptureConfig, CaptureBackend};
+//! ```no_run
+//! use liteclip_replay::capture::CaptureConfig;
 //!
-//! let mut capture = DxgiCapture::new();
-//! let config = CaptureConfig {
-//!     target_fps: 60,
-//!     output_index: 0,
-//!     perform_cpu_readback: true,
-//!     target_resolution: Some((1920, 1080)),
-//! };
-//!
-//! capture.start(config)?;
-//!
-//! // Receive frames
-//! while let Ok(frame) = capture.frame_rx().recv() {
-//!     // Process frame
-//! }
+//! let mut config = CaptureConfig::default();
+//! config.target_fps = 60;
+//! config.target_resolution = Some((1920, 1080));
 //! ```
 
 use anyhow::Result;
@@ -74,15 +63,12 @@ pub use dxgi::DxgiCapture;
 ///
 /// # Example
 ///
-/// ```
+/// ```ignore
 /// use liteclip_replay::capture::CaptureConfig;
 ///
-/// let config = CaptureConfig {
-///     target_fps: 60,
-///     output_index: 0,
-///     perform_cpu_readback: true,
-///     target_resolution: Some((1920, 1080)),
-/// };
+/// let mut config = CaptureConfig::default();
+/// config.target_fps = 60;
+/// config.target_resolution = Some((1920, 1080));
 /// ```
 #[derive(Debug, Clone)]
 pub struct CaptureConfig {

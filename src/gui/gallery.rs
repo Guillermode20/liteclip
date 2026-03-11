@@ -266,7 +266,7 @@ impl GalleryApp {
                         if is_expanded {
                             ui.add_space(6.0);
 
-                            let rows = (videos.len() + cols - 1) / cols;
+                            let rows = videos.len().div_ceil(cols);
 
                             for row in 0..rows {
                                 ui.horizontal(|ui| {

@@ -25,11 +25,11 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
 //! use liteclip_replay::config::Config;
 //!
 //! // Load configuration (or use defaults)
-//! let config = Config::load().await.unwrap_or_default();
+//! let config = Config::default();
 //!
 //! // Modify settings
 //! let mut config = config;
@@ -37,7 +37,7 @@
 //! config.video.bitrate_mbps = 15;
 //!
 //! // Save configuration
-//! config.save().await?;
+//! config.save_sync().unwrap();
 //! ```
 
 pub mod config_mod;

@@ -1,5 +1,4 @@
 use std::ffi::c_void;
-use std::mem::ManuallyDrop;
 
 use anyhow::{Context, Result};
 use ffmpeg::format::Pixel;
@@ -60,7 +59,9 @@ impl FfmpegEncoder {
         height: u32,
     ) -> Result<D3d11HardwareContext> {
         unsafe {
-            let mut device_ctx_ref = ffmpeg::ffi::av_hwdevice_ctx_alloc(ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA);
+            let mut device_ctx_ref = ffmpeg::ffi::av_hwdevice_ctx_alloc(
+                ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA,
+            );
             if device_ctx_ref.is_null() {
                 anyhow::bail!("Failed to allocate FFmpeg D3D11 device context");
             }
@@ -68,14 +69,15 @@ impl FfmpegEncoder {
             let hw_device_ctx = (*device_ctx_ref).data as *mut ffmpeg::ffi::AVHWDeviceContext;
             let d3d11_ctx = (*hw_device_ctx).hwctx as *mut AvD3d11vaDeviceContext;
 
-            let context = device.GetImmediateContext()
+            let context = device
+                .GetImmediateContext()
                 .context("Failed to get immediate context")?;
 
             let ffmpeg_device = device.clone();
             let ffmpeg_context = context.clone();
             (*d3d11_ctx).device = ffmpeg_device.as_raw() as *mut _;
             (*d3d11_ctx).device_context = ffmpeg_context.as_raw() as *mut _;
-            
+
             // Store the objects in the struct to keep them alive
             let device_for_storage = ffmpeg_device.clone();
             let context_for_storage = context.clone();
@@ -83,7 +85,10 @@ impl FfmpegEncoder {
             let init_result = ffmpeg::ffi::av_hwdevice_ctx_init(device_ctx_ref);
             if init_result < 0 {
                 ffmpeg::ffi::av_buffer_unref(&mut device_ctx_ref);
-                anyhow::bail!("Failed to initialize FFmpeg D3D11 hardware device context: {}", init_result);
+                anyhow::bail!(
+                    "Failed to initialize FFmpeg D3D11 hardware device context: {}",
+                    init_result
+                );
             }
 
             let mut frames_ctx_ref = Self::create_hw_frames_ctx_with_pool_size(
