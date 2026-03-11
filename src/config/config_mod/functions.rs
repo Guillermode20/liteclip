@@ -85,7 +85,7 @@ pub(super) fn default_hotkey_gallery() -> String {
     "Alt+G".to_string()
 }
 pub(super) fn default_memory_limit() -> u32 {
-    128
+    0
 }
 pub(super) fn default_gpu_index() -> u32 {
     0
@@ -110,7 +110,7 @@ mod tests {
         assert_eq!(config.video.quality_preset, QualityPreset::Performance);
         assert_eq!(config.video.rate_control, RateControl::Vbr);
         assert_eq!(config.video.quality_value, None);
-        assert_eq!(config.advanced.memory_limit_mb, 128);
+        assert_eq!(config.advanced.memory_limit_mb, 0);
         assert!(config.audio.capture_system);
         assert!(config.audio.capture_mic);
         assert!(config.audio.mic_noise_reduction);

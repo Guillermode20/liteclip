@@ -196,14 +196,7 @@ impl Config {
                 LEGACY_DEFAULT_MEMORY_LIMIT_MB, recommended
             );
             self.advanced.memory_limit_mb = recommended;
-        } else if self.advanced.memory_limit_mb == 0 {
-            let recommended = self.recommended_replay_memory_limit_mb();
-            warn!(
-                "Config: memory_limit_mb was 0, clamping to recommended {} MB",
-                recommended
-            );
-            self.advanced.memory_limit_mb = recommended;
-        } else if self.advanced.memory_limit_mb < MIN_MEMORY_LIMIT_MB {
+        } else if self.advanced.memory_limit_mb > 0 && self.advanced.memory_limit_mb < MIN_MEMORY_LIMIT_MB {
             warn!(
                 "Config: memory_limit_mb was {}, clamping to {}",
                 self.advanced.memory_limit_mb, MIN_MEMORY_LIMIT_MB
@@ -315,9 +308,12 @@ impl Config {
     }
 
     pub fn effective_replay_memory_limit_mb(&self) -> u32 {
-        self.advanced
-            .memory_limit_mb
-            .clamp(MIN_MEMORY_LIMIT_MB, MAX_MEMORY_LIMIT_MB)
+        let limit = self.advanced.memory_limit_mb;
+        if limit == 0 {
+            0
+        } else {
+            limit.clamp(MIN_MEMORY_LIMIT_MB, MAX_MEMORY_LIMIT_MB)
+        }
     }
 
     pub fn requires_pipeline_restart(&self, other: &Config) -> bool {
