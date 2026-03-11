@@ -4,74 +4,68 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: pwsh
+
 jobs:
-  build:
+  package:
     runs-on: windows-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo registry
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Build release
-        run: cargo build --release --features ffmpeg
-
-      - name: Upload build artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-output
-          path: target/release/liteclip-replay.exe
-
-  package:
-    runs-on: windows-latest
-    needs: build
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: build-output
-          path: target/release
+      - uses: Swatinem/rust-cache@v2
 
       - name: Setup .NET SDK (for WiX)
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
 
-      - name: Build MSI installer
+      - name: Normalize release version for installer
         run: |
-          cd installer
-          ./build.ps1 -Configuration Release -Platform x64 -ProductVersion "${{ github.ref_name }}"
-        shell: pwsh
+          $tag = '${{ github.ref_name }}'
+          $normalized = $tag.TrimStart('v')
+          if ($normalized -match '^\d+\.\d+\.\d+$') {
+            $normalized = "$normalized.0"
+          }
+          if ($normalized -notmatch '^\d+\.\d+\.\d+(\.\d+)?$') {
+            throw "Release tag '$tag' is not a valid installer version. Use tags like v1.2.3 or v1.2.3.4."
+          }
+          "PRODUCT_VERSION=$normalized" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Prepare portable package
-        run: |
-          mkdir -p portable/LiteClipReplay-portable
-          cp target/release/liteclip-replay.exe portable/LiteClipReplay-portable/
-          cp installer/output/portable/LiteClipReplay-portable/*.dll portable/LiteClipReplay-portable/ 2>/dev/null || true
-          cd portable
-          Compress-Archive -Path LiteClipReplay-portable -DestinationPath LiteClipReplay-portable.zip
-        shell: bash
+      - name: Build MSI installer
+        run: .\installer\build.ps1 -Configuration Release -Platform x64 -ProductVersion "${{ env.PRODUCT_VERSION }}"
 
       - name: Upload MSI artifact
         uses: actions/upload-artifact@v4
         with:
           name: LiteClipReplay-msi
           path: installer/output/en-US/LiteClipReplay.msi
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Upload portable artifact
         uses: actions/upload-artifact@v4
         with:
           name: LiteClipReplay-portable
-          path: portable/LiteClipReplay-portable.zip
+          path: installer/output/portable/LiteClipReplay-portable.zip
+          if-no-files-found: error
+          retention-days: 30
 
   release:
     runs-on: ubuntu-latest
