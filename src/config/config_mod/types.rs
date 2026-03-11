@@ -196,7 +196,9 @@ impl Config {
                 LEGACY_DEFAULT_MEMORY_LIMIT_MB, recommended
             );
             self.advanced.memory_limit_mb = recommended;
-        } else if self.advanced.memory_limit_mb > 0 && self.advanced.memory_limit_mb < MIN_MEMORY_LIMIT_MB {
+        } else if self.advanced.memory_limit_mb > 0
+            && self.advanced.memory_limit_mb < MIN_MEMORY_LIMIT_MB
+        {
             warn!(
                 "Config: memory_limit_mb was {}, clamping to {}",
                 self.advanced.memory_limit_mb, MIN_MEMORY_LIMIT_MB
