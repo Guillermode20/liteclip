@@ -67,7 +67,10 @@ pub struct ClipExportRequest {
 
 impl ClipExportRequest {
     pub fn output_duration_secs(&self) -> f64 {
-        self.keep_ranges.iter().map(|range| range.duration_secs()).sum()
+        self.keep_ranges
+            .iter()
+            .map(|range| range.duration_secs())
+            .sum()
     }
 }
 
@@ -78,17 +81,15 @@ enum ExportOutcome {
 
 pub fn probe_video_file(video_path: &Path) -> Result<VideoFileMetadata> {
     let ffprobe = ffprobe_executable_path();
-    let output = command_output(
-        Command::new(&ffprobe).args([
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration:stream=codec_type,width,height",
-            "-of",
-            "default=noprint_wrappers=1:nokey=0",
-            &video_path.to_string_lossy(),
-        ]),
-    )
+    let output = command_output(Command::new(&ffprobe).args([
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration:stream=codec_type,width,height",
+        "-of",
+        "default=noprint_wrappers=1:nokey=0",
+        &video_path.to_string_lossy(),
+    ]))
     .with_context(|| format!("Failed to probe video metadata via {:?}", ffprobe))?;
 
     if !output.status.success() {
@@ -141,7 +142,11 @@ pub fn probe_video_file(video_path: &Path) -> Result<VideoFileMetadata> {
     })
 }
 
-pub fn extract_preview_frame(video_path: &Path, timestamp_secs: f64, max_width: u32) -> Result<RgbaImage> {
+pub fn extract_preview_frame(
+    video_path: &Path,
+    timestamp_secs: f64,
+    max_width: u32,
+) -> Result<RgbaImage> {
     let ffmpeg = ffmpeg_executable_path();
     let timestamp = format_seconds_arg(timestamp_secs);
     let scale = format!("scale={max_width}:-2:force_original_aspect_ratio=decrease");
@@ -180,7 +185,10 @@ pub fn extract_preview_frame(video_path: &Path, timestamp_secs: f64, max_width: 
     }
 
     if output.stdout.is_empty() {
-        bail!("ffmpeg returned an empty preview frame for {:?}", video_path);
+        bail!(
+            "ffmpeg returned an empty preview frame for {:?}",
+            video_path
+        );
     }
 
     Ok(image::load_from_memory(&output.stdout)
@@ -224,7 +232,12 @@ fn run_clip_export(
             .parent()
             .context("Output path is missing a parent directory")?,
     )
-    .with_context(|| format!("Failed to create output directory for {:?}", request.output_path))?;
+    .with_context(|| {
+        format!(
+            "Failed to create output directory for {:?}",
+            request.output_path
+        )
+    })?;
 
     let output_duration_secs = request.output_duration_secs().max(0.1);
     let audio_bitrate_kbps = if request.metadata.has_audio {
@@ -232,7 +245,8 @@ fn run_clip_export(
     } else {
         0
     };
-    let total_bitrate_kbps = (f64::from(request.target_size_mb) * 8192.0 / output_duration_secs).max(256.0);
+    let total_bitrate_kbps =
+        (f64::from(request.target_size_mb) * 8192.0 / output_duration_secs).max(256.0);
     let video_bitrate_kbps = (total_bitrate_kbps - f64::from(audio_bitrate_kbps) - 24.0)
         .max(300.0)
         .round() as u32;
@@ -273,11 +287,13 @@ fn run_clip_export(
         &ffmpeg,
         &first_pass_args,
         output_duration_secs,
-        ClipExportPhase::FirstPass,
-        0.0,
-        0.5,
-        progress_tx,
-        cancel_flag,
+        FFmpegProgressContext {
+            phase: ClipExportPhase::FirstPass,
+            start_fraction: 0.0,
+            span_fraction: 0.5,
+            progress_tx: progress_tx.clone(),
+            cancel_flag: cancel_flag.clone(),
+        },
     )? {
         cleanup_passlog_files(&passlog_prefix);
         let _ = std::fs::remove_file(&request.output_path);
@@ -301,11 +317,13 @@ fn run_clip_export(
         &ffmpeg,
         &second_pass_args,
         output_duration_secs,
-        ClipExportPhase::SecondPass,
-        0.5,
-        0.5,
-        progress_tx,
-        cancel_flag,
+        FFmpegProgressContext {
+            phase: ClipExportPhase::SecondPass,
+            start_fraction: 0.5,
+            span_fraction: 0.5,
+            progress_tx: progress_tx.clone(),
+            cancel_flag: cancel_flag.clone(),
+        },
     )? {
         cleanup_passlog_files(&passlog_prefix);
         let _ = std::fs::remove_file(&request.output_path);
@@ -385,15 +403,19 @@ fn build_ffmpeg_args(
     args
 }
 
+struct FFmpegProgressContext {
+    phase: ClipExportPhase,
+    start_fraction: f32,
+    span_fraction: f32,
+    progress_tx: Sender<ClipExportUpdate>,
+    cancel_flag: Arc<AtomicBool>,
+}
+
 fn run_ffmpeg_phase(
     ffmpeg: &Path,
     args: &[String],
     total_duration_secs: f64,
-    phase: ClipExportPhase,
-    start_fraction: f32,
-    span_fraction: f32,
-    progress_tx: &Sender<ClipExportUpdate>,
-    cancel_flag: &Arc<AtomicBool>,
+    progress_ctx: FFmpegProgressContext,
 ) -> Result<bool> {
     let mut command = Command::new(ffmpeg);
     command
@@ -407,9 +429,12 @@ fn run_ffmpeg_phase(
         command.creation_flags(CREATE_NO_WINDOW);
     }
 
-    let mut child = command
-        .spawn()
-        .with_context(|| format!("Failed to spawn ffmpeg phase {:?} via {:?}", phase, ffmpeg))?;
+    let mut child = command.spawn().with_context(|| {
+        format!(
+            "Failed to spawn ffmpeg phase {:?} via {:?}",
+            progress_ctx.phase, ffmpeg
+        )
+    })?;
 
     let stderr = child
         .stderr
@@ -430,7 +455,7 @@ fn run_ffmpeg_phase(
         let reader = BufReader::new(stdout);
         for line in reader.lines() {
             let line = line.context("Failed to read ffmpeg progress output")?;
-            if cancel_flag.load(Ordering::SeqCst) {
+            if progress_ctx.cancel_flag.load(Ordering::SeqCst) {
                 let _ = child.kill();
                 let _ = child.wait();
                 let _ = stderr_handle.join();
@@ -438,32 +463,47 @@ fn run_ffmpeg_phase(
             }
 
             if let Some(processed_secs) = parse_progress_seconds(&line) {
-                let phase_progress = (processed_secs / total_duration_secs).clamp(0.0, 1.0) as f32;
-                let fraction = (start_fraction + phase_progress * span_fraction).clamp(0.0, 1.0);
-                let _ = progress_tx.send(ClipExportUpdate::Progress {
-                    phase,
-                    fraction,
-                    message: format!("{} {:.0}%", phase_label(phase), fraction * 100.0),
+                let fraction = if total_duration_secs > 0.0 {
+                    (processed_secs / total_duration_secs) as f32
+                } else {
+                    0.0
+                };
+                let adjusted_fraction =
+                    progress_ctx.start_fraction + (fraction * progress_ctx.span_fraction);
+                let _ = progress_ctx.progress_tx.send(ClipExportUpdate::Progress {
+                    phase: progress_ctx.phase,
+                    fraction: adjusted_fraction.clamp(0.0, 1.0),
+                    message: format!(
+                        "{}: {}",
+                        phase_label(progress_ctx.phase),
+                        format_seconds_arg(processed_secs)
+                    ),
                 });
             }
         }
     }
 
-    let status = child.wait().context("Failed waiting for ffmpeg phase to finish")?;
+    let status = child
+        .wait()
+        .context("Failed waiting for ffmpeg phase to finish")?;
     let stderr = stderr_handle.join().unwrap_or_default();
 
-    if cancel_flag.load(Ordering::SeqCst) {
+    if progress_ctx.cancel_flag.load(Ordering::SeqCst) {
         return Ok(true);
     }
 
     if !status.success() {
-        bail!("FFmpeg {} failed: {}", phase_label(phase), stderr.trim());
+        bail!(
+            "FFmpeg {} failed: {}",
+            phase_label(progress_ctx.phase),
+            stderr.trim()
+        );
     }
 
-    let _ = progress_tx.send(ClipExportUpdate::Progress {
-        phase,
-        fraction: (start_fraction + span_fraction).clamp(0.0, 1.0),
-        message: format!("{} complete", phase_label(phase)),
+    let _ = progress_ctx.progress_tx.send(ClipExportUpdate::Progress {
+        phase: progress_ctx.phase,
+        fraction: (progress_ctx.start_fraction + progress_ctx.span_fraction).clamp(0.0, 1.0),
+        message: format!("{} complete", phase_label(progress_ctx.phase)),
     });
 
     Ok(false)
@@ -512,7 +552,7 @@ fn build_filter_complex(keep_ranges: &[TimeRange], has_audio: bool) -> String {
 
 fn parse_progress_seconds(line: &str) -> Option<f64> {
     let (_, value) = line.split_once('=')?;
-    match line.split_once('=' )?.0 {
+    match line.split_once('=')?.0 {
         "out_time_ms" | "out_time_us" => {
             let micros = value.trim().parse::<f64>().ok()?;
             Some(micros / 1_000_000.0)
@@ -608,7 +648,10 @@ mod tests {
     #[test]
     fn parses_progress_output_variants() {
         assert_eq!(parse_progress_seconds("out_time_ms=1500000"), Some(1.5));
-        assert_eq!(parse_progress_seconds("out_time=00:00:02.500000"), Some(2.5));
+        assert_eq!(
+            parse_progress_seconds("out_time=00:00:02.500000"),
+            Some(2.5)
+        );
         assert_eq!(parse_progress_seconds("progress=continue"), None);
     }
 
@@ -629,28 +672,26 @@ mod tests {
         let input_path = temp_dir.join("input.mp4");
         let output_path = temp_dir.join("output.mp4");
 
-        let sample_status = command_output(
-            Command::new(&ffmpeg).args([
-                "-y",
-                "-f",
-                "lavfi",
-                "-i",
-                "testsrc=size=320x240:rate=30",
-                "-f",
-                "lavfi",
-                "-i",
-                "sine=frequency=1000:sample_rate=48000",
-                "-t",
-                "2",
-                "-c:v",
-                "libx264",
-                "-pix_fmt",
-                "yuv420p",
-                "-c:a",
-                "aac",
-                &input_path.to_string_lossy(),
-            ]),
-        )
+        let sample_status = command_output(Command::new(&ffmpeg).args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=320x240:rate=30",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=1000:sample_rate=48000",
+            "-t",
+            "2",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            &input_path.to_string_lossy(),
+        ]))
         .unwrap();
         assert!(sample_status.status.success());
 
