@@ -1036,8 +1036,8 @@ fn render_editor_workspace(
     }
 
     ui.horizontal_top(|ui| {
-        let sidebar_width = (available_size.x * 0.32)
-            .clamp(EDITOR_SIDEBAR_MIN_WIDTH, EDITOR_SIDEBAR_WIDTH);
+        let sidebar_width =
+            (available_size.x * 0.32).clamp(EDITOR_SIDEBAR_MIN_WIDTH, EDITOR_SIDEBAR_WIDTH);
         let main_width = (ui.available_width() - sidebar_width - 12.0).max(320.0);
 
         ui.allocate_ui_with_layout(
@@ -1118,7 +1118,10 @@ fn render_action_section(
         };
 
         if ui
-            .add_sized([ui.available_width(), 32.0], egui::Button::new(preview_label))
+            .add_sized(
+                [ui.available_width(), 32.0],
+                egui::Button::new(preview_label),
+            )
             .clicked()
         {
             editor.preview_final = !editor.preview_final;
