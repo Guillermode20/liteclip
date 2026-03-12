@@ -15,9 +15,9 @@ use tracing::{info, warn};
 mod browser;
 mod editor;
 mod frame_cache;
-mod playback;
+mod persistent_playback;
 
-use playback::PlaybackController;
+use persistent_playback::PlaybackController;
 
 use crate::config::Config;
 use crate::gui::manager::{show_toast, ToastKind};
@@ -429,6 +429,26 @@ impl ClipCompressApp {
 
         if let Some(editor) = self.editor.as_mut() {
             editor.playback.poll();
+
+            // Live playback path: drain the frame queue for frames due by now.
+            if editor.is_playing && !editor.preview_final {
+                let wall_time = editor.playback.playback_position_secs();
+                if let Some(image) = editor.playback.take_playback_frame(wall_time) {
+                    let color_image = color_image_from_rgba(&image);
+                    if let Some(texture) = &mut editor.preview_texture {
+                        texture.set(color_image, egui::TextureOptions::LINEAR);
+                    } else {
+                        editor.preview_texture = Some(ctx.load_texture(
+                            format!("preview:{}", editor.video.filename),
+                            color_image,
+                            egui::TextureOptions::LINEAR,
+                        ));
+                    }
+                    editor.error_message = None;
+                }
+            }
+
+            // Static / single-frame preview path (paused or preview_final mode).
             if let Some(frame) = editor.playback.take_frame() {
                 let color_image = color_image_from_rgba(&frame.image);
                 if let Some(texture) = &mut editor.preview_texture {
@@ -508,7 +528,13 @@ impl ClipCompressApp {
         }
 
         if self.should_repaint() {
-            ctx.request_repaint_after(Duration::from_millis(80));
+            let repaint_ms = self
+                .editor
+                .as_ref()
+                .filter(|e| e.is_playing && !e.preview_final)
+                .map(|e| (1000.0 / e.playback.playback_fps()).clamp(8.0, 50.0) as u64)
+                .unwrap_or(80);
+            ctx.request_repaint_after(Duration::from_millis(repaint_ms));
         }
     }
 
@@ -626,7 +652,7 @@ fn render_preview_panel(
             let label = if editor.is_playing { "Pause" } else { "Play" };
             if ui.button(label).clicked() {
                 if editor.is_playing {
-                    editor.playback.pause_at(editor.current_time_secs);
+                    editor.playback.scrub_to(editor.current_time_secs);
                     editor.is_playing = false;
                 } else {
                     editor.last_tick = Instant::now();
@@ -803,16 +829,25 @@ fn render_timeline(ui: &mut egui::Ui, editor: &mut EditorState, outcome: &mut Ed
                 editor.selected_cut_point = Some(index);
             } else {
                 editor.selected_cut_point = None;
-                editor.current_time_secs = x_to_time(track_rect, pointer.x, editor.duration_secs());
-                editor.playback.pause_at(editor.current_time_secs);
-                editor.is_playing = false;
-                if response.dragged() {
-                    outcome.fast_preview_request = Some(editor.current_time_secs);
+                editor.current_time_secs =
+                    x_to_time(track_rect, pointer.x, editor.duration_secs());
+
+                if editor.is_playing {
+                    editor.playback.scrub_to(editor.current_time_secs);
                 } else {
-                    outcome.preview_request = Some(editor.current_time_secs);
+                    editor.playback.pause_at(editor.current_time_secs);
+                    if response.dragged() {
+                        outcome.fast_preview_request = Some(editor.current_time_secs);
+                    } else {
+                        outcome.preview_request = Some(editor.current_time_secs);
+                    }
                 }
             }
         }
+    }
+
+    if response.drag_stopped() && editor.is_playing {
+        editor.playback.commit_scrub(editor.current_time_secs);
     }
 }
 

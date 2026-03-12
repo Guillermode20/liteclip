@@ -1,6 +1,7 @@
 use anyhow::{bail, Context, Result};
 use image::RgbaImage;
 use rodio::{OutputStream, Sink, Source};
+use std::collections::VecDeque;
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -18,10 +19,19 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 const CACHE_MEMORY_MB: usize = 200;
 const KEYFRAME_SCRUB_THRESHOLD_SECS: f64 = 1.0;
+/// Maximum frames buffered ahead during live playback.
+const PLAYBACK_QUEUE_DEPTH: usize = 24;
+/// How long after the last scrub_to() call before we restart FFmpeg (debounce).
+const SCRUB_SETTLE_MS: u64 = 150;
 
 pub struct PlaybackFrame {
     pub image: RgbaImage,
     pub from_cache: bool,
+}
+
+struct TimedFrame {
+    pts_secs: f64,
+    image: RgbaImage,
 }
 
 pub struct PlaybackController {
@@ -35,6 +45,7 @@ struct SharedPlaybackState {
     current_time_secs: Mutex<f64>,
     playing_since: Mutex<Option<PlaybackClock>>,
     latest_frame: Mutex<Option<PlaybackFrame>>,
+    frame_queue: Mutex<VecDeque<TimedFrame>>,
     last_error: Mutex<Option<String>>,
     child: Mutex<Option<Child>>,
     generation: AtomicU64,
@@ -44,6 +55,7 @@ struct SharedPlaybackState {
     audio_started_generation: AtomicU64,
     frame_cache: Mutex<FrameCache>,
     keyframe_positions: Mutex<Vec<f64>>,
+    scrub_settle_deadline: Mutex<Option<Instant>>,
 }
 
 struct PlaybackClock {
@@ -70,6 +82,7 @@ impl PlaybackController {
             current_time_secs: Mutex::new(0.0),
             playing_since: Mutex::new(None),
             latest_frame: Mutex::new(None),
+            frame_queue: Mutex::new(VecDeque::new()),
             last_error: Mutex::new(None),
             child: Mutex::new(None),
             generation: AtomicU64::new(0),
@@ -79,6 +92,7 @@ impl PlaybackController {
             audio_started_generation: AtomicU64::new(0),
             frame_cache: Mutex::new(FrameCache::new(CACHE_MEMORY_MB)),
             keyframe_positions: Mutex::new(Vec::new()),
+            scrub_settle_deadline: Mutex::new(None),
         });
 
         let controller = Self {
@@ -93,20 +107,34 @@ impl PlaybackController {
         controller
     }
 
+    fn set_latest_frame_from_cache(&self, time_secs: f64, tolerance_secs: f64) -> bool {
+        let cached = self
+            .shared
+            .frame_cache
+            .lock()
+            .unwrap()
+            .get_closest(time_secs, tolerance_secs);
+        let Some(cached) = cached else {
+            return false;
+        };
+        let Some(image) =
+            RgbaImage::from_raw(cached.width, cached.height, (*cached.rgba_data).clone())
+        else {
+            return false;
+        };
+        *self.shared.latest_frame.lock().unwrap() = Some(PlaybackFrame {
+            image,
+            from_cache: true,
+        });
+        true
+    }
+
     pub fn request_preview_frame(&mut self, time_secs: f64) {
         let clamped_time = self.clamp_time(time_secs);
         self.pause_at(clamped_time);
 
-        if let Some(cached) = self.shared.frame_cache.lock().unwrap().get(clamped_time) {
-            if let Some(image) =
-                RgbaImage::from_raw(cached.width, cached.height, (*cached.rgba_data).clone())
-            {
-                *self.shared.latest_frame.lock().unwrap() = Some(PlaybackFrame {
-                    image,
-                    from_cache: true,
-                });
-                return;
-            }
+        if self.set_latest_frame_from_cache(clamped_time, 0.0) {
+            return;
         }
 
         self.spawn_video_process(clamped_time, clamped_time, true, false);
@@ -115,22 +143,7 @@ impl PlaybackController {
     pub fn request_preview_frame_fast(&mut self, time_secs: f64) {
         let clamped_time = self.clamp_time(time_secs);
 
-        let closest_cached = self
-            .shared
-            .frame_cache
-            .lock()
-            .unwrap()
-            .get_closest(clamped_time, 0.5);
-        if let Some(cached) = closest_cached {
-            if let Some(image) =
-                RgbaImage::from_raw(cached.width, cached.height, (*cached.rgba_data).clone())
-            {
-                *self.shared.latest_frame.lock().unwrap() = Some(PlaybackFrame {
-                    image,
-                    from_cache: true,
-                });
-            }
-        }
+        let _ = self.set_latest_frame_from_cache(clamped_time, 0.5);
 
         self.pause_at(clamped_time);
 
@@ -144,12 +157,14 @@ impl PlaybackController {
         let clamped_time = self.clamp_time(time_secs);
         self.stop_video_process();
         self.stop_audio();
+        self.shared.frame_queue.lock().unwrap().clear();
+        *self.shared.scrub_settle_deadline.lock().unwrap() = None;
         *self.shared.current_time_secs.lock().unwrap() = clamped_time;
         *self.shared.playing_since.lock().unwrap() = Some(PlaybackClock {
             start_time_secs: clamped_time,
             started_at: Instant::now(),
         });
-        self.spawn_video_process(clamped_time, clamped_time, false, false);
+        self.spawn_playback_process(clamped_time);
         self.maybe_start_audio();
     }
 
@@ -157,8 +172,72 @@ impl PlaybackController {
         let clamped_time = self.clamp_time(time_secs);
         *self.shared.current_time_secs.lock().unwrap() = clamped_time;
         *self.shared.playing_since.lock().unwrap() = None;
+        *self.shared.scrub_settle_deadline.lock().unwrap() = None;
+        self.shared.frame_queue.lock().unwrap().clear();
         self.stop_video_process();
         self.stop_audio();
+    }
+
+    /// Scrub to a new position.
+    ///
+    /// If paused: stops the current process and issues a single-frame preview
+    /// via the existing latest_frame path.
+    ///
+    /// If playing: immediately updates the wall-clock position and schedules a
+    /// debounced FFmpeg restart. The frame queue is cleared so stale frames are
+    /// not displayed. The caller should continue using `take_playback_frame` —
+    /// a new FFmpeg process will start automatically once scrubbing settles.
+    pub fn scrub_to(&mut self, time_secs: f64) {
+        let clamped_time = self.clamp_time(time_secs);
+
+        if !self.is_playing() {
+            self.stop_video_process();
+            self.stop_audio();
+            *self.shared.current_time_secs.lock().unwrap() = clamped_time;
+            return;
+        }
+
+        // Update clock to new position immediately.
+        *self.shared.current_time_secs.lock().unwrap() = clamped_time;
+        *self.shared.playing_since.lock().unwrap() = Some(PlaybackClock {
+            start_time_secs: clamped_time,
+            started_at: Instant::now(),
+        });
+
+        let _ = self.set_latest_frame_from_cache(clamped_time, 0.5);
+
+        // Discard buffered frames from the old position.
+        self.shared.frame_queue.lock().unwrap().clear();
+
+        // Kill the running FFmpeg process so it stops producing frames from
+        // the wrong position, but don't restart yet — wait for scrub to settle.
+        self.stop_video_process();
+        self.stop_audio();
+
+        // Schedule a restart after the scrub settle delay.
+        *self.shared.scrub_settle_deadline.lock().unwrap() =
+            Some(Instant::now() + Duration::from_millis(SCRUB_SETTLE_MS));
+    }
+
+    /// Immediately restart playback from the given position.  Call this when
+    /// a scrub drag ends so playback resumes without waiting for the settle
+    /// timer.
+    pub fn commit_scrub(&mut self, time_secs: f64) {
+        if !self.is_playing() {
+            return;
+        }
+        let clamped_time = self.clamp_time(time_secs);
+        *self.shared.scrub_settle_deadline.lock().unwrap() = None;
+        self.stop_video_process();
+        self.stop_audio();
+        self.shared.frame_queue.lock().unwrap().clear();
+        *self.shared.current_time_secs.lock().unwrap() = clamped_time;
+        *self.shared.playing_since.lock().unwrap() = Some(PlaybackClock {
+            start_time_secs: clamped_time,
+            started_at: Instant::now(),
+        });
+        self.spawn_playback_process(clamped_time);
+        self.maybe_start_audio();
     }
 
     pub fn playback_position_secs(&self) -> f64 {
@@ -178,25 +257,73 @@ impl PlaybackController {
         self.is_playing()
             || self.shared.audio_loading.load(Ordering::SeqCst)
             || self.shared.child.lock().unwrap().is_some()
+            || self.shared.scrub_settle_deadline.lock().unwrap().is_some()
     }
 
+    /// Take a single-frame preview result (used in paused / static-seek mode).
     pub fn take_frame(&self) -> Option<PlaybackFrame> {
         self.shared.latest_frame.lock().unwrap().take()
+    }
+
+    /// During live playback, drain the frame queue up to `wall_time_secs` and
+    /// return the most recent frame whose PTS is at or before that time.
+    /// Returns `None` if no frame is ready yet.
+    pub fn take_playback_frame(&self, wall_time_secs: f64) -> Option<RgbaImage> {
+        let mut queue = self.shared.frame_queue.lock().unwrap();
+        let mut result: Option<RgbaImage> = None;
+
+        // Pop all frames that should have already been shown.
+        while queue.front().map(|f| f.pts_secs <= wall_time_secs).unwrap_or(false) {
+            if let Some(f) = queue.pop_front() {
+                result = Some(f.image);
+            }
+        }
+
+        result
     }
 
     pub fn take_error(&self) -> Option<String> {
         self.shared.last_error.lock().unwrap().take()
     }
 
+    /// Returns the video FPS clamped to a sensible playback range.
+    pub fn playback_fps(&self) -> f64 {
+        self.metadata.fps.clamp(1.0, 120.0)
+    }
+
     pub fn poll(&mut self) {
-        if self.is_playing() {
-            let current_time = self.playback_position_secs();
-            *self.shared.current_time_secs.lock().unwrap() = current_time;
-            if current_time >= self.metadata.duration_secs {
-                self.pause_at(self.metadata.duration_secs);
-            } else {
-                self.maybe_start_audio();
+        if !self.is_playing() {
+            return;
+        }
+
+        // Check if a debounced scrub has settled and restart FFmpeg.
+        let should_restart = {
+            let mut deadline = self.shared.scrub_settle_deadline.lock().unwrap();
+            match *deadline {
+                Some(d) if Instant::now() >= d => {
+                    *deadline = None;
+                    true
+                }
+                _ => false,
             }
+        };
+
+        if should_restart {
+            let time = self.playback_position_secs();
+            self.stop_video_process();
+            self.shared.frame_queue.lock().unwrap().clear();
+            self.spawn_playback_process(time);
+            self.maybe_start_audio();
+            return;
+        }
+
+        let current_time = self.playback_position_secs();
+        *self.shared.current_time_secs.lock().unwrap() = current_time;
+
+        if current_time >= self.metadata.duration_secs {
+            self.pause_at(self.metadata.duration_secs);
+        } else {
+            self.maybe_start_audio();
         }
     }
 
@@ -370,6 +497,149 @@ impl PlaybackController {
         self.shared.audio_generation.fetch_add(1, Ordering::SeqCst);
     }
 
+    /// Spawn a continuous playback FFmpeg process that pushes decoded frames
+    /// into the shared `frame_queue` with wall-clock-aligned PTS values.
+    fn spawn_playback_process(&mut self, seek_time: f64) {
+        self.stop_video_process();
+        let generation = self.shared.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let ffmpeg = ffmpeg_executable_path();
+        let (out_width, out_height) = self.scaled_dimensions();
+        let frame_len = out_width as usize * out_height as usize * 4;
+        let timestamp = format_seconds_arg(seek_time);
+        let fps = self.playback_fps();
+
+        let mut command = Command::new(&ffmpeg);
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        command.args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-ss",
+            &timestamp,
+            "-i",
+            &self.video_path.to_string_lossy(),
+            "-an",
+            "-vf",
+            &format!("scale={out_width}:{out_height}"),
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgba",
+            "-",
+        ]);
+
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
+
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(err) => {
+                *self.shared.last_error.lock().unwrap() =
+                    Some(format!("Playback process failed: {err}"));
+                return;
+            }
+        };
+
+        let stdout = match child.stdout.take() {
+            Some(s) => s,
+            None => {
+                *self.shared.last_error.lock().unwrap() =
+                    Some("Playback process stdout was unavailable".to_string());
+                let _ = child.kill();
+                let _ = child.wait();
+                return;
+            }
+        };
+        let stderr = child.stderr.take();
+        *self.shared.child.lock().unwrap() = Some(child);
+
+        let shared = self.shared.clone();
+        let frame_duration = 1.0 / fps;
+
+        thread::spawn(move || {
+            let mut stdout = stdout;
+            let mut buffer = vec![0_u8; frame_len];
+            let mut frame_index: u64 = 0;
+            let mut first_frame = true;
+
+            loop {
+                // Back-pressure: pause reading when the queue is full so we
+                // don't decode far ahead of the presentation position.
+                loop {
+                    if shared.generation.load(Ordering::SeqCst) != generation {
+                        return;
+                    }
+                    if shared.frame_queue.lock().unwrap().len() < PLAYBACK_QUEUE_DEPTH {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(2));
+                }
+
+                if shared.generation.load(Ordering::SeqCst) != generation {
+                    break;
+                }
+
+                match stdout.read_exact(&mut buffer) {
+                    Ok(()) => {
+                        if shared.generation.load(Ordering::SeqCst) != generation {
+                            break;
+                        }
+                        if let Some(image) =
+                            RgbaImage::from_raw(out_width, out_height, buffer.clone())
+                        {
+                            let pts = seek_time + frame_index as f64 * frame_duration;
+
+                            shared.frame_cache.lock().unwrap().insert(
+                                pts,
+                                buffer.clone(),
+                                out_width,
+                                out_height,
+                            );
+                            if first_frame {
+                                first_frame = false;
+                            }
+
+                            shared
+                                .frame_queue
+                                .lock()
+                                .unwrap()
+                                .push_back(TimedFrame { pts_secs: pts, image });
+                        }
+                        frame_index += 1;
+                    }
+                    Err(err) => {
+                        if first_frame && shared.generation.load(Ordering::SeqCst) == generation {
+                            if let Some(mut stderr) = stderr {
+                                let mut stderr_text = String::new();
+                                let _ = stderr.read_to_string(&mut stderr_text);
+                                *shared.last_error.lock().unwrap() =
+                                    Some(if stderr_text.trim().is_empty() {
+                                        format!("Playback stream failed: {err}")
+                                    } else {
+                                        format!(
+                                            "Playback stream failed: {}",
+                                            stderr_text.trim()
+                                        )
+                                    });
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+
+            if shared.generation.load(Ordering::SeqCst) == generation {
+                if let Some(mut child) = shared.child.lock().unwrap().take() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            }
+        });
+    }
+
     fn spawn_video_process(
         &mut self,
         seek_time: f64,
@@ -407,6 +677,8 @@ impl PlaybackController {
                 "-",
             ]);
         } else {
+            // Legacy multi-frame path (preview_final mode). Use -re for
+            // controlled pacing since presentation timing is handled externally.
             command.args([
                 "-hide_banner",
                 "-loglevel",

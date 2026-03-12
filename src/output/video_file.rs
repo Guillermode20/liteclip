@@ -22,6 +22,7 @@ pub struct VideoFileMetadata {
     pub width: u32,
     pub height: u32,
     pub has_audio: bool,
+    pub fps: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -85,7 +86,7 @@ pub fn probe_video_file(video_path: &Path) -> Result<VideoFileMetadata> {
         "-v",
         "error",
         "-show_entries",
-        "format=duration:stream=codec_type,width,height",
+        "format=duration:stream=codec_type,width,height,r_frame_rate",
         "-of",
         "default=noprint_wrappers=1:nokey=0",
         &video_path.to_string_lossy(),
@@ -106,6 +107,7 @@ pub fn probe_video_file(video_path: &Path) -> Result<VideoFileMetadata> {
     let mut width = None;
     let mut height = None;
     let mut has_audio = false;
+    let mut fps = None;
 
     for line in stdout.lines() {
         let Some((key, value)) = line.split_once('=') else {
@@ -123,6 +125,9 @@ pub fn probe_video_file(video_path: &Path) -> Result<VideoFileMetadata> {
             "height" if current_stream == "video" && height.is_none() => {
                 height = value.trim().parse::<u32>().ok();
             }
+            "r_frame_rate" if current_stream == "video" && fps.is_none() => {
+                fps = parse_rational_fps(value.trim());
+            }
             "duration" if duration_secs.is_none() => {
                 duration_secs = value.trim().parse::<f64>().ok();
             }
@@ -139,6 +144,7 @@ pub fn probe_video_file(video_path: &Path) -> Result<VideoFileMetadata> {
         width,
         height,
         has_audio,
+        fps: fps.unwrap_or(30.0),
     })
 }
 
@@ -615,6 +621,17 @@ fn command_output(command: &mut Command) -> Result<std::process::Output> {
 
 fn format_seconds_arg(seconds: f64) -> String {
     format!("{:.3}", seconds.max(0.0))
+}
+
+fn parse_rational_fps(value: &str) -> Option<f64> {
+    if let Some((num, den)) = value.split_once('/') {
+        let n = num.trim().parse::<f64>().ok()?;
+        let d = den.trim().parse::<f64>().ok()?;
+        if d > 0.0 {
+            return Some(n / d);
+        }
+    }
+    value.trim().parse::<f64>().ok()
 }
 
 fn parse_hhmmss_time(value: &str) -> Option<f64> {
