@@ -14,6 +14,7 @@ use tracing::{info, warn};
 
 mod browser;
 mod editor;
+mod frame_cache;
 mod playback;
 
 use playback::PlaybackController;
@@ -392,6 +393,23 @@ impl ClipCompressApp {
         editor.playback.request_preview_frame(timestamp_secs);
     }
 
+    fn queue_fast_preview_request(&mut self, timestamp_secs: f64) {
+        let Some(editor) = self.editor.as_mut() else {
+            return;
+        };
+
+        let timestamp_secs = timestamp_secs.clamp(0.0, editor.duration_secs());
+
+        if let Some(last_requested) = editor.last_requested_preview_time {
+            if editor.preview_texture.is_some() && (last_requested - timestamp_secs).abs() < 0.05 {
+                return;
+            }
+        }
+
+        editor.last_requested_preview_time = Some(timestamp_secs);
+        editor.playback.request_preview_frame_fast(timestamp_secs);
+    }
+
     fn poll_background_work(&mut self, ctx: &egui::Context) -> Option<f64> {
         let mut follow_up_preview = None;
 
@@ -481,6 +499,10 @@ impl ClipCompressApp {
             requested_preview = Some(preview_request);
         }
 
+        if let Some(fast_preview_request) = editor_outcome.fast_preview_request {
+            self.queue_fast_preview_request(fast_preview_request);
+        }
+
         if let Some(preview_request) = requested_preview {
             self.queue_preview_request(preview_request);
         }
@@ -532,6 +554,7 @@ struct BrowserUiOutcome {
 #[derive(Default)]
 struct EditorUiOutcome {
     preview_request: Option<f64>,
+    fast_preview_request: Option<f64>,
     back_to_browser: bool,
     refresh_browser: bool,
 }
@@ -668,6 +691,12 @@ fn render_editor_stats(ui: &mut egui::Ui, editor: &EditorState) {
             ui.separator();
             ui.label("Audio: included");
         }
+        ui.separator();
+        let (cache_entries, cache_mb) = editor.playback.cache_stats();
+        ui.label(format!(
+            "Cache: {} frames ({:.1} MB)",
+            cache_entries, cache_mb
+        ));
     });
 }
 
@@ -777,7 +806,11 @@ fn render_timeline(ui: &mut egui::Ui, editor: &mut EditorState, outcome: &mut Ed
                 editor.current_time_secs = x_to_time(track_rect, pointer.x, editor.duration_secs());
                 editor.playback.pause_at(editor.current_time_secs);
                 editor.is_playing = false;
-                outcome.preview_request = Some(editor.current_time_secs);
+                if response.dragged() {
+                    outcome.fast_preview_request = Some(editor.current_time_secs);
+                } else {
+                    outcome.preview_request = Some(editor.current_time_secs);
+                }
             }
         }
     }

@@ -9,14 +9,19 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use super::frame_cache::FrameCache;
 use crate::output::functions::ffmpeg_executable_path;
 use crate::output::VideoFileMetadata;
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+const CACHE_MEMORY_MB: usize = 200;
+const KEYFRAME_SCRUB_THRESHOLD_SECS: f64 = 1.0;
+
 pub struct PlaybackFrame {
     pub image: RgbaImage,
+    pub from_cache: bool,
 }
 
 pub struct PlaybackController {
@@ -37,6 +42,8 @@ struct SharedPlaybackState {
     audio_buffer: Mutex<Option<AudioBuffer>>,
     audio_generation: AtomicU64,
     audio_started_generation: AtomicU64,
+    frame_cache: Mutex<FrameCache>,
+    keyframe_positions: Mutex<Vec<f64>>,
 }
 
 struct PlaybackClock {
@@ -70,6 +77,8 @@ impl PlaybackController {
             audio_buffer: Mutex::new(None),
             audio_generation: AtomicU64::new(1),
             audio_started_generation: AtomicU64::new(0),
+            frame_cache: Mutex::new(FrameCache::new(CACHE_MEMORY_MB)),
+            keyframe_positions: Mutex::new(Vec::new()),
         });
 
         let controller = Self {
@@ -80,13 +89,55 @@ impl PlaybackController {
         };
 
         controller.begin_audio_preload();
+        controller.begin_keyframe_extraction();
         controller
     }
 
     pub fn request_preview_frame(&mut self, time_secs: f64) {
         let clamped_time = self.clamp_time(time_secs);
         self.pause_at(clamped_time);
-        self.spawn_video_process(clamped_time, true);
+
+        if let Some(cached) = self.shared.frame_cache.lock().unwrap().get(clamped_time) {
+            if let Some(image) =
+                RgbaImage::from_raw(cached.width, cached.height, (*cached.rgba_data).clone())
+            {
+                *self.shared.latest_frame.lock().unwrap() = Some(PlaybackFrame {
+                    image,
+                    from_cache: true,
+                });
+                return;
+            }
+        }
+
+        self.spawn_video_process(clamped_time, clamped_time, true, false);
+    }
+
+    pub fn request_preview_frame_fast(&mut self, time_secs: f64) {
+        let clamped_time = self.clamp_time(time_secs);
+
+        let closest_cached = self
+            .shared
+            .frame_cache
+            .lock()
+            .unwrap()
+            .get_closest(clamped_time, 0.5);
+        if let Some(cached) = closest_cached {
+            if let Some(image) =
+                RgbaImage::from_raw(cached.width, cached.height, (*cached.rgba_data).clone())
+            {
+                *self.shared.latest_frame.lock().unwrap() = Some(PlaybackFrame {
+                    image,
+                    from_cache: true,
+                });
+            }
+        }
+
+        self.pause_at(clamped_time);
+
+        let seek_time = self
+            .find_nearest_keyframe(clamped_time)
+            .unwrap_or(clamped_time);
+        self.spawn_video_process(seek_time, clamped_time, true, true);
     }
 
     pub fn play_from(&mut self, time_secs: f64) {
@@ -98,7 +149,7 @@ impl PlaybackController {
             start_time_secs: clamped_time,
             started_at: Instant::now(),
         });
-        self.spawn_video_process(clamped_time, false);
+        self.spawn_video_process(clamped_time, clamped_time, false, false);
         self.maybe_start_audio();
     }
 
@@ -147,6 +198,93 @@ impl PlaybackController {
                 self.maybe_start_audio();
             }
         }
+    }
+
+    pub fn cache_stats(&self) -> (usize, f64) {
+        let cache = self.shared.frame_cache.lock().unwrap();
+        (cache.entry_count(), cache.memory_usage_mb())
+    }
+
+    fn find_nearest_keyframe(&self, time_secs: f64) -> Option<f64> {
+        let positions = self.shared.keyframe_positions.lock().unwrap();
+        if positions.is_empty() {
+            return None;
+        }
+
+        let mut nearest = positions[0];
+        let mut min_diff = (positions[0] - time_secs).abs();
+
+        for &pos in positions.iter() {
+            let diff = (pos - time_secs).abs();
+            if diff < min_diff {
+                min_diff = diff;
+                nearest = pos;
+            }
+        }
+
+        if (nearest - time_secs).abs() > KEYFRAME_SCRUB_THRESHOLD_SECS {
+            return None;
+        }
+
+        Some(nearest)
+    }
+
+    fn begin_keyframe_extraction(&self) {
+        let video_path = self.video_path.clone();
+        let shared = Arc::clone(&self.shared);
+
+        thread::spawn(move || {
+            let ffmpeg = ffmpeg_executable_path();
+            let mut command = Command::new(&ffmpeg);
+            command.args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                &video_path.to_string_lossy(),
+                "-vf",
+                "showinfo",
+                "-f",
+                "null",
+                "-",
+            ]);
+            command.stderr(Stdio::piped());
+
+            #[cfg(target_os = "windows")]
+            {
+                use std::os::windows::process::CommandExt;
+                command.creation_flags(CREATE_NO_WINDOW);
+            }
+
+            if let Ok(output) = command.output() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let mut positions = Vec::new();
+
+                for line in stderr.lines() {
+                    if line.contains("key:1") || line.contains("is_key") {
+                        if let Some(pts_start) = line.find("pts_time:") {
+                            let pts_str = &line[pts_start + 9..];
+                            if let Some(end) =
+                                pts_str.find(|c: char| !c.is_numeric() && c != '.' && c != '-')
+                            {
+                                if let Ok(pts) = pts_str[..end].parse::<f64>() {
+                                    if pts >= 0.0 {
+                                        positions.push(pts);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if !positions.is_empty() {
+                    positions.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                    positions.dedup_by(|a, b| (*a - *b).abs() < 0.01);
+                }
+
+                *shared.keyframe_positions.lock().unwrap() = positions;
+            }
+        });
     }
 
     fn begin_audio_preload(&self) {
@@ -232,15 +370,22 @@ impl PlaybackController {
         self.shared.audio_generation.fetch_add(1, Ordering::SeqCst);
     }
 
-    fn spawn_video_process(&mut self, time_secs: f64, single_frame: bool) {
+    fn spawn_video_process(
+        &mut self,
+        seek_time: f64,
+        display_time: f64,
+        single_frame: bool,
+        low_priority: bool,
+    ) {
         self.stop_video_process();
         let generation = self.shared.generation.fetch_add(1, Ordering::SeqCst) + 1;
         let ffmpeg = ffmpeg_executable_path();
         let (out_width, out_height) = self.scaled_dimensions();
         let frame_len = out_width as usize * out_height as usize * 4;
-        let timestamp = format_seconds_arg(time_secs);
+        let timestamp = format_seconds_arg(seek_time);
         let mut command = Command::new(&ffmpeg);
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
+
         if single_frame {
             command.args([
                 "-hide_banner",
@@ -285,7 +430,12 @@ impl PlaybackController {
         #[cfg(target_os = "windows")]
         {
             use std::os::windows::process::CommandExt;
-            command.creation_flags(CREATE_NO_WINDOW);
+            if low_priority {
+                const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x00004000;
+                command.creation_flags(CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS);
+            } else {
+                command.creation_flags(CREATE_NO_WINDOW);
+            }
         }
 
         let mut child = match command.spawn() {
@@ -311,6 +461,8 @@ impl PlaybackController {
         *self.shared.child.lock().unwrap() = Some(child);
 
         let shared = self.shared.clone();
+        let cache_time = display_time;
+
         thread::spawn(move || {
             let mut stdout = stdout;
             let mut buffer = vec![0_u8; frame_len];
@@ -325,7 +477,18 @@ impl PlaybackController {
                         if let Some(image) =
                             RgbaImage::from_raw(out_width, out_height, buffer.clone())
                         {
-                            *shared.latest_frame.lock().unwrap() = Some(PlaybackFrame { image });
+                            if first_frame {
+                                shared.frame_cache.lock().unwrap().insert(
+                                    cache_time,
+                                    buffer.clone(),
+                                    out_width,
+                                    out_height,
+                                );
+                            }
+                            *shared.latest_frame.lock().unwrap() = Some(PlaybackFrame {
+                                image,
+                                from_cache: false,
+                            });
                         }
                         if single_frame {
                             break;
