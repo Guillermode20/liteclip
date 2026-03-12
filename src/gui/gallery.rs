@@ -26,6 +26,9 @@ const DEFAULT_AUDIO_BITRATE_KBPS: u32 = 128;
 const PREVIEW_FRAME_WIDTH: u32 = 960;
 const PREVIEW_FRAME_INTERVAL_SECS: f64 = 0.25;
 const MIN_RANGE_SECS: f64 = 0.1;
+const EDITOR_SIDEBAR_WIDTH: f32 = 340.0;
+const EDITOR_SIDEBAR_MIN_WIDTH: f32 = 280.0;
+const EDITOR_STACK_BREAKPOINT: f32 = 960.0;
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -733,44 +736,7 @@ impl ClipCompressApp {
         ui.separator();
 
         ui.add_enabled_ui(!export_active, |ui| {
-            render_preview_panel(ui, editor, &mut outcome);
-            ui.add_space(8.0);
-            render_editor_stats(ui, editor);
-            ui.add_space(8.0);
-            render_timeline_panel(ui, editor, &mut outcome);
-            ui.add_space(8.0);
-            render_snippet_list(ui, editor, &mut outcome);
-            ui.add_space(8.0);
-            render_size_section(ui, editor);
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                let preview_label = if editor.preview_final {
-                    "Stop Preview"
-                } else {
-                    "Preview Final"
-                };
-                if ui.button(preview_label).clicked() {
-                    editor.preview_final = !editor.preview_final;
-                    editor.is_playing = editor.preview_final;
-                    editor.last_tick = Instant::now();
-                    if editor.preview_final {
-                        editor.current_time_secs = clamp_to_enabled_playback_time(
-                            editor.current_time_secs,
-                            editor.duration_secs(),
-                            &editor.cut_points,
-                            &editor.snippet_enabled,
-                        );
-                    }
-                    outcome.preview_request = Some(editor.current_time_secs);
-                }
-                let can_export = !editor.kept_ranges().is_empty() && editor.target_size_mb > 0;
-                if ui
-                    .add_enabled(can_export, egui::Button::new("Export Clip"))
-                    .clicked()
-                {
-                    start_export(editor);
-                }
-            });
+            render_editor_workspace(ui, editor, &mut outcome);
         });
 
         if let Some(status) = &editor.status_message {
@@ -848,7 +814,15 @@ fn render_preview_panel(
     outcome: &mut EditorUiOutcome,
 ) {
     egui::Frame::group(ui.style()).show(ui, |ui| {
-        let preview_size = egui::vec2(ui.available_width(), 320.0);
+        let available_width = ui.available_width().max(220.0);
+        let aspect_ratio = (editor.video.metadata.width.max(1) as f32
+            / editor.video.metadata.height.max(1) as f32)
+            .max(1.0 / 3.0);
+        let available_height = ui.available_height().max(220.0);
+        let mut preview_height = (available_width / aspect_ratio).max(180.0);
+        let max_preview_height = (available_height - 72.0).max(180.0);
+        preview_height = preview_height.min(max_preview_height);
+        let preview_size = egui::vec2(available_width, preview_height);
         if let Some(texture) = &editor.preview_texture {
             ui.add(
                 egui::Image::from_texture(texture)
@@ -924,6 +898,10 @@ fn render_editor_stats(ui: &mut egui::Ui, editor: &EditorState) {
             "Resolution: {}x{}",
             editor.video.metadata.width, editor.video.metadata.height
         ));
+        if editor.video.metadata.has_audio {
+            ui.separator();
+            ui.label("Audio: included");
+        }
     });
 }
 
@@ -964,7 +942,8 @@ fn render_timeline_panel(
 }
 
 fn render_timeline(ui: &mut egui::Ui, editor: &mut EditorState, outcome: &mut EditorUiOutcome) {
-    let desired_size = egui::vec2(ui.available_width(), 78.0);
+    let timeline_height = ui.available_height().clamp(92.0, 180.0);
+    let desired_size = egui::vec2(ui.available_width(), timeline_height);
     let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::click());
     let track_rect = egui::Rect::from_min_max(
         rect.min + egui::vec2(0.0, 12.0),
@@ -1037,6 +1016,141 @@ fn render_timeline(ui: &mut egui::Ui, editor: &mut EditorState, outcome: &mut Ed
     }
 }
 
+fn render_editor_workspace(
+    ui: &mut egui::Ui,
+    editor: &mut EditorState,
+    outcome: &mut EditorUiOutcome,
+) {
+    let available_size = ui.available_size();
+    let stacked_layout = available_size.x < EDITOR_STACK_BREAKPOINT;
+
+    if stacked_layout {
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                render_editor_main_panel(ui, editor, outcome);
+                ui.add_space(12.0);
+                render_editor_sidebar(ui, editor, outcome, false);
+            });
+        return;
+    }
+
+    ui.horizontal_top(|ui| {
+        let sidebar_width = (available_size.x * 0.32)
+            .clamp(EDITOR_SIDEBAR_MIN_WIDTH, EDITOR_SIDEBAR_WIDTH);
+        let main_width = (ui.available_width() - sidebar_width - 12.0).max(320.0);
+
+        ui.allocate_ui_with_layout(
+            egui::vec2(main_width, available_size.y.max(320.0)),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                render_editor_main_panel(ui, editor, outcome);
+            },
+        );
+
+        ui.add_space(12.0);
+
+        ui.allocate_ui_with_layout(
+            egui::vec2(sidebar_width, available_size.y.max(320.0)),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                render_editor_sidebar(ui, editor, outcome, true);
+            },
+        );
+    });
+}
+
+fn render_editor_main_panel(
+    ui: &mut egui::Ui,
+    editor: &mut EditorState,
+    outcome: &mut EditorUiOutcome,
+) {
+    render_preview_panel(ui, editor, outcome);
+    ui.add_space(10.0);
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        render_editor_stats(ui, editor);
+    });
+    ui.add_space(10.0);
+    render_timeline_panel(ui, editor, outcome);
+}
+
+fn render_editor_sidebar(
+    ui: &mut egui::Ui,
+    editor: &mut EditorState,
+    outcome: &mut EditorUiOutcome,
+    fill_height: bool,
+) {
+    let render_contents =
+        |ui: &mut egui::Ui, editor: &mut EditorState, outcome: &mut EditorUiOutcome| {
+            render_snippet_list(ui, editor, outcome);
+            ui.add_space(10.0);
+            render_size_section(ui, editor);
+            ui.add_space(10.0);
+            render_action_section(ui, editor, outcome);
+        };
+
+    if fill_height {
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                render_contents(ui, editor, outcome);
+            });
+    } else {
+        render_contents(ui, editor, outcome);
+    }
+}
+
+fn render_action_section(
+    ui: &mut egui::Ui,
+    editor: &mut EditorState,
+    outcome: &mut EditorUiOutcome,
+) {
+    let can_export = !editor.kept_ranges().is_empty() && editor.target_size_mb > 0;
+
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.label(egui::RichText::new("Actions").strong());
+        ui.add_space(6.0);
+
+        let preview_label = if editor.preview_final {
+            "Stop Preview"
+        } else {
+            "Preview Final"
+        };
+
+        if ui
+            .add_sized([ui.available_width(), 32.0], egui::Button::new(preview_label))
+            .clicked()
+        {
+            editor.preview_final = !editor.preview_final;
+            editor.is_playing = editor.preview_final;
+            editor.last_tick = Instant::now();
+            if editor.preview_final {
+                editor.current_time_secs = clamp_to_enabled_playback_time(
+                    editor.current_time_secs,
+                    editor.duration_secs(),
+                    &editor.cut_points,
+                    &editor.snippet_enabled,
+                );
+            }
+            outcome.preview_request = Some(editor.current_time_secs);
+        }
+
+        ui.add_space(6.0);
+
+        if ui
+            .add_enabled(can_export, egui::Button::new("Export Clip"))
+            .clicked()
+        {
+            start_export(editor);
+        }
+
+        if editor.preview_final {
+            ui.add_space(8.0);
+            ui.label(egui::RichText::new("Previewing kept ranges only").strong());
+        }
+    });
+}
+
 fn hit_test_cut_point(editor: &EditorState, rect: egui::Rect, pointer_x: f32) -> Option<usize> {
     let mut best_match = None;
     let mut best_distance = f32::MAX;
@@ -1059,27 +1173,37 @@ fn render_snippet_list(ui: &mut egui::Ui, editor: &mut EditorState, outcome: &mu
         ui.label(egui::RichText::new("Use the timeline and add cuts at the playhead to split the clip into snippets. Disabled snippets are skipped in preview/export.").weak());
 
         let snippets = editor.snippets();
-        for (index, snippet) in snippets.iter().copied().enumerate() {
-            ui.horizontal(|ui| {
-                let mut enabled = editor.snippet_enabled.get(index).copied().unwrap_or(true);
-                if ui.checkbox(&mut enabled, format!("Snippet {}", index + 1)).changed() {
-                    if let Some(flag) = editor.snippet_enabled.get_mut(index) {
-                        *flag = enabled;
-                    }
-                    outcome.preview_request = Some(editor.current_time_secs);
-                }
-                ui.label(format!(
-                    "{} to {} ({})",
-                    format_timestamp_precise(snippet.start_secs),
-                    format_timestamp_precise(snippet.end_secs),
-                    format_compact_duration(snippet.duration_secs()),
-                ));
-                if index < editor.cut_points.len() && ui.button("Remove following cut").clicked() {
-                    remove_cut_point(editor, index);
-                    outcome.preview_request = Some(editor.current_time_secs);
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .max_height(260.0)
+            .show(ui, |ui| {
+                for (index, snippet) in snippets.iter().copied().enumerate() {
+                    egui::Frame::group(ui.style())
+                        .inner_margin(egui::Margin::same(8))
+                        .show(ui, |ui| {
+                            ui.horizontal_wrapped(|ui| {
+                                let mut enabled = editor.snippet_enabled.get(index).copied().unwrap_or(true);
+                                if ui.checkbox(&mut enabled, format!("Snippet {}", index + 1)).changed() {
+                                    if let Some(flag) = editor.snippet_enabled.get_mut(index) {
+                                        *flag = enabled;
+                                    }
+                                    outcome.preview_request = Some(editor.current_time_secs);
+                                }
+                                ui.label(format!(
+                                    "{} to {} ({})",
+                                    format_timestamp_precise(snippet.start_secs),
+                                    format_timestamp_precise(snippet.end_secs),
+                                    format_compact_duration(snippet.duration_secs()),
+                                ));
+                                if index < editor.cut_points.len() && ui.button("Remove following cut").clicked() {
+                                    remove_cut_point(editor, index);
+                                    outcome.preview_request = Some(editor.current_time_secs);
+                                }
+                            });
+                        });
+                    ui.add_space(6.0);
                 }
             });
-        }
     });
 }
 
@@ -1093,7 +1217,9 @@ fn render_size_section(ui: &mut egui::Ui, editor: &mut EditorState) {
     let (quality_label, bars) = quality_estimate(&editor.video.metadata, video_kbps);
 
     egui::Frame::group(ui.style()).show(ui, |ui| {
-        ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("Export Settings").strong());
+        ui.add_space(6.0);
+        ui.horizontal_wrapped(|ui| {
             ui.label("Target Output Size:");
             ui.add(
                 egui::DragValue::new(&mut editor.target_size_mb)

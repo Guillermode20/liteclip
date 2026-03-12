@@ -241,9 +241,9 @@ impl eframe::App for GuiManagerApp {
                 egui::ViewportId::from_hash_of("gallery"),
                 egui::ViewportBuilder::default()
                     .with_title("LiteClip Clip & Compress")
-                    .with_inner_size([900.0, 600.0])
+                    .with_inner_size([1280.0, 820.0])
                     .with_resizable(true)
-                    .with_min_inner_size([400.0, 300.0]),
+                    .with_min_inner_size([720.0, 520.0]),
                 move |ctx, class| {
                     if class == egui::ViewportClass::Embedded {
                         return;
