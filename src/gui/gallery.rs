@@ -15,6 +15,7 @@ use tracing::{info, warn};
 mod browser;
 mod editor;
 mod frame_cache;
+mod hw_decode;
 mod persistent_playback;
 
 use persistent_playback::PlaybackController;
@@ -30,7 +31,7 @@ use crate::platform::AppEvent;
 const ALL_GAMES_FILTER: &str = "All Games";
 const DEFAULT_TARGET_SIZE_MB: u32 = 25;
 const DEFAULT_AUDIO_BITRATE_KBPS: u32 = 128;
-const PREVIEW_FRAME_WIDTH: u32 = 960;
+const PREVIEW_FRAME_WIDTH: u32 = 640;
 const PREVIEW_FRAME_INTERVAL_SECS: f64 = 0.25;
 const MIN_RANGE_SECS: f64 = 0.1;
 const EDITOR_SIDEBAR_WIDTH: f32 = 340.0;
@@ -652,7 +653,7 @@ fn render_preview_panel(
             let label = if editor.is_playing { "Pause" } else { "Play" };
             if ui.button(label).clicked() {
                 if editor.is_playing {
-                    editor.playback.scrub_to(editor.current_time_secs);
+                    editor.playback.pause_at(editor.current_time_secs);
                     editor.is_playing = false;
                 } else {
                     editor.last_tick = Instant::now();
@@ -829,8 +830,7 @@ fn render_timeline(ui: &mut egui::Ui, editor: &mut EditorState, outcome: &mut Ed
                 editor.selected_cut_point = Some(index);
             } else {
                 editor.selected_cut_point = None;
-                editor.current_time_secs =
-                    x_to_time(track_rect, pointer.x, editor.duration_secs());
+                editor.current_time_secs = x_to_time(track_rect, pointer.x, editor.duration_secs());
 
                 if editor.is_playing {
                     editor.playback.scrub_to(editor.current_time_secs);

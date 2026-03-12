@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -12,32 +12,25 @@ pub struct CachedFrame {
     pub memory_size: usize,
 }
 
-struct CacheEntry {
-    frame: CachedFrame,
-    access_order: u64,
-}
-
 pub struct FrameCache {
-    entries: HashMap<i64, CacheEntry>,
+    entries: HashMap<i64, CachedFrame>,
+    insertion_order: VecDeque<i64>,
     memory_budget: usize,
     current_memory: usize,
-    access_counter: u64,
-    time_quantum_ms: i64,
 }
 
 impl FrameCache {
     pub fn new(memory_budget_mb: usize) -> Self {
         Self {
             entries: HashMap::new(),
+            insertion_order: VecDeque::new(),
             memory_budget: memory_budget_mb * 1024 * 1024,
             current_memory: 0,
-            access_counter: 0,
-            time_quantum_ms: 100,
         }
     }
 
     pub fn time_to_key(time_secs: f64) -> i64 {
-        ((time_secs * 10.0).round() as i64).max(0)
+        ((time_secs * 10.0).floor() as i64).max(0)
     }
 
     pub fn key_to_time(key: i64) -> f64 {
@@ -46,12 +39,9 @@ impl FrameCache {
 
     pub fn get(&mut self, time_secs: f64) -> Option<CachedFrame> {
         let key = Self::time_to_key(time_secs);
-        if let Some(entry) = self.entries.get_mut(&key) {
-            entry.access_order = self.access_counter;
-            self.access_counter += 1;
-            let mut frame = entry.frame.clone();
+        if let Some(frame) = self.entries.get_mut(&key) {
             frame.last_accessed = Instant::now();
-            return Some(frame);
+            return Some(frame.clone());
         }
         None
     }
@@ -85,12 +75,21 @@ impl FrameCache {
             return;
         }
 
-        if let Some(existing) = self.entries.get(&key) {
-            self.current_memory -= existing.frame.memory_size;
+        if self.entries.contains_key(&key) {
+            if let Some(old_frame) = self.entries.remove(&key) {
+                self.current_memory -= old_frame.memory_size;
+            }
+            self.insertion_order.retain(|&k| k != key);
         }
 
-        while self.current_memory + memory_size > self.memory_budget && !self.entries.is_empty() {
-            self.evict_lru();
+        while self.current_memory + memory_size > self.memory_budget {
+            if let Some(old_key) = self.insertion_order.pop_front() {
+                if let Some(old_frame) = self.entries.remove(&old_key) {
+                    self.current_memory -= old_frame.memory_size;
+                }
+            } else {
+                break;
+            }
         }
 
         let frame = CachedFrame {
@@ -103,36 +102,13 @@ impl FrameCache {
         };
 
         self.current_memory += memory_size;
-        self.entries.insert(
-            key,
-            CacheEntry {
-                frame,
-                access_order: self.access_counter,
-            },
-        );
-        self.access_counter += 1;
-    }
-
-    fn evict_lru(&mut self) {
-        if self.entries.is_empty() {
-            return;
-        }
-
-        let lru_key = self
-            .entries
-            .iter()
-            .min_by_key(|(_, entry)| entry.access_order)
-            .map(|(k, _)| *k);
-
-        if let Some(key) = lru_key {
-            if let Some(entry) = self.entries.remove(&key) {
-                self.current_memory -= entry.frame.memory_size;
-            }
-        }
+        self.entries.insert(key, frame);
+        self.insertion_order.push_back(key);
     }
 
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.insertion_order.clear();
         self.current_memory = 0;
     }
 

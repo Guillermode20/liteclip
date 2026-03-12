@@ -13,6 +13,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use super::frame_cache::FrameCache;
+use super::hw_decode::{self, HwDeviceContext};
 use crate::output::functions::ffmpeg_executable_path;
 use crate::output::VideoFileMetadata;
 
@@ -114,6 +115,9 @@ struct DecoderSession {
     stream_time_base_den: i32,
     seek_target_secs: f64,
     last_pts_secs: f64,
+    hw_device_ctx: Option<HwDeviceContext>,
+    hw_pix_fmt: Option<ffmpeg::ffi::AVPixelFormat>,
+    sw_frame: ffmpeg::util::frame::video::Video,
 }
 
 impl PlaybackController {
@@ -151,7 +155,10 @@ impl PlaybackController {
     }
 
     fn next_request_id(&self) -> u64 {
-        self.shared.request_generation.fetch_add(1, Ordering::SeqCst) + 1
+        self.shared
+            .request_generation
+            .fetch_add(1, Ordering::SeqCst)
+            + 1
     }
 
     fn active_request_id(&self) -> u64 {
@@ -189,14 +196,20 @@ impl PlaybackController {
         self.decoder.stop();
 
         if self.set_latest_frame_from_cache(clamped_time, 0.0) {
-            self.shared.video_request_in_flight.store(false, Ordering::SeqCst);
+            self.shared
+                .video_request_in_flight
+                .store(false, Ordering::SeqCst);
             return;
         }
 
         let request_id = self.next_request_id();
-        self.shared.video_request_in_flight.store(true, Ordering::SeqCst);
+        self.shared
+            .video_request_in_flight
+            .store(true, Ordering::SeqCst);
         if let Err(err) = self.decoder.request_preview(request_id, clamped_time) {
-            self.shared.video_request_in_flight.store(false, Ordering::SeqCst);
+            self.shared
+                .video_request_in_flight
+                .store(false, Ordering::SeqCst);
             *self.shared.last_error.lock().unwrap() = Some(err.to_string());
         }
     }
@@ -211,9 +224,13 @@ impl PlaybackController {
         let _ = self.set_latest_frame_from_cache(clamped_time, 0.5);
 
         let request_id = self.next_request_id();
-        self.shared.video_request_in_flight.store(true, Ordering::SeqCst);
+        self.shared
+            .video_request_in_flight
+            .store(true, Ordering::SeqCst);
         if let Err(err) = self.decoder.request_preview(request_id, clamped_time) {
-            self.shared.video_request_in_flight.store(false, Ordering::SeqCst);
+            self.shared
+                .video_request_in_flight
+                .store(false, Ordering::SeqCst);
             *self.shared.last_error.lock().unwrap() = Some(err.to_string());
         }
     }
@@ -228,7 +245,9 @@ impl PlaybackController {
         });
 
         let request_id = self.next_request_id();
-        self.shared.video_request_in_flight.store(false, Ordering::SeqCst);
+        self.shared
+            .video_request_in_flight
+            .store(false, Ordering::SeqCst);
         if let Err(err) = self.decoder.start_playback(request_id, clamped_time) {
             *self.shared.playing_since.lock().unwrap() = None;
             *self.shared.last_error.lock().unwrap() = Some(err.to_string());
@@ -242,7 +261,9 @@ impl PlaybackController {
         *self.shared.current_time_secs.lock().unwrap() = clamped_time;
         *self.shared.playing_since.lock().unwrap() = None;
         self.shared.frame_queue.lock().unwrap().clear();
-        self.shared.video_request_in_flight.store(false, Ordering::SeqCst);
+        self.shared
+            .video_request_in_flight
+            .store(false, Ordering::SeqCst);
         self.next_request_id();
         self.decoder.stop();
         self.stop_audio();
@@ -317,15 +338,26 @@ impl PlaybackController {
 
     pub fn take_playback_frame(&self, wall_time_secs: f64) -> Option<RgbaImage> {
         let mut queue = self.shared.frame_queue.lock().unwrap();
+        if queue.is_empty() {
+            return None;
+        }
+
         let mut result = None;
-        while queue
-            .front()
-            .map(|frame| frame.pts_secs <= wall_time_secs)
-            .unwrap_or(false)
-        {
-            if let Some(frame) = queue.pop_front() {
-                result = Some(frame.image);
+        let mut count = 0;
+        while let Some(frame) = queue.front() {
+            if frame.pts_secs <= wall_time_secs {
+                result = Some(queue.pop_front().unwrap().image);
+                count += 1;
+            } else {
+                break;
             }
+        }
+        if count > 1 {
+            tracing::debug!(
+                "take_playback_frame: skipped {} frames, wall_time={:.3}s",
+                count - 1,
+                wall_time_secs
+            );
         }
         result
     }
@@ -340,7 +372,13 @@ impl PlaybackController {
 
     pub fn poll(&mut self) {
         while let Some(frame) = self.decoder.try_recv_frame() {
+            tracing::debug!(
+                "Received frame request_id={} active_id={}",
+                frame.request_id,
+                self.active_request_id()
+            );
             if frame.request_id != self.active_request_id() {
+                tracing::debug!("Skipping frame from old request");
                 continue;
             }
 
@@ -353,6 +391,7 @@ impl PlaybackController {
 
             match frame.kind {
                 DecoderFrameKind::Preview => {
+                    tracing::debug!("Preview frame received, storing in latest_frame");
                     *self.shared.latest_frame.lock().unwrap() = Some(PlaybackFrame {
                         image: frame.image,
                         from_cache: false,
@@ -363,22 +402,33 @@ impl PlaybackController {
                 }
                 DecoderFrameKind::Playback => {
                     let mut queue = self.shared.frame_queue.lock().unwrap();
-                    if queue.len() >= PLAYBACK_QUEUE_DEPTH {
+                    let queue_len = queue.len();
+                    if queue_len >= PLAYBACK_QUEUE_DEPTH {
                         queue.pop_front();
                     }
                     queue.push_back(TimedFrame {
                         pts_secs: frame.pts_secs,
                         image: frame.image,
                     });
+                    if queue_len < 3 || queue_len % 10 == 0 {
+                        tracing::debug!(
+                            "Playback frame queued: pts={:.3}s, queue_len={}",
+                            frame.pts_secs,
+                            queue_len + 1
+                        );
+                    }
                 }
             }
         }
 
         while let Some(error) = self.decoder.try_recv_error() {
+            tracing::error!("Received decoder error: {}", error.message);
             if error.request_id != 0 && error.request_id != self.active_request_id() {
                 continue;
             }
-            self.shared.video_request_in_flight.store(false, Ordering::SeqCst);
+            self.shared
+                .video_request_in_flight
+                .store(false, Ordering::SeqCst);
             *self.shared.last_error.lock().unwrap() = Some(error.message);
         }
 
@@ -415,7 +465,8 @@ impl PlaybackController {
                     *shared.audio_buffer.lock().unwrap() = Some(buffer);
                 }
                 Err(err) => {
-                    *shared.last_error.lock().unwrap() = Some(format!("Audio preload failed: {err:#}"));
+                    *shared.last_error.lock().unwrap() =
+                        Some(format!("Audio preload failed: {err:#}"));
                 }
             }
             shared.audio_loading.store(false, Ordering::SeqCst);
@@ -449,14 +500,16 @@ impl PlaybackController {
             let (stream, handle) = match OutputStream::try_default() {
                 Ok(stream_and_handle) => stream_and_handle,
                 Err(err) => {
-                    *shared.last_error.lock().unwrap() = Some(format!("Audio output failed: {err}"));
+                    *shared.last_error.lock().unwrap() =
+                        Some(format!("Audio output failed: {err}"));
                     return;
                 }
             };
             let sink = match Sink::try_new(&handle) {
                 Ok(sink) => sink,
                 Err(err) => {
-                    *shared.last_error.lock().unwrap() = Some(format!("Audio output failed: {err}"));
+                    *shared.last_error.lock().unwrap() =
+                        Some(format!("Audio output failed: {err}"));
                     drop(stream);
                     return;
                 }
@@ -484,7 +537,8 @@ impl PlaybackController {
 
 impl Drop for PlaybackController {
     fn drop(&mut self) {
-        self.pause_at(self.playback_position_secs());
+        let _ = self.shared.playing_since.lock().map(|mut g| *g = None);
+        self.shared.audio_generation.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -494,7 +548,15 @@ impl PersistentVideoDecoder {
         let (frame_tx, frame_rx) = bounded(DECODER_CHANNEL_CAPACITY);
         let (error_tx, error_rx) = unbounded();
         let worker = thread::spawn(move || {
-            decoder_worker_loop(video_path, output_width, output_height, fps, command_rx, frame_tx, error_tx);
+            decoder_worker_loop(
+                video_path,
+                output_width,
+                output_height,
+                fps,
+                command_rx,
+                frame_tx,
+                error_tx,
+            );
         });
         Self {
             command_tx,
@@ -505,14 +567,28 @@ impl PersistentVideoDecoder {
     }
 
     fn request_preview(&self, request_id: u64, time_secs: f64) -> Result<()> {
+        tracing::debug!(
+            "Sending preview request {} at {:.2}s",
+            request_id,
+            time_secs
+        );
         self.command_tx
-            .send(DecoderCommand::Preview { request_id, time_secs })
-            .map_err(|_| anyhow!("Decoder worker is unavailable"))
+            .send(DecoderCommand::Preview {
+                request_id,
+                time_secs,
+            })
+            .map_err(|e| {
+                tracing::error!("Failed to send preview request: {}", e);
+                anyhow!("Decoder worker is unavailable")
+            })
     }
 
     fn start_playback(&self, request_id: u64, time_secs: f64) -> Result<()> {
         self.command_tx
-            .send(DecoderCommand::Playback { request_id, time_secs })
+            .send(DecoderCommand::Playback {
+                request_id,
+                time_secs,
+            })
             .map_err(|_| anyhow!("Decoder worker is unavailable"))
     }
 
@@ -584,10 +660,15 @@ fn decoder_worker_loop(
     frame_tx: crossbeam::channel::Sender<DecoderFrame>,
     error_tx: Sender<DecoderError>,
 ) {
+    tracing::info!("Decoder worker starting for {:?}", video_path);
     let _ = ffmpeg::init();
     let mut session = match DecoderSession::open(&video_path, output_width, output_height, fps) {
-        Ok(session) => session,
+        Ok(session) => {
+            tracing::info!("Decoder session opened successfully");
+            session
+        }
         Err(err) => {
+            tracing::error!("Failed to initialize video decoder: {err:#}");
             let _ = error_tx.send(DecoderError {
                 request_id: 0,
                 message: format!("Failed to initialize video decoder: {err:#}"),
@@ -596,20 +677,32 @@ fn decoder_worker_loop(
         }
     };
 
+    tracing::info!("Decoder worker entering main loop");
     loop {
         let command = match command_rx.recv() {
             Ok(command) => command,
-            Err(_) => return,
+            Err(_) => {
+                tracing::info!("Decoder worker channel disconnected, exiting");
+                return;
+            }
         };
 
         match command {
-            DecoderCommand::Shutdown => return,
-            DecoderCommand::Stop => continue,
+            DecoderCommand::Shutdown => {
+                tracing::info!("Decoder worker received shutdown, exiting");
+                return;
+            }
+            DecoderCommand::Stop => {
+                tracing::debug!("Decoder worker received stop");
+                continue;
+            }
             DecoderCommand::Preview {
                 request_id,
                 time_secs,
             } => {
+                tracing::debug!("Preview request {} at {:.2}s", request_id, time_secs);
                 if let Err(err) = session.seek_to(time_secs) {
+                    tracing::error!("Preview seek failed: {err:#}");
                     let _ = error_tx.send(DecoderError {
                         request_id,
                         message: format!("Preview seek failed: {err:#}"),
@@ -617,8 +710,10 @@ fn decoder_worker_loop(
                     continue;
                 }
 
+                tracing::debug!("Decoding preview frame");
                 match session.decode_next_image() {
                     Ok(Some((pts_secs, image))) => {
+                        tracing::debug!("Preview frame decoded at {:.2}s", pts_secs);
                         let _ = frame_tx.send(DecoderFrame {
                             request_id,
                             kind: DecoderFrameKind::Preview,
@@ -627,12 +722,14 @@ fn decoder_worker_loop(
                         });
                     }
                     Ok(None) => {
+                        tracing::warn!("No preview frame could be decoded");
                         let _ = error_tx.send(DecoderError {
                             request_id,
                             message: "No preview frame could be decoded".to_string(),
                         });
                     }
                     Err(err) => {
+                        tracing::error!("Preview decode failed: {err:#}");
                         let _ = error_tx.send(DecoderError {
                             request_id,
                             message: format!("Preview decode failed: {err:#}"),
@@ -644,7 +741,9 @@ fn decoder_worker_loop(
                 request_id,
                 time_secs,
             } => {
+                tracing::info!("Playback request {} at {:.2}s", request_id, time_secs);
                 if let Err(err) = session.seek_to(time_secs) {
+                    tracing::error!("Playback seek failed: {err:#}");
                     let _ = error_tx.send(DecoderError {
                         request_id,
                         message: format!("Playback seek failed: {err:#}"),
@@ -653,14 +752,34 @@ fn decoder_worker_loop(
                 }
 
                 let mut active_request_id = request_id;
+                let mut frame_count = 0u32;
                 'playback: loop {
                     match command_rx.try_recv() {
-                        Ok(DecoderCommand::Shutdown) => return,
-                        Ok(DecoderCommand::Stop) => break 'playback,
+                        Ok(DecoderCommand::Shutdown) => {
+                            tracing::info!(
+                                "Playback {} received shutdown after {} frames",
+                                active_request_id,
+                                frame_count
+                            );
+                            return;
+                        }
+                        Ok(DecoderCommand::Stop) => {
+                            tracing::info!(
+                                "Playback {} stopped after {} frames",
+                                active_request_id,
+                                frame_count
+                            );
+                            break 'playback;
+                        }
                         Ok(DecoderCommand::Preview {
                             request_id,
                             time_secs,
                         }) => {
+                            tracing::debug!(
+                                "Playback {} interrupted by preview {}",
+                                active_request_id,
+                                request_id
+                            );
                             if let Err(err) = session.seek_to(time_secs) {
                                 let _ = error_tx.send(DecoderError {
                                     request_id,
@@ -679,7 +798,8 @@ fn decoder_worker_loop(
                                     Ok(None) => {
                                         let _ = error_tx.send(DecoderError {
                                             request_id,
-                                            message: "No preview frame could be decoded".to_string(),
+                                            message: "No preview frame could be decoded"
+                                                .to_string(),
                                         });
                                     }
                                     Err(err) => {
@@ -696,6 +816,7 @@ fn decoder_worker_loop(
                             request_id,
                             time_secs,
                         }) => {
+                            tracing::debug!("Playback {} seeking to {:.2}s", request_id, time_secs);
                             active_request_id = request_id;
                             if let Err(err) = session.seek_to(time_secs) {
                                 let _ = error_tx.send(DecoderError {
@@ -705,12 +826,28 @@ fn decoder_worker_loop(
                                 break 'playback;
                             }
                         }
-                        Err(TryRecvError::Disconnected) => return,
+                        Err(TryRecvError::Disconnected) => {
+                            tracing::info!(
+                                "Playback {} channel disconnected after {} frames",
+                                active_request_id,
+                                frame_count
+                            );
+                            return;
+                        }
                         Err(TryRecvError::Empty) => {}
                     }
 
                     match session.decode_next_image() {
                         Ok(Some((pts_secs, image))) => {
+                            frame_count += 1;
+                            if frame_count <= 5 || frame_count % 30 == 0 {
+                                tracing::debug!(
+                                    "Playback {} frame {} at {:.3}s",
+                                    active_request_id,
+                                    frame_count,
+                                    pts_secs
+                                );
+                            }
                             let frame = DecoderFrame {
                                 request_id: active_request_id,
                                 kind: DecoderFrameKind::Playback,
@@ -719,8 +856,22 @@ fn decoder_worker_loop(
                             };
                             match send_playback_frame(&command_rx, &frame_tx, frame) {
                                 Ok(None) => {}
-                                Ok(Some(DecoderCommand::Shutdown)) => return,
-                                Ok(Some(DecoderCommand::Stop)) => break 'playback,
+                                Ok(Some(DecoderCommand::Shutdown)) => {
+                                    tracing::info!(
+                                        "Playback {} shutdown during send after {} frames",
+                                        active_request_id,
+                                        frame_count
+                                    );
+                                    return;
+                                }
+                                Ok(Some(DecoderCommand::Stop)) => {
+                                    tracing::info!(
+                                        "Playback {} stop during send after {} frames",
+                                        active_request_id,
+                                        frame_count
+                                    );
+                                    break 'playback;
+                                }
                                 Ok(Some(DecoderCommand::Preview {
                                     request_id,
                                     time_secs,
@@ -750,7 +901,9 @@ fn decoder_worker_loop(
                                             Err(err) => {
                                                 let _ = error_tx.send(DecoderError {
                                                     request_id,
-                                                    message: format!("Preview decode failed: {err:#}"),
+                                                    message: format!(
+                                                        "Preview decode failed: {err:#}"
+                                                    ),
                                                 });
                                             }
                                         }
@@ -792,7 +945,6 @@ fn decoder_worker_loop(
             }
         }
     }
-
 }
 
 impl DecoderSession {
@@ -807,7 +959,25 @@ impl DecoderSession {
         let stream_time_base = input_stream.time_base();
         let context = ffmpeg::codec::context::Context::from_parameters(input_stream.parameters())
             .context("Failed to create decoder context")?;
-        let decoder = context.decoder().video().context("Failed to open video decoder")?;
+        let mut decoder = context
+            .decoder()
+            .video()
+            .context("Failed to open video decoder")?;
+
+        let (hw_device_ctx, hw_pix_fmt) = if false {
+            hw_decode::try_create_hw_context(&decoder)
+                .map(|(ctx, fmt)| (Some(ctx), Some(fmt)))
+                .unwrap_or((None, None))
+        } else {
+            (None, None)
+        };
+
+        if let Some(ref hw_ctx) = hw_device_ctx {
+            unsafe {
+                (*decoder.as_mut_ptr()).hw_device_ctx = ffmpeg::ffi::av_buffer_ref(hw_ctx.as_ptr());
+            }
+        }
+
         let input_format = decoder.format();
         let input_width = decoder.width();
         let input_height = decoder.height();
@@ -839,6 +1009,9 @@ impl DecoderSession {
             stream_time_base_den: stream_time_base.1,
             seek_target_secs: 0.0,
             last_pts_secs: 0.0,
+            hw_device_ctx,
+            hw_pix_fmt,
+            sw_frame: ffmpeg::util::frame::video::Video::empty(),
         })
     }
 
@@ -872,8 +1045,35 @@ impl DecoderSession {
                     if pts_secs + 0.001 < self.seek_target_secs {
                         continue;
                     }
+
+                    let frame_to_scale: &ffmpeg::util::frame::video::Video =
+                        if let Some(hw_fmt) = self.hw_pix_fmt {
+                            if self.decoded_frame.format() as i32 == hw_fmt as i32 {
+                                match unsafe {
+                                    hw_decode::transfer_frame_to_sw(
+                                        &self.decoded_frame,
+                                        &mut self.sw_frame,
+                                    )
+                                } {
+                                    Ok(()) => &self.sw_frame,
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "HW frame transfer failed, falling back to SW: {}",
+                                            e
+                                        );
+                                        self.hw_pix_fmt = None;
+                                        &self.decoded_frame
+                                    }
+                                }
+                            } else {
+                                &self.decoded_frame
+                            }
+                        } else {
+                            &self.decoded_frame
+                        };
+
                     self.scaler
-                        .run(&self.decoded_frame, &mut self.rgba_frame)
+                        .run(frame_to_scale, &mut self.rgba_frame)
                         .context("Failed to scale decoded frame")?;
                     let image = rgba_frame_to_image(
                         &self.rgba_frame,
@@ -928,8 +1128,8 @@ impl DecoderSession {
             return self.last_pts_secs;
         }
 
-        let pts_secs = pts as f64 * self.stream_time_base_num as f64
-            / self.stream_time_base_den as f64;
+        let pts_secs =
+            pts as f64 * self.stream_time_base_num as f64 / self.stream_time_base_den as f64;
         if pts_secs.is_finite() {
             pts_secs.max(0.0)
         } else {
