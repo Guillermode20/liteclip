@@ -5,18 +5,24 @@ use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::mpsc::Sender as TokioSender;
 use tracing::{info, warn};
 
+mod browser;
+mod editor;
+mod playback;
+
+use playback::PlaybackController;
+
 use crate::config::Config;
 use crate::gui::manager::{show_toast, ToastKind};
 use crate::output::{
-    extract_preview_frame, generate_thumbnail, probe_video_file, spawn_clip_export,
-    ClipExportRequest, ClipExportUpdate, TimeRange, VideoFileMetadata,
+    generate_thumbnail, probe_video_file, spawn_clip_export, ClipExportRequest, ClipExportUpdate,
+    TimeRange, VideoFileMetadata,
 };
 use crate::platform::AppEvent;
 
@@ -50,13 +56,6 @@ struct VideoEntry {
 
 struct ThumbnailResult {
     video_path: PathBuf,
-    image: Option<RgbaImage>,
-    error: Option<String>,
-}
-
-struct PreviewFrameResult {
-    video_path: PathBuf,
-    timestamp_secs: f64,
     image: Option<RgbaImage>,
     error: Option<String>,
 }
@@ -99,6 +98,7 @@ struct EditorState {
     error_message: Option<String>,
     export_state: Option<ExportState>,
     export_output: Option<PathBuf>,
+    playback: PlaybackController,
 }
 
 impl EditorState {
@@ -106,6 +106,11 @@ impl EditorState {
         let target_size_mb = DEFAULT_TARGET_SIZE_MB
             .max(video.size_mb.round() as u32 / 2)
             .min(video.size_mb.ceil().max(1.0) as u32);
+        let playback = PlaybackController::new(
+            video.path.clone(),
+            video.metadata.clone(),
+            PREVIEW_FRAME_WIDTH,
+        );
         Self {
             video,
             current_time_secs: 0.0,
@@ -124,6 +129,7 @@ impl EditorState {
             error_message: None,
             export_state: None,
             export_output: None,
+            playback,
         }
     }
 
@@ -170,8 +176,6 @@ pub struct ClipCompressApp {
     thumbnails_generating: HashSet<PathBuf>,
     thumbnail_tx: Sender<ThumbnailResult>,
     thumbnail_rx: Receiver<ThumbnailResult>,
-    preview_tx: Sender<PreviewFrameResult>,
-    preview_rx: Receiver<PreviewFrameResult>,
     editor: Option<EditorState>,
 }
 
@@ -182,7 +186,6 @@ impl ClipCompressApp {
         let save_directory = PathBuf::from(&config.general.save_directory);
         let cache_directory = save_directory.join(".cache");
         let (thumbnail_tx, thumbnail_rx) = mpsc::channel();
-        let (preview_tx, preview_rx) = mpsc::channel();
 
         Self {
             save_directory,
@@ -195,8 +198,6 @@ impl ClipCompressApp {
             thumbnails_generating: HashSet::new(),
             thumbnail_tx,
             thumbnail_rx,
-            preview_tx,
-            preview_rx,
             editor: None,
         }
     }
@@ -385,30 +386,10 @@ impl ClipCompressApp {
             }
         }
 
+        editor.last_requested_preview_time = Some(timestamp_secs);
         editor.preview_frame_in_flight = true;
         editor.pending_preview_request = None;
-        editor.last_requested_preview_time = Some(timestamp_secs);
-
-        let tx = self.preview_tx.clone();
-        let video_path = editor.video.path.clone();
-        std::thread::spawn(move || {
-            let result =
-                match extract_preview_frame(&video_path, timestamp_secs, PREVIEW_FRAME_WIDTH) {
-                    Ok(image) => PreviewFrameResult {
-                        video_path,
-                        timestamp_secs,
-                        image: Some(image),
-                        error: None,
-                    },
-                    Err(err) => PreviewFrameResult {
-                        video_path,
-                        timestamp_secs,
-                        image: None,
-                        error: Some(format!("{err:#}")),
-                    },
-                };
-            let _ = tx.send(result);
-        });
+        editor.playback.request_preview_frame(timestamp_secs);
     }
 
     fn poll_background_work(&mut self, ctx: &egui::Context) -> Option<f64> {
@@ -428,17 +409,10 @@ impl ClipCompressApp {
             }
         }
 
-        while let Ok(result) = self.preview_rx.try_recv() {
-            let Some(editor) = self.editor.as_mut() else {
-                continue;
-            };
-            if editor.video.path != result.video_path {
-                continue;
-            }
-
-            editor.preview_frame_in_flight = false;
-            if let Some(image) = result.image {
-                let color_image = color_image_from_rgba(&image);
+        if let Some(editor) = self.editor.as_mut() {
+            editor.playback.poll();
+            if let Some(frame) = editor.playback.take_frame() {
+                let color_image = color_image_from_rgba(&frame.image);
                 if let Some(texture) = &mut editor.preview_texture {
                     texture.set(color_image, egui::TextureOptions::LINEAR);
                 } else {
@@ -448,15 +422,20 @@ impl ClipCompressApp {
                         egui::TextureOptions::LINEAR,
                     ));
                 }
+                editor.preview_frame_in_flight = false;
                 editor.error_message = None;
-            } else if let Some(error) = result.error {
-                editor.error_message = Some(error);
+                if let Some(pending) = editor.pending_preview_request.take() {
+                    follow_up_preview = Some(pending);
+                } else if editor.is_playing {
+                    follow_up_preview = None;
+                }
             }
-
-            if let Some(pending) = editor.pending_preview_request.take() {
-                follow_up_preview = Some(pending);
-            } else if editor.is_playing {
-                follow_up_preview = Some(result.timestamp_secs);
+            if let Some(error) = editor.playback.take_error() {
+                editor.preview_frame_in_flight = false;
+                editor.error_message = Some(error);
+                if let Some(pending) = editor.pending_preview_request.take() {
+                    follow_up_preview = Some(pending);
+                }
             }
         }
 
@@ -518,7 +497,7 @@ impl ClipCompressApp {
         let Some(editor) = self.editor.as_ref() else {
             return false;
         };
-        editor.is_playing || editor.preview_frame_in_flight || editor.has_active_export()
+        editor.is_playing || editor.playback.has_pending_activity() || editor.has_active_export()
     }
 
     fn open_editor(&mut self, video: VideoEntry) {
@@ -527,240 +506,11 @@ impl ClipCompressApp {
     }
 
     fn render_browser(&mut self, ui: &mut egui::Ui) -> BrowserUiOutcome {
-        let mut outcome = BrowserUiOutcome::default();
-        let total_videos: usize = self
-            .videos_by_game
-            .iter()
-            .map(|(_, videos)| videos.len())
-            .sum();
-        let filtered_videos: Vec<VideoEntry> = if self.filter_game == ALL_GAMES_FILTER {
-            self.videos_by_game
-                .iter()
-                .flat_map(|(_, videos)| videos.iter().cloned())
-                .collect()
-        } else {
-            self.videos_by_game
-                .iter()
-                .find(|(game, _)| *game == self.filter_game)
-                .map(|(_, videos)| videos.clone())
-                .unwrap_or_default()
-        };
-
-        ui.horizontal(|ui| {
-            ui.heading("Clip & Compress");
-            ui.label(format!("({total_videos} videos)"));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Refresh").clicked() {
-                    outcome.refresh_requested = true;
-                }
-                egui::ComboBox::from_id_salt("clip_filter_game")
-                    .selected_text(&self.filter_game)
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut self.filter_game,
-                            ALL_GAMES_FILTER.to_string(),
-                            ALL_GAMES_FILTER,
-                        );
-                        for (game, _) in &self.videos_by_game {
-                            ui.selectable_value(&mut self.filter_game, game.clone(), game);
-                        }
-                    });
-            });
-        });
-        ui.separator();
-
-        if let Some(error) = &self.scan_error {
-            ui.colored_label(egui::Color32::LIGHT_RED, error);
-        }
-
-        if filtered_videos.is_empty() {
-            ui.vertical_centered(|ui| {
-                ui.add_space(64.0);
-                ui.label(
-                    egui::RichText::new("No saved videos found")
-                        .size(18.0)
-                        .strong(),
-                );
-                ui.label(
-                    egui::RichText::new("Save some clips first, then open Clip & Compress again.")
-                        .weak(),
-                );
-            });
-            return outcome;
-        }
-
-        let tile_width = 220.0;
-        let tile_spacing = 12.0;
-        let thumb_height = 124.0;
-        let columns = ((ui.available_width() + tile_spacing) / (tile_width + tile_spacing))
-            .floor()
-            .max(1.0) as usize;
-        let rows = filtered_videos.len().div_ceil(columns);
-
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                for row in 0..rows {
-                    ui.horizontal(|ui| {
-                        for column in 0..columns {
-                            let index = row * columns + column;
-                            if index >= filtered_videos.len() {
-                                break;
-                            }
-
-                            let video = filtered_videos[index].clone();
-                            let has_thumb = self.thumbnails.contains_key(&video.path);
-                            if !has_thumb {
-                                outcome.thumbnails_to_generate.push(video.clone());
-                            }
-
-                            let response = ui
-                                .scope(|ui| {
-                                    ui.set_min_width(tile_width);
-                                    ui.set_max_width(tile_width);
-                                    egui::Frame::group(ui.style())
-                                        .fill(egui::Color32::from_rgb(30, 32, 36))
-                                        .inner_margin(egui::Margin::same(10))
-                                        .show(ui, |ui| {
-                                            ui.vertical(|ui| {
-                                                let thumb_size =
-                                                    egui::vec2(tile_width - 20.0, thumb_height);
-                                                if let Some(texture) =
-                                                    self.thumbnails.get(&video.path)
-                                                {
-                                                    ui.add(
-                                                        egui::Image::from_texture(texture)
-                                                            .fit_to_exact_size(thumb_size)
-                                                            .maintain_aspect_ratio(true),
-                                                    );
-                                                } else {
-                                                    let (rect, _) = ui.allocate_exact_size(
-                                                        thumb_size,
-                                                        egui::Sense::hover(),
-                                                    );
-                                                    ui.painter().rect_filled(
-                                                        rect,
-                                                        egui::CornerRadius::same(6),
-                                                        egui::Color32::from_rgb(22, 24, 27),
-                                                    );
-                                                    ui.painter().text(
-                                                        rect.center(),
-                                                        egui::Align2::CENTER_CENTER,
-                                                        format!(
-                                                            "{}\n{}",
-                                                            format_compact_duration(
-                                                                video.metadata.duration_secs
-                                                            ),
-                                                            "Generating thumbnail"
-                                                        ),
-                                                        egui::FontId::proportional(14.0),
-                                                        egui::Color32::from_rgb(150, 155, 165),
-                                                    );
-                                                }
-
-                                                ui.add_space(6.0);
-                                                ui.label(
-                                                    egui::RichText::new(&video.filename)
-                                                        .size(13.0)
-                                                        .strong(),
-                                                );
-                                                ui.label(
-                                                    egui::RichText::new(format!(
-                                                        "{} | {} | {}",
-                                                        video.game,
-                                                        format_compact_duration(
-                                                            video.metadata.duration_secs
-                                                        ),
-                                                        format_size_mb(video.size_mb)
-                                                    ))
-                                                    .weak(),
-                                                );
-                                                ui.label(
-                                                    egui::RichText::new(format!(
-                                                        "{}x{}{}",
-                                                        video.metadata.width,
-                                                        video.metadata.height,
-                                                        if video.metadata.has_audio {
-                                                            " | audio"
-                                                        } else {
-                                                            ""
-                                                        }
-                                                    ))
-                                                    .small(),
-                                                );
-                                                ui.add_space(6.0);
-                                                if ui.button("Select").clicked() {
-                                                    outcome.selected_video = Some(video.clone());
-                                                }
-                                            });
-                                        })
-                                })
-                                .response;
-
-                            if response.double_clicked() {
-                                outcome.selected_video = Some(video);
-                            }
-                            ui.add_space(tile_spacing);
-                        }
-                    });
-                    ui.add_space(tile_spacing);
-                }
-            });
-
-        outcome
+        browser::render_browser_ui(self, ui)
     }
 
     fn render_editor(&mut self, ui: &mut egui::Ui) -> EditorUiOutcome {
-        let mut outcome = EditorUiOutcome::default();
-        let Some(editor) = self.editor.as_mut() else {
-            return outcome;
-        };
-
-        poll_editor_export_updates(editor, &mut outcome);
-        if editor.export_output.is_some() {
-            return render_completion_screen(ui, editor);
-        }
-
-        update_playback_clock(editor, &mut outcome);
-
-        let export_active = editor.has_active_export();
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(!export_active, egui::Button::new("< Back to Videos"))
-                .clicked()
-            {
-                outcome.back_to_browser = true;
-            }
-            ui.heading(format!("Editing: {}", editor.video.filename));
-        });
-        ui.separator();
-
-        ui.add_enabled_ui(!export_active, |ui| {
-            render_editor_workspace(ui, editor, &mut outcome);
-        });
-
-        if let Some(status) = &editor.status_message {
-            ui.add_space(6.0);
-            ui.colored_label(egui::Color32::LIGHT_GREEN, status);
-        }
-        if let Some(error) = &editor.error_message {
-            ui.add_space(6.0);
-            ui.colored_label(egui::Color32::LIGHT_RED, error);
-        }
-
-        if let Some(export) = editor.export_state.as_mut() {
-            ui.add_space(10.0);
-            ui.separator();
-            ui.label(egui::RichText::new("Exporting clip").strong());
-            ui.add(egui::ProgressBar::new(export.progress).show_percentage());
-            ui.label(&export.message);
-            if ui.button("Cancel Export").clicked() {
-                export.cancel_flag.store(true, Ordering::SeqCst);
-                export.message = "Cancelling export...".to_string();
-            }
-        }
-
-        outcome
+        editor::render_editor_ui(self, ui)
     }
 
     pub fn refresh(&mut self) {
@@ -843,16 +593,31 @@ fn render_preview_panel(
                 egui::FontId::proportional(18.0),
                 egui::Color32::from_rgb(160, 165, 175),
             );
-            outcome.preview_request = Some(editor.current_time_secs);
+            if !editor.preview_frame_in_flight {
+                outcome.preview_request = Some(editor.current_time_secs);
+            }
         }
 
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             let label = if editor.is_playing { "Pause" } else { "Play" };
             if ui.button(label).clicked() {
-                editor.is_playing = !editor.is_playing;
-                editor.last_tick = Instant::now();
                 if editor.is_playing {
+                    editor.playback.pause_at(editor.current_time_secs);
+                    editor.is_playing = false;
+                } else {
+                    editor.last_tick = Instant::now();
+                    editor.is_playing = true;
+                    if editor.preview_final {
+                        editor.current_time_secs = clamp_to_enabled_playback_time(
+                            editor.current_time_secs,
+                            editor.duration_secs(),
+                            &editor.cut_points,
+                            &editor.snippet_enabled,
+                        );
+                    } else {
+                        editor.playback.play_from(editor.current_time_secs);
+                    }
                     outcome.preview_request = Some(editor.current_time_secs);
                 }
             }
@@ -870,6 +635,7 @@ fn render_preview_panel(
             egui::Slider::new(&mut editor.current_time_secs, 0.0..=duration).show_value(false),
         );
         if response.changed() {
+            editor.playback.pause_at(editor.current_time_secs);
             editor.is_playing = false;
             editor.current_time_secs = editor.current_time_secs.clamp(0.0, editor.duration_secs());
             outcome.preview_request = Some(editor.current_time_secs);
@@ -944,7 +710,7 @@ fn render_timeline_panel(
 fn render_timeline(ui: &mut egui::Ui, editor: &mut EditorState, outcome: &mut EditorUiOutcome) {
     let timeline_height = ui.available_height().clamp(92.0, 180.0);
     let desired_size = egui::vec2(ui.available_width(), timeline_height);
-    let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::click());
+    let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::click_and_drag());
     let track_rect = egui::Rect::from_min_max(
         rect.min + egui::vec2(0.0, 12.0),
         rect.max - egui::vec2(0.0, 22.0),
@@ -1003,12 +769,13 @@ fn render_timeline(ui: &mut egui::Ui, editor: &mut EditorState, outcome: &mut Ed
     }
 
     if let Some(pointer) = response.interact_pointer_pos() {
-        if response.clicked() {
+        if response.clicked() || response.dragged() {
             if let Some(index) = hit_test_cut_point(editor, track_rect, pointer.x) {
                 editor.selected_cut_point = Some(index);
             } else {
                 editor.selected_cut_point = None;
                 editor.current_time_secs = x_to_time(track_rect, pointer.x, editor.duration_secs());
+                editor.playback.pause_at(editor.current_time_secs);
                 editor.is_playing = false;
                 outcome.preview_request = Some(editor.current_time_secs);
             }
@@ -1124,6 +891,7 @@ fn render_action_section(
             )
             .clicked()
         {
+            editor.playback.pause_at(editor.current_time_secs);
             editor.preview_final = !editor.preview_final;
             editor.is_playing = editor.preview_final;
             editor.last_tick = Instant::now();
@@ -1252,6 +1020,16 @@ fn update_playback_clock(editor: &mut EditorState, outcome: &mut EditorUiOutcome
         return;
     }
 
+    if !editor.preview_final {
+        editor.current_time_secs = editor.playback.playback_position_secs();
+        if editor.current_time_secs >= editor.duration_secs() {
+            editor.current_time_secs = editor.duration_secs();
+            editor.is_playing = false;
+            editor.playback.pause_at(editor.current_time_secs);
+        }
+        return;
+    }
+
     let now = Instant::now();
     let delta = now.duration_since(editor.last_tick).as_secs_f64();
     editor.last_tick = now;
@@ -1320,6 +1098,7 @@ fn start_export(editor: &mut EditorState) {
     editor.export_output = None;
     editor.status_message = None;
     editor.error_message = None;
+    editor.playback.pause_at(editor.current_time_secs);
     editor.is_playing = false;
     editor.preview_final = false;
 }
