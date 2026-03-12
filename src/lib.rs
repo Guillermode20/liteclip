@@ -15,7 +15,7 @@
 //! - [`clip`] - Clip saving and muxing functionality
 //! - [`config`] - Configuration management
 //! - [`platform`] - Windows integration (hotkeys, tray, notifications)
-//! - [`gui`] - User interface components (settings, gallery)
+//! - [`gui`] - User interface components (settings, Clip & Compress)
 //! - [`output`] - Output file handling and thumbnails
 //! - [`detection`] - Running game detection
 //!

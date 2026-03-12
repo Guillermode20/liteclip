@@ -41,7 +41,7 @@ impl TrayManager {
 
         let item_save = MenuItem::with_id(ID_SAVE_CLIP, "Save Clip", true, None);
         let item_settings = MenuItem::with_id(ID_OPEN_SETTINGS, "Open Settings", true, None);
-        let item_gallery = MenuItem::with_id(ID_OPEN_GALLERY, "Open Gallery", true, None);
+        let item_gallery = MenuItem::with_id(ID_OPEN_GALLERY, "Open Clip & Compress", true, None);
         let separator1 = PredefinedMenuItem::separator();
         let item_restart = MenuItem::with_id(ID_RESTART, "Restart", true, None);
         let item_exit = MenuItem::with_id(ID_EXIT, "Exit", true, None);

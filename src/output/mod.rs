@@ -40,6 +40,7 @@ pub mod functions;
 pub mod mp4;
 pub mod saver;
 pub mod types;
+pub mod video_file;
 
 pub use functions::{
     calculate_clip_start_pts, generate_output_path, generate_thumbnail, h264_nal_type,
@@ -47,3 +48,7 @@ pub use functions::{
 };
 pub use saver::spawn_clip_saver;
 pub use types::{Muxer, MuxerConfig};
+pub use video_file::{
+    extract_preview_frame, probe_video_file, spawn_clip_export, ClipExportPhase,
+    ClipExportRequest, ClipExportUpdate, TimeRange, VideoFileMetadata,
+};

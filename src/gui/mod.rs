@@ -1,12 +1,12 @@
 //! Graphical User Interface
 //!
 //! This module provides GUI components built with egui for settings
-//! and clip gallery.
+//! and Clip & Compress.
 //!
 //! # Components
 //!
 //! - **Settings GUI**: Configuration interface for video, audio, and hotkeys
-//! - **Gallery GUI**: Browse and manage saved clips
+//! - **Clip & Compress GUI**: Browse saved clips and edit clipped exports
 //!
 //! # Architecture
 //!
@@ -17,7 +17,7 @@
 //! # Key Functions
 //!
 //! - [`show_settings_gui`] - Open the settings window
-//! - [`show_gallery_gui`] - Open the clip gallery window
+//! - [`show_gallery_gui`] - Open the Clip & Compress window
 //!
 //! # Example
 //!

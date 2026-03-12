@@ -240,7 +240,7 @@ impl eframe::App for GuiManagerApp {
             ctx.show_viewport_deferred(
                 egui::ViewportId::from_hash_of("gallery"),
                 egui::ViewportBuilder::default()
-                    .with_title("LiteClip Gallery")
+                    .with_title("LiteClip Clip & Compress")
                     .with_inner_size([900.0, 600.0])
                     .with_resizable(true)
                     .with_min_inner_size([400.0, 300.0]),

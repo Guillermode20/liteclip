@@ -143,7 +143,8 @@ pub fn generate_output_path(base_dir: &Path, game_name: Option<&str>) -> Result<
             base_dir.join(game)
         }
     } else {
-        base_dir.to_path_buf()
+        // Default to a Desktop subfolder for recordings that are not associated with a game
+        base_dir.join("Desktop")
     };
 
     std::fs::create_dir_all(&output_dir)

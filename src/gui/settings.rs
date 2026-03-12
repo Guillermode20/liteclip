@@ -271,7 +271,7 @@ impl SettingsApp {
                     );
                     render_hotkey_field(
                         ui,
-                        "Open Gallery:",
+                        "Open Clip & Compress:",
                         &mut self.config.hotkeys.open_gallery,
                         &mut self.hotkey_errors.open_gallery,
                     );

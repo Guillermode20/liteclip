@@ -124,7 +124,8 @@ impl ClipManager {
                 save_dir.join(game)
             }
         } else {
-            save_dir
+            // Put recordings without an associated game into a Desktop subfolder by default
+            save_dir.join("Desktop")
         };
 
         std::fs::create_dir_all(&output_dir)?;
