@@ -13,12 +13,10 @@ use tokio::sync::mpsc::Sender as TokioSender;
 use tracing::{info, warn};
 
 mod browser;
+mod decode_pipeline;
 mod editor;
-mod frame_cache;
-mod hw_decode;
-mod persistent_playback;
 
-use persistent_playback::PlaybackController;
+use decode_pipeline::PlaybackController;
 
 use crate::config::Config;
 use crate::gui::manager::{show_toast, ToastKind};
@@ -376,6 +374,12 @@ impl ClipCompressApp {
             return;
         };
 
+        if editor.is_playing && !editor.preview_final {
+            editor.preview_frame_in_flight = false;
+            editor.pending_preview_request = None;
+            return;
+        }
+
         let timestamp_secs = timestamp_secs.clamp(0.0, editor.duration_secs());
         if editor.preview_frame_in_flight {
             editor.pending_preview_request = Some(timestamp_secs);
@@ -429,12 +433,22 @@ impl ClipCompressApp {
         }
 
         if let Some(editor) = self.editor.as_mut() {
-            editor.playback.poll();
+            let wall_time = if editor.is_playing && !editor.preview_final {
+                Some(editor.playback.playback_position_secs())
+            } else {
+                None
+            };
+            editor.playback.poll_with_wall_time(wall_time);
 
             // Live playback path: drain the frame queue for frames due by now.
             if editor.is_playing && !editor.preview_final {
-                let wall_time = editor.playback.playback_position_secs();
+                let wall_time = wall_time.unwrap();
+                let (queue_len, _) = editor.playback.cache_stats();
                 if let Some(image) = editor.playback.take_playback_frame(wall_time) {
+                    tracing::trace!(
+                        "poll_background_work: displaying frame at wall_time={:.3}s",
+                        wall_time
+                    );
                     let color_image = color_image_from_rgba(&image);
                     if let Some(texture) = &mut editor.preview_texture {
                         texture.set(color_image, egui::TextureOptions::LINEAR);
@@ -445,7 +459,15 @@ impl ClipCompressApp {
                             egui::TextureOptions::LINEAR,
                         ));
                     }
+                    editor.preview_frame_in_flight = false;
+                    editor.pending_preview_request = None;
                     editor.error_message = None;
+                } else if queue_len > 0 {
+                    tracing::trace!(
+                        "poll_background_work: no frame for wall_time={:.3}s, queue_len={}",
+                        wall_time,
+                        queue_len
+                    );
                 }
             }
 
@@ -665,10 +687,12 @@ fn render_preview_panel(
                             &editor.cut_points,
                             &editor.snippet_enabled,
                         );
+                        outcome.preview_request = Some(editor.current_time_secs);
                     } else {
+                        editor.preview_frame_in_flight = false;
+                        editor.pending_preview_request = None;
                         editor.playback.play_from(editor.current_time_secs);
                     }
-                    outcome.preview_request = Some(editor.current_time_secs);
                 }
             }
             ui.label(format!(

@@ -41,7 +41,7 @@ pub fn init_gui_manager() {
             let pos = get_toast_window_pos();
 
             let options = eframe::NativeOptions {
-                renderer: eframe::Renderer::Glow,
+                renderer: eframe::Renderer::Wgpu,
                 viewport: egui::ViewportBuilder::default()
                     .with_transparent(true)
                     .with_always_on_top()
