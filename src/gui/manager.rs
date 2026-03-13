@@ -41,7 +41,7 @@ pub fn init_gui_manager() {
             let pos = get_toast_window_pos();
 
             let options = eframe::NativeOptions {
-                renderer: eframe::Renderer::Wgpu,
+                renderer: eframe::Renderer::Glow,
                 viewport: egui::ViewportBuilder::default()
                     .with_transparent(true)
                     .with_always_on_top()
@@ -163,7 +163,7 @@ impl GuiManagerApp {
 
 impl eframe::App for GuiManagerApp {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        [0.0, 0.0, 0.0, 0.0]
+        egui::Rgba::TRANSPARENT.to_array()
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
