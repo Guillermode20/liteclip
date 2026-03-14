@@ -15,8 +15,26 @@ use std::time::{Duration, Instant};
 use crate::output::functions::ffmpeg_executable_path;
 use crate::output::VideoFileMetadata;
 
-const FRAME_CHANNEL_CAPACITY: usize = 12;
-const PLAYBACK_QUEUE_DEPTH: usize = 10;
+const FRAME_CHANNEL_CAPACITY: usize = 24; // Increased from 12 for better buffering
+const PLAYBACK_QUEUE_DEPTH: usize = 20; // Increased from 10 for smoother playback
+
+/// Frame quality levels for adaptive resolution during scrubbing
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScrubQuality {
+    Low,    // Fast scrubbing - reduced resolution
+    Medium, // Normal scrubbing
+    High,   // Playback/paused - full resolution
+}
+
+impl ScrubQuality {
+    pub fn preview_width(&self) -> u32 {
+        match self {
+            ScrubQuality::Low => 320,
+            ScrubQuality::Medium => 640,
+            ScrubQuality::High => 1280,
+        }
+    }
+}
 
 pub struct PlaybackFrame {
     pub image: RgbaImage,
@@ -110,6 +128,10 @@ struct DecoderSession {
     stream_time_base_den: i32,
     seek_target_secs: f64,
     last_pts_secs: f64,
+    /// Track keyframe positions for smarter seeking
+    keyframe_positions: Vec<f64>,
+    /// Current scrub quality for adaptive resolution
+    scrub_quality: ScrubQuality,
 }
 
 impl PlaybackController {
@@ -246,8 +268,8 @@ impl PlaybackController {
             started_at: Instant::now(),
         });
         self.shared.frame_queue.lock().unwrap().clear();
-        self.stop_audio();
 
+        // Seek decoder to new position without stopping audio
         let request_id = self.next_request_id();
         if let Err(err) = self.decoder.start_playback(request_id, clamped_time) {
             *self.shared.last_error.lock().unwrap() = Some(err.to_string());
@@ -255,23 +277,15 @@ impl PlaybackController {
     }
 
     pub fn commit_scrub(&mut self, time_secs: f64) {
-        if !self.is_playing() {
-            return;
-        }
+        // Audio is already in sync from scrub_to, just ensure position is correct
         let clamped_time = self.clamp_time(time_secs);
         *self.shared.current_time_secs.lock().unwrap() = clamped_time;
-        *self.shared.playing_since.lock().unwrap() = Some(PlaybackClock {
-            start_time_secs: clamped_time,
-            started_at: Instant::now(),
-        });
-        self.shared.frame_queue.lock().unwrap().clear();
-
-        let request_id = self.next_request_id();
-        if let Err(err) = self.decoder.start_playback(request_id, clamped_time) {
-            *self.shared.last_error.lock().unwrap() = Some(err.to_string());
-            return;
+        if self.is_playing() {
+            *self.shared.playing_since.lock().unwrap() = Some(PlaybackClock {
+                start_time_secs: clamped_time,
+                started_at: Instant::now(),
+            });
         }
-        self.maybe_start_audio();
     }
 
     pub fn playback_position_secs(&self) -> f64 {
@@ -291,6 +305,10 @@ impl PlaybackController {
         self.is_playing()
             || self.shared.audio_loading.load(Ordering::SeqCst)
             || self.shared.video_request_in_flight.load(Ordering::SeqCst)
+    }
+
+    pub fn is_frame_request_in_flight(&self) -> bool {
+        self.shared.video_request_in_flight.load(Ordering::SeqCst)
     }
 
     pub fn take_frame(&self) -> Option<PlaybackFrame> {
@@ -1007,11 +1025,39 @@ impl DecoderSession {
             stream_time_base_den: stream_time_base.1,
             seek_target_secs: 0.0,
             last_pts_secs: 0.0,
+            keyframe_positions: Vec::new(),
+            scrub_quality: ScrubQuality::High,
         })
     }
 
     fn seek_to(&mut self, time_secs: f64) -> Result<()> {
-        let timestamp = (time_secs.max(0.0) * ffmpeg::ffi::AV_TIME_BASE as f64).round() as i64;
+        // Find the nearest keyframe before the target time for more efficient seeking
+        let seek_time = if !self.keyframe_positions.is_empty() {
+            // Find the keyframe just before our target time
+            let nearest_keyframe = self
+                .keyframe_positions
+                .iter()
+                .filter(|&&k| k <= time_secs)
+                .last()
+                .copied();
+
+            match nearest_keyframe {
+                Some(kf) if (time_secs - kf) > 2.0 => {
+                    // If we're more than 2 seconds past a keyframe, seek to keyframe first
+                    tracing::debug!(
+                        "Seeking to keyframe at {:.3}s instead of {:.3}s",
+                        kf,
+                        time_secs
+                    );
+                    kf
+                }
+                _ => time_secs,
+            }
+        } else {
+            time_secs
+        };
+
+        let timestamp = (seek_time.max(0.0) * ffmpeg::ffi::AV_TIME_BASE as f64).round() as i64;
         let result = unsafe {
             ffmpeg::ffi::av_seek_frame(
                 self.input.as_mut_ptr(),
@@ -1037,11 +1083,34 @@ impl DecoderSession {
             match self.decoder.receive_frame(&mut self.decoded_frame) {
                 Ok(()) => {
                     let pts_secs = self.frame_pts_secs();
+
+                    // Check if this is a keyframe
+                    let is_keyframe = unsafe {
+                        let flags = (*self.decoded_frame.as_ptr()).flags;
+                        flags & ffmpeg::ffi::AV_FRAME_FLAG_KEY != 0
+                    };
+
+                    // Track keyframe positions for smarter seeking
+                    if is_keyframe {
+                        self.keyframe_positions.push(pts_secs);
+                        // Keep keyframe list sorted and remove duplicates
+                        self.keyframe_positions
+                            .sort_by(|a, b| a.partial_cmp(b).unwrap());
+                        self.keyframe_positions
+                            .dedup_by(|a, b| (*a - *b).abs() < 0.001);
+                        // Limit the list size to prevent memory bloat
+                        if self.keyframe_positions.len() > 1000 {
+                            self.keyframe_positions.remove(0);
+                        }
+                    }
+
                     tracing::trace!(
-                        "decode_next_image: received frame pts={:.3}s, seek_target={:.3}s",
+                        "decode_next_image: received frame pts={:.3}s, seek_target={:.3}s, keyframe={}",
                         pts_secs,
-                        self.seek_target_secs
+                        self.seek_target_secs,
+                        is_keyframe
                     );
+
                     if pts_secs + 0.001 < self.seek_target_secs {
                         tracing::trace!("decode_next_image: skipping frame before seek target");
                         continue;

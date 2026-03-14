@@ -315,7 +315,19 @@ impl LockFreeReplayBuffer {
 
         let mut cache = inner.param_cache.lock().unwrap();
 
-        let mut nals: Vec<(usize, usize, u8, u8)> = Vec::new();
+        // Early exit if we already have all parameters for current codec
+        let has_all_params = match cache.codec_kind {
+            CodecKind::H264 => cache.h264_sps.is_some() && cache.h264_pps.is_some(),
+            CodecKind::Hevc => {
+                cache.hevc_vps.is_some() && cache.hevc_sps.is_some() && cache.hevc_pps.is_some()
+            }
+            _ => false,
+        };
+        if has_all_params {
+            inner.param_cache_complete.store(true, Ordering::Release);
+            return;
+        }
+
         let mut i = 0;
         while i < data.len() {
             let start_code_len;
@@ -336,17 +348,19 @@ impl LockFreeReplayBuffer {
             let hevc_nal = (data[nal_start] >> 1) & 0x3f;
             let h264_nal = data[nal_start] & 0x1f;
 
-            nals.push((i, start_code_len, hevc_nal, h264_nal));
-            i = nal_start + 1;
-        }
+            // Find NAL end
+            let mut nal_end = nal_start + 1;
+            while nal_end < data.len() {
+                if (nal_end + 3 <= data.len() && data[nal_end..nal_end + 3] == [0x00, 0x00, 0x01])
+                    || (nal_end + 4 <= data.len()
+                        && data[nal_end..nal_end + 4] == [0x00, 0x00, 0x00, 0x01])
+                {
+                    break;
+                }
+                nal_end += 1;
+            }
 
-        for (idx, (start, _sc_len, hevc_nal, h264_nal)) in nals.iter().enumerate() {
-            let next_start = nals
-                .get(idx + 1)
-                .map(|(s, _, _, _)| *s)
-                .unwrap_or(data.len());
-
-            let nal_data = Bytes::copy_from_slice(&data[*start..next_start]);
+            let nal_data = Bytes::copy_from_slice(&data[i..nal_end]);
 
             let already_hevc =
                 cache.hevc_vps.is_some() || cache.hevc_sps.is_some() || cache.hevc_pps.is_some();
@@ -355,17 +369,17 @@ impl LockFreeReplayBuffer {
                 32 => {
                     cache.hevc_vps = Some(nal_data);
                     cache.codec_kind = CodecKind::Hevc;
-                    trace!("Cached HEVC VPS ({} bytes)", next_start - start);
+                    trace!("Cached HEVC VPS ({} bytes)", nal_end - i);
                 }
                 33 => {
                     cache.hevc_sps = Some(nal_data);
                     cache.codec_kind = CodecKind::Hevc;
-                    trace!("Cached HEVC SPS ({} bytes)", next_start - start);
+                    trace!("Cached HEVC SPS ({} bytes)", nal_end - i);
                 }
                 34 => {
                     cache.hevc_pps = Some(nal_data);
                     cache.codec_kind = CodecKind::Hevc;
-                    trace!("Cached HEVC PPS ({} bytes)", next_start - start);
+                    trace!("Cached HEVC PPS ({} bytes)", nal_end - i);
                 }
                 _ => {
                     if !already_hevc {
@@ -373,28 +387,33 @@ impl LockFreeReplayBuffer {
                             7 => {
                                 cache.h264_sps = Some(nal_data);
                                 cache.codec_kind = CodecKind::H264;
-                                trace!("Cached H.264 SPS ({} bytes)", next_start - start);
+                                trace!("Cached H.264 SPS ({} bytes)", nal_end - i);
                             }
                             8 => {
                                 cache.h264_pps = Some(nal_data);
                                 cache.codec_kind = CodecKind::H264;
-                                trace!("Cached H.264 PPS ({} bytes)", next_start - start);
+                                trace!("Cached H.264 PPS ({} bytes)", nal_end - i);
                             }
                             _ => {}
                         }
                     }
                 }
             }
-        }
 
-        let complete = match cache.codec_kind {
-            CodecKind::H264 => cache.h264_sps.is_some() && cache.h264_pps.is_some(),
-            CodecKind::Hevc => {
-                cache.hevc_vps.is_some() && cache.hevc_sps.is_some() && cache.hevc_pps.is_some()
+            // Check if we have all parameters now
+            let complete = match cache.codec_kind {
+                CodecKind::H264 => cache.h264_sps.is_some() && cache.h264_pps.is_some(),
+                CodecKind::Hevc => {
+                    cache.hevc_vps.is_some() && cache.hevc_sps.is_some() && cache.hevc_pps.is_some()
+                }
+                _ => false,
+            };
+            if complete {
+                inner.param_cache_complete.store(true, Ordering::Release);
+                return;
             }
-        };
-        if complete {
-            inner.param_cache_complete.store(true, Ordering::Release);
+
+            i = nal_end;
         }
     }
 

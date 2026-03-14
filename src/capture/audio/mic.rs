@@ -539,7 +539,10 @@ impl NoiseSuppressor {
         };
 
         // Append incoming i16 → f32 to the input accumulator
-        self.in_buf.extend(samples.iter().map(|&s| s as f32));
+        self.in_buf.reserve(samples.len());
+        for s in samples.iter() {
+            self.in_buf.push(*s as f32);
+        }
 
         // --- Overlap-add processing with 50% hop ---
         //
@@ -550,21 +553,19 @@ impl NoiseSuppressor {
         let interleaved_hop = Self::HOP_SIZE * self.channels;
 
         while self.in_buf.len() >= interleaved_frame {
-            // Allocate per-channel scratch on the stack
-            let mut channel_in = [0.0f32; Self::FRAME_SIZE];
-            let mut channel_denoised = [0.0f32; Self::FRAME_SIZE];
-
             // We will produce `HOP_SIZE` interleaved output samples
             let out_start = self.out_buf.len();
             self.out_buf.resize(out_start + interleaved_hop, 0.0);
 
             for ch in 0..self.channels {
                 // De-interleave this channel's FRAME_SIZE samples
+                let mut channel_in = [0.0f32; Self::FRAME_SIZE];
                 for i in 0..Self::FRAME_SIZE {
                     channel_in[i] = self.in_buf[i * self.channels + ch];
                 }
 
                 // Run RNNoise — returns VAD probability [0.0, 1.0]
+                let mut channel_denoised = [0.0f32; Self::FRAME_SIZE];
                 let vad = self.states[ch].process_frame(&mut channel_denoised, &channel_in);
 
                 // --- Adaptive gain from VAD ---
@@ -631,14 +632,14 @@ impl NoiseSuppressor {
         // --- Write processed output back to the i16 buffer ---
         let available = self.out_buf.len().min(samples.len());
 
-        for (i, sample) in samples.iter_mut().enumerate().take(available) {
-            *sample = self.out_buf[i].clamp(-32768.0, 32767.0) as i16;
+        for i in 0..available {
+            samples[i] = self.out_buf[i].clamp(-32768.0, 32767.0) as i16;
         }
         self.out_buf.drain(0..available);
 
         // Zero-fill if we don't have enough output yet (startup latency)
-        for sample in samples.iter_mut().skip(available) {
-            *sample = 0;
+        for i in available..samples.len() {
+            samples[i] = 0;
         }
     }
 }

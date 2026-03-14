@@ -99,6 +99,29 @@ struct EditorState {
     export_state: Option<ExportState>,
     export_output: Option<PathBuf>,
     playback: PlaybackController,
+    // Scrubbing optimization fields
+    scrub_state: ScrubState,
+    last_scrub_time: Option<Instant>,
+    last_scrub_position: Option<f64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScrubState {
+    Idle,
+    DraggingFast,   // > 2x playback speed - use low res
+    DraggingNormal, // Normal speed - use medium res
+    DraggingSlow,   // < 0.5x speed - use high res
+}
+
+impl ScrubState {
+    fn preview_width(&self) -> u32 {
+        match self {
+            ScrubState::Idle => 640,
+            ScrubState::DraggingFast => 320, // Fast scrub = low res for speed
+            ScrubState::DraggingNormal => 480, // Normal = medium res
+            ScrubState::DraggingSlow => 640, // Slow = high res
+        }
+    }
 }
 
 impl EditorState {
@@ -130,6 +153,9 @@ impl EditorState {
             export_state: None,
             export_output: None,
             playback,
+            scrub_state: ScrubState::Idle,
+            last_scrub_time: None,
+            last_scrub_position: None,
         }
     }
 
@@ -381,6 +407,13 @@ impl ClipCompressApp {
         }
 
         let timestamp_secs = timestamp_secs.clamp(0.0, editor.duration_secs());
+
+        // Skip if decoder is already processing a request
+        if editor.playback.is_frame_request_in_flight() {
+            editor.pending_preview_request = Some(timestamp_secs);
+            return;
+        }
+
         if editor.preview_frame_in_flight {
             editor.pending_preview_request = Some(timestamp_secs);
             return;
@@ -405,8 +438,15 @@ impl ClipCompressApp {
 
         let timestamp_secs = timestamp_secs.clamp(0.0, editor.duration_secs());
 
+        // Skip if decoder is already processing a request
+        if editor.playback.is_frame_request_in_flight() {
+            return;
+        }
+
+        // More aggressive debouncing during scrubbing (150ms instead of 100ms)
+        // This prevents overwhelming the decoder with requests during fast scrub
         if let Some(last_requested) = editor.last_requested_preview_time {
-            if editor.preview_texture.is_some() && (last_requested - timestamp_secs).abs() < 0.05 {
+            if editor.preview_texture.is_some() && (last_requested - timestamp_secs).abs() < 0.15 {
                 return;
             }
         }
@@ -854,11 +894,41 @@ fn render_timeline(ui: &mut egui::Ui, editor: &mut EditorState, outcome: &mut Ed
                 editor.selected_cut_point = Some(index);
             } else {
                 editor.selected_cut_point = None;
-                editor.current_time_secs = x_to_time(track_rect, pointer.x, editor.duration_secs());
+                let new_time_secs = x_to_time(track_rect, pointer.x, editor.duration_secs());
+
+                // Calculate scrub speed for adaptive resolution
+                let now = Instant::now();
+                if let (Some(last_time), Some(last_pos)) =
+                    (editor.last_scrub_time, editor.last_scrub_position)
+                {
+                    let dt = last_time.elapsed().as_secs_f64();
+                    let dx = (new_time_secs - last_pos).abs();
+                    if dt > 0.001 {
+                        let speed = dx / dt; // seconds of video per second of wall time
+                        let fps = editor.video.metadata.fps;
+
+                        // Update scrub state based on speed relative to playback
+                        editor.scrub_state = if speed > fps * 2.0 {
+                            ScrubState::DraggingFast
+                        } else if speed > fps * 0.5 {
+                            ScrubState::DraggingNormal
+                        } else {
+                            ScrubState::DraggingSlow
+                        }
+                    }
+                }
+                editor.last_scrub_time = Some(now);
+                editor.last_scrub_position = Some(new_time_secs);
+                editor.current_time_secs = new_time_secs;
 
                 if editor.is_playing {
+                    // When playing, just scrub to the new position
+                    // The decoder will seek and continue producing frames
                     editor.playback.scrub_to(editor.current_time_secs);
+
+                    // When drag stops, commit_scrub will sync the final position
                 } else {
+                    // When paused, pause at position and request preview frame
                     editor.playback.pause_at(editor.current_time_secs);
                     if response.dragged() {
                         outcome.fast_preview_request = Some(editor.current_time_secs);
@@ -872,6 +942,9 @@ fn render_timeline(ui: &mut egui::Ui, editor: &mut EditorState, outcome: &mut Ed
 
     if response.drag_stopped() && editor.is_playing {
         editor.playback.commit_scrub(editor.current_time_secs);
+        editor.scrub_state = ScrubState::Idle;
+        editor.last_scrub_time = None;
+        editor.last_scrub_position = None;
     }
 }
 

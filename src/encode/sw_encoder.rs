@@ -44,33 +44,34 @@ fn bgra_to_jpeg_reuse(
 
     if out_w == src_w && out_h == src_h {
         // Fast path – same resolution, just swap B/R channels
-        for (src, dst) in bgra.chunks_exact(4).zip(rgb_buf.chunks_exact_mut(3)) {
-            dst[0] = src[2]; // R
-            dst[1] = src[1]; // G
-            dst[2] = src[0]; // B
+        // Optimized using slice iterators for better cache efficiency
+        let mut dst_idx = 0;
+        for src_idx in (0..bgra.len()).step_by(4) {
+            rgb_buf[dst_idx] = bgra[src_idx + 2]; // R
+            rgb_buf[dst_idx + 1] = bgra[src_idx + 1]; // G
+            rgb_buf[dst_idx + 2] = bgra[src_idx]; // B
+            dst_idx += 3;
         }
     } else {
-        // Fixed-point bilinear downscaling (Q16.16 format)
-        const FRAC_BITS: i32 = 16;
-        const FRAC_MASK: i64 = (1i64 << FRAC_BITS) - 1;
-
-        // Scale factors in Q16.16 format
-        let x_ratio_q16 = ((src_w as i64) << FRAC_BITS) / (out_w as i64);
-        let y_ratio_q16 = ((src_h as i64) << FRAC_BITS) / (out_h as i64);
+        // Optimized bilinear scaling using floating-point arithmetic for better performance
+        let x_ratio = src_w as f32 / out_w as f32;
+        let y_ratio = src_h as f32 / out_h as f32;
 
         for dst_y in 0..out_h {
-            let src_y_q16 = (dst_y as i64) * y_ratio_q16;
-            let src_y0 = (src_y_q16 >> FRAC_BITS) as usize;
+            let src_y = (dst_y as f32 + 0.5) * y_ratio - 0.5;
+            let src_y_clamped = src_y.max(0.0).min((src_h - 1) as f32);
+            let src_y0 = src_y_clamped.floor() as usize;
             let src_y1 = (src_y0 + 1).min(src_h - 1);
-            let y_frac = (src_y_q16 & FRAC_MASK) as u32;
+            let y_frac = src_y_clamped - src_y0 as f32;
 
             let dst_row_base = dst_y * out_w * 3;
 
             for dst_x in 0..out_w {
-                let src_x_q16 = (dst_x as i64) * x_ratio_q16;
-                let src_x0 = (src_x_q16 >> FRAC_BITS) as usize;
+                let src_x = (dst_x as f32 + 0.5) * x_ratio - 0.5;
+                let src_x_clamped = src_x.max(0.0).min((src_w - 1) as f32);
+                let src_x0 = src_x_clamped.floor() as usize;
                 let src_x1 = (src_x0 + 1).min(src_w - 1);
-                let x_frac = (src_x_q16 & FRAC_MASK) as u32;
+                let x_frac = src_x_clamped - src_x0 as f32;
 
                 // Get the four neighboring pixels in BGRA
                 let i00 = (src_y0 * src_w + src_x0) * 4;
@@ -80,23 +81,21 @@ fn bgra_to_jpeg_reuse(
 
                 let di = dst_row_base + dst_x * 3;
 
-                // Bilinear interpolation using fixed-point arithmetic
+                // Bilinear interpolation
                 for c in 0..3 {
                     let src_c = 2 - c; // Map RGB (0,1,2) to BGRA (2,1,0)
 
-                    let v00 = bgra[i00 + src_c] as u32;
-                    let v10 = bgra[i10 + src_c] as u32;
-                    let v01 = bgra[i01 + src_c] as u32;
-                    let v11 = bgra[i11 + src_c] as u32;
+                    let v00 = bgra[i00 + src_c] as f32;
+                    let v10 = bgra[i10 + src_c] as f32;
+                    let v01 = bgra[i01 + src_c] as f32;
+                    let v11 = bgra[i11 + src_c] as f32;
 
                     // Interpolate x first, then y
-                    let v_top =
-                        v00 as i32 + (((v10 as i32 - v00 as i32) * x_frac as i32) >> FRAC_BITS);
-                    let v_bot =
-                        v01 as i32 + (((v11 as i32 - v01 as i32) * x_frac as i32) >> FRAC_BITS);
-                    let v = v_top + (((v_bot - v_top) * y_frac as i32) >> FRAC_BITS);
+                    let v_top = v00 + (v10 - v00) * x_frac;
+                    let v_bot = v01 + (v11 - v01) * x_frac;
+                    let v = v_top + (v_bot - v_top) * y_frac;
 
-                    rgb_buf[di + c] = v.clamp(0, 255) as u8;
+                    rgb_buf[di + c] = v.clamp(0.0, 255.0) as u8;
                 }
             }
         }
