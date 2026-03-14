@@ -2,7 +2,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use crossbeam::channel::{bounded, Receiver, Sender, TryRecvError, TrySendError};
 use ffmpeg_next as ffmpeg;
 use image::RgbaImage;
-use rodio::{OutputStream, Sink, Source};
+use rodio::{Sink, Source};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -18,24 +18,6 @@ use crate::output::VideoFileMetadata;
 const FRAME_CHANNEL_CAPACITY: usize = 24; // Increased from 12 for better buffering
 const PLAYBACK_QUEUE_DEPTH: usize = 20; // Increased from 10 for smoother playback
 
-/// Frame quality levels for adaptive resolution during scrubbing
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ScrubQuality {
-    Low,    // Fast scrubbing - reduced resolution
-    Medium, // Normal scrubbing
-    High,   // Playback/paused - full resolution
-}
-
-impl ScrubQuality {
-    pub fn preview_width(&self) -> u32 {
-        match self {
-            ScrubQuality::Low => 320,
-            ScrubQuality::Medium => 640,
-            ScrubQuality::High => 1280,
-        }
-    }
-}
-
 pub struct PlaybackFrame {
     pub image: RgbaImage,
 }
@@ -49,6 +31,8 @@ pub struct PlaybackController {
     metadata: VideoFileMetadata,
     shared: Arc<SharedPlaybackState>,
     decoder: DecodePipeline,
+    audio_handle: Option<rodio::OutputStreamHandle>,
+    _audio_shutdown_tx: Option<std::sync::mpsc::Sender<()>>,
 }
 
 struct SharedPlaybackState {
@@ -67,7 +51,7 @@ struct SharedPlaybackState {
 
 struct PlaybackClock {
     start_time_secs: f64,
-    started_at: Instant,
+    started_at: Option<Instant>,
 }
 
 struct AudioBuffer {
@@ -130,8 +114,6 @@ struct DecoderSession {
     last_pts_secs: f64,
     /// Track keyframe positions for smarter seeking
     keyframe_positions: Vec<f64>,
-    /// Current scrub quality for adaptive resolution
-    scrub_quality: ScrubQuality,
 }
 
 impl PlaybackController {
@@ -158,10 +140,27 @@ impl PlaybackController {
             metadata.fps.clamp(1.0, 120.0),
         );
 
+        let (audio_shutdown_tx, audio_shutdown_rx) = std::sync::mpsc::channel();
+        let (audio_handle_tx, audio_handle_rx) = std::sync::mpsc::channel();
+
+        thread::spawn(move || {
+            if let Ok((stream, handle)) = rodio::OutputStream::try_default() {
+                let _ = audio_handle_tx.send(Some(handle));
+                let _ = audio_shutdown_rx.recv();
+                drop(stream);
+            } else {
+                let _ = audio_handle_tx.send(None);
+            }
+        });
+
+        let audio_handle = audio_handle_rx.recv().unwrap_or(None);
+
         let controller = Self {
             metadata,
             shared,
             decoder,
+            audio_handle,
+            _audio_shutdown_tx: Some(audio_shutdown_tx),
         };
         controller.begin_audio_preload(video_path);
         controller
@@ -179,26 +178,14 @@ impl PlaybackController {
     }
 
     pub fn request_preview_frame(&mut self, time_secs: f64) {
-        let clamped_time = self.clamp_time(time_secs);
-        self.stop_audio();
-        *self.shared.current_time_secs.lock().unwrap() = clamped_time;
-        *self.shared.playing_since.lock().unwrap() = None;
-        self.shared.frame_queue.lock().unwrap().clear();
-        self.decoder.stop();
-
-        let request_id = self.next_request_id();
-        self.shared
-            .video_request_in_flight
-            .store(true, Ordering::SeqCst);
-        if let Err(err) = self.decoder.request_preview(request_id, clamped_time) {
-            self.shared
-                .video_request_in_flight
-                .store(false, Ordering::SeqCst);
-            *self.shared.last_error.lock().unwrap() = Some(err.to_string());
-        }
+        self.request_preview_at(time_secs);
     }
 
     pub fn request_preview_frame_fast(&mut self, time_secs: f64) {
+        self.request_preview_at(time_secs);
+    }
+
+    fn request_preview_at(&mut self, time_secs: f64) {
         let clamped_time = self.clamp_time(time_secs);
         self.stop_audio();
         *self.shared.current_time_secs.lock().unwrap() = clamped_time;
@@ -224,7 +211,7 @@ impl PlaybackController {
         *self.shared.current_time_secs.lock().unwrap() = clamped_time;
         *self.shared.playing_since.lock().unwrap() = Some(PlaybackClock {
             start_time_secs: clamped_time,
-            started_at: Instant::now(),
+            started_at: None, // Wait for first frame to start clock and audio
         });
         tracing::info!("play_from: starting at {:.3}s", clamped_time);
 
@@ -238,7 +225,7 @@ impl PlaybackController {
             *self.shared.last_error.lock().unwrap() = Some(err.to_string());
             return;
         }
-        self.maybe_start_audio();
+        self.stop_audio();
     }
 
     pub fn pause_at(&mut self, time_secs: f64) {
@@ -254,45 +241,13 @@ impl PlaybackController {
         self.stop_audio();
     }
 
-    pub fn scrub_to(&mut self, time_secs: f64) {
-        let clamped_time = self.clamp_time(time_secs);
-
-        if !self.is_playing() {
-            *self.shared.current_time_secs.lock().unwrap() = clamped_time;
-            return;
-        }
-
-        *self.shared.current_time_secs.lock().unwrap() = clamped_time;
-        *self.shared.playing_since.lock().unwrap() = Some(PlaybackClock {
-            start_time_secs: clamped_time,
-            started_at: Instant::now(),
-        });
-        self.shared.frame_queue.lock().unwrap().clear();
-
-        // Seek decoder to new position without stopping audio
-        let request_id = self.next_request_id();
-        if let Err(err) = self.decoder.start_playback(request_id, clamped_time) {
-            *self.shared.last_error.lock().unwrap() = Some(err.to_string());
-        }
-    }
-
-    pub fn commit_scrub(&mut self, time_secs: f64) {
-        // Audio is already in sync from scrub_to, just ensure position is correct
-        let clamped_time = self.clamp_time(time_secs);
-        *self.shared.current_time_secs.lock().unwrap() = clamped_time;
-        if self.is_playing() {
-            *self.shared.playing_since.lock().unwrap() = Some(PlaybackClock {
-                start_time_secs: clamped_time,
-                started_at: Instant::now(),
-            });
-        }
-    }
-
     pub fn playback_position_secs(&self) -> f64 {
         let maybe_clock = self.shared.playing_since.lock().unwrap();
         if let Some(clock) = maybe_clock.as_ref() {
-            return self
-                .clamp_time(clock.start_time_secs + clock.started_at.elapsed().as_secs_f64());
+            if let Some(started_at) = clock.started_at {
+                return self.clamp_time(clock.start_time_secs + started_at.elapsed().as_secs_f64());
+            }
+            return self.clamp_time(clock.start_time_secs);
         }
         *self.shared.current_time_secs.lock().unwrap()
     }
@@ -315,7 +270,8 @@ impl PlaybackController {
         self.shared.latest_frame.lock().unwrap().take()
     }
 
-    pub fn take_playback_frame(&self, wall_time_secs: f64) -> Option<RgbaImage> {
+    pub fn take_playback_frame(&self) -> Option<RgbaImage> {
+        let wall_time_secs = self.playback_position_secs();
         let mut queue = self.shared.frame_queue.lock().unwrap();
         if queue.is_empty() {
             return None;
@@ -401,10 +357,6 @@ impl PlaybackController {
     }
 
     pub fn poll(&mut self) {
-        self.poll_with_wall_time(None);
-    }
-
-    pub fn poll_with_wall_time(&mut self, _wall_time_secs: Option<f64>) {
         let mut frame_count = 0;
         loop {
             {
@@ -469,10 +421,32 @@ impl PlaybackController {
             return;
         }
 
+        self.check_and_start_clock();
+
         let current_time = self.playback_position_secs();
         *self.shared.current_time_secs.lock().unwrap() = current_time;
         if current_time >= self.metadata.duration_secs {
             self.pause_at(self.metadata.duration_secs);
+        }
+    }
+
+    fn check_and_start_clock(&mut self) {
+        let mut clock_unlocked = false;
+        {
+            let mut maybe_clock = self.shared.playing_since.lock().unwrap();
+            if let Some(clock) = maybe_clock.as_mut() {
+                if clock.started_at.is_none() {
+                    let queue = self.shared.frame_queue.lock().unwrap();
+                    if let Some(front) = queue.front() {
+                        clock.start_time_secs = front.pts_secs;
+                        clock.started_at = Some(Instant::now());
+                        clock_unlocked = true;
+                    }
+                }
+            }
+        }
+        if clock_unlocked {
+            self.maybe_start_audio();
         }
     }
 
@@ -526,6 +500,10 @@ impl PlaybackController {
             return;
         }
 
+        let Some(handle) = self.audio_handle.clone() else {
+            return;
+        };
+
         let start_time = self.playback_position_secs();
         let generation = self.shared.audio_generation.fetch_add(1, Ordering::SeqCst) + 1;
         self.shared
@@ -533,20 +511,11 @@ impl PlaybackController {
             .store(generation, Ordering::SeqCst);
         let shared = self.shared.clone();
         thread::spawn(move || {
-            let (stream, handle) = match OutputStream::try_default() {
-                Ok(stream_and_handle) => stream_and_handle,
-                Err(err) => {
-                    *shared.last_error.lock().unwrap() =
-                        Some(format!("Audio output failed: {err}"));
-                    return;
-                }
-            };
             let sink = match Sink::try_new(&handle) {
                 Ok(sink) => sink,
                 Err(err) => {
                     *shared.last_error.lock().unwrap() =
                         Some(format!("Audio output failed: {err}"));
-                    drop(stream);
                     return;
                 }
             };
@@ -562,7 +531,6 @@ impl PlaybackController {
                 thread::sleep(Duration::from_millis(20));
             }
             drop(sink);
-            drop(stream);
         });
     }
 
@@ -1026,7 +994,6 @@ impl DecoderSession {
             seek_target_secs: 0.0,
             last_pts_secs: 0.0,
             keyframe_positions: Vec::new(),
-            scrub_quality: ScrubQuality::High,
         })
     }
 
@@ -1214,7 +1181,7 @@ impl Iterator for AudioSliceSource {
 
 impl Source for AudioSliceSource {
     fn current_frame_len(&self) -> Option<usize> {
-        None
+        Some(self.samples.len() - self.next_index)
     }
 
     fn channels(&self) -> u16 {
@@ -1226,7 +1193,9 @@ impl Source for AudioSliceSource {
     }
 
     fn total_duration(&self) -> Option<Duration> {
-        None
+        let remaining_samples = (self.samples.len() - self.next_index) as f64;
+        let seconds = remaining_samples / (self.channels as f64 * self.sample_rate as f64);
+        Some(Duration::from_secs_f64(seconds))
     }
 }
 

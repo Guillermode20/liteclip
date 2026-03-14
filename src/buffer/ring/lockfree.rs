@@ -321,7 +321,6 @@ impl LockFreeReplayBuffer {
             CodecKind::Hevc => {
                 cache.hevc_vps.is_some() && cache.hevc_sps.is_some() && cache.hevc_pps.is_some()
             }
-            _ => false,
         };
         if has_all_params {
             inner.param_cache_complete.store(true, Ordering::Release);
@@ -406,7 +405,6 @@ impl LockFreeReplayBuffer {
                 CodecKind::Hevc => {
                     cache.hevc_vps.is_some() && cache.hevc_sps.is_some() && cache.hevc_pps.is_some()
                 }
-                _ => false,
             };
             if complete {
                 inner.param_cache_complete.store(true, Ordering::Release);

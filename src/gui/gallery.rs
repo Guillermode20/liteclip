@@ -31,6 +31,8 @@ const DEFAULT_TARGET_SIZE_MB: u32 = 25;
 const DEFAULT_AUDIO_BITRATE_KBPS: u32 = 128;
 const PREVIEW_FRAME_WIDTH: u32 = 640;
 const PREVIEW_FRAME_INTERVAL_SECS: f64 = 0.25;
+const SCRUB_SAMPLE_MIN_DT_SECS: f64 = 0.01;
+const SCRUB_FAST_RATE_SECS_PER_SEC: f64 = 6.0;
 const MIN_RANGE_SECS: f64 = 0.1;
 const EDITOR_SIDEBAR_WIDTH: f32 = 340.0;
 const EDITOR_SIDEBAR_MIN_WIDTH: f32 = 280.0;
@@ -100,28 +102,9 @@ struct EditorState {
     export_output: Option<PathBuf>,
     playback: PlaybackController,
     // Scrubbing optimization fields
-    scrub_state: ScrubState,
+    was_playing_before_scrub: bool,
     last_scrub_time: Option<Instant>,
     last_scrub_position: Option<f64>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ScrubState {
-    Idle,
-    DraggingFast,   // > 2x playback speed - use low res
-    DraggingNormal, // Normal speed - use medium res
-    DraggingSlow,   // < 0.5x speed - use high res
-}
-
-impl ScrubState {
-    fn preview_width(&self) -> u32 {
-        match self {
-            ScrubState::Idle => 640,
-            ScrubState::DraggingFast => 320, // Fast scrub = low res for speed
-            ScrubState::DraggingNormal => 480, // Normal = medium res
-            ScrubState::DraggingSlow => 640, // Slow = high res
-        }
-    }
 }
 
 impl EditorState {
@@ -153,7 +136,7 @@ impl EditorState {
             export_state: None,
             export_output: None,
             playback,
-            scrub_state: ScrubState::Idle,
+            was_playing_before_scrub: false,
             last_scrub_time: None,
             last_scrub_position: None,
         }
@@ -473,18 +456,13 @@ impl ClipCompressApp {
         }
 
         if let Some(editor) = self.editor.as_mut() {
-            let wall_time = if editor.is_playing && !editor.preview_final {
-                Some(editor.playback.playback_position_secs())
-            } else {
-                None
-            };
-            editor.playback.poll_with_wall_time(wall_time);
+            editor.playback.poll();
 
             // Live playback path: drain the frame queue for frames due by now.
             if editor.is_playing && !editor.preview_final {
-                let wall_time = wall_time.unwrap();
+                let wall_time = editor.playback.playback_position_secs();
                 let (queue_len, _) = editor.playback.cache_stats();
-                if let Some(image) = editor.playback.take_playback_frame(wall_time) {
+                if let Some(image) = editor.playback.take_playback_frame() {
                     tracing::trace!(
                         "poll_background_work: displaying frame at wall_time={:.3}s",
                         wall_time
@@ -888,6 +866,14 @@ fn render_timeline(ui: &mut egui::Ui, editor: &mut EditorState, outcome: &mut Ed
         );
     }
 
+    if response.drag_started() {
+        editor.was_playing_before_scrub = editor.is_playing;
+        if editor.is_playing {
+            editor.is_playing = false;
+            editor.playback.pause_at(editor.current_time_secs);
+        }
+    }
+
     if let Some(pointer) = response.interact_pointer_pos() {
         if response.clicked() || response.dragged() {
             if let Some(index) = hit_test_cut_point(editor, track_rect, pointer.x) {
@@ -896,41 +882,35 @@ fn render_timeline(ui: &mut egui::Ui, editor: &mut EditorState, outcome: &mut Ed
                 editor.selected_cut_point = None;
                 let new_time_secs = x_to_time(track_rect, pointer.x, editor.duration_secs());
 
-                // Calculate scrub speed for adaptive resolution
+                // Calculate scrub speed to determine preview quality
                 let now = Instant::now();
+                let mut is_fast_scrub = false;
                 if let (Some(last_time), Some(last_pos)) =
                     (editor.last_scrub_time, editor.last_scrub_position)
                 {
                     let dt = last_time.elapsed().as_secs_f64();
                     let dx = (new_time_secs - last_pos).abs();
-                    if dt > 0.001 {
+                    if dt >= SCRUB_SAMPLE_MIN_DT_SECS {
                         let speed = dx / dt; // seconds of video per second of wall time
-                        let fps = editor.video.metadata.fps;
-
-                        // Update scrub state based on speed relative to playback
-                        editor.scrub_state = if speed > fps * 2.0 {
-                            ScrubState::DraggingFast
-                        } else if speed > fps * 0.5 {
-                            ScrubState::DraggingNormal
-                        } else {
-                            ScrubState::DraggingSlow
-                        }
+                        is_fast_scrub = speed >= SCRUB_FAST_RATE_SECS_PER_SEC;
                     }
                 }
                 editor.last_scrub_time = Some(now);
                 editor.last_scrub_position = Some(new_time_secs);
                 editor.current_time_secs = new_time_secs;
 
-                if editor.is_playing {
-                    // When playing, just scrub to the new position
-                    // The decoder will seek and continue producing frames
-                    editor.playback.scrub_to(editor.current_time_secs);
-
-                    // When drag stops, commit_scrub will sync the final position
-                } else {
-                    // When paused, pause at position and request preview frame
+                if response.clicked() {
+                    // Single click jump
+                    if editor.is_playing {
+                        editor.playback.play_from(editor.current_time_secs);
+                    } else {
+                        editor.playback.pause_at(editor.current_time_secs);
+                        outcome.preview_request = Some(editor.current_time_secs);
+                    }
+                } else if response.dragged() {
+                    // Continuous drag
                     editor.playback.pause_at(editor.current_time_secs);
-                    if response.dragged() {
+                    if is_fast_scrub {
                         outcome.fast_preview_request = Some(editor.current_time_secs);
                     } else {
                         outcome.preview_request = Some(editor.current_time_secs);
@@ -940,9 +920,15 @@ fn render_timeline(ui: &mut egui::Ui, editor: &mut EditorState, outcome: &mut Ed
         }
     }
 
-    if response.drag_stopped() && editor.is_playing {
-        editor.playback.commit_scrub(editor.current_time_secs);
-        editor.scrub_state = ScrubState::Idle;
+    if response.drag_stopped() {
+        if editor.was_playing_before_scrub {
+            editor.is_playing = true;
+            editor.was_playing_before_scrub = false;
+            editor.playback.play_from(editor.current_time_secs);
+        } else {
+            // Promote the final paused scrub position to a full preview request.
+            outcome.preview_request = Some(editor.current_time_secs);
+        }
         editor.last_scrub_time = None;
         editor.last_scrub_position = None;
     }
