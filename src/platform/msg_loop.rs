@@ -25,6 +25,7 @@ const HOTKEY_ID_SAVE_CLIP: i32 = 1000;
 const HOTKEY_ID_TOGGLE_RECORDING: i32 = 1001;
 const HOTKEY_ID_SCREENSHOT: i32 = 1002;
 const HOTKEY_ID_OPEN_GALLERY: i32 = 1003;
+const IDLE_LOOP_SLEEP_MS: u64 = 8;
 
 /// Spawn the platform thread (hotkeys and tray).
 pub fn spawn_platform_thread(
@@ -142,7 +143,7 @@ fn run_platform_loop(
                 // Use a short wait, but check if messages are pending first
                 // Peek with PM_NOREMOVE to check without removing
                 if !PeekMessageW(&mut msg, HWND::default(), 0, 0, PM_NOREMOVE).as_bool() {
-                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    std::thread::sleep(std::time::Duration::from_millis(IDLE_LOOP_SLEEP_MS));
                 }
             }
         }

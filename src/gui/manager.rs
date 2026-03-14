@@ -31,6 +31,7 @@ static GUI_INIT: Once = Once::new();
 
 const TOAST_WINDOW_SIZE: [f32; 2] = [350.0, 300.0];
 const TOAST_WINDOW_MARGIN: [f32; 2] = [20.0, 20.0];
+const IDLE_REPAINT_MS: u64 = 100;
 
 pub fn init_gui_manager() {
     GUI_INIT.call_once(|| {
@@ -264,7 +265,7 @@ impl eframe::App for GuiManagerApp {
         if show_settings || show_gallery {
             ctx.request_repaint();
         } else {
-            ctx.request_repaint_after(Duration::from_millis(16));
+            ctx.request_repaint_after(Duration::from_millis(IDLE_REPAINT_MS));
         }
 
         self.set_click_through(true);

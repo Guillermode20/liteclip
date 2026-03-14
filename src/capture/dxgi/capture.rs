@@ -1108,6 +1108,7 @@ impl DxgiCapture {
         let mut log_counter = 0u64;
         const LOG_INTERVAL: u64 = 1800; // Log every 1800 frames (~30s at 60fps)
         const DROP_LOG_INTERVAL: u64 = 300;
+        const FRAME_PACING_SPIN_WINDOW: Duration = Duration::from_micros(200);
         let frame_period = Duration::from_nanos(1_000_000_000u64 / base_fps as u64);
         let mut next_frame_time = std::time::Instant::now();
         while running.load(Ordering::Relaxed) {
@@ -1321,15 +1322,13 @@ impl DxgiCapture {
                 window_duplicates = 0;
             }
 
-            // Precise pacing: hybrid sleep + spin-wait
+            // Precise pacing: mostly sleep, then a short final spin for accuracy.
             let now = std::time::Instant::now();
             if now < next_frame_time {
                 let diff = next_frame_time - now;
-                // Sleep for the majority of the time, leaving a 2ms buffer for spin-wait precision
-                if diff > Duration::from_millis(2) {
-                    std::thread::sleep(diff - Duration::from_millis(2));
+                if diff > FRAME_PACING_SPIN_WINDOW {
+                    std::thread::sleep(diff - FRAME_PACING_SPIN_WINDOW);
                 }
-                // Final precision spin-wait
                 while std::time::Instant::now() < next_frame_time {
                     std::hint::spin_loop();
                 }
