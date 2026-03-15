@@ -243,110 +243,17 @@ impl SettingsApp {
                         egui::Slider::new(&mut self.config.audio.mic_volume, 0..=200)
                             .text("Mic Volume %"),
                     );
-                    egui::ComboBox::from_label("Mic Noise Suppression")
-                        .selected_text(match self.config.audio.mic_noise_suppression_mode {
-                            MicNoiseSuppressionMode::Rnnoise => "RNNoise (Quality)",
-                            MicNoiseSuppressionMode::NoiseGate => "Noise Gate (Performance)",
-                            MicNoiseSuppressionMode::None => "Off",
-                        })
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(
-                                &mut self.config.audio.mic_noise_suppression_mode,
-                                MicNoiseSuppressionMode::Rnnoise,
-                                "RNNoise (Quality)",
-                            );
-                            ui.selectable_value(
-                                &mut self.config.audio.mic_noise_suppression_mode,
-                                MicNoiseSuppressionMode::NoiseGate,
-                                "Noise Gate (Performance)",
-                            );
-                            ui.selectable_value(
-                                &mut self.config.audio.mic_noise_suppression_mode,
-                                MicNoiseSuppressionMode::None,
-                                "Off",
-                            );
-                        });
+                    ui.checkbox(
+                        &mut self.config.audio.mic_noise_reduction,
+                        "Reduce mic background hiss",
+                    );
+                    ui.label(
+                        egui::RichText::new(
+                            "When enabled, a lightweight adaptive gate suppresses low-level hiss when you're not speaking.",
+                        )
+                        .small(),
+                    );
 
-                    if self.config.audio.mic_noise_suppression_mode
-                        == MicNoiseSuppressionMode::Rnnoise
-                    {
-                        ui.indent("noise_suppression_settings", |ui| {
-                            egui::ComboBox::from_label("Sensitivity")
-                                .selected_text(
-                                    match self.config.audio.mic_ns_vad_gate_threshold_percent {
-                                        0..=49 => "Low",
-                                        50..=64 => "Medium",
-                                        _ => "High",
-                                    },
-                                )
-                                .show_ui(ui, |ui| {
-                                    ui.selectable_value(
-                                        &mut self.config.audio.mic_ns_vad_gate_threshold_percent,
-                                        40,
-                                        "Low",
-                                    );
-                                    ui.selectable_value(
-                                        &mut self.config.audio.mic_ns_vad_gate_threshold_percent,
-                                        55,
-                                        "Medium",
-                                    );
-                                    ui.selectable_value(
-                                        &mut self.config.audio.mic_ns_vad_gate_threshold_percent,
-                                        70,
-                                        "High",
-                                    );
-                                });
-                            ui.label(
-                                egui::RichText::new(
-                                    "Low = whisper; High = aggressive suppression.",
-                                )
-                                .small(),
-                            );
-
-                            egui::ComboBox::from_label("Voice Tail")
-                                .selected_text(match self.config.audio.mic_ns_hangover_frames {
-                                    0..=5 => "Short",
-                                    6..=15 => "Medium",
-                                    _ => "Long",
-                                })
-                                .show_ui(ui, |ui| {
-                                    ui.selectable_value(
-                                        &mut self.config.audio.mic_ns_hangover_frames,
-                                        2,
-                                        "Short",
-                                    );
-                                    ui.selectable_value(
-                                        &mut self.config.audio.mic_ns_hangover_frames,
-                                        10,
-                                        "Medium",
-                                    );
-                                    ui.selectable_value(
-                                        &mut self.config.audio.mic_ns_hangover_frames,
-                                        25,
-                                        "Long",
-                                    );
-                                });
-                            ui.label(
-                                egui::RichText::new(
-                                    "How long the gate stays open after you finish speaking.",
-                                )
-                                .small(),
-                            );
-
-                            if ui.link("Reset to Defaults").clicked() {
-                                self.config.audio.mic_ns_min_gain_percent = 1;
-                                self.config.audio.mic_ns_vad_noise_threshold_percent = 25;
-                                self.config.audio.mic_ns_vad_gate_threshold_percent = 55;
-                                self.config.audio.mic_ns_snr_min_tenths = 12;
-                                self.config.audio.mic_ns_snr_max_tenths = 60;
-                                self.config.audio.mic_ns_hangover_frames = 10;
-                                self.config.audio.mic_ns_noise_floor_fast_percent = 10;
-                                self.config.audio.mic_ns_noise_floor_slow_percent = 1;
-                                self.config.audio.mic_ns_attack_ms = 1;
-                                self.config.audio.mic_ns_release_ms = 30;
-                            }
-                        });
-                    }
 
                     ui.add_space(10.0);
                     ui.separator();

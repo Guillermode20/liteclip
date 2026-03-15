@@ -7,7 +7,7 @@
 //! - **System Audio Capture**: Loopback mode captures all system audio
 //! - **Microphone Capture**: Direct capture from microphone device
 //! - **Audio Mixing**: Combines system and mic audio with volume control
-//! - **Noise Suppression**: Optional RNNoise-based noise reduction
+//! - **Noise Suppression**: Optional adaptive hiss gate to reduce low-level noise
 //!
 //! # Architecture
 //!

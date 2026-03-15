@@ -28,80 +28,39 @@ use crate::encode::{EncodedPacket, StreamType};
 /// Runtime-tunable settings for microphone noise suppression.
 #[derive(Debug, Clone)]
 pub struct NoiseSuppressorSettings {
-    pub min_gain: f32,
-    pub vad_noise_threshold: f32,
-    pub vad_gate_threshold: f32,
-    pub snr_min: f32,
-    pub snr_max: f32,
-    pub hangover_frames: u8,
-    pub noise_floor_fast_alpha: f32,
-    pub noise_floor_slow_alpha: f32,
-    pub attack_alpha: f32,
-    pub release_alpha: f32,
+    pub gate_threshold_db: f32,
+    pub gate_hysteresis_db: f32,
+    pub attack_ms: f32,
+    pub release_ms: f32,
+    pub hold_ms: f32,
+    pub min_gain_db: f32,
 }
 
 impl Default for NoiseSuppressorSettings {
     fn default() -> Self {
         Self {
-            min_gain: 0.004,
-            vad_noise_threshold: 0.25,
-            vad_gate_threshold: 0.55,
-            snr_min: 1.2,
-            snr_max: 6.0,
-            hangover_frames: 10,
-            noise_floor_fast_alpha: 0.10,
-            noise_floor_slow_alpha: 0.01,
-            attack_alpha: Self::alpha_from_ms(1.0),
-            release_alpha: Self::alpha_from_ms(30.0),
+            gate_threshold_db: -45.0,
+            gate_hysteresis_db: 4.0,
+            attack_ms: 2.0,
+            release_ms: 150.0,
+            hold_ms: 100.0,
+            min_gain_db: -60.0,
         }
     }
 }
 
 impl NoiseSuppressorSettings {
-    #[inline]
-    pub fn alpha_from_ms(ms: f32) -> f32 {
-        if ms <= 0.0 {
-            return 1.0;
-        }
-        let sample_rate = 48_000.0;
-        let tau_seconds = ms / 1000.0;
-        let alpha = 1.0 - (-1.0 / (sample_rate * tau_seconds)).exp();
-        alpha.clamp(0.000001, 1.0)
-    }
-
     fn sanitize(&mut self) {
-        self.min_gain = self.min_gain.clamp(0.0, 0.2);
-        self.vad_noise_threshold = self.vad_noise_threshold.clamp(0.0, 0.95);
-        self.vad_gate_threshold = self.vad_gate_threshold.clamp(0.05, 1.0);
-        if self.vad_gate_threshold <= self.vad_noise_threshold {
-            self.vad_gate_threshold = (self.vad_noise_threshold + 0.01).min(1.0);
-        }
-
-        self.snr_min = self.snr_min.clamp(0.5, 10.0);
-        self.snr_max = self.snr_max.clamp(1.0, 15.0);
-        if self.snr_max <= self.snr_min {
-            self.snr_max = (self.snr_min + 0.1).min(15.0);
-        }
-
-        self.noise_floor_fast_alpha = self.noise_floor_fast_alpha.clamp(0.001, 0.5);
-        self.noise_floor_slow_alpha = self.noise_floor_slow_alpha.clamp(0.001, 0.2);
-        if self.noise_floor_slow_alpha > self.noise_floor_fast_alpha {
-            self.noise_floor_slow_alpha = self.noise_floor_fast_alpha;
-        }
-
-        self.attack_alpha = self.attack_alpha.clamp(0.000001, 1.0);
-        self.release_alpha = self.release_alpha.clamp(0.000001, 1.0);
+        self.gate_threshold_db = self.gate_threshold_db.clamp(-90.0, -10.0);
+        self.gate_hysteresis_db = self.gate_hysteresis_db.clamp(0.0, 20.0);
+        self.attack_ms = self.attack_ms.clamp(0.1, 100.0);
+        self.release_ms = self.release_ms.clamp(1.0, 2000.0);
+        self.hold_ms = self.hold_ms.clamp(0.0, 1000.0);
+        self.min_gain_db = self.min_gain_db.clamp(-120.0, 0.0);
     }
 }
 
 /// Configuration for WASAPI microphone capture
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MicNoiseProcessingMode {
-    None,
-    NoiseGate,
-    Rnnoise,
-}
-
 #[derive(Debug, Clone)]
 pub struct WasapiMicConfig {
     pub sample_rate: u32,
@@ -109,7 +68,7 @@ pub struct WasapiMicConfig {
     pub bits_per_sample: u16,
     pub buffer_duration: Duration,
     pub device_id: Option<String>, // None for default device
-    pub noise_processing_mode: MicNoiseProcessingMode,
+    pub noise_reduction_enabled: bool,
     pub noise_suppressor_settings: NoiseSuppressorSettings,
 }
 
@@ -121,7 +80,7 @@ impl Default for WasapiMicConfig {
             bits_per_sample: 16,
             buffer_duration: Duration::from_millis(100),
             device_id: None,
-            noise_processing_mode: MicNoiseProcessingMode::Rnnoise,
+            noise_reduction_enabled: true,
             noise_suppressor_settings: NoiseSuppressorSettings::default(),
         }
     }
@@ -295,19 +254,14 @@ impl WasapiMicCapture {
         let sample_rate = config.sample_rate.max(1) as f64;
         let mut total_frames: u64 = 0;
 
-        let mut noise_processor = if config.sample_rate == 48000 && config.bits_per_sample == 16 {
-            match config.noise_processing_mode {
-                MicNoiseProcessingMode::None => None,
-                MicNoiseProcessingMode::NoiseGate => Some(MicNoiseProcessor::NoiseGate(
-                    NoiseGate::new(config.channels as usize, config.noise_suppressor_settings),
-                )),
-                MicNoiseProcessingMode::Rnnoise => {
-                    Some(MicNoiseProcessor::Rnnoise(NoiseSuppressor::new(
-                        config.channels as usize,
-                        config.noise_suppressor_settings,
-                    )))
-                }
-            }
+        let mut noise_processor = if config.sample_rate == 48000
+            && config.bits_per_sample == 16
+            && config.noise_reduction_enabled
+        {
+            Some(MicNoiseProcessor::SmarterNoiseGate(SmarterNoiseGate::new(
+                config.channels as usize,
+                config.noise_suppressor_settings,
+            )))
         } else {
             None
         };
@@ -482,15 +436,13 @@ impl WasapiMicCapture {
 const AUDIO_FRAME_SIZE: usize = 480;
 
 enum MicNoiseProcessor {
-    Rnnoise(NoiseSuppressor),
-    NoiseGate(NoiseGate),
+    SmarterNoiseGate(SmarterNoiseGate),
 }
 
 impl MicNoiseProcessor {
     fn process(&mut self, data: &mut [u8]) {
         match self {
-            Self::Rnnoise(processor) => processor.process(data),
-            Self::NoiseGate(processor) => processor.process(data),
+            Self::SmarterNoiseGate(processor) => processor.process(data),
         }
     }
 }
@@ -508,50 +460,55 @@ fn soft_limit(x: f32) -> f32 {
     }
 }
 
-/// Advanced noise suppressor using `nnnoiseless` (RNNoise) for 48kHz 16-bit PCM audio.
-struct NoiseSuppressor {
+/// Smooth entry/exit noise gate with hysteresis and RMS tracking.
+struct SmarterNoiseGate {
     channels: usize,
-    states: Vec<Box<nnnoiseless::DenoiseState<'static>>>,
-    settings: NoiseSuppressorSettings,
-
-    /// Interleaved f32 input accumulator.
     in_buf: Vec<f32>,
     in_head: usize,
-
-    /// Interleaved f32 output accumulator.
     out_buf: Vec<f32>,
     out_head: usize,
 
-    /// Per-channel smoothed gain from the *previous* frame.
+    // Per-channel state
+    envelope: Vec<f32>,
     gain: Vec<f32>,
+    hold_count: Vec<usize>,
+    is_open: Vec<bool>,
 
-    /// Per-channel running background level estimate (RMS in i16 domain).
-    noise_floor: Vec<f32>,
+    // Pre-calculated coefficients
+    env_alpha_up: f32,
+    env_alpha_down: f32,
+    attack_alpha: f32,
+    release_alpha: f32,
+    hold_frames: usize,
+    threshold_linear: f32,
+    hysteresis_linear: f32,
+    min_gain_linear: f32,
 
-    /// Per-channel gate hangover (in frames) to avoid chopping trailing syllables.
-    speech_hangover: Vec<u8>,
-
-    /// Per-channel DC-blocker state: last input, last output.
     dc_x: Vec<f32>,
     dc_y: Vec<f32>,
-
-    /// Per-channel reusable frame scratch buffers to avoid per-frame stack churn.
     frame_in: Vec<Box<[f32; AUDIO_FRAME_SIZE]>>,
-    frame_out: Vec<Box<[f32; AUDIO_FRAME_SIZE]>>,
 }
 
-impl NoiseSuppressor {
-    /// DC blocking filter coefficient (HPF at ~20 Hz for 48 kHz).
+impl SmarterNoiseGate {
     const DC_COEFF: f32 = 0.9975;
+    const SAMPLE_RATE: f32 = 48000.0;
 
-    #[allow(clippy::needless_range_loop)]
     fn new(channels: usize, mut settings: NoiseSuppressorSettings) -> Self {
-        let mut states = Vec::with_capacity(channels);
-        for _ in 0..channels {
-            states.push(nnnoiseless::DenoiseState::new());
-        }
-
         settings.sanitize();
+
+        // 3ms envelope attack, 15ms release for a more stable detector
+        let env_alpha_up = 1.0 - (-1.0 / (Self::SAMPLE_RATE * 0.003)).exp();
+        let env_alpha_down = 1.0 - (-1.0 / (Self::SAMPLE_RATE * 0.015)).exp();
+
+        let attack_alpha = 1.0 - (-1.0 / (Self::SAMPLE_RATE * (settings.attack_ms / 1000.0))).exp();
+        let release_alpha =
+            1.0 - (-1.0 / (Self::SAMPLE_RATE * (settings.release_ms / 1000.0))).exp();
+        let hold_frames = ((settings.hold_ms / 1000.0) * Self::SAMPLE_RATE) as usize;
+
+        let threshold_linear = 10f32.powf(settings.gate_threshold_db / 20.0);
+        let hysteresis_linear =
+            10f32.powf((settings.gate_threshold_db + settings.gate_hysteresis_db) / 20.0);
+        let min_gain_linear = 10f32.powf(settings.min_gain_db / 20.0);
 
         Self {
             channels,
@@ -559,191 +516,18 @@ impl NoiseSuppressor {
             in_head: 0,
             out_buf: Vec::new(),
             out_head: 0,
-            settings,
+            envelope: vec![0.0; channels],
             gain: vec![0.0; channels],
-            noise_floor: vec![300.0; channels],
-            speech_hangover: vec![0; channels],
-            dc_x: vec![0.0; channels],
-            dc_y: vec![0.0; channels],
-            frame_in: (0..channels)
-                .map(|_| Box::new([0.0; AUDIO_FRAME_SIZE]))
-                .collect(),
-            frame_out: (0..channels)
-                .map(|_| Box::new([0.0; AUDIO_FRAME_SIZE]))
-                .collect(),
-            states,
-        }
-    }
-
-    /// Apply DC-blocking high-pass filter to a single sample for the given channel.
-    #[inline]
-    fn dc_block(&mut self, ch: usize, x: f32) -> f32 {
-        // y[n] = x[n] - x[n-1] + R * y[n-1],  R ≈ 0.9975
-        let y = x - self.dc_x[ch] + Self::DC_COEFF * self.dc_y[ch];
-        self.dc_x[ch] = x;
-        self.dc_y[ch] = y;
-        y
-    }
-
-    #[allow(clippy::needless_range_loop)]
-    fn process(&mut self, data: &mut [u8]) {
-        if data.len() % (self.channels * 2) != 0 {
-            return;
-        }
-
-        let samples = unsafe {
-            std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut i16, data.len() / 2)
-        };
-
-        // Append incoming i16 → f32 to the input accumulator
-        self.in_buf.reserve(samples.len());
-        for s in samples.iter() {
-            self.in_buf.push(*s as f32);
-        }
-
-        let interleaved_frame = AUDIO_FRAME_SIZE * self.channels;
-
-        while (self.in_buf.len() - self.in_head) >= interleaved_frame {
-            let out_start = self.out_buf.len();
-            self.out_buf.resize(out_start + interleaved_frame, 0.0);
-            let frame_start = self.in_head;
-
-            for ch in 0..self.channels {
-                // De-interleave this channel's frame samples.
-                for i in 0..AUDIO_FRAME_SIZE {
-                    self.frame_in[ch][i] = self.in_buf[frame_start + i * self.channels + ch];
-                }
-
-                // Run RNNoise — returns VAD probability [0.0, 1.0]
-                let vad = self.states[ch].process_frame(
-                    self.frame_out[ch].as_mut_slice(),
-                    self.frame_in[ch].as_slice(),
-                );
-
-                // Measure per-frame RMS in the i16 amplitude domain.
-                let mut energy = 0.0f32;
-                for i in 0..AUDIO_FRAME_SIZE {
-                    let sample = self.frame_out[ch][i];
-                    energy += sample * sample;
-                }
-                let frame_rms = (energy / AUDIO_FRAME_SIZE as f32).sqrt();
-
-                // Update background floor. Learn quickly in non-speech, slowly otherwise.
-                let floor = &mut self.noise_floor[ch];
-                let alpha = if vad < self.settings.vad_noise_threshold {
-                    self.settings.noise_floor_fast_alpha
-                } else {
-                    self.settings.noise_floor_slow_alpha
-                };
-                *floor += alpha * (frame_rms - *floor);
-                *floor = floor.max(10.0);
-
-                // SNR-derived gate confidence. Low SNR means likely static/noise.
-                let snr = frame_rms / (*floor + 1.0);
-                let snr_gate = ((snr - self.settings.snr_min)
-                    / (self.settings.snr_max - self.settings.snr_min))
-                    .clamp(0.0, 1.0);
-
-                // VAD-derived confidence.
-                let vad_gate = ((vad - self.settings.vad_noise_threshold)
-                    / (self.settings.vad_gate_threshold - self.settings.vad_noise_threshold))
-                    .clamp(0.0, 1.0);
-
-                // --- Adaptive gain from VAD ---
-                let mut gate_confidence = vad_gate.max(snr_gate);
-
-                if vad >= self.settings.vad_gate_threshold {
-                    self.speech_hangover[ch] = self.settings.hangover_frames;
-                } else if self.speech_hangover[ch] > 0 {
-                    self.speech_hangover[ch] -= 1;
-                    // Keep some openness for trailing phonemes while release smoothing handles fade-out.
-                    gate_confidence = gate_confidence.max(0.60);
-                }
-
-                let target_gain =
-                    self.settings.min_gain + (1.0 - self.settings.min_gain) * gate_confidence;
-
-                let mut current_gain = self.gain[ch];
-
-                for i in 0..AUDIO_FRAME_SIZE {
-                    // Smooth gain toward target_gain per sample
-                    let alpha = if target_gain > current_gain {
-                        self.settings.attack_alpha
-                    } else {
-                        self.settings.release_alpha
-                    };
-                    current_gain += alpha * (target_gain - current_gain);
-
-                    let denoised = self.frame_out[ch][i] * current_gain;
-
-                    let dc_blocked = self.dc_block(ch, denoised);
-                    let limited = soft_limit(dc_blocked);
-
-                    self.out_buf[out_start + i * self.channels + ch] = limited;
-                }
-
-                self.gain[ch] = current_gain;
-            }
-
-            self.in_head += interleaved_frame;
-            if self.in_head > 0 && self.in_head >= self.in_buf.len() / 2 {
-                self.in_buf.drain(0..self.in_head);
-                self.in_head = 0;
-            }
-        }
-
-        // --- Write processed output back to the i16 buffer ---
-        let available = (self.out_buf.len() - self.out_head).min(samples.len());
-
-        for i in 0..available {
-            samples[i] = self.out_buf[self.out_head + i].clamp(-32768.0, 32767.0) as i16;
-        }
-
-        self.out_head += available;
-        if self.out_head > 0 && self.out_head >= self.out_buf.len() / 2 {
-            self.out_buf.drain(0..self.out_head);
-            self.out_head = 0;
-        }
-
-        // Zero-fill if we don't have enough output yet (startup latency)
-        for i in available..samples.len() {
-            samples[i] = 0;
-        }
-    }
-}
-
-/// Lightweight microphone noise gate for performance-focused use.
-struct NoiseGate {
-    channels: usize,
-    settings: NoiseSuppressorSettings,
-    in_buf: Vec<f32>,
-    in_head: usize,
-    out_buf: Vec<f32>,
-    out_head: usize,
-    gain: Vec<f32>,
-    noise_floor: Vec<f32>,
-    speech_hangover: Vec<u8>,
-    dc_x: Vec<f32>,
-    dc_y: Vec<f32>,
-    frame_in: Vec<Box<[f32; AUDIO_FRAME_SIZE]>>,
-}
-
-impl NoiseGate {
-    const DC_COEFF: f32 = 0.9975;
-
-    fn new(channels: usize, mut settings: NoiseSuppressorSettings) -> Self {
-        settings.sanitize();
-
-        Self {
-            channels,
-            settings,
-            in_buf: Vec::new(),
-            in_head: 0,
-            out_buf: Vec::new(),
-            out_head: 0,
-            gain: vec![0.0; channels],
-            noise_floor: vec![300.0; channels],
-            speech_hangover: vec![0; channels],
+            hold_count: vec![0; channels],
+            is_open: vec![false; channels],
+            env_alpha_up,
+            env_alpha_down,
+            attack_alpha,
+            release_alpha,
+            hold_frames,
+            threshold_linear,
+            hysteresis_linear,
+            min_gain_linear,
             dc_x: vec![0.0; channels],
             dc_y: vec![0.0; channels],
             frame_in: (0..channels)
@@ -770,7 +554,6 @@ impl NoiseGate {
             std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut i16, data.len() / 2)
         };
 
-        self.in_buf.reserve(samples.len());
         for s in samples.iter() {
             self.in_buf.push(*s as f32);
         }
@@ -786,53 +569,57 @@ impl NoiseGate {
                     self.frame_in[ch][i] = self.in_buf[frame_start + i * self.channels + ch];
                 }
 
-                let mut energy = 0.0f32;
-                for i in 0..AUDIO_FRAME_SIZE {
-                    let sample = self.frame_in[ch][i];
-                    energy += sample * sample;
-                }
-                let frame_rms = (energy / AUDIO_FRAME_SIZE as f32).sqrt();
-
-                let floor = &mut self.noise_floor[ch];
-                let alpha = if frame_rms <= *floor {
-                    self.settings.noise_floor_fast_alpha
-                } else {
-                    self.settings.noise_floor_slow_alpha
-                };
-                *floor += alpha * (frame_rms - *floor);
-                *floor = floor.max(10.0);
-
-                let snr = frame_rms / (*floor + 1.0);
-                let snr_gate = ((snr - self.settings.snr_min)
-                    / (self.settings.snr_max - self.settings.snr_min))
-                    .clamp(0.0, 1.0);
-
-                let mut gate_confidence = snr_gate;
-                if snr >= self.settings.snr_min {
-                    self.speech_hangover[ch] = self.settings.hangover_frames;
-                } else if self.speech_hangover[ch] > 0 {
-                    self.speech_hangover[ch] -= 1;
-                    gate_confidence = gate_confidence.max(0.60);
-                }
-
-                let target_gain =
-                    self.settings.min_gain + (1.0 - self.settings.min_gain) * gate_confidence;
+                let mut current_env = self.envelope[ch];
                 let mut current_gain = self.gain[ch];
+                let mut current_hold = self.hold_count[ch];
+                let mut gate_open = self.is_open[ch];
 
                 for i in 0..AUDIO_FRAME_SIZE {
-                    let alpha = if target_gain > current_gain {
-                        self.settings.attack_alpha
-                    } else {
-                        self.settings.release_alpha
-                    };
-                    current_gain += alpha * (target_gain - current_gain);
+                    let s_abs = self.frame_in[ch][i].abs();
 
-                    let gated = self.frame_in[ch][i] * current_gain;
-                    let dc_blocked = self.dc_block(ch, gated);
-                    self.out_buf[out_start + i * self.channels + ch] = soft_limit(dc_blocked);
+                    // Smoother envelope tracking (asymmetric)
+                    let env_alpha = if s_abs > current_env {
+                        self.env_alpha_up
+                    } else {
+                        self.env_alpha_down
+                    };
+                    current_env += env_alpha * (s_abs - current_env);
+
+                    // Gate logic with hysteresis
+                    if gate_open {
+                        if current_env < self.threshold_linear {
+                            if current_hold > 0 {
+                                current_hold -= 1;
+                            } else {
+                                gate_open = false;
+                            }
+                        } else {
+                            current_hold = self.hold_frames;
+                        }
+                    } else {
+                        if current_env > self.hysteresis_linear {
+                            gate_open = true;
+                            current_hold = self.hold_frames;
+                        }
+                    }
+
+                    let target_gain = if gate_open { 1.0 } else { self.min_gain_linear };
+
+                    // Gain smoothing
+                    if target_gain > current_gain {
+                        current_gain += self.attack_alpha * (target_gain - current_gain);
+                    } else {
+                        current_gain += self.release_alpha * (target_gain - current_gain);
+                    }
+
+                    let processed = self.dc_block(ch, self.frame_in[ch][i] * current_gain);
+                    self.out_buf[out_start + i * self.channels + ch] = soft_limit(processed);
                 }
 
+                self.envelope[ch] = current_env;
                 self.gain[ch] = current_gain;
+                self.hold_count[ch] = current_hold;
+                self.is_open[ch] = gate_open;
             }
 
             self.in_head += interleaved_frame;
@@ -871,9 +658,6 @@ mod tests {
         assert_eq!(config.bits_per_sample, 16);
         assert_eq!(config.buffer_duration, Duration::from_millis(100));
         assert!(config.device_id.is_none());
-        assert_eq!(
-            config.noise_processing_mode,
-            MicNoiseProcessingMode::Rnnoise
-        );
+        assert!(config.noise_reduction_enabled);
     }
 }

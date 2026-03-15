@@ -2,7 +2,7 @@
 //!
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
-use super::types::{EncoderType, MicNoiseSuppressionMode, QualityPreset, RateControl, Resolution};
+use super::types::{EncoderType, QualityPreset, RateControl, Resolution};
 
 pub const MAX_FRAMERATE: u32 = 240;
 pub const RECOMMENDED_BUFFER_HEADROOM_PERCENT: u64 = 135;
@@ -90,39 +90,6 @@ pub fn default_compression_attack() -> u8 {
 pub fn default_compression_release() -> u8 {
     100 // 100ms
 }
-pub fn default_mic_ns_min_gain_percent() -> u8 {
-    1
-}
-pub fn default_mic_ns_vad_noise_threshold_percent() -> u8 {
-    25
-}
-pub fn default_mic_ns_vad_gate_threshold_percent() -> u8 {
-    55
-}
-pub fn default_mic_ns_snr_min_tenths() -> u8 {
-    12
-}
-pub fn default_mic_ns_snr_max_tenths() -> u8 {
-    60
-}
-pub fn default_mic_ns_hangover_frames() -> u8 {
-    10
-}
-pub fn default_mic_ns_noise_floor_fast_percent() -> u8 {
-    10
-}
-pub fn default_mic_ns_noise_floor_slow_percent() -> u8 {
-    1
-}
-pub fn default_mic_ns_attack_ms() -> u8 {
-    1
-}
-pub fn default_mic_ns_release_ms() -> u8 {
-    30
-}
-pub fn default_mic_noise_suppression_mode() -> MicNoiseSuppressionMode {
-    MicNoiseSuppressionMode::Rnnoise
-}
 pub(super) fn default_hotkey_save() -> String {
     "Alt+F9".to_string()
 }
@@ -158,10 +125,7 @@ mod tests {
         assert_eq!(config.advanced.memory_limit_mb, 0);
         assert!(config.audio.capture_system);
         assert!(config.audio.capture_mic);
-        assert_eq!(
-            config.audio.mic_noise_suppression_mode,
-            MicNoiseSuppressionMode::Rnnoise
-        );
+        assert!(config.audio.mic_noise_reduction);
     }
     #[test]
     fn test_validate_quality_value_clamps() {

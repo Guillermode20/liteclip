@@ -4,7 +4,7 @@
 //! including video, audio, hotkeys, and general settings.
 
 use anyhow::{Context, Result};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 use super::functions::{
@@ -12,17 +12,12 @@ use super::functions::{
     default_compression_ratio, default_compression_release, default_compression_threshold,
     default_encoder, default_false, default_framerate, default_gpu_index, default_hotkey_gallery,
     default_hotkey_save, default_hotkey_screenshot, default_hotkey_toggle,
-    default_keyframe_interval, default_master_volume, default_mic_device,
-    default_mic_noise_suppression_mode, default_mic_ns_attack_ms, default_mic_ns_hangover_frames,
-    default_mic_ns_min_gain_percent, default_mic_ns_noise_floor_fast_percent,
-    default_mic_ns_noise_floor_slow_percent, default_mic_ns_release_ms,
-    default_mic_ns_snr_max_tenths, default_mic_ns_snr_min_tenths,
-    default_mic_ns_vad_gate_threshold_percent, default_mic_ns_vad_noise_threshold_percent,
-    default_mic_volume, default_quality_preset, default_quality_value,
-    default_quality_value_for_preset, default_rate_control, default_replay_duration,
-    default_resolution, default_save_directory, default_system_volume, default_true,
-    ESTIMATED_MIC_AUDIO_BITRATE_BPS, ESTIMATED_SYSTEM_AUDIO_BITRATE_BPS, MAX_FRAMERATE,
-    RECOMMENDED_BUFFER_BASE_OVERHEAD_MB, RECOMMENDED_BUFFER_HEADROOM_PERCENT,
+    default_keyframe_interval, default_master_volume, default_mic_device, default_mic_volume,
+    default_quality_preset, default_quality_value, default_quality_value_for_preset,
+    default_rate_control, default_replay_duration, default_resolution, default_save_directory,
+    default_system_volume, default_true, ESTIMATED_MIC_AUDIO_BITRATE_BPS,
+    ESTIMATED_SYSTEM_AUDIO_BITRATE_BPS, MAX_FRAMERATE, RECOMMENDED_BUFFER_BASE_OVERHEAD_MB,
+    RECOMMENDED_BUFFER_HEADROOM_PERCENT,
 };
 
 /// Encoder selection for video encoding.
@@ -254,32 +249,7 @@ impl Config {
         self.audio.compression_ratio = self.audio.compression_ratio.clamp(1, 20);
         self.audio.compression_attack = self.audio.compression_attack.clamp(1, 100);
         self.audio.compression_release = self.audio.compression_release.clamp(50, 255);
-        self.audio.mic_ns_min_gain_percent = self.audio.mic_ns_min_gain_percent.clamp(0, 20);
-        self.audio.mic_ns_vad_noise_threshold_percent =
-            self.audio.mic_ns_vad_noise_threshold_percent.clamp(0, 95);
-        self.audio.mic_ns_vad_gate_threshold_percent =
-            self.audio.mic_ns_vad_gate_threshold_percent.clamp(5, 100);
-        if self.audio.mic_ns_vad_gate_threshold_percent
-            <= self.audio.mic_ns_vad_noise_threshold_percent
-        {
-            self.audio.mic_ns_vad_gate_threshold_percent =
-                (self.audio.mic_ns_vad_noise_threshold_percent + 1).min(100);
-        }
-        self.audio.mic_ns_snr_min_tenths = self.audio.mic_ns_snr_min_tenths.clamp(5, 100);
-        self.audio.mic_ns_snr_max_tenths = self.audio.mic_ns_snr_max_tenths.clamp(10, 150);
-        if self.audio.mic_ns_snr_max_tenths <= self.audio.mic_ns_snr_min_tenths {
-            self.audio.mic_ns_snr_max_tenths = (self.audio.mic_ns_snr_min_tenths + 1).min(150);
-        }
-        self.audio.mic_ns_hangover_frames = self.audio.mic_ns_hangover_frames.clamp(0, 50);
-        self.audio.mic_ns_noise_floor_fast_percent =
-            self.audio.mic_ns_noise_floor_fast_percent.clamp(1, 50);
-        self.audio.mic_ns_noise_floor_slow_percent =
-            self.audio.mic_ns_noise_floor_slow_percent.clamp(1, 20);
-        if self.audio.mic_ns_noise_floor_slow_percent > self.audio.mic_ns_noise_floor_fast_percent {
-            self.audio.mic_ns_noise_floor_slow_percent = self.audio.mic_ns_noise_floor_fast_percent;
-        }
-        self.audio.mic_ns_attack_ms = self.audio.mic_ns_attack_ms.clamp(1, 20);
-        self.audio.mic_ns_release_ms = self.audio.mic_ns_release_ms.clamp(5, 200);
+        // mic_noise_reduction is a simple on/off toggle, no per-parameter clamping required.
     }
 
     pub fn estimated_replay_storage_bytes(&self) -> usize {
@@ -344,21 +314,7 @@ impl Config {
             || self.audio.capture_system != other.audio.capture_system
             || self.audio.capture_mic != other.audio.capture_mic
             || self.audio.mic_device != other.audio.mic_device
-            || self.audio.mic_noise_suppression_mode != other.audio.mic_noise_suppression_mode
-            || self.audio.mic_ns_min_gain_percent != other.audio.mic_ns_min_gain_percent
-            || self.audio.mic_ns_vad_noise_threshold_percent
-                != other.audio.mic_ns_vad_noise_threshold_percent
-            || self.audio.mic_ns_vad_gate_threshold_percent
-                != other.audio.mic_ns_vad_gate_threshold_percent
-            || self.audio.mic_ns_snr_min_tenths != other.audio.mic_ns_snr_min_tenths
-            || self.audio.mic_ns_snr_max_tenths != other.audio.mic_ns_snr_max_tenths
-            || self.audio.mic_ns_hangover_frames != other.audio.mic_ns_hangover_frames
-            || self.audio.mic_ns_noise_floor_fast_percent
-                != other.audio.mic_ns_noise_floor_fast_percent
-            || self.audio.mic_ns_noise_floor_slow_percent
-                != other.audio.mic_ns_noise_floor_slow_percent
-            || self.audio.mic_ns_attack_ms != other.audio.mic_ns_attack_ms
-            || self.audio.mic_ns_release_ms != other.audio.mic_ns_release_ms
+            || self.audio.mic_noise_reduction != other.audio.mic_noise_reduction
             // Audio processing settings that require restart
             || self.audio.compression_enabled != other.audio.compression_enabled
             || self.audio.compression_threshold != other.audio.compression_threshold
@@ -389,42 +345,6 @@ pub enum RateControl {
     Cq,
 }
 
-/// Microphone noise suppression processing mode.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum MicNoiseSuppressionMode {
-    None,
-    NoiseGate,
-    Rnnoise,
-}
-
-impl Default for MicNoiseSuppressionMode {
-    fn default() -> Self {
-        Self::Rnnoise
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum MicNoiseSuppressionModeCompat {
-    Mode(MicNoiseSuppressionMode),
-    Bool(bool),
-}
-
-fn deserialize_mic_noise_suppression_mode<'de, D>(
-    deserializer: D,
-) -> Result<MicNoiseSuppressionMode, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let value = Option::<MicNoiseSuppressionModeCompat>::deserialize(deserializer)?;
-    Ok(match value {
-        Some(MicNoiseSuppressionModeCompat::Mode(mode)) => mode,
-        Some(MicNoiseSuppressionModeCompat::Bool(true)) => MicNoiseSuppressionMode::Rnnoise,
-        Some(MicNoiseSuppressionModeCompat::Bool(false)) => MicNoiseSuppressionMode::None,
-        None => default_mic_noise_suppression_mode(),
-    })
-}
 /// Audio capture settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioConfig {
@@ -452,31 +372,8 @@ pub struct AudioConfig {
     pub compression_attack: u8, // 1ms to 100ms
     #[serde(default = "default_compression_release")]
     pub compression_release: u8, // 50ms to 500ms
-    #[serde(
-        default = "default_mic_noise_suppression_mode",
-        deserialize_with = "deserialize_mic_noise_suppression_mode"
-    )]
-    pub mic_noise_suppression_mode: MicNoiseSuppressionMode,
-    #[serde(default = "default_mic_ns_min_gain_percent")]
-    pub mic_ns_min_gain_percent: u8,
-    #[serde(default = "default_mic_ns_vad_noise_threshold_percent")]
-    pub mic_ns_vad_noise_threshold_percent: u8,
-    #[serde(default = "default_mic_ns_vad_gate_threshold_percent")]
-    pub mic_ns_vad_gate_threshold_percent: u8,
-    #[serde(default = "default_mic_ns_snr_min_tenths")]
-    pub mic_ns_snr_min_tenths: u8,
-    #[serde(default = "default_mic_ns_snr_max_tenths")]
-    pub mic_ns_snr_max_tenths: u8,
-    #[serde(default = "default_mic_ns_hangover_frames")]
-    pub mic_ns_hangover_frames: u8,
-    #[serde(default = "default_mic_ns_noise_floor_fast_percent")]
-    pub mic_ns_noise_floor_fast_percent: u8,
-    #[serde(default = "default_mic_ns_noise_floor_slow_percent")]
-    pub mic_ns_noise_floor_slow_percent: u8,
-    #[serde(default = "default_mic_ns_attack_ms")]
-    pub mic_ns_attack_ms: u8,
-    #[serde(default = "default_mic_ns_release_ms")]
-    pub mic_ns_release_ms: u8,
+    #[serde(default = "default_false")]
+    pub mic_noise_reduction: bool,
 }
 /// Global hotkey bindings
 #[derive(Debug, Clone, Serialize, Deserialize)]
