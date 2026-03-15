@@ -526,6 +526,7 @@ struct RNNoiseProcessor {
     out_buf: Vec<f32>,
     out_head: usize,
     gain: f32,
+    speech_presence: f32,
     noise_floor: f32,
     speech_hangover: u8,
     dc_x: Vec<f32>,
@@ -535,23 +536,23 @@ struct RNNoiseProcessor {
     primed: bool,
     attack_alpha: f32,
     release_alpha: f32,
+    presence_attack_alpha: f32,
+    presence_release_alpha: f32,
 }
 
 impl RNNoiseProcessor {
     const DC_COEFF: f32 = 0.9975;
-    /// Floor gain applied when the gate decides the frame is noise.
-    /// 0.08 = 92% noise reduction; high enough to suppress hiss clearly but
-    /// low enough that a mis-classified voiced frame doesn't sound chopped off.
-    const MIN_GAIN: f32 = 0.08;
-    const VAD_NOISE_THRESHOLD: f32 = 0.25;
+    const MIN_GAIN: f32 = 0.18;
+    const QUIET_SPEECH_GAIN: f32 = 0.62;
+    const VAD_NOISE_THRESHOLD: f32 = 0.22;
     /// VAD probability above which the gate fully opens. Lower value = gate
     /// opens more readily, protecting quiet phonemes and word onsets.
-    const VAD_GATE_THRESHOLD: f32 = 0.40;
-    const SNR_MIN: f32 = 1.2;
-    const SNR_MAX: f32 = 6.0;
+    const VAD_GATE_THRESHOLD: f32 = 0.52;
+    const SNR_MIN: f32 = 1.15;
+    const SNR_MAX: f32 = 5.5;
     /// Frames to hold the gate open after speech drops below threshold.
     /// 20 × 10 ms = 200 ms — covers brief pauses between words.
-    const HANGOVER_FRAMES: u8 = 20;
+    const HANGOVER_FRAMES: u8 = 24;
     const NOISE_FLOOR_FAST_ALPHA: f32 = 0.10;
     const NOISE_FLOOR_SLOW_ALPHA: f32 = 0.01;
 
@@ -568,6 +569,7 @@ impl RNNoiseProcessor {
             out_buf: vec![0.0; AUDIO_FRAME_SIZE],
             out_head: 0,
             gain: Self::MIN_GAIN,
+            speech_presence: 0.0,
             noise_floor: 300.0,
             speech_hangover: 0,
             dc_x: vec![0.0; channels],
@@ -577,6 +579,8 @@ impl RNNoiseProcessor {
             primed: false,
             attack_alpha: Self::alpha_from_ms(1.5),
             release_alpha: Self::alpha_from_ms(80.0),
+            presence_attack_alpha: Self::frame_alpha_from_ms(30.0),
+            presence_release_alpha: Self::frame_alpha_from_ms(220.0),
         }
     }
 
@@ -590,6 +594,34 @@ impl RNNoiseProcessor {
         let tau_seconds = ms / 1000.0;
         let alpha = 1.0 - (-1.0 / (sample_rate * tau_seconds)).exp();
         alpha.clamp(0.000001, 1.0)
+    }
+
+    #[inline]
+    fn frame_alpha_from_ms(ms: f32) -> f32 {
+        if ms <= 0.0 {
+            return 1.0;
+        }
+
+        let frame_rate = 100.0;
+        let tau_seconds = ms / 1000.0;
+        let alpha = 1.0 - (-1.0 / (frame_rate * tau_seconds)).exp();
+        alpha.clamp(0.000001, 1.0)
+    }
+
+    #[inline]
+    fn lerp(a: f32, b: f32, t: f32) -> f32 {
+        a + (b - a) * t.clamp(0.0, 1.0)
+    }
+
+    #[inline]
+    fn compute_adaptive_target_gain(vad: f32, snr_gate: f32, speech_presence: f32) -> f32 {
+        let quiet_voice = ((vad - Self::VAD_NOISE_THRESHOLD)
+            / (Self::VAD_GATE_THRESHOLD - Self::VAD_NOISE_THRESHOLD))
+            .clamp(0.0, 1.0);
+        let floor_shape = (speech_presence * 0.75 + quiet_voice * 0.25).clamp(0.0, 1.0);
+        let adaptive_floor = Self::lerp(Self::MIN_GAIN, Self::QUIET_SPEECH_GAIN, floor_shape);
+        let openness = (vad * 0.45 + snr_gate * 0.20 + speech_presence * 0.35).clamp(0.0, 1.0);
+        Self::lerp(adaptive_floor, 1.0, openness)
     }
 
     #[inline]
@@ -647,20 +679,29 @@ impl RNNoiseProcessor {
             let snr = frame_rms / (self.noise_floor + 1.0);
             let snr_gate =
                 ((snr - Self::SNR_MIN) / (Self::SNR_MAX - Self::SNR_MIN)).clamp(0.0, 1.0);
-            let vad_gate = ((vad - Self::VAD_NOISE_THRESHOLD)
-                / (Self::VAD_GATE_THRESHOLD - Self::VAD_NOISE_THRESHOLD))
-                .clamp(0.0, 1.0);
 
-            let mut gate_confidence = vad_gate.max(snr_gate);
+            let instant_speech = (vad * 0.72 + snr_gate * 0.28).clamp(0.0, 1.0);
             if vad >= Self::VAD_GATE_THRESHOLD {
                 self.speech_hangover = Self::HANGOVER_FRAMES;
-                gate_confidence = 1.0;
-            } else if self.speech_hangover > 0 {
-                self.speech_hangover -= 1;
-                gate_confidence = 1.0;
             }
 
-            let target_gain = Self::MIN_GAIN + (1.0 - Self::MIN_GAIN) * gate_confidence;
+            let mut presence_target = instant_speech;
+            if self.speech_hangover > 0 {
+                self.speech_hangover -= 1;
+                let hold = (self.speech_hangover as f32 / Self::HANGOVER_FRAMES as f32).max(0.35);
+                presence_target = presence_target.max(hold);
+            }
+
+            let presence_alpha = if presence_target >= self.speech_presence {
+                self.presence_attack_alpha
+            } else {
+                self.presence_release_alpha
+            };
+            self.speech_presence +=
+                presence_alpha * (presence_target - self.speech_presence);
+
+            let target_gain =
+                Self::compute_adaptive_target_gain(vad, snr_gate, self.speech_presence);
             let mut current_gain = self.gain;
 
             let out_start = self.out_buf.len();
@@ -753,5 +794,21 @@ mod tests {
         let samples: &[i16] =
             unsafe { std::slice::from_raw_parts(data.as_ptr() as *const i16, data.len() / 2) };
         assert_eq!(samples.len(), 960);
+    }
+
+    #[test]
+    fn test_adaptive_target_gain_preserves_quiet_speech() {
+        let noise_only = RNNoiseProcessor::compute_adaptive_target_gain(0.05, 0.0, 0.0);
+        let quiet_speech = RNNoiseProcessor::compute_adaptive_target_gain(0.32, 0.18, 0.55);
+
+        assert!(quiet_speech > noise_only + 0.25);
+        assert!(quiet_speech <= 1.0);
+    }
+
+    #[test]
+    fn test_adaptive_target_gain_stays_bounded() {
+        let gain = RNNoiseProcessor::compute_adaptive_target_gain(0.95, 1.0, 1.0);
+        assert!(gain >= RNNoiseProcessor::MIN_GAIN);
+        assert!(gain <= 1.0);
     }
 }
