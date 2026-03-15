@@ -186,6 +186,9 @@ pub struct ClipCompressApp {
     thumbnail_tx: Sender<ThumbnailResult>,
     thumbnail_rx: Receiver<ThumbnailResult>,
     editor: Option<EditorState>,
+    pub selection_mode: bool,
+    pub selected_videos: HashSet<PathBuf>,
+    pub delete_slider_progress: f32,
 }
 
 pub type GalleryApp = ClipCompressApp;
@@ -208,6 +211,9 @@ impl ClipCompressApp {
             thumbnail_tx,
             thumbnail_rx,
             editor: None,
+            selection_mode: false,
+            selected_videos: HashSet::new(),
+            delete_slider_progress: 0.0,
         }
     }
 
@@ -552,6 +558,29 @@ impl ClipCompressApp {
             requested_preview = Some(0.0);
         }
 
+        if !browser_outcome.videos_to_delete.is_empty() {
+            for video in browser_outcome.videos_to_delete {
+                if let Err(e) = std::fs::remove_file(&video.path) {
+                    warn!("Failed to delete video {:?}: {}", video.path, e);
+                } else {
+                    info!("Deleted video {:?}", video.path);
+                    let thumb_path = self.get_thumb_path(&video.path);
+                    if thumb_path.exists() {
+                        let _ = std::fs::remove_file(&thumb_path);
+                    }
+                }
+            }
+            self.selected_videos.clear();
+            self.selection_mode = false;
+            self.refresh();
+        }
+
+        if let Some(video) = browser_outcome.video_to_open {
+            if let Err(e) = open_path(&video.path) {
+                warn!("Failed to open video {:?}: {}", video.path, e);
+            }
+        }
+
         if editor_outcome.back_to_browser {
             self.editor = None;
         }
@@ -615,6 +644,8 @@ impl ClipCompressApp {
 struct BrowserUiOutcome {
     thumbnails_to_generate: Vec<VideoEntry>,
     selected_video: Option<VideoEntry>,
+    videos_to_delete: Vec<VideoEntry>,
+    video_to_open: Option<VideoEntry>,
     refresh_requested: bool,
 }
 

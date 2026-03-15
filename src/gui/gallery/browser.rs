@@ -12,16 +12,13 @@ pub(super) fn render_browser_ui(app: &mut ClipCompressApp, ui: &mut egui::Ui) ->
         .iter()
         .map(|(_, videos)| videos.len())
         .sum();
-    let filtered_videos: Vec<VideoEntry> = if app.filter_game == ALL_GAMES_FILTER {
-        app.videos_by_game
-            .iter()
-            .flat_map(|(_, videos)| videos.iter().cloned())
-            .collect()
+    let display_groups: Vec<(String, Vec<VideoEntry>)> = if app.filter_game == ALL_GAMES_FILTER {
+        app.videos_by_game.clone()
     } else {
         app.videos_by_game
             .iter()
             .find(|(game, _)| *game == app.filter_game)
-            .map(|(_, videos)| videos.clone())
+            .map(|(game, videos)| vec![(game.clone(), videos.clone())])
             .unwrap_or_default()
     };
 
@@ -31,6 +28,15 @@ pub(super) fn render_browser_ui(app: &mut ClipCompressApp, ui: &mut egui::Ui) ->
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.button("Refresh").clicked() {
                 outcome.refresh_requested = true;
+            }
+            if ui
+                .toggle_value(&mut app.selection_mode, "Select...")
+                .clicked()
+            {
+                if !app.selection_mode {
+                    app.selected_videos.clear();
+                    app.delete_slider_progress = 0.0;
+                }
             }
             egui::ComboBox::from_id_salt("clip_filter_game")
                 .selected_text(&app.filter_game)
@@ -52,7 +58,7 @@ pub(super) fn render_browser_ui(app: &mut ClipCompressApp, ui: &mut egui::Ui) ->
         ui.colored_label(egui::Color32::LIGHT_RED, error);
     }
 
-    if filtered_videos.is_empty() {
+    if display_groups.is_empty() {
         ui.vertical_centered(|ui| {
             ui.add_space(64.0);
             ui.label(
@@ -74,33 +80,110 @@ pub(super) fn render_browser_ui(app: &mut ClipCompressApp, ui: &mut egui::Ui) ->
     let columns = ((ui.available_width() + tile_spacing) / (tile_width + tile_spacing))
         .floor()
         .max(1.0) as usize;
-    let rows = filtered_videos.len().div_ceil(columns);
+
+    if app.selection_mode && !app.selected_videos.is_empty() {
+        egui::TopBottomPanel::bottom("delete_panel")
+            .exact_height(50.0)
+            .show_inside(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.add_space(10.0);
+                    ui.label(
+                        egui::RichText::new(format!("{} selected", app.selected_videos.len()))
+                            .strong(),
+                    );
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add_space(20.0);
+
+                        let response = ui.add(
+                            egui::Slider::new(&mut app.delete_slider_progress, 0.0..=1.0)
+                                .show_value(false)
+                                .text("Slide to Confirm Delete"),
+                        );
+
+                        if response.drag_stopped() {
+                            if app.delete_slider_progress >= 0.99 {
+                                // Gather all matching video entries
+                                let mut deleting = Vec::new();
+                                for (_, videos) in &app.videos_by_game {
+                                    for video in videos {
+                                        if app.selected_videos.contains(&video.path) {
+                                            deleting.push(video.clone());
+                                        }
+                                    }
+                                }
+                                outcome.videos_to_delete = deleting;
+                            } else {
+                                app.delete_slider_progress = 0.0;
+                            }
+                        } else if !response.dragged() {
+                            app.delete_slider_progress = 0.0;
+                        }
+                    });
+                });
+            });
+    }
 
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            for row in 0..rows {
+            for (game, videos) in display_groups {
+                ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    for column in 0..columns {
-                        let index = row * columns + column;
-                        if index >= filtered_videos.len() {
-                            break;
-                        }
+                    ui.heading(game.clone());
+                    if app.selection_mode {
+                        let game_video_paths: Vec<_> =
+                            videos.iter().map(|v| v.path.clone()).collect();
+                        let all_selected = game_video_paths
+                            .iter()
+                            .all(|p| app.selected_videos.contains(p));
 
-                        let video = filtered_videos[index].clone();
-                        let has_thumb = app.thumbnails.contains_key(&video.path);
-                        if !has_thumb {
-                            outcome.thumbnails_to_generate.push(video.clone());
+                        if ui
+                            .button(if all_selected {
+                                "Deselect All"
+                            } else {
+                                "Select All"
+                            })
+                            .clicked()
+                        {
+                            if all_selected {
+                                for path in game_video_paths {
+                                    app.selected_videos.remove(&path);
+                                }
+                            } else {
+                                for path in game_video_paths {
+                                    app.selected_videos.insert(path);
+                                }
+                            }
                         }
+                    }
+                });
+                ui.add_space(4.0);
 
-                        let response = ui
-                            .scope(|ui| {
-                                ui.set_min_width(tile_width);
-                                ui.set_max_width(tile_width);
-                                egui::Frame::group(ui.style())
-                                    .fill(egui::Color32::from_rgb(30, 32, 36))
-                                    .inner_margin(egui::Margin::same(10))
-                                    .show(ui, |ui| {
+                let group_rows = videos.len().div_ceil(columns);
+                for row in 0..group_rows {
+                    ui.horizontal(|ui| {
+                        for column in 0..columns {
+                            let index = row * columns + column;
+                            if index >= videos.len() {
+                                break;
+                            }
+
+                            let video = videos[index].clone();
+                            let has_thumb = app.thumbnails.contains_key(&video.path);
+                            if !has_thumb {
+                                outcome.thumbnails_to_generate.push(video.clone());
+                            }
+
+                            let response = ui
+                                .scope(|ui| {
+                                    ui.set_min_width(tile_width);
+                                    ui.set_max_width(tile_width);
+                                    let frame = egui::Frame::group(ui.style())
+                                        .fill(egui::Color32::from_rgb(30, 32, 36))
+                                        .inner_margin(egui::Margin::same(10));
+
+                                    frame.show(ui, |ui| {
                                         ui.vertical(|ui| {
                                             let thumb_size =
                                                 egui::vec2(tile_width - 20.0, thumb_height);
@@ -165,22 +248,73 @@ pub(super) fn render_browser_ui(app: &mut ClipCompressApp, ui: &mut egui::Ui) ->
                                                 ))
                                                 .small(),
                                             );
-                                            ui.add_space(6.0);
-                                            if ui.button("Select").clicked() {
-                                                outcome.selected_video = Some(video.clone());
+
+                                            if !app.selection_mode {
+                                                ui.add_space(6.0);
+                                                ui.horizontal(|ui| {
+                                                    if ui.button("Edit").clicked() {
+                                                        outcome.selected_video =
+                                                            Some(video.clone());
+                                                    }
+                                                    if ui.button("Open").clicked() {
+                                                        outcome.video_to_open = Some(video.clone());
+                                                    }
+                                                    ui.with_layout(
+                                                        egui::Layout::right_to_left(
+                                                            egui::Align::Center,
+                                                        ),
+                                                        |ui| {
+                                                            if ui.button("Delete").clicked() {
+                                                                app.selection_mode = true;
+                                                                app.selected_videos
+                                                                    .insert(video.path.clone());
+                                                            }
+                                                        },
+                                                    );
+                                                });
+                                            } else {
+                                                // In selection mode, adding a bit of space so height matches mostly
+                                                ui.add_space(32.0);
                                             }
                                         });
                                     })
-                            })
-                            .response;
+                                })
+                                .response;
 
-                        if response.double_clicked() {
-                            outcome.selected_video = Some(video);
+                            let is_selected = app.selected_videos.contains(&video.path);
+                            if app.selection_mode && is_selected {
+                                let rect = response.rect.shrink(2.0);
+                                ui.painter().rect_stroke(
+                                    rect,
+                                    // Shrink the radius to match the inner edge of the tile frame
+                                    egui::CornerRadius::same(4),
+                                    egui::Stroke::new(2.0, egui::Color32::LIGHT_BLUE),
+                                    egui::StrokeKind::Inside,
+                                );
+                            }
+
+                            if app.selection_mode {
+                                // Make the whole tile clickable
+                                let interact_response = ui.interact(
+                                    response.rect,
+                                    response.id.with("click"),
+                                    egui::Sense::click(),
+                                );
+                                if interact_response.clicked() {
+                                    if app.selected_videos.contains(&video.path) {
+                                        app.selected_videos.remove(&video.path);
+                                    } else {
+                                        app.selected_videos.insert(video.path.clone());
+                                    }
+                                }
+                            } else if response.double_clicked() {
+                                outcome.selected_video = Some(video);
+                            }
+                            ui.add_space(tile_spacing);
                         }
-                        ui.add_space(tile_spacing);
-                    }
-                });
-                ui.add_space(tile_spacing);
+                    });
+                    ui.add_space(tile_spacing);
+                }
             }
         });
 
