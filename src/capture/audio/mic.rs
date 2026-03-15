@@ -225,26 +225,36 @@ impl WasapiMicCapture {
             config.channels
         );
 
-        let mut noise_processor = if config.bits_per_sample == 16 && config.noise_reduction_enabled
-        {
-            tracing::warn!(
-                "RNNoise: INITIALIZING noise processor for {} channels",
-                config.channels
-            );
-            Some(MicNoiseProcessor::RNNoise(RNNoiseProcessor::new(
-                config.channels as usize,
-            )))
-        } else {
-            tracing::warn!(
-                "RNNoise: Processor NOT initialized (bits: {}, enabled: {})",
-                config.bits_per_sample,
-                config.noise_reduction_enabled
-            );
-            None
-        };
+        let noise_tx: Option<crossbeam::channel::Sender<RawMicFrame>> =
+            if config.bits_per_sample == 16 && config.noise_reduction_enabled {
+                tracing::warn!(
+                    "RNNoise: Starting noise thread for {} channels",
+                    config.channels
+                );
+                let (tx, rx) = crossbeam::channel::bounded::<RawMicFrame>(64);
+                let processor = RNNoiseProcessor::new(config.channels as usize);
+                let packet_tx_noise = packet_tx.clone();
+                let running_noise = running.clone();
+                let processed_samples_noise = processed_samples.clone();
+                thread::spawn(move || {
+                    run_noise_thread(
+                        rx,
+                        packet_tx_noise,
+                        processor,
+                        running_noise,
+                        processed_samples_noise,
+                    );
+                });
+                Some(tx)
+            } else {
+                tracing::warn!(
+                    "RNNoise: Processor NOT initialized (bits: {}, enabled: {})",
+                    config.bits_per_sample,
+                    config.noise_reduction_enabled
+                );
+                None
+            };
 
-        let mut last_activity_log = std::time::Instant::now();
-        let mut packets_since_log = 0;
         let mut total_frames: u64 = 0;
 
         let max_buffer_size = (config.sample_rate as usize / 10) * block_align as usize;
@@ -301,20 +311,6 @@ impl WasapiMicCapture {
                 unsafe { capture_client.ReleaseBuffer(frame_count) }
                     .context("IAudioCaptureClient::ReleaseBuffer failed")?;
 
-                if let Some(processor) = &mut noise_processor {
-                    processor.process(&mut audio_buffer);
-                    packets_since_log += 1;
-
-                    if last_activity_log.elapsed() >= Duration::from_secs(2) {
-                        tracing::info!(
-                            "RNNoise: Active - processed {} packets in last 2s",
-                            packets_since_log
-                        );
-                        packets_since_log = 0;
-                        last_activity_log = std::time::Instant::now();
-                    }
-                }
-
                 let pts = if qpc_position > 0 {
                     qpc_position.min(i64::MAX as u64) as i64
                 } else {
@@ -322,20 +318,30 @@ impl WasapiMicCapture {
                 };
                 total_frames = total_frames.saturating_add(frame_count as u64);
 
-                let packet = EncodedPacket::new(
-                    audio_buffer.split_to(byte_count).freeze(),
-                    pts,
-                    pts,
-                    false,
-                    StreamType::Microphone,
-                );
-
-                if packet_tx.send(packet).is_err() {
-                    running.store(false, Ordering::SeqCst);
-                    break;
+                if let Some(ref tx) = noise_tx {
+                    let raw = RawMicFrame {
+                        data: audio_buffer.split_to(byte_count),
+                        pts,
+                        frame_count,
+                    };
+                    if tx.send(raw).is_err() {
+                        running.store(false, Ordering::SeqCst);
+                        break;
+                    }
+                } else {
+                    let packet = EncodedPacket::new(
+                        audio_buffer.split_to(byte_count).freeze(),
+                        pts,
+                        pts,
+                        false,
+                        StreamType::Microphone,
+                    );
+                    if packet_tx.send(packet).is_err() {
+                        running.store(false, Ordering::SeqCst);
+                        break;
+                    }
+                    processed_samples.fetch_add(frame_count as u64, Ordering::Relaxed);
                 }
-
-                processed_samples.fetch_add(frame_count as u64, Ordering::SeqCst);
 
                 packet_frames = unsafe { capture_client.GetNextPacketSize() }?;
             }
@@ -418,14 +424,50 @@ impl WasapiMicCapture {
 
 const AUDIO_FRAME_SIZE: usize = 480;
 
-enum MicNoiseProcessor {
-    RNNoise(RNNoiseProcessor),
+struct RawMicFrame {
+    data: BytesMut,
+    pts: i64,
+    frame_count: u32,
 }
 
-impl MicNoiseProcessor {
-    fn process(&mut self, data: &mut [u8]) {
-        match self {
-            Self::RNNoise(processor) => processor.process(data),
+fn run_noise_thread(
+    raw_rx: crossbeam::channel::Receiver<RawMicFrame>,
+    packet_tx: Sender<EncodedPacket>,
+    mut processor: RNNoiseProcessor,
+    running: Arc<AtomicBool>,
+    processed_samples: Arc<AtomicU64>,
+) {
+    let mut last_log = std::time::Instant::now();
+    let mut packets: u32 = 0;
+    loop {
+        match raw_rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(mut frame) => {
+                processor.process(&mut frame.data);
+                packets += 1;
+                if last_log.elapsed() >= Duration::from_secs(2) {
+                    tracing::info!("RNNoise: processed {} packets in 2s", packets);
+                    packets = 0;
+                    last_log = std::time::Instant::now();
+                }
+                let frozen = frame.data.freeze();
+                let packet = EncodedPacket::new(
+                    frozen,
+                    frame.pts,
+                    frame.pts,
+                    false,
+                    StreamType::Microphone,
+                );
+                processed_samples.fetch_add(frame.frame_count as u64, Ordering::Relaxed);
+                if packet_tx.send(packet).is_err() {
+                    break;
+                }
+            }
+            Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
+                if !running.load(Ordering::Relaxed) {
+                    break;
+                }
+            }
+            Err(_) => break,
         }
     }
 }
@@ -565,10 +607,7 @@ impl RNNoiseProcessor {
                 .state
                 .process_frame(self.frame_out.as_mut_slice(), self.frame_in.as_slice());
 
-            let mut energy = 0.0f32;
-            for s in self.frame_out.iter() {
-                energy += s * s;
-            }
+            let energy: f32 = self.frame_out.iter().map(|s| s * s).sum();
             let frame_rms = (energy / AUDIO_FRAME_SIZE as f32).sqrt();
 
             let floor_alpha = if vad < Self::VAD_NOISE_THRESHOLD {
@@ -601,16 +640,13 @@ impl RNNoiseProcessor {
             let out_start = self.out_buf.len();
             self.out_buf.resize(out_start + AUDIO_FRAME_SIZE, 0.0);
 
+            let gain_alpha = if target_gain >= current_gain {
+                self.attack_alpha
+            } else {
+                self.release_alpha
+            };
             for i in 0..AUDIO_FRAME_SIZE {
-                let gain_alpha = if target_gain > current_gain {
-                    self.attack_alpha
-                } else {
-                    self.release_alpha
-                };
                 current_gain += gain_alpha * (target_gain - current_gain);
-
-                // Always output the processed frame - the nnnoiseless crate
-                // already handles priming internally
                 self.out_buf[out_start + i] = self.frame_out[i] * current_gain;
             }
 
