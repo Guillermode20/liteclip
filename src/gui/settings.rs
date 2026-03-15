@@ -250,26 +250,66 @@ impl SettingsApp {
 
                     if self.config.audio.mic_noise_reduction {
                         ui.indent("noise_suppression_settings", |ui| {
-                            ui.add(
-                                egui::Slider::new(
-                                    &mut self.config.audio.mic_ns_vad_gate_threshold_percent,
-                                    5..=100,
+                            egui::ComboBox::from_label("Sensitivity")
+                                .selected_text(
+                                    match self.config.audio.mic_ns_vad_gate_threshold_percent {
+                                        0..=49 => "Low",
+                                        50..=64 => "Medium",
+                                        _ => "High",
+                                    },
                                 )
-                                .text("Sensitivity"),
-                            )
-                            .on_hover_text(
-                                "Higher values make the gate close more aggressively on background noise.",
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(
+                                        &mut self.config.audio.mic_ns_vad_gate_threshold_percent,
+                                        40,
+                                        "Low",
+                                    );
+                                    ui.selectable_value(
+                                        &mut self.config.audio.mic_ns_vad_gate_threshold_percent,
+                                        55,
+                                        "Medium",
+                                    );
+                                    ui.selectable_value(
+                                        &mut self.config.audio.mic_ns_vad_gate_threshold_percent,
+                                        70,
+                                        "High",
+                                    );
+                                });
+                            ui.label(
+                                egui::RichText::new(
+                                    "Low = whisper; High = aggressive suppression.",
+                                )
+                                .small(),
                             );
 
-                            ui.add(
-                                egui::Slider::new(
-                                    &mut self.config.audio.mic_ns_hangover_frames,
-                                    0..=50,
+                            egui::ComboBox::from_label("Voice Tail")
+                                .selected_text(match self.config.audio.mic_ns_hangover_frames {
+                                    0..=5 => "Short",
+                                    6..=15 => "Medium",
+                                    _ => "Long",
+                                })
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(
+                                        &mut self.config.audio.mic_ns_hangover_frames,
+                                        2,
+                                        "Short",
+                                    );
+                                    ui.selectable_value(
+                                        &mut self.config.audio.mic_ns_hangover_frames,
+                                        10,
+                                        "Medium",
+                                    );
+                                    ui.selectable_value(
+                                        &mut self.config.audio.mic_ns_hangover_frames,
+                                        25,
+                                        "Long",
+                                    );
+                                });
+                            ui.label(
+                                egui::RichText::new(
+                                    "How long the gate stays open after you finish speaking.",
                                 )
-                                .text("Voice Tail Duration"),
-                            )
-                            .on_hover_text(
-                                "How long to keep the microphone open after you stop speaking.",
+                                .small(),
                             );
 
                             if ui.link("Reset to Defaults").clicked() {
