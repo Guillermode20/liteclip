@@ -251,11 +251,20 @@ fn run_clip_export(
     } else {
         0
     };
+
+    // Dynamic container overhead based on segment count
+    let container_overhead_kbps = 16.0 + (request.keep_ranges.len() as f64 * 8.0);
+
+    // Frame rate scaling: higher fps needs more bitrate
+    let fps_factor = (request.metadata.fps / 30.0).clamp(0.67, 2.0);
+
     let total_bitrate_kbps =
-        (f64::from(request.target_size_mb) * 8192.0 / output_duration_secs).max(256.0);
-    let video_bitrate_kbps = (total_bitrate_kbps - f64::from(audio_bitrate_kbps) - 24.0)
-        .max(300.0)
-        .round() as u32;
+        (f64::from(request.target_size_mb) * 8192.0 / output_duration_secs).max(256.0) * fps_factor;
+
+    let video_bitrate_kbps =
+        (total_bitrate_kbps - f64::from(audio_bitrate_kbps) - container_overhead_kbps)
+            .max(300.0)
+            .round() as u32;
 
     let first_pass_filter = build_filter_complex(&request.keep_ranges, false);
     let second_pass_filter = build_filter_complex(&request.keep_ranges, request.metadata.has_audio);
@@ -267,6 +276,9 @@ fn run_clip_export(
     let passlog_prefix_str = passlog_prefix.to_string_lossy().into_owned();
     let ffmpeg = ffmpeg_executable_path();
 
+    // Determine adaptive preset based on bitrate
+    let preset = select_adaptive_preset(video_bitrate_kbps);
+
     let _ = progress_tx.send(ClipExportUpdate::Progress {
         phase: ClipExportPhase::Preparing,
         fraction: 0.0,
@@ -274,12 +286,13 @@ fn run_clip_export(
     });
 
     info!(
-        "Exporting clipped video {:?} -> {:?} ({} kept ranges, target={} MB, video bitrate={} kbps)",
+        "Exporting clipped video {:?} -> {:?} ({} kept ranges, target={} MB, video bitrate={} kbps, preset={})",
         request.input_path,
         request.output_path,
         request.keep_ranges.len(),
         request.target_size_mb,
-        video_bitrate_kbps
+        video_bitrate_kbps,
+        preset
     );
 
     let first_pass_args = build_ffmpeg_args(
@@ -288,6 +301,7 @@ fn run_clip_export(
         &passlog_prefix_str,
         video_bitrate_kbps,
         true,
+        &preset,
     );
     if run_ffmpeg_phase(
         &ffmpeg,
@@ -318,6 +332,7 @@ fn run_clip_export(
         &passlog_prefix_str,
         video_bitrate_kbps,
         false,
+        &preset,
     );
     if run_ffmpeg_phase(
         &ffmpeg,
@@ -341,12 +356,28 @@ fn run_clip_export(
     Ok(ExportOutcome::Finished(request.output_path.clone()))
 }
 
+fn select_adaptive_preset(video_bitrate_kbps: u32) -> &'static str {
+    // Adaptive preset selection: use slower presets at lower bitrates
+    // for better compression efficiency, and faster presets at high bitrates
+    match video_bitrate_kbps {
+        // Very low bitrate: use veryslow for maximum compression
+        0..=1000 => "veryslow",
+        // Low bitrate: use slower for good compression
+        1001..=3000 => "slow",
+        // Medium bitrate: standard preset
+        3001..=8000 => "medium",
+        // High bitrate: faster encoding (quality less critical)
+        _ => "fast",
+    }
+}
+
 fn build_ffmpeg_args(
     request: &ClipExportRequest,
     filter_complex: &str,
     passlog_prefix: &str,
     video_bitrate_kbps: u32,
     first_pass: bool,
+    preset: &str,
 ) -> Vec<String> {
     let mut args = vec![
         "-y".to_string(),
@@ -365,7 +396,7 @@ fn build_ffmpeg_args(
         "-c:v".to_string(),
         "libx264".to_string(),
         "-preset".to_string(),
-        "medium".to_string(),
+        preset.to_string(),
         "-pix_fmt".to_string(),
         "yuv420p".to_string(),
         "-b:v".to_string(),
