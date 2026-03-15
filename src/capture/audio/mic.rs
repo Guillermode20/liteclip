@@ -302,8 +302,9 @@ impl WasapiMicCapture {
 
                 let byte_count = frame_count as usize * block_align as usize;
                 audio_buffer.resize(byte_count, 0);
+                let silent = flags & (AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) != 0;
                 unsafe {
-                    if flags & (AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) == 0 && !data_ptr.is_null() {
+                    if !silent && !data_ptr.is_null() {
                         std::ptr::copy_nonoverlapping(
                             data_ptr,
                             audio_buffer.as_mut_ptr(),
@@ -349,6 +350,7 @@ impl WasapiMicCapture {
                         data: audio_buffer.split_to(byte_count),
                         pts,
                         frame_count,
+                        silent,
                     };
                     if tx.send(raw).is_err() {
                         running.store(false, Ordering::SeqCst);
@@ -454,6 +456,7 @@ struct RawMicFrame {
     data: BytesMut,
     pts: i64,
     frame_count: u32,
+    silent: bool,
 }
 
 fn run_noise_thread(
@@ -468,7 +471,9 @@ fn run_noise_thread(
     loop {
         match raw_rx.recv_timeout(Duration::from_millis(200)) {
             Ok(mut frame) => {
-                processor.process(&mut frame.data);
+                if !frame.silent {
+                    processor.process(&mut frame.data);
+                }
                 packets += 1;
                 if last_log.elapsed() >= Duration::from_secs(2) {
                     tracing::info!("RNNoise: processed {} packets in 2s", packets);
@@ -498,9 +503,8 @@ fn run_noise_thread(
     }
 }
 
-#[inline]
 fn soft_limit(x: f32) -> f32 {
-    const THRESHOLD: f32 = 16_384.0; // -6dB
+    const THRESHOLD: f32 = 16_384.0;
     const MAX: f32 = 32_767.0;
 
     if x.abs() < THRESHOLD {
@@ -512,12 +516,6 @@ fn soft_limit(x: f32) -> f32 {
     }
 }
 
-/// RNNoise-based noise suppression using the nnnoiseless crate.
-///
-/// Stereo (or higher) mic input is mixed to mono before running RNNoise, then
-/// the denoised + gain-shaped result is broadcast back to all channels. This
-/// halves the neural-net call count on stereo mics with no audible quality
-/// loss for single-capsule microphones (where L ≈ R anyway).
 struct RNNoiseProcessor {
     channels: usize,
     state: Box<DenoiseState<'static>>,
@@ -545,28 +543,23 @@ impl RNNoiseProcessor {
     const MIN_GAIN: f32 = 0.18;
     const QUIET_SPEECH_GAIN: f32 = 0.62;
     const VAD_NOISE_THRESHOLD: f32 = 0.22;
-    /// VAD probability above which the gate fully opens. Lower value = gate
-    /// opens more readily, protecting quiet phonemes and word onsets.
     const VAD_GATE_THRESHOLD: f32 = 0.52;
     const SNR_MIN: f32 = 1.15;
     const SNR_MAX: f32 = 5.5;
-    /// Frames to hold the gate open after speech drops below threshold.
-    /// 20 × 10 ms = 200 ms — covers brief pauses between words.
     const HANGOVER_FRAMES: u8 = 24;
     const NOISE_FLOOR_FAST_ALPHA: f32 = 0.10;
     const NOISE_FLOOR_SLOW_ALPHA: f32 = 0.01;
 
     fn new(channels: usize) -> Self {
-        // Pre-prime the input queue with one silent frame so the RNNoise
-        // pipeline always has output ready before real audio arrives.
-        let mut in_buf = Vec::with_capacity(AUDIO_FRAME_SIZE * 8);
+        let mut in_buf = Vec::with_capacity(AUDIO_FRAME_SIZE * 16);
         in_buf.resize(AUDIO_FRAME_SIZE, 0.0);
+        let out_buf = Vec::with_capacity(AUDIO_FRAME_SIZE * 16);
         Self {
             channels,
             state: DenoiseState::new(),
             in_buf,
             in_head: 0,
-            out_buf: vec![0.0; AUDIO_FRAME_SIZE],
+            out_buf,
             out_head: 0,
             gain: Self::MIN_GAIN,
             speech_presence: 0.0,
@@ -632,6 +625,26 @@ impl RNNoiseProcessor {
         filtered
     }
 
+    #[inline]
+    fn compact_queue(buf: &mut Vec<f32>, head: &mut usize) {
+        if *head > 0 && *head >= buf.len() / 2 {
+            let remaining = buf.len() - *head;
+            buf.copy_within(*head.., 0);
+            buf.truncate(remaining);
+            *head = 0;
+        }
+    }
+
+    #[inline]
+    fn dc_block_broadcast(&mut self, sample: f32) -> f32 {
+        let filtered = self.dc_block(0, sample);
+        for channel in 1..self.channels {
+            self.dc_x[channel] = sample;
+            self.dc_y[channel] = filtered;
+        }
+        filtered
+    }
+
     #[allow(clippy::needless_range_loop)]
     fn process(&mut self, data: &mut [u8]) {
         if self.channels == 0 || data.len() % (self.channels * 2) != 0 {
@@ -645,15 +658,36 @@ impl RNNoiseProcessor {
 
         // Mix interleaved input down to mono.  For a typical single-capsule
         // mic L == R, so this is lossless; it also halves RNNoise call count.
-        let channels_f = self.channels as f32;
-        self.in_buf.reserve(frame_count);
-        for frame_idx in 0..frame_count {
-            let mut sum = 0.0f32;
-            for ch in 0..self.channels {
-                sum += samples[frame_idx * self.channels + ch] as f32;
+        let write_start = self.in_buf.len();
+        self.in_buf.resize(write_start + frame_count, 0.0);
+        match self.channels {
+            1 => {
+                for (dst, &sample) in self.in_buf[write_start..].iter_mut().zip(samples.iter()) {
+                    *dst = sample as f32;
+                }
             }
-            self.in_buf.push(sum / channels_f);
+            2 => {
+                for (dst, frame) in self.in_buf[write_start..].iter_mut().zip(samples.chunks_exact(2)) {
+                    *dst = (frame[0] as f32 + frame[1] as f32) * 0.5;
+                }
+            }
+            _ => {
+                let channels_f = self.channels as f32;
+                for (dst, frame) in self.in_buf[write_start..]
+                    .iter_mut()
+                    .zip(samples.chunks_exact(self.channels))
+                {
+                    let mut sum = 0.0f32;
+                    for &sample in frame {
+                        sum += sample as f32;
+                    }
+                    *dst = sum / channels_f;
+                }
+            }
         }
+
+        let complete_frames = (self.in_buf.len() - self.in_head) / AUDIO_FRAME_SIZE;
+        self.out_buf.reserve(complete_frames.saturating_mul(AUDIO_FRAME_SIZE));
 
         // Process complete 480-sample RNNoise frames from the mono queue.
         while (self.in_buf.len() - self.in_head) >= AUDIO_FRAME_SIZE {
@@ -665,7 +699,10 @@ impl RNNoiseProcessor {
                 .state
                 .process_frame(self.frame_out.as_mut_slice(), self.frame_in.as_slice());
 
-            let energy: f32 = self.frame_out.iter().map(|s| s * s).sum();
+            let mut energy = 0.0f32;
+            for &sample in self.frame_out.iter() {
+                energy += sample * sample;
+            }
             let frame_rms = (energy / AUDIO_FRAME_SIZE as f32).sqrt();
 
             let floor_alpha = if vad < Self::VAD_NOISE_THRESHOLD {
@@ -720,29 +757,46 @@ impl RNNoiseProcessor {
             self.gain = current_gain;
             self.primed = true;
             self.in_head += AUDIO_FRAME_SIZE;
-            if self.in_head > 0 && self.in_head >= self.in_buf.len() / 2 {
-                self.in_buf.drain(0..self.in_head);
-                self.in_head = 0;
-            }
+            Self::compact_queue(&mut self.in_buf, &mut self.in_head);
         }
 
         // Broadcast processed mono output to all interleaved channels,
         // with per-channel DC blocking and soft limiting.
         let available = (self.out_buf.len() - self.out_head).min(frame_count);
-        for frame_idx in 0..available {
-            let mono_sample = self.out_buf[self.out_head + frame_idx];
-            for ch in 0..self.channels {
-                let dc_blocked = self.dc_block(ch, mono_sample);
-                samples[frame_idx * self.channels + ch] =
-                    soft_limit(dc_blocked).clamp(-32768.0, 32767.0) as i16;
+        match self.channels {
+            1 => {
+                for frame_idx in 0..available {
+                    let mono_sample = self.out_buf[self.out_head + frame_idx];
+                    samples[frame_idx] =
+                        soft_limit(self.dc_block_broadcast(mono_sample)).clamp(-32768.0, 32767.0)
+                            as i16;
+                }
+            }
+            2 => {
+                for frame_idx in 0..available {
+                    let mono_sample = self.out_buf[self.out_head + frame_idx];
+                    let limited = soft_limit(self.dc_block_broadcast(mono_sample))
+                        .clamp(-32768.0, 32767.0) as i16;
+                    let sample_idx = frame_idx * 2;
+                    samples[sample_idx] = limited;
+                    samples[sample_idx + 1] = limited;
+                }
+            }
+            _ => {
+                for frame_idx in 0..available {
+                    let mono_sample = self.out_buf[self.out_head + frame_idx];
+                    let limited = soft_limit(self.dc_block_broadcast(mono_sample))
+                        .clamp(-32768.0, 32767.0) as i16;
+                    let sample_idx = frame_idx * self.channels;
+                    for channel in 0..self.channels {
+                        samples[sample_idx + channel] = limited;
+                    }
+                }
             }
         }
 
         self.out_head += available;
-        if self.out_head > 0 && self.out_head >= self.out_buf.len() / 2 {
-            self.out_buf.drain(0..self.out_head);
-            self.out_head = 0;
-        }
+        Self::compact_queue(&mut self.out_buf, &mut self.out_head);
 
         // For any frames the output buffer couldn't cover, leave the original
         // WASAPI PCM in place (no noise reduction for those samples).  Injecting
