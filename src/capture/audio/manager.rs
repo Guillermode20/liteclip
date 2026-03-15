@@ -11,7 +11,7 @@ use std::thread;
 use std::time::Duration;
 use tracing::{debug, error, warn};
 
-use crate::capture::audio::mic::WasapiMicConfig;
+use crate::capture::audio::mic::{NoiseSuppressorSettings, WasapiMicConfig};
 use crate::capture::audio::mixer::AudioMixer;
 use crate::capture::audio::system::WasapiSystemConfig;
 use crate::capture::audio::{WasapiMicCapture, WasapiSystemCapture};
@@ -84,6 +84,22 @@ impl WasapiAudioManager {
                     Some(config.mic_device.clone())
                 },
                 noise_reduction: config.mic_noise_reduction,
+                noise_suppressor_settings: NoiseSuppressorSettings {
+                    min_gain: config.mic_ns_min_gain_percent as f32 / 100.0,
+                    vad_noise_threshold: config.mic_ns_vad_noise_threshold_percent as f32 / 100.0,
+                    vad_gate_threshold: config.mic_ns_vad_gate_threshold_percent as f32 / 100.0,
+                    snr_min: config.mic_ns_snr_min_tenths as f32 / 10.0,
+                    snr_max: config.mic_ns_snr_max_tenths as f32 / 10.0,
+                    hangover_frames: config.mic_ns_hangover_frames,
+                    noise_floor_fast_alpha: config.mic_ns_noise_floor_fast_percent as f32 / 100.0,
+                    noise_floor_slow_alpha: config.mic_ns_noise_floor_slow_percent as f32 / 100.0,
+                    attack_alpha: NoiseSuppressorSettings::alpha_from_ms(
+                        config.mic_ns_attack_ms as f32,
+                    ),
+                    release_alpha: NoiseSuppressorSettings::alpha_from_ms(
+                        config.mic_ns_release_ms as f32,
+                    ),
+                },
             };
 
             if let Err(e) = mic_capture.start(mic_config) {

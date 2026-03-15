@@ -90,6 +90,36 @@ pub fn default_compression_attack() -> u8 {
 pub fn default_compression_release() -> u8 {
     100 // 100ms
 }
+pub fn default_mic_ns_min_gain_percent() -> u8 {
+    1
+}
+pub fn default_mic_ns_vad_noise_threshold_percent() -> u8 {
+    25
+}
+pub fn default_mic_ns_vad_gate_threshold_percent() -> u8 {
+    55
+}
+pub fn default_mic_ns_snr_min_tenths() -> u8 {
+    12
+}
+pub fn default_mic_ns_snr_max_tenths() -> u8 {
+    60
+}
+pub fn default_mic_ns_hangover_frames() -> u8 {
+    10
+}
+pub fn default_mic_ns_noise_floor_fast_percent() -> u8 {
+    10
+}
+pub fn default_mic_ns_noise_floor_slow_percent() -> u8 {
+    1
+}
+pub fn default_mic_ns_attack_ms() -> u8 {
+    1
+}
+pub fn default_mic_ns_release_ms() -> u8 {
+    30
+}
 pub(super) fn default_hotkey_save() -> String {
     "Alt+F9".to_string()
 }

@@ -25,6 +25,75 @@ use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 use crate::buffer::ring::qpc_frequency;
 use crate::encode::{EncodedPacket, StreamType};
 
+/// Runtime-tunable settings for microphone noise suppression.
+#[derive(Debug, Clone)]
+pub struct NoiseSuppressorSettings {
+    pub min_gain: f32,
+    pub vad_noise_threshold: f32,
+    pub vad_gate_threshold: f32,
+    pub snr_min: f32,
+    pub snr_max: f32,
+    pub hangover_frames: u8,
+    pub noise_floor_fast_alpha: f32,
+    pub noise_floor_slow_alpha: f32,
+    pub attack_alpha: f32,
+    pub release_alpha: f32,
+}
+
+impl Default for NoiseSuppressorSettings {
+    fn default() -> Self {
+        Self {
+            min_gain: 0.004,
+            vad_noise_threshold: 0.25,
+            vad_gate_threshold: 0.55,
+            snr_min: 1.2,
+            snr_max: 6.0,
+            hangover_frames: 10,
+            noise_floor_fast_alpha: 0.10,
+            noise_floor_slow_alpha: 0.01,
+            attack_alpha: Self::alpha_from_ms(1.0),
+            release_alpha: Self::alpha_from_ms(30.0),
+        }
+    }
+}
+
+impl NoiseSuppressorSettings {
+    #[inline]
+    pub fn alpha_from_ms(ms: f32) -> f32 {
+        if ms <= 0.0 {
+            return 1.0;
+        }
+        let sample_rate = 48_000.0;
+        let tau_seconds = ms / 1000.0;
+        let alpha = 1.0 - (-1.0 / (sample_rate * tau_seconds)).exp();
+        alpha.clamp(0.000001, 1.0)
+    }
+
+    fn sanitize(&mut self) {
+        self.min_gain = self.min_gain.clamp(0.0, 0.2);
+        self.vad_noise_threshold = self.vad_noise_threshold.clamp(0.0, 0.95);
+        self.vad_gate_threshold = self.vad_gate_threshold.clamp(0.05, 1.0);
+        if self.vad_gate_threshold <= self.vad_noise_threshold {
+            self.vad_gate_threshold = (self.vad_noise_threshold + 0.01).min(1.0);
+        }
+
+        self.snr_min = self.snr_min.clamp(0.5, 10.0);
+        self.snr_max = self.snr_max.clamp(1.0, 15.0);
+        if self.snr_max <= self.snr_min {
+            self.snr_max = (self.snr_min + 0.1).min(15.0);
+        }
+
+        self.noise_floor_fast_alpha = self.noise_floor_fast_alpha.clamp(0.001, 0.5);
+        self.noise_floor_slow_alpha = self.noise_floor_slow_alpha.clamp(0.001, 0.2);
+        if self.noise_floor_slow_alpha > self.noise_floor_fast_alpha {
+            self.noise_floor_slow_alpha = self.noise_floor_fast_alpha;
+        }
+
+        self.attack_alpha = self.attack_alpha.clamp(0.000001, 1.0);
+        self.release_alpha = self.release_alpha.clamp(0.000001, 1.0);
+    }
+}
+
 /// Configuration for WASAPI microphone capture
 #[derive(Debug, Clone)]
 pub struct WasapiMicConfig {
@@ -34,6 +103,7 @@ pub struct WasapiMicConfig {
     pub buffer_duration: Duration,
     pub device_id: Option<String>, // None for default device
     pub noise_reduction: bool,     // Enable AI noise reduction (nnnoiseless)
+    pub noise_suppressor_settings: NoiseSuppressorSettings,
 }
 
 impl Default for WasapiMicConfig {
@@ -45,6 +115,7 @@ impl Default for WasapiMicConfig {
             buffer_duration: Duration::from_millis(100),
             device_id: None,
             noise_reduction: true,
+            noise_suppressor_settings: NoiseSuppressorSettings::default(),
         }
     }
 }
@@ -221,7 +292,10 @@ impl WasapiMicCapture {
             && config.sample_rate == 48000
             && config.bits_per_sample == 16
         {
-            Some(NoiseSuppressor::new(config.channels as usize))
+            Some(NoiseSuppressor::new(
+                config.channels as usize,
+                config.noise_suppressor_settings,
+            ))
         } else {
             None
         };
@@ -395,113 +469,69 @@ impl WasapiMicCapture {
 
 /// Advanced noise suppressor using `nnnoiseless` (RNNoise) for 48kHz 16-bit PCM audio.
 ///
-/// Key improvements over a naive frame-by-frame approach:
+/// Key improvements:
 ///
-/// 1. **Overlap-add with Hann window (50% hop)** — eliminates discontinuities at frame
-///    boundaries that cause crackling.
-/// 2. **VAD-based adaptive gain** — uses the voice-activity probability returned by RNNoise
+/// 1. **VAD-based adaptive gain** — uses the voice-activity probability returned by RNNoise
 ///    to smoothly gate between denoised and attenuated audio instead of slamming to silence.
-/// 3. **Attack / release smoothing** — fast attack (≈2 ms) to catch speech onsets, slow
-///    release (≈80 ms) to let natural tails ring out.
-/// 4. **Comfort noise** — injects a very quiet shaped noise floor so silence never sounds
-///    unnaturally dead.
+/// 2. **Adaptive noise-floor tracking** — estimates each channel's background floor and
+///    closes the gate harder when SNR is poor.
+/// 3. **Per-sample smooth gain interpolation** — eliminates discontinuities at frame boundaries.
+/// 4. **Speech hangover** — keeps speech tails natural while still cutting static between words.
 /// 5. **DC blocking filter** — removes low-frequency drift that can build up across frames.
 /// 6. **Soft limiter** — prevents clipping without hard edges.
 struct NoiseSuppressor {
     channels: usize,
     states: Vec<Box<nnnoiseless::DenoiseState<'static>>>,
-
-    /// Per-channel ring of the *previous* windowed frame (for overlap-add output).
-    prev_frame: Vec<[f32; Self::FRAME_SIZE]>,
+    settings: NoiseSuppressorSettings,
 
     /// Interleaved f32 input accumulator.
     in_buf: Vec<f32>,
 
-    /// Interleaved f32 output accumulator (ready to convert back to i16).
+    /// Interleaved f32 output accumulator.
     out_buf: Vec<f32>,
 
-    /// Per-channel smoothed gain (0.0 = silent, 1.0 = full signal).
+    /// Per-channel smoothed gain from the *previous* frame.
     gain: Vec<f32>,
+
+    /// Per-channel running background level estimate (RMS in i16 domain).
+    noise_floor: Vec<f32>,
+
+    /// Per-channel gate hangover (in frames) to avoid chopping trailing syllables.
+    speech_hangover: Vec<u8>,
 
     /// Per-channel DC-blocker state: last input, last output.
     dc_x: Vec<f32>,
     dc_y: Vec<f32>,
-
-    /// Pre-computed Hann analysis window (length = FRAME_SIZE).
-    window: [f32; Self::FRAME_SIZE],
-
-    /// Simple PRNG state for comfort noise.
-    rng_state: u32,
-
-    /// Whether this is the very first frame (skip overlap for first).
-    first_frame: bool,
 }
 
 impl NoiseSuppressor {
     /// RNNoise fixed frame size: 480 samples (10 ms at 48 kHz).
     const FRAME_SIZE: usize = 480;
-    /// Hop size for 50% overlap.
-    const HOP_SIZE: usize = Self::FRAME_SIZE / 2; // 240 samples, 5 ms
-
-    // --- Gain smoothing time constants (in frames, where 1 frame = 5 ms at hop rate) ---
-    /// Attack: ~2 ms → coefficient per hop ≈ 0.35
-    const ATTACK_COEFF: f32 = 0.35;
-    /// Release: ~80 ms → coefficient per hop ≈ 0.04
-    const RELEASE_COEFF: f32 = 0.04;
-
-    /// Minimum gain floor — never gate below this. Keeps a whisper of the processed
-    /// signal audible so the listener doesn't perceive "pumping".
-    const MIN_GAIN: f32 = 0.02;
-
-    /// Comfort noise amplitude (RMS). Very quiet — about −66 dBFS.
-    const COMFORT_NOISE_AMP: f32 = 50.0;
-
-    /// VAD threshold below which we consider the frame "non-speech" and start
-    /// closing the gate.
-    const VAD_GATE_THRESHOLD: f32 = 0.35;
 
     /// DC blocking filter coefficient (HPF at ~20 Hz for 48 kHz).
     const DC_COEFF: f32 = 0.9975;
 
     #[allow(clippy::needless_range_loop)]
-    fn new(channels: usize) -> Self {
+    fn new(channels: usize, mut settings: NoiseSuppressorSettings) -> Self {
         let mut states = Vec::with_capacity(channels);
         for _ in 0..channels {
             states.push(nnnoiseless::DenoiseState::new());
         }
 
-        // Pre-compute Hann window
-        let mut window = [0.0f32; Self::FRAME_SIZE];
-        for i in 0..Self::FRAME_SIZE {
-            let t = i as f32 / (Self::FRAME_SIZE - 1) as f32;
-            window[i] = 0.5 * (1.0 - (2.0 * std::f32::consts::PI * t).cos());
-        }
+        settings.sanitize();
 
         Self {
             channels,
-            prev_frame: vec![[0.0; Self::FRAME_SIZE]; channels],
             in_buf: Vec::new(),
             out_buf: Vec::new(),
+            settings,
             gain: vec![0.0; channels],
+            noise_floor: vec![300.0; channels],
+            speech_hangover: vec![0; channels],
             dc_x: vec![0.0; channels],
             dc_y: vec![0.0; channels],
-            window,
             states,
-            rng_state: 0xDEAD_BEEFu32,
-            first_frame: true,
         }
-    }
-
-    /// Fast xorshift32 PRNG — returns a value in [-1, 1].
-    #[inline]
-    fn next_noise(&mut self) -> f32 {
-        let mut s = self.rng_state;
-        s ^= s << 13;
-        s ^= s >> 17;
-        s ^= s << 5;
-        self.rng_state = s;
-        // Map u32 → [-1.0, 1.0]
-        (s as i32) as f32 / (i32::MAX as f32)
     }
 
     /// Apply DC-blocking high-pass filter to a single sample for the given channel.
@@ -544,18 +574,11 @@ impl NoiseSuppressor {
             self.in_buf.push(*s as f32);
         }
 
-        // --- Overlap-add processing with 50% hop ---
-        //
-        // We need at least one full FRAME_SIZE of interleaved samples to produce output.
-        // Each iteration we advance by HOP_SIZE interleaved samples, producing HOP_SIZE
-        // output samples per channel.
         let interleaved_frame = Self::FRAME_SIZE * self.channels;
-        let interleaved_hop = Self::HOP_SIZE * self.channels;
 
         while self.in_buf.len() >= interleaved_frame {
-            // We will produce `HOP_SIZE` interleaved output samples
             let out_start = self.out_buf.len();
-            self.out_buf.resize(out_start + interleaved_hop, 0.0);
+            self.out_buf.resize(out_start + interleaved_frame, 0.0);
 
             for ch in 0..self.channels {
                 // De-interleave this channel's FRAME_SIZE samples
@@ -568,65 +591,72 @@ impl NoiseSuppressor {
                 let mut channel_denoised = [0.0f32; Self::FRAME_SIZE];
                 let vad = self.states[ch].process_frame(&mut channel_denoised, &channel_in);
 
+                // Measure per-frame RMS in the i16 amplitude domain.
+                let mut energy = 0.0f32;
+                for sample in channel_denoised {
+                    energy += sample * sample;
+                }
+                let frame_rms = (energy / Self::FRAME_SIZE as f32).sqrt();
+
+                // Update background floor. Learn quickly in non-speech, slowly otherwise.
+                let floor = &mut self.noise_floor[ch];
+                let alpha = if vad < self.settings.vad_noise_threshold {
+                    self.settings.noise_floor_fast_alpha
+                } else {
+                    self.settings.noise_floor_slow_alpha
+                };
+                *floor += alpha * (frame_rms - *floor);
+                *floor = floor.max(10.0);
+
+                // SNR-derived gate confidence. Low SNR means likely static/noise.
+                let snr = frame_rms / (*floor + 1.0);
+                let snr_gate = ((snr - self.settings.snr_min)
+                    / (self.settings.snr_max - self.settings.snr_min))
+                    .clamp(0.0, 1.0);
+
+                // VAD-derived confidence.
+                let vad_gate = ((vad - self.settings.vad_noise_threshold)
+                    / (self.settings.vad_gate_threshold - self.settings.vad_noise_threshold))
+                    .clamp(0.0, 1.0);
+
                 // --- Adaptive gain from VAD ---
-                let target_gain = if vad >= Self::VAD_GATE_THRESHOLD {
-                    // Speech detected: open gate fully
-                    1.0
-                } else {
-                    // Below threshold: map linearly to [MIN_GAIN, partial]
-                    // so it doesn't slam shut
-                    Self::MIN_GAIN + (1.0 - Self::MIN_GAIN) * (vad / Self::VAD_GATE_THRESHOLD)
-                };
+                let mut gate_confidence = vad_gate.max(snr_gate);
 
-                // Smooth gain with asymmetric attack/release
-                let coeff = if target_gain > self.gain[ch] {
-                    Self::ATTACK_COEFF
-                } else {
-                    Self::RELEASE_COEFF
-                };
-                self.gain[ch] += coeff * (target_gain - self.gain[ch]);
+                if vad >= self.settings.vad_gate_threshold {
+                    self.speech_hangover[ch] = self.settings.hangover_frames;
+                } else if self.speech_hangover[ch] > 0 {
+                    self.speech_hangover[ch] -= 1;
+                    // Keep some openness for trailing phonemes while release smoothing handles fade-out.
+                    gate_confidence = gate_confidence.max(0.60);
+                }
 
-                // --- Window, apply gain, overlap-add ---
-                // Current windowed frame (full FRAME_SIZE)
-                let mut cur_windowed = [0.0f32; Self::FRAME_SIZE];
+                let target_gain =
+                    self.settings.min_gain + (1.0 - self.settings.min_gain) * gate_confidence;
+
+                let mut current_gain = self.gain[ch];
+
                 for i in 0..Self::FRAME_SIZE {
-                    let denoised = channel_denoised[i] * self.gain[ch];
-                    // Add comfort noise scaled by (1 - gain) so it only appears in quiet parts
-                    let comfort =
-                        self.next_noise() * Self::COMFORT_NOISE_AMP * (1.0 - self.gain[ch]);
-                    cur_windowed[i] = (denoised + comfort) * self.window[i];
+                    // Smooth gain toward target_gain per sample
+                    let alpha = if target_gain > current_gain {
+                        self.settings.attack_alpha
+                    } else {
+                        self.settings.release_alpha
+                    };
+                    current_gain += alpha * (target_gain - current_gain);
+
+                    let denoised = channel_denoised[i] * current_gain;
+
+                    let dc_blocked = self.dc_block(ch, denoised);
+                    let limited = Self::soft_limit(dc_blocked);
+
+                    self.out_buf[out_start + i * self.channels + ch] = limited;
                 }
 
-                // Overlap-add: the output for this hop is the *second half* of the previous
-                // frame plus the *first half* of the current frame.
-                if !self.first_frame {
-                    for i in 0..Self::HOP_SIZE {
-                        let overlap_sample =
-                            self.prev_frame[ch][Self::HOP_SIZE + i] + cur_windowed[i];
-                        let dc_blocked = self.dc_block(ch, overlap_sample);
-                        let limited = Self::soft_limit(dc_blocked);
-                        self.out_buf[out_start + i * self.channels + ch] = limited;
-                    }
-                } else {
-                    // First frame: no previous data, just output the first half directly
-                    // with reduced amplitude to fade in
-                    for i in 0..Self::HOP_SIZE {
-                        let fade = i as f32 / Self::HOP_SIZE as f32; // linear fade-in
-                        let sample = cur_windowed[i] * fade;
-                        let dc_blocked = self.dc_block(ch, sample);
-                        let limited = Self::soft_limit(dc_blocked);
-                        self.out_buf[out_start + i * self.channels + ch] = limited;
-                    }
-                }
-
-                // Store current frame for next overlap
-                self.prev_frame[ch] = cur_windowed;
+                self.gain[ch] = current_gain;
             }
 
-            self.first_frame = false;
-
-            // Advance the input buffer by one hop (not a full frame, because we overlap)
-            self.in_buf.drain(0..interleaved_hop);
+            // Advance the input buffer by one full frame (RNNoise works in contiguous blocks)
+            self.in_buf.drain(0..interleaved_frame);
         }
 
         // --- Write processed output back to the i16 buffer ---

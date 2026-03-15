@@ -248,6 +248,45 @@ impl SettingsApp {
                         "Mic Noise Reduction (AI)",
                     );
 
+                    if self.config.audio.mic_noise_reduction {
+                        ui.indent("noise_suppression_settings", |ui| {
+                            ui.add(
+                                egui::Slider::new(
+                                    &mut self.config.audio.mic_ns_vad_gate_threshold_percent,
+                                    5..=100,
+                                )
+                                .text("Sensitivity"),
+                            )
+                            .on_hover_text(
+                                "Higher values make the gate close more aggressively on background noise.",
+                            );
+
+                            ui.add(
+                                egui::Slider::new(
+                                    &mut self.config.audio.mic_ns_hangover_frames,
+                                    0..=50,
+                                )
+                                .text("Voice Tail Duration"),
+                            )
+                            .on_hover_text(
+                                "How long to keep the microphone open after you stop speaking.",
+                            );
+
+                            if ui.link("Reset to Defaults").clicked() {
+                                self.config.audio.mic_ns_min_gain_percent = 1;
+                                self.config.audio.mic_ns_vad_noise_threshold_percent = 25;
+                                self.config.audio.mic_ns_vad_gate_threshold_percent = 55;
+                                self.config.audio.mic_ns_snr_min_tenths = 12;
+                                self.config.audio.mic_ns_snr_max_tenths = 60;
+                                self.config.audio.mic_ns_hangover_frames = 10;
+                                self.config.audio.mic_ns_noise_floor_fast_percent = 10;
+                                self.config.audio.mic_ns_noise_floor_slow_percent = 1;
+                                self.config.audio.mic_ns_attack_ms = 1;
+                                self.config.audio.mic_ns_release_ms = 30;
+                            }
+                        });
+                    }
+
                     ui.add_space(10.0);
                     ui.separator();
                     ui.add_space(10.0);
