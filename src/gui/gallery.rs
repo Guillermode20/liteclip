@@ -86,7 +86,6 @@ struct EditorState {
     video: VideoEntry,
     current_time_secs: f64,
     is_playing: bool,
-    preview_final: bool,
     last_tick: Instant,
     cut_points: Vec<f64>,
     snippet_enabled: Vec<bool>,
@@ -121,7 +120,6 @@ impl EditorState {
             video,
             current_time_secs: 0.0,
             is_playing: false,
-            preview_final: false,
             last_tick: Instant::now(),
             cut_points: Vec::new(),
             snippet_enabled: vec![true],
@@ -389,12 +387,6 @@ impl ClipCompressApp {
             return;
         };
 
-        if editor.is_playing && !editor.preview_final {
-            editor.preview_frame_in_flight = false;
-            editor.pending_preview_request = None;
-            return;
-        }
-
         let timestamp_secs = timestamp_secs.clamp(0.0, editor.duration_secs());
 
         // Skip if decoder is already processing a request
@@ -465,7 +457,7 @@ impl ClipCompressApp {
             editor.playback.poll();
 
             // Live playback path: drain the frame queue for frames due by now.
-            if editor.is_playing && !editor.preview_final {
+            if editor.is_playing {
                 let wall_time = editor.playback.playback_position_secs();
                 let (queue_len, _) = editor.playback.cache_stats();
                 if let Some(image) = editor.playback.take_playback_frame() {
@@ -495,7 +487,7 @@ impl ClipCompressApp {
                 }
             }
 
-            // Static / single-frame preview path (paused or preview_final mode).
+            // Static / single-frame preview path (paused).
             if let Some(frame) = editor.playback.take_frame() {
                 let color_image = color_image_from_rgba(&frame.image);
                 if let Some(texture) = &mut editor.preview_texture {
@@ -601,7 +593,7 @@ impl ClipCompressApp {
             let repaint_ms = self
                 .editor
                 .as_ref()
-                .filter(|e| e.is_playing && !e.preview_final)
+                .filter(|e| e.is_playing)
                 .map(|e| (1000.0 / e.playback.playback_fps()).clamp(8.0, 50.0) as u64)
                 .unwrap_or(80);
             ctx.request_repaint_after(Duration::from_millis(repaint_ms));
@@ -729,28 +721,15 @@ fn render_preview_panel(
                 } else {
                     editor.last_tick = Instant::now();
                     editor.is_playing = true;
-                    if editor.preview_final {
-                        editor.current_time_secs = clamp_to_enabled_playback_time(
-                            editor.current_time_secs,
-                            editor.duration_secs(),
-                            &editor.cut_points,
-                            &editor.snippet_enabled,
-                        );
-                        outcome.preview_request = Some(editor.current_time_secs);
-                    } else {
-                        editor.preview_frame_in_flight = false;
-                        editor.pending_preview_request = None;
-                        editor.playback.play_from(editor.current_time_secs);
-                    }
+                    editor.preview_frame_in_flight = false;
+                    editor.pending_preview_request = None;
+                    editor.playback.play_from(editor.current_time_secs);
                 }
             }
             ui.label(format!(
                 "Current: {}",
                 format_timestamp_precise(editor.current_time_secs)
             ));
-            if editor.preview_final {
-                ui.label(egui::RichText::new("Previewing kept ranges only").strong());
-            }
         });
 
         let duration = editor.duration_secs();
@@ -808,8 +787,9 @@ fn render_timeline_panel(
     egui::Frame::group(ui.style()).show(ui, |ui| {
         ui.label(egui::RichText::new("Timeline").strong());
         ui.add_space(4.0);
-        render_timeline(ui, editor, outcome);
-        ui.add_space(8.0);
+
+        // Controls are above the timeline so they remain visible even when the
+        // timeline is constrained vertically.
         ui.horizontal(|ui| {
             if ui.button("Add Cut at Playhead").clicked()
                 && add_cut_point(editor, editor.current_time_secs)
@@ -833,6 +813,17 @@ fn render_timeline_panel(
                 outcome.preview_request = Some(editor.current_time_secs);
             }
         });
+
+        ui.add_space(8.0);
+
+        // Make the timeline scrollable in the vertical direction so it can always
+        // be fully interacted with when the window is too short.
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .max_height(260.0)
+            .show(ui, |ui| {
+                render_timeline(ui, editor, outcome);
+            });
     });
 }
 
@@ -1052,7 +1043,7 @@ fn render_editor_sidebar(
 fn render_action_section(
     ui: &mut egui::Ui,
     editor: &mut EditorState,
-    outcome: &mut EditorUiOutcome,
+    _outcome: &mut EditorUiOutcome,
 ) {
     let can_export = !editor.kept_ranges().is_empty() && editor.target_size_mb > 0;
 
@@ -1060,46 +1051,14 @@ fn render_action_section(
         ui.label(egui::RichText::new("Actions").strong());
         ui.add_space(6.0);
 
-        let preview_label = if editor.preview_final {
-            "Stop Preview"
-        } else {
-            "Preview Final"
-        };
-
         if ui
-            .add_sized(
-                [ui.available_width(), 32.0],
-                egui::Button::new(preview_label),
+            .add_enabled(
+                can_export,
+                egui::Button::new("Export Clip").min_size(egui::vec2(ui.available_width(), 32.0)),
             )
             .clicked()
         {
-            editor.playback.pause_at(editor.current_time_secs);
-            editor.preview_final = !editor.preview_final;
-            editor.is_playing = editor.preview_final;
-            editor.last_tick = Instant::now();
-            if editor.preview_final {
-                editor.current_time_secs = clamp_to_enabled_playback_time(
-                    editor.current_time_secs,
-                    editor.duration_secs(),
-                    &editor.cut_points,
-                    &editor.snippet_enabled,
-                );
-            }
-            outcome.preview_request = Some(editor.current_time_secs);
-        }
-
-        ui.add_space(6.0);
-
-        if ui
-            .add_enabled(can_export, egui::Button::new("Export Clip"))
-            .clicked()
-        {
             start_export(editor);
-        }
-
-        if editor.preview_final {
-            ui.add_space(8.0);
-            ui.label(egui::RichText::new("Previewing kept ranges only").strong());
         }
     });
 }
@@ -1202,37 +1161,11 @@ fn update_playback_clock(editor: &mut EditorState, outcome: &mut EditorUiOutcome
         return;
     }
 
-    if !editor.preview_final {
-        editor.current_time_secs = editor.playback.playback_position_secs();
-        if editor.current_time_secs >= editor.duration_secs() {
-            editor.current_time_secs = editor.duration_secs();
-            editor.is_playing = false;
-            editor.playback.pause_at(editor.current_time_secs);
-        }
-        return;
-    }
-
-    let now = Instant::now();
-    let delta = now.duration_since(editor.last_tick).as_secs_f64();
-    editor.last_tick = now;
-    if delta <= 0.0 {
-        return;
-    }
-
-    editor.current_time_secs += delta;
-    if editor.preview_final {
-        editor.current_time_secs = clamp_to_enabled_playback_time(
-            editor.current_time_secs,
-            editor.duration_secs(),
-            &editor.cut_points,
-            &editor.snippet_enabled,
-        );
-    }
-
+    editor.current_time_secs = editor.playback.playback_position_secs();
     if editor.current_time_secs >= editor.duration_secs() {
         editor.current_time_secs = editor.duration_secs();
         editor.is_playing = false;
-        editor.preview_final = false;
+        editor.playback.pause_at(editor.current_time_secs);
     }
 
     if editor.preview_frame_in_flight {
@@ -1282,7 +1215,6 @@ fn start_export(editor: &mut EditorState) {
     editor.error_message = None;
     editor.playback.pause_at(editor.current_time_secs);
     editor.is_playing = false;
-    editor.preview_final = false;
 }
 
 fn poll_editor_export_updates(editor: &mut EditorState, outcome: &mut EditorUiOutcome) {
@@ -1586,6 +1518,7 @@ fn enabled_time_ranges(
         .collect()
 }
 
+#[allow(dead_code)]
 fn clamp_to_enabled_playback_time(
     time_secs: f64,
     duration_secs: f64,
