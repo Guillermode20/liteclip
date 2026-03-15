@@ -1,11 +1,10 @@
 use eframe::egui;
 
 use super::{
-    add_cut_point, clamp_selected_snippet_index, cycle_editor_focus_zone,
-    poll_editor_export_updates, remove_cut_point, render_completion_screen,
-    render_editor_workspace, seek_editor, start_export, toggle_editor_playback,
-    update_playback_clock, ClipCompressApp, EditorFocusZone, EditorUiOutcome,
-    EDITOR_LARGE_SEEK_SECS, EDITOR_SMALL_SEEK_SECS,
+    add_cut_point, clamp_selected_snippet_index, poll_editor_export_updates, remove_cut_point,
+    render_completion_screen, render_editor_workspace, seek_editor, start_export,
+    toggle_editor_playback, update_playback_clock, ClipCompressApp, EditorFocusZone,
+    EditorUiOutcome, EDITOR_LARGE_SEEK_SECS, EDITOR_SMALL_SEEK_SECS,
 };
 
 pub(super) fn render_editor_ui(app: &mut ClipCompressApp, ui: &mut egui::Ui) -> EditorUiOutcome {
@@ -34,11 +33,11 @@ pub(super) fn render_editor_ui(app: &mut ClipCompressApp, ui: &mut egui::Ui) -> 
         ui.heading(format!("Editing: {}", editor.video.filename));
         ui.separator();
         ui.label(match editor.focus_zone {
-            EditorFocusZone::MainPanel => "Keyboard Focus: Main Panel (Tab to switch)",
-            EditorFocusZone::Sidebar => "Keyboard Focus: Sidebar (Tab to switch)",
+            EditorFocusZone::MainPanel => "Keyboard Focus: Main Panel",
+            EditorFocusZone::Sidebar => "Keyboard Focus: Sidebar",
         });
         ui.label(egui::RichText::new(
-            "Hotkeys: Space=Play/Pause · ←/→=Seek · Home/End=Jump · A=Add cut · Del=Remove cut · Tab=Switch focus · Esc=Back · Ctrl+E/S=Export · Ctrl+Z=Undo",
+            "Hotkeys: Space=Play/Pause · ←/→=Seek · Home/End=Jump · A=Add cut · Del=Remove cut · Esc=Back · Ctrl+E/S=Export · Ctrl+Z=Undo",
         )
         .weak()
         .small());
@@ -83,11 +82,6 @@ fn handle_editor_shortcuts(
 ) {
     if ctx.wants_keyboard_input() {
         return;
-    }
-
-    if ctx.input(|i| i.key_pressed(egui::Key::Tab)) {
-        let backwards = ctx.input(|i| i.modifiers.shift);
-        cycle_editor_focus_zone(editor, backwards);
     }
 
     if export_active {

@@ -23,7 +23,7 @@ pub(super) fn render_browser_ui(app: &mut ClipCompressApp, ui: &mut egui::Ui) ->
             .unwrap_or_default()
     };
 
-    let flat_visible_videos = flatten_visible_videos(&display_groups);
+    let _flat_visible_videos = flatten_visible_videos(&display_groups);
 
     let mut filter_response = None;
     ui.horizontal(|ui| {
@@ -91,11 +91,11 @@ pub(super) fn render_browser_ui(app: &mut ClipCompressApp, ui: &mut egui::Ui) ->
     let tile_width = 220.0;
     let tile_spacing = 12.0;
     let thumb_height = 124.0;
-    let columns = ((ui.available_width() + tile_spacing) / (tile_width + tile_spacing))
+    let columns_count = ((ui.available_width() + tile_spacing) / (tile_width + tile_spacing))
         .floor()
         .max(1.0) as usize;
 
-    handle_browser_shortcuts(app, ui.ctx(), &flat_visible_videos, columns, &mut outcome);
+    // handle_browser_shortcuts(app, ui.ctx(), &flat_visible_videos, columns, &mut outcome);
 
     if app.selection_mode && !app.selected_videos.is_empty() {
         egui::TopBottomPanel::bottom("delete_panel")
@@ -178,11 +178,11 @@ pub(super) fn render_browser_ui(app: &mut ClipCompressApp, ui: &mut egui::Ui) ->
                 });
                 ui.add_space(4.0);
 
-                let group_rows = videos.len().div_ceil(columns);
+                let group_rows = videos.len().div_ceil(columns_count);
                 for row in 0..group_rows {
                     ui.horizontal(|ui| {
-                        for column in 0..columns {
-                            let index = row * columns + column;
+                        for column in 0..columns_count {
+                            let index = row * columns_count + column;
                             if index >= videos.len() {
                                 break;
                             }
@@ -300,27 +300,15 @@ pub(super) fn render_browser_ui(app: &mut ClipCompressApp, ui: &mut egui::Ui) ->
                                 .response;
 
                             let is_selected = app.selected_videos.contains(&video.path);
-                            let is_keyboard_selected = app
-                                .keyboard_selected_video
-                                .as_ref()
-                                .is_some_and(|path| *path == video.path);
+
+                            // Draw selection/focus outlines when in delete-selection mode.
                             if app.selection_mode && is_selected {
                                 let rect = response.rect.shrink(2.0);
                                 ui.painter().rect_stroke(
                                     rect,
                                     // Shrink the radius to match the inner edge of the tile frame
                                     egui::CornerRadius::same(4),
-                                    egui::Stroke::new(2.0, egui::Color32::LIGHT_BLUE),
-                                    egui::StrokeKind::Inside,
-                                );
-                            }
-
-                            if is_keyboard_selected {
-                                let rect = response.rect.shrink(6.0);
-                                ui.painter().rect_stroke(
-                                    rect,
-                                    egui::CornerRadius::same(4),
-                                    egui::Stroke::new(2.0, egui::Color32::from_rgb(236, 201, 75)),
+                                    egui::Stroke::new(2.0, egui::Color32::WHITE),
                                     egui::StrokeKind::Inside,
                                 );
                             }
@@ -333,7 +321,6 @@ pub(super) fn render_browser_ui(app: &mut ClipCompressApp, ui: &mut egui::Ui) ->
                                     egui::Sense::click(),
                                 );
                                 if interact_response.clicked() {
-                                    app.keyboard_selected_video = Some(video.path.clone());
                                     if app.selected_videos.contains(&video.path) {
                                         app.selected_videos.remove(&video.path);
                                     } else {
@@ -341,7 +328,6 @@ pub(super) fn render_browser_ui(app: &mut ClipCompressApp, ui: &mut egui::Ui) ->
                                     }
                                 }
                             } else if response.double_clicked() {
-                                app.keyboard_selected_video = Some(video.path.clone());
                                 outcome.selected_video = Some(video);
                             }
                             ui.add_space(tile_spacing);
@@ -362,6 +348,7 @@ fn flatten_visible_videos(display_groups: &[(String, Vec<VideoEntry>)]) -> Vec<V
         .collect()
 }
 
+#[allow(dead_code)]
 fn gather_selected_entries(app: &ClipCompressApp) -> Vec<VideoEntry> {
     let mut deleting = Vec::new();
     for (_, videos) in &app.videos_by_game {
@@ -374,6 +361,7 @@ fn gather_selected_entries(app: &ClipCompressApp) -> Vec<VideoEntry> {
     deleting
 }
 
+#[allow(dead_code)]
 fn move_keyboard_selection(app: &mut ClipCompressApp, videos: &[VideoEntry], delta: isize) {
     if videos.is_empty() {
         app.keyboard_selected_video = None;
@@ -389,6 +377,7 @@ fn move_keyboard_selection(app: &mut ClipCompressApp, videos: &[VideoEntry], del
     app.keyboard_selected_video = Some(videos[next_index].path.clone());
 }
 
+#[allow(dead_code)]
 fn handle_browser_shortcuts(
     app: &mut ClipCompressApp,
     ctx: &egui::Context,

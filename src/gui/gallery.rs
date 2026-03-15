@@ -36,6 +36,7 @@ const MIN_RANGE_SECS: f64 = 0.1;
 const EDITOR_SIDEBAR_WIDTH: f32 = 340.0;
 const EDITOR_SIDEBAR_MIN_WIDTH: f32 = 280.0;
 const EDITOR_STACK_BREAKPOINT: f32 = 960.0;
+#[allow(dead_code)]
 const BROWSER_DELETE_HOLD_SECS: f32 = 1.0;
 const EDITOR_SMALL_SEEK_SECS: f64 = 1.0;
 const EDITOR_LARGE_SEEK_SECS: f64 = 5.0;
@@ -84,6 +85,7 @@ struct ExportState {
     message: String,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum EditorFocusZone {
     MainPanel,
@@ -816,6 +818,7 @@ fn seek_editor(editor: &mut EditorState, outcome: &mut EditorUiOutcome, delta_se
     outcome.preview_request = Some(editor.current_time_secs);
 }
 
+#[allow(dead_code)]
 fn cycle_editor_focus_zone(editor: &mut EditorState, backwards: bool) {
     editor.focus_zone = match (editor.focus_zone, backwards) {
         (EditorFocusZone::MainPanel, false) => EditorFocusZone::Sidebar,
@@ -1150,11 +1153,7 @@ fn render_snippet_list(ui: &mut egui::Ui, editor: &mut EditorState, outcome: &mu
             .max_height(260.0)
             .show(ui, |ui| {
                 for (index, snippet) in snippets.iter().copied().enumerate() {
-                    let is_keyboard_selected = editor.selected_snippet_index == Some(index);
-                    let mut snippet_frame = egui::Frame::group(ui.style()).inner_margin(egui::Margin::same(8));
-                    if is_keyboard_selected {
-                        snippet_frame = snippet_frame.stroke(egui::Stroke::new(2.0, egui::Color32::from_rgb(236, 201, 75)));
-                    }
+                    let snippet_frame = egui::Frame::group(ui.style()).inner_margin(egui::Margin::same(8));
 
                     snippet_frame
                         .inner_margin(egui::Margin::same(8))

@@ -132,6 +132,11 @@ impl GuiManagerApp {
 
     #[cfg(not(target_os = "windows"))]
     fn new(_cc: &eframe::CreationContext<'_>, rx: Receiver<GuiMessage>) -> Self {
+        let mut visuals = cc.egui_ctx.style().visuals.clone();
+        visuals.selection.bg_fill = egui::Color32::TRANSPARENT;
+        visuals.selection.stroke = egui::Stroke::new(0.0, egui::Color32::TRANSPARENT);
+        cc.egui_ctx.set_visuals(visuals);
+
         Self {
             rx,
             settings: Arc::new(Mutex::new(None)),
