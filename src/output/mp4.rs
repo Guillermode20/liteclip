@@ -11,6 +11,7 @@ use super::{
 
 const AUDIO_BITRATE_BPS: usize = 192_000;
 const PCM_BYTES_PER_SAMPLE: usize = 2;
+const AUDIO_PACKET_JITTER_TOLERANCE_FRAMES: usize = 8;
 
 struct EncodedAudioPacket {
     data: bytes::Bytes,
@@ -351,6 +352,86 @@ fn write_borrowed_video_packet(
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::encode::StreamType;
+
+    fn qpc_for_frame_index(target_frame_index: usize) -> i64 {
+        let qpc_freq = crate::buffer::ring::qpc_frequency().max(1);
+        let approx = ((target_frame_index as i128) * (qpc_freq as i128)
+            / (AUDIO_SAMPLE_RATE as i128)) as i64;
+
+        for delta in approx.saturating_sub(4096)..=approx.saturating_add(4096) {
+            if qpc_to_sample_index(delta) == target_frame_index {
+                return delta;
+            }
+        }
+
+        approx
+    }
+
+    fn packet_from_i16_samples(samples: &[i16], pts: i64, stream: StreamType) -> EncodedPacket {
+        let data: Vec<u8> = samples.iter().flat_map(|sample| sample.to_le_bytes()).collect();
+        EncodedPacket::new(data, pts, pts, false, stream)
+    }
+
+    #[test]
+    fn mix_audio_packets_to_pcm_snaps_small_packet_jitter() {
+        let first = packet_from_i16_samples(
+            &[1000, 1000, 1001, 1001, 1002, 1002, 1003, 1003],
+            0,
+            StreamType::Microphone,
+        );
+        let second_pts = qpc_for_frame_index(5);
+        assert_eq!(qpc_to_sample_index(second_pts), 5);
+        let second = packet_from_i16_samples(
+            &[2000, 2000, 2001, 2001, 2002, 2002, 2003, 2003],
+            second_pts,
+            StreamType::Microphone,
+        );
+
+        let audio_packets = vec![&first, &second];
+        let mixed = mix_audio_packets_to_pcm(&audio_packets, 0, qpc_for_frame_index(8));
+
+        assert_eq!(mixed.len(), 16);
+        assert_eq!(
+            &mixed[..16],
+            &[1000, 1000, 1001, 1001, 1002, 1002, 1003, 1003, 2000, 2000, 2001, 2001, 2002,
+                2002, 2003, 2003]
+        );
+    }
+
+    #[test]
+    fn mix_audio_packets_to_pcm_preserves_real_gaps() {
+        let first = packet_from_i16_samples(
+            &[1000, 1000, 1001, 1001, 1002, 1002, 1003, 1003],
+            0,
+            StreamType::Microphone,
+        );
+        let second_start_frame = 4 + AUDIO_PACKET_JITTER_TOLERANCE_FRAMES + 4;
+        let second_pts = qpc_for_frame_index(second_start_frame);
+        assert_eq!(qpc_to_sample_index(second_pts), second_start_frame);
+        let second = packet_from_i16_samples(
+            &[2000, 2000, 2001, 2001, 2002, 2002, 2003, 2003],
+            second_pts,
+            StreamType::Microphone,
+        );
+
+        let audio_packets = vec![&first, &second];
+        let mixed = mix_audio_packets_to_pcm(
+            &audio_packets,
+            0,
+            qpc_for_frame_index(second_start_frame + 4),
+        );
+
+        let gap_start = 4 * AUDIO_CHANNELS as usize;
+        let gap_end = second_start_frame * AUDIO_CHANNELS as usize;
+        assert!(mixed[gap_start..gap_end].iter().all(|&sample| sample == 0));
+        assert_eq!(&mixed[gap_end..gap_end + 8], &[2000, 2000, 2001, 2001, 2002, 2002, 2003, 2003]);
+    }
+}
+
 fn default_video_frame_qpc(video_frame_rate: i32) -> i64 {
     let qpc_freq = crate::buffer::ring::qpc_frequency();
     (qpc_freq / video_frame_rate.max(1) as i64).max(1)
@@ -372,6 +453,14 @@ fn qpc_to_sample_index(delta_qpc: i64) -> usize {
     ((delta_qpc as i128) * (AUDIO_SAMPLE_RATE as i128) / (qpc_freq as i128)) as usize
 }
 
+fn audio_stream_id(packet: &EncodedPacket) -> u8 {
+    match packet.stream {
+        crate::encode::StreamType::SystemAudio => 1,
+        crate::encode::StreamType::Microphone => 2,
+        _ => 0,
+    }
+}
+
 fn mix_audio_packets_to_pcm(
     audio_packets: &[&EncodedPacket],
     base_qpc: i64,
@@ -379,15 +468,15 @@ fn mix_audio_packets_to_pcm(
 ) -> Vec<i16> {
     let mut stream_buffers: std::collections::HashMap<u8, Vec<i32>> =
         std::collections::HashMap::new();
+    let mut stream_next_indices: std::collections::HashMap<u8, usize> =
+        std::collections::HashMap::new();
+    let mut ordered_audio_packets: Vec<&EncodedPacket> = audio_packets.to_vec();
+    ordered_audio_packets.sort_by_key(|packet| (audio_stream_id(packet), packet.pts));
 
-    for packet in audio_packets {
-        let stream_id = match packet.stream {
-            crate::encode::StreamType::SystemAudio => 1,
-            crate::encode::StreamType::Microphone => 2,
-            _ => 0,
-        };
+    for packet in ordered_audio_packets {
+        let stream_id = audio_stream_id(packet);
         let start_frames = qpc_to_sample_index(packet.pts.saturating_sub(base_qpc));
-        let start_index = start_frames.saturating_mul(AUDIO_CHANNELS as usize);
+        let nominal_start_index = start_frames.saturating_mul(AUDIO_CHANNELS as usize);
 
         let samples: Vec<i16> = packet
             .data
@@ -398,6 +487,17 @@ fn mix_audio_packets_to_pcm(
         if samples.is_empty() {
             continue;
         }
+
+        let start_index = match stream_next_indices.get(&stream_id).copied() {
+            Some(next_index)
+                if nominal_start_index.abs_diff(next_index)
+                    <= AUDIO_PACKET_JITTER_TOLERANCE_FRAMES
+                        .saturating_mul(AUDIO_CHANNELS as usize) =>
+            {
+                next_index
+            }
+            _ => nominal_start_index,
+        };
 
         let required_len = start_index.saturating_add(samples.len());
         let stream_buffer = stream_buffers.entry(stream_id).or_default();
@@ -410,6 +510,8 @@ fn mix_audio_packets_to_pcm(
             // timestamp jitter overlapping and causing huge volume spikes.
             stream_buffer[start_index + offset] = sample as i32;
         }
+
+        stream_next_indices.insert(stream_id, start_index.saturating_add(required_len - start_index));
     }
 
     let video_required_samples = qpc_to_sample_index(video_end_qpc.saturating_sub(base_qpc))

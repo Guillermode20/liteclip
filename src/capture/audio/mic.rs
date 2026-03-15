@@ -15,8 +15,10 @@ use tracing::{debug, error, warn};
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::Media::Audio::{
     eCapture, eConsole, IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator, MMDeviceEnumerator,
-    AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
-    AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY, WAVEFORMATEX,
+    AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY, AUDCLNT_BUFFERFLAGS_SILENT,
+    AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR, AUDCLNT_SHAREMODE_SHARED,
+    AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+    AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY, WAVEFORMATEX,
 };
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
@@ -256,6 +258,8 @@ impl WasapiMicCapture {
             };
 
         let mut total_frames: u64 = 0;
+        let mut capture_discontinuities: u64 = 0;
+        let mut timestamp_errors: u64 = 0;
 
         let max_buffer_size = (config.sample_rate as usize / 10) * block_align as usize;
         let mut audio_buffer = BytesMut::with_capacity(max_buffer_size);
@@ -311,7 +315,29 @@ impl WasapiMicCapture {
                 unsafe { capture_client.ReleaseBuffer(frame_count) }
                     .context("IAudioCaptureClient::ReleaseBuffer failed")?;
 
-                let pts = if qpc_position > 0 {
+                if flags & (AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY.0 as u32) != 0 {
+                    capture_discontinuities = capture_discontinuities.saturating_add(1);
+                    if capture_discontinuities == 1 || capture_discontinuities % 100 == 0 {
+                        warn!(
+                            "Microphone capture discontinuity detected (count={})",
+                            capture_discontinuities
+                        );
+                    }
+                }
+
+                let has_timestamp_error =
+                    flags & (AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR.0 as u32) != 0;
+                if has_timestamp_error {
+                    timestamp_errors = timestamp_errors.saturating_add(1);
+                    if timestamp_errors == 1 || timestamp_errors % 100 == 0 {
+                        warn!(
+                            "Microphone capture timestamp error detected; using frame-derived timing (count={})",
+                            timestamp_errors
+                        );
+                    }
+                }
+
+                let pts = if !has_timestamp_error && qpc_position > 0 {
                     qpc_position.min(i64::MAX as u64) as i64
                 } else {
                     start_qpc + ((total_frames as f64 / sample_rate) * qpc_freq) as i64
