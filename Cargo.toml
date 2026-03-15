@@ -56,6 +56,9 @@ rodio = "0.20"
 ffmpeg-next = { version = "7.1.0", default-features = false, features = ["codec", "format", "software-scaling", "software-resampling"] }
 nnnoiseless = "0.5.2"
 
+[profile.dev.package.nnnoiseless]
+opt-level = 3
+
 [profile.release]
 codegen-units = 1
 lto = "fat"

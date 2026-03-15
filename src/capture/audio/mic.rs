@@ -536,6 +536,7 @@ struct RNNoiseProcessor {
     release_alpha: f32,
     presence_attack_alpha: f32,
     presence_release_alpha: f32,
+    quiet_packet_streak: u8,
 }
 
 impl RNNoiseProcessor {
@@ -549,6 +550,10 @@ impl RNNoiseProcessor {
     const HANGOVER_FRAMES: u8 = 24;
     const NOISE_FLOOR_FAST_ALPHA: f32 = 0.10;
     const NOISE_FLOOR_SLOW_ALPHA: f32 = 0.01;
+    const QUIET_PACKET_STREAK_THRESHOLD: u8 = 4;
+    const QUIET_PACKET_MAX_MEAN_ABS: f32 = 48.0;
+    const QUIET_PACKET_MAX_PEAK: i32 = 900;
+    const QUIET_BYPASS_MAX_SPEECH_PRESENCE: f32 = 0.08;
 
     fn new(channels: usize) -> Self {
         let mut in_buf = Vec::with_capacity(AUDIO_FRAME_SIZE * 16);
@@ -574,6 +579,7 @@ impl RNNoiseProcessor {
             release_alpha: Self::alpha_from_ms(80.0),
             presence_attack_alpha: Self::frame_alpha_from_ms(30.0),
             presence_release_alpha: Self::frame_alpha_from_ms(220.0),
+            quiet_packet_streak: 0,
         }
     }
 
@@ -618,6 +624,78 @@ impl RNNoiseProcessor {
     }
 
     #[inline]
+    fn reset_after_quiet_bypass(&mut self) {
+        self.in_buf.clear();
+        self.in_buf.resize(AUDIO_FRAME_SIZE, 0.0);
+        self.in_head = 0;
+        self.out_buf.clear();
+        self.out_head = 0;
+        self.gain = Self::MIN_GAIN;
+        self.speech_presence = 0.0;
+        self.speech_hangover = 0;
+        self.primed = false;
+    }
+
+    #[inline]
+    fn maybe_bypass_quiet_packet(&mut self, data: &mut [u8]) -> bool {
+        if self.channels == 0 || data.len() % (self.channels * 2) != 0 {
+            return false;
+        }
+
+        let sample_count = data.len() / 2;
+        let frame_count = sample_count / self.channels;
+        if frame_count == 0 {
+            return false;
+        }
+
+        let samples =
+            unsafe { std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut i16, sample_count) };
+
+        let (sum_abs, peak_abs) = match self.channels {
+            1 => samples.iter().fold((0i64, 0i32), |(sum, peak), &sample| {
+                let abs = (sample as i32).abs();
+                (sum + abs as i64, peak.max(abs))
+            }),
+            2 => samples
+                .chunks_exact(2)
+                .fold((0i64, 0i32), |(sum, peak), frame| {
+                    let mono = ((frame[0] as i32) + (frame[1] as i32)) / 2;
+                    let abs = mono.abs();
+                    (sum + abs as i64, peak.max(abs))
+                }),
+            _ => samples
+                .chunks_exact(self.channels)
+                .fold((0i64, 0i32), |(sum, peak), frame| {
+                    let mono = frame.iter().map(|&sample| sample as i32).sum::<i32>()
+                        / self.channels as i32;
+                    let abs = mono.abs();
+                    (sum + abs as i64, peak.max(abs))
+                }),
+        };
+
+        let mean_abs = sum_abs as f32 / frame_count as f32;
+        let quiet_packet = self.speech_hangover == 0
+            && self.speech_presence <= Self::QUIET_BYPASS_MAX_SPEECH_PRESENCE
+            && mean_abs <= Self::QUIET_PACKET_MAX_MEAN_ABS
+            && peak_abs <= Self::QUIET_PACKET_MAX_PEAK;
+
+        if quiet_packet {
+            self.quiet_packet_streak = self.quiet_packet_streak.saturating_add(1);
+        } else {
+            self.quiet_packet_streak = 0;
+            return false;
+        }
+
+        if self.quiet_packet_streak < Self::QUIET_PACKET_STREAK_THRESHOLD {
+            return false;
+        }
+
+        data.fill(0);
+        self.reset_after_quiet_bypass();
+        true
+    }
+
+    #[inline]
     fn dc_block(&mut self, channel: usize, sample: f32) -> f32 {
         let filtered = sample - self.dc_x[channel] + Self::DC_COEFF * self.dc_y[channel];
         self.dc_x[channel] = sample;
@@ -648,6 +726,10 @@ impl RNNoiseProcessor {
     #[allow(clippy::needless_range_loop)]
     fn process(&mut self, data: &mut [u8]) {
         if self.channels == 0 || data.len() % (self.channels * 2) != 0 {
+            return;
+        }
+
+        if self.maybe_bypass_quiet_packet(data) {
             return;
         }
 
@@ -848,6 +930,20 @@ mod tests {
         let samples: &[i16] =
             unsafe { std::slice::from_raw_parts(data.as_ptr() as *const i16, data.len() / 2) };
         assert_eq!(samples.len(), 960);
+    }
+
+    #[test]
+    fn test_quiet_packet_bypass_zeros_after_streak() {
+        let mut processor = RNNoiseProcessor::new(2);
+        let mut data = vec![0u8; 480 * 2 * 2];
+
+        for _ in 0..RNNoiseProcessor::QUIET_PACKET_STREAK_THRESHOLD {
+            processor.process(&mut data);
+        }
+
+        let samples: &[i16] =
+            unsafe { std::slice::from_raw_parts(data.as_ptr() as *const i16, data.len() / 2) };
+        assert!(samples.iter().all(|&s| s == 0));
     }
 
     #[test]
