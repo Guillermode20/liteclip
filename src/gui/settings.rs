@@ -249,7 +249,7 @@ impl SettingsApp {
                     );
                     ui.label(
                         egui::RichText::new(
-                            "When enabled, a lightweight adaptive gate suppresses low-level hiss when you're not speaking.",
+                            "When enabled, high-quality AI-powered noise suppression removes background hiss and hum.",
                         )
                         .small(),
                     );

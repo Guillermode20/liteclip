@@ -11,7 +11,7 @@ use std::thread;
 use std::time::Duration;
 use tracing::{debug, error, warn};
 
-use crate::capture::audio::mic::{NoiseSuppressorSettings, WasapiMicConfig};
+use crate::capture::audio::mic::WasapiMicConfig;
 use crate::capture::audio::mixer::AudioMixer;
 use crate::capture::audio::system::WasapiSystemConfig;
 use crate::capture::audio::{WasapiMicCapture, WasapiSystemCapture};
@@ -84,7 +84,6 @@ impl WasapiAudioManager {
                     Some(config.mic_device.clone())
                 },
                 noise_reduction_enabled: config.mic_noise_reduction,
-                noise_suppressor_settings: NoiseSuppressorSettings::default(),
             };
 
             if let Err(e) = mic_capture.start(mic_config) {
@@ -102,7 +101,7 @@ impl WasapiAudioManager {
             .system_capture
             .as_ref()
             .map(|capture| capture.packet_rx());
-        let mut mic_rx = self.mic_capture.as_ref().map(|capture| capture.packet_rx());
+        let mut mic_rx = self.mic_capture.as_ref().map(|capture| capture.receiver());
 
         self.running.store(true, Ordering::SeqCst);
 

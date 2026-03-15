@@ -5,6 +5,7 @@
 use anyhow::{Context, Result};
 use bytes::BytesMut;
 use crossbeam::channel::{bounded, Receiver, Sender};
+use nnnoiseless::DenoiseState;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -25,41 +26,6 @@ use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 use crate::buffer::ring::qpc_frequency;
 use crate::encode::{EncodedPacket, StreamType};
 
-/// Runtime-tunable settings for microphone noise suppression.
-#[derive(Debug, Clone)]
-pub struct NoiseSuppressorSettings {
-    pub gate_threshold_db: f32,
-    pub gate_hysteresis_db: f32,
-    pub attack_ms: f32,
-    pub release_ms: f32,
-    pub hold_ms: f32,
-    pub min_gain_db: f32,
-}
-
-impl Default for NoiseSuppressorSettings {
-    fn default() -> Self {
-        Self {
-            gate_threshold_db: -45.0,
-            gate_hysteresis_db: 4.0,
-            attack_ms: 2.0,
-            release_ms: 150.0,
-            hold_ms: 100.0,
-            min_gain_db: -60.0,
-        }
-    }
-}
-
-impl NoiseSuppressorSettings {
-    fn sanitize(&mut self) {
-        self.gate_threshold_db = self.gate_threshold_db.clamp(-90.0, -10.0);
-        self.gate_hysteresis_db = self.gate_hysteresis_db.clamp(0.0, 20.0);
-        self.attack_ms = self.attack_ms.clamp(0.1, 100.0);
-        self.release_ms = self.release_ms.clamp(1.0, 2000.0);
-        self.hold_ms = self.hold_ms.clamp(0.0, 1000.0);
-        self.min_gain_db = self.min_gain_db.clamp(-120.0, 0.0);
-    }
-}
-
 /// Configuration for WASAPI microphone capture
 #[derive(Debug, Clone)]
 pub struct WasapiMicConfig {
@@ -69,7 +35,6 @@ pub struct WasapiMicConfig {
     pub buffer_duration: Duration,
     pub device_id: Option<String>, // None for default device
     pub noise_reduction_enabled: bool,
-    pub noise_suppressor_settings: NoiseSuppressorSettings,
 }
 
 impl Default for WasapiMicConfig {
@@ -81,7 +46,6 @@ impl Default for WasapiMicConfig {
             buffer_duration: Duration::from_millis(100),
             device_id: None,
             noise_reduction_enabled: true,
-            noise_suppressor_settings: NoiseSuppressorSettings::default(),
         }
     }
 }
@@ -99,8 +63,7 @@ pub struct WasapiMicCapture {
 impl WasapiMicCapture {
     /// Create a new WASAPI microphone capture instance
     pub fn new() -> Result<Self> {
-        let (packet_tx, packet_rx) = bounded(64); // Buffer for audio packets
-
+        let (packet_tx, packet_rx) = bounded(128);
         Ok(Self {
             running: Arc::new(AtomicBool::new(false)),
             initialized: Arc::new(AtomicBool::new(false)),
@@ -111,92 +74,95 @@ impl WasapiMicCapture {
         })
     }
 
-    /// Start capturing microphone audio
+    /// Start microphone capture
     pub fn start(&mut self, config: WasapiMicConfig) -> Result<()> {
         if self.running.load(Ordering::SeqCst) {
             return Ok(());
         }
 
         self.running.store(true, Ordering::SeqCst);
-        self.initialized.store(false, Ordering::SeqCst);
-
-        let running = Arc::clone(&self.running);
-        let initialized = Arc::clone(&self.initialized);
+        let running = self.running.clone();
+        let initialized = self.initialized.clone();
         let packet_tx = self.packet_tx.clone();
-        let processed_samples = Arc::clone(&self.processed_samples);
+        let processed_samples = self.processed_samples.clone();
 
-        // Spawn the capture thread
-        self.capture_thread = Some(thread::spawn(move || {
-            if let Err(e) =
-                Self::capture_loop(running, initialized, packet_tx, processed_samples, config)
-            {
-                error!("Microphone audio capture error: {}", e);
+        let handle = thread::spawn(move || {
+            if let Err(e) = Self::capture_loop(
+                config,
+                running.clone(),
+                initialized,
+                packet_tx,
+                processed_samples,
+            ) {
+                error!("Microphone capture loop error: {:?}", e);
+                running.store(false, Ordering::SeqCst);
             }
-        }));
+        });
 
-        // Wait briefly for the capture thread to initialize WASAPI and report status without
-        // always paying a fixed half-second startup penalty.
-        for _ in 0..50 {
-            if self.initialized.load(Ordering::SeqCst) || !self.running.load(Ordering::SeqCst) {
-                break;
+        self.capture_thread = Some(handle);
+
+        // Wait for initialization to complete or fail
+        let mut attempts = 0;
+        while !self.initialized.load(Ordering::SeqCst) && self.running.load(Ordering::SeqCst) {
+            thread::sleep(Duration::from_millis(50));
+            attempts += 1;
+            if attempts > 40 {
+                // 2 seconds
+                return Err(anyhow::anyhow!(
+                    "Microphone capture initialization timed out"
+                ));
             }
-            thread::sleep(Duration::from_millis(10));
         }
 
-        if self.initialized.load(Ordering::SeqCst) {
-            debug!("WASAPI microphone audio capture started and initialized successfully");
-        } else if self.running.load(Ordering::SeqCst) {
-            warn!("WASAPI microphone capture thread has not confirmed initialization after 500ms; mic audio may be unavailable");
-        } else {
-            warn!("WASAPI microphone capture thread exited during initialization; mic audio is unavailable");
+        if !self.running.load(Ordering::SeqCst) {
+            return Err(anyhow::anyhow!("Microphone capture failed to start"));
         }
 
         Ok(())
     }
 
-    /// Stop capturing microphone audio
+    /// Stop microphone capture
     pub fn stop(&mut self) {
         self.running.store(false, Ordering::SeqCst);
         if let Some(handle) = self.capture_thread.take() {
-            if handle.join().is_err() {
-                error!("Microphone audio capture thread panicked");
-            }
+            let _ = handle.join();
         }
-        debug!("WASAPI microphone audio capture stopped");
+        self.initialized.store(false, Ordering::SeqCst);
     }
 
-    /// Get receiver for captured audio packets
-    pub fn packet_rx(&self) -> Receiver<EncodedPacket> {
+    /// Get the receiver for captured audio packets
+    pub fn receiver(&self) -> Receiver<EncodedPacket> {
         self.packet_rx.clone()
     }
 
-    /// Main capture loop
+    /// Get total samples processed
+    pub fn processed_samples(&self) -> u64 {
+        self.processed_samples.load(Ordering::SeqCst)
+    }
+
     fn capture_loop(
+        config: WasapiMicConfig,
         running: Arc<AtomicBool>,
         initialized: Arc<AtomicBool>,
         packet_tx: Sender<EncodedPacket>,
         processed_samples: Arc<AtomicU64>,
-        config: WasapiMicConfig,
     ) -> Result<()> {
-        debug!("Starting WASAPI microphone capture loop");
-
-        let _com = ComApartment::initialize()?;
-
+        let _com = ComApartment::new(COINIT_MULTITHREADED)?;
         Self::set_audio_thread_priority();
 
-        if config.device_id.is_some() {
-            warn!("Microphone custom device_id is not implemented yet; using default capture endpoint");
-        }
-
         let enumerator: IMMDeviceEnumerator =
-            unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }
-                .context("Failed to create MMDeviceEnumerator")?;
+            unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }?;
 
-        // Log all available capture devices so the user can see what's available
-        crate::capture::audio::device_info::log_all_capture_devices(&enumerator);
-
-        let device = unsafe { enumerator.GetDefaultAudioEndpoint(eCapture, eConsole) }
-            .context("Failed to get default microphone endpoint")?;
+        let device = match &config.device_id {
+            Some(id) => {
+                let mut id_wide: Vec<u16> = id.encode_utf16().collect();
+                id_wide.push(0);
+                unsafe { enumerator.GetDevice(windows::core::PCWSTR(id_wide.as_ptr())) }
+                    .context("Failed to get microphone device by ID")?
+            }
+            None => unsafe { enumerator.GetDefaultAudioEndpoint(eCapture, eConsole) }
+                .context("Failed to get default microphone device")?,
+        };
 
         // Log which device was selected
         crate::capture::audio::device_info::log_device("Selected microphone device", &device);
@@ -252,26 +218,40 @@ impl WasapiMicCapture {
         let start_qpc = query_qpc()?;
         let qpc_freq = qpc_frequency() as f64;
         let sample_rate = config.sample_rate.max(1) as f64;
-        let mut total_frames: u64 = 0;
+        tracing::info!(
+            "RNNoise: Config - enabled: {}, bits: {}, channels: {}",
+            config.noise_reduction_enabled,
+            config.bits_per_sample,
+            config.channels
+        );
 
-        let mut noise_processor = if config.sample_rate == 48000
-            && config.bits_per_sample == 16
-            && config.noise_reduction_enabled
+        let mut noise_processor = if config.bits_per_sample == 16 && config.noise_reduction_enabled
         {
-            Some(MicNoiseProcessor::SmarterNoiseGate(SmarterNoiseGate::new(
+            tracing::warn!(
+                "RNNoise: INITIALIZING noise processor for {} channels",
+                config.channels
+            );
+            Some(MicNoiseProcessor::RNNoise(RNNoiseProcessor::new(
                 config.channels as usize,
-                config.noise_suppressor_settings,
             )))
         } else {
+            tracing::warn!(
+                "RNNoise: Processor NOT initialized (bits: {}, enabled: {})",
+                config.bits_per_sample,
+                config.noise_reduction_enabled
+            );
             None
         };
+
+        let mut last_activity_log = std::time::Instant::now();
+        let mut packets_since_log = 0;
+        let mut total_frames: u64 = 0;
 
         let max_buffer_size = (config.sample_rate as usize / 10) * block_align as usize;
         let mut audio_buffer = BytesMut::with_capacity(max_buffer_size);
 
         while running.load(Ordering::SeqCst) {
-            let mut packet_frames = unsafe { capture_client.GetNextPacketSize() }
-                .context("IAudioCaptureClient::GetNextPacketSize failed")?;
+            let mut packet_frames = unsafe { capture_client.GetNextPacketSize() }?;
 
             if packet_frames == 0 {
                 match unsafe { WaitForSingleObject(capture_event.raw(), 100) }.0 {
@@ -323,6 +303,16 @@ impl WasapiMicCapture {
 
                 if let Some(processor) = &mut noise_processor {
                     processor.process(&mut audio_buffer);
+                    packets_since_log += 1;
+
+                    if last_activity_log.elapsed() >= Duration::from_secs(2) {
+                        tracing::info!(
+                            "RNNoise: Active - processed {} packets in last 2s",
+                            packets_since_log
+                        );
+                        packets_since_log = 0;
+                        last_activity_log = std::time::Instant::now();
+                    }
                 }
 
                 let pts = if qpc_position > 0 {
@@ -347,24 +337,31 @@ impl WasapiMicCapture {
 
                 processed_samples.fetch_add(frame_count as u64, Ordering::SeqCst);
 
-                packet_frames = unsafe { capture_client.GetNextPacketSize() }
-                    .context("IAudioCaptureClient::GetNextPacketSize failed")?;
+                packet_frames = unsafe { capture_client.GetNextPacketSize() }?;
             }
         }
-
-        unsafe { audio_client.Stop() }.context("Failed to stop microphone capture")?;
-
-        debug!("WASAPI microphone audio capture loop ended");
         Ok(())
     }
+}
+
+fn query_qpc() -> Result<i64> {
+    let mut qpc = 0i64;
+    unsafe {
+        windows::Win32::System::Performance::QueryPerformanceCounter(&mut qpc)
+            .context("QueryPerformanceCounter failed")?;
+    }
+    Ok(qpc)
+}
+
+fn duration_to_hns(duration: Duration) -> i64 {
+    (duration.as_nanos() / 100) as i64
 }
 
 struct EventHandle(HANDLE);
 
 impl EventHandle {
     fn new() -> Result<Self> {
-        let handle =
-            unsafe { CreateEventW(None, false, false, None) }.context("CreateEventW failed")?;
+        let handle = unsafe { CreateEventW(None, false, false, None) }?;
         Ok(Self(handle))
     }
 
@@ -375,29 +372,15 @@ impl EventHandle {
 
 impl Drop for EventHandle {
     fn drop(&mut self) {
-        if self.0 != HANDLE::default() {
-            let _ = unsafe { CloseHandle(self.0) };
-        }
+        let _ = unsafe { CloseHandle(self.0) };
     }
-}
-
-fn duration_to_hns(duration: Duration) -> i64 {
-    (duration.as_secs_f64() * 10_000_000.0) as i64
-}
-
-fn query_qpc() -> Result<i64> {
-    let mut qpc = 0i64;
-    unsafe { windows::Win32::System::Performance::QueryPerformanceCounter(&mut qpc) }
-        .context("QueryPerformanceCounter failed")?;
-    Ok(qpc)
 }
 
 struct ComApartment;
 
 impl ComApartment {
-    fn initialize() -> Result<Self> {
-        unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).ok() }
-            .context("CoInitializeEx failed for WASAPI microphone capture")?;
+    fn new(mode: windows::Win32::System::Com::COINIT) -> Result<Self> {
+        unsafe { CoInitializeEx(None, mode) }.ok()?;
         Ok(Self)
     }
 }
@@ -436,21 +419,22 @@ impl WasapiMicCapture {
 const AUDIO_FRAME_SIZE: usize = 480;
 
 enum MicNoiseProcessor {
-    SmarterNoiseGate(SmarterNoiseGate),
+    RNNoise(RNNoiseProcessor),
 }
 
 impl MicNoiseProcessor {
     fn process(&mut self, data: &mut [u8]) {
         match self {
-            Self::SmarterNoiseGate(processor) => processor.process(data),
+            Self::RNNoise(processor) => processor.process(data),
         }
     }
 }
 
 #[inline]
 fn soft_limit(x: f32) -> f32 {
-    const THRESHOLD: f32 = 28000.0;
-    const MAX: f32 = 32767.0;
+    const THRESHOLD: f32 = 28_000.0;
+    const MAX: f32 = 32_767.0;
+
     if x.abs() < THRESHOLD {
         x
     } else {
@@ -460,93 +444,94 @@ fn soft_limit(x: f32) -> f32 {
     }
 }
 
-/// Smooth entry/exit noise gate with hysteresis and RMS tracking.
-struct SmarterNoiseGate {
+/// RNNoise-based noise suppression using the nnnoiseless crate.
+///
+/// Pure RNNoise is fairly subtle on steady mic hiss, so this adapter keeps the
+/// earlier VAD/SNR-driven gain shaping on top of the denoiser output to make
+/// the suppression clearly audible in the live mic path.
+struct RNNoiseProcessor {
     channels: usize,
+    states: Vec<Box<DenoiseState<'static>>>,
     in_buf: Vec<f32>,
     in_head: usize,
     out_buf: Vec<f32>,
     out_head: usize,
-
-    // Per-channel state
-    envelope: Vec<f32>,
     gain: Vec<f32>,
-    hold_count: Vec<usize>,
-    is_open: Vec<bool>,
-
-    // Pre-calculated coefficients
-    env_alpha_up: f32,
-    env_alpha_down: f32,
-    attack_alpha: f32,
-    release_alpha: f32,
-    hold_frames: usize,
-    threshold_linear: f32,
-    hysteresis_linear: f32,
-    min_gain_linear: f32,
-
+    noise_floor: Vec<f32>,
+    speech_hangover: Vec<u8>,
     dc_x: Vec<f32>,
     dc_y: Vec<f32>,
     frame_in: Vec<Box<[f32; AUDIO_FRAME_SIZE]>>,
+    frame_out: Vec<Box<[f32; AUDIO_FRAME_SIZE]>>,
+    primed: bool,
+    attack_alpha: f32,
+    release_alpha: f32,
 }
 
-impl SmarterNoiseGate {
+impl RNNoiseProcessor {
     const DC_COEFF: f32 = 0.9975;
-    const SAMPLE_RATE: f32 = 48000.0;
+    const MIN_GAIN: f32 = 0.004;
+    const VAD_NOISE_THRESHOLD: f32 = 0.25;
+    const VAD_GATE_THRESHOLD: f32 = 0.55;
+    const SNR_MIN: f32 = 1.2;
+    const SNR_MAX: f32 = 6.0;
+    const HANGOVER_FRAMES: u8 = 10;
+    const NOISE_FLOOR_FAST_ALPHA: f32 = 0.10;
+    const NOISE_FLOOR_SLOW_ALPHA: f32 = 0.01;
 
-    fn new(channels: usize, mut settings: NoiseSuppressorSettings) -> Self {
-        settings.sanitize();
-
-        // 3ms envelope attack, 15ms release for a more stable detector
-        let env_alpha_up = 1.0 - (-1.0 / (Self::SAMPLE_RATE * 0.003)).exp();
-        let env_alpha_down = 1.0 - (-1.0 / (Self::SAMPLE_RATE * 0.015)).exp();
-
-        let attack_alpha = 1.0 - (-1.0 / (Self::SAMPLE_RATE * (settings.attack_ms / 1000.0))).exp();
-        let release_alpha =
-            1.0 - (-1.0 / (Self::SAMPLE_RATE * (settings.release_ms / 1000.0))).exp();
-        let hold_frames = ((settings.hold_ms / 1000.0) * Self::SAMPLE_RATE) as usize;
-
-        let threshold_linear = 10f32.powf(settings.gate_threshold_db / 20.0);
-        let hysteresis_linear =
-            10f32.powf((settings.gate_threshold_db + settings.gate_hysteresis_db) / 20.0);
-        let min_gain_linear = 10f32.powf(settings.min_gain_db / 20.0);
+    fn new(channels: usize) -> Self {
+        let mut states = Vec::with_capacity(channels);
+        for _ in 0..channels {
+            states.push(DenoiseState::new());
+        }
 
         Self {
             channels,
-            in_buf: Vec::new(),
+            states,
+            in_buf: Vec::with_capacity(AUDIO_FRAME_SIZE * channels * 4),
             in_head: 0,
-            out_buf: Vec::new(),
+            out_buf: Vec::with_capacity(AUDIO_FRAME_SIZE * channels * 4),
             out_head: 0,
-            envelope: vec![0.0; channels],
             gain: vec![0.0; channels],
-            hold_count: vec![0; channels],
-            is_open: vec![false; channels],
-            env_alpha_up,
-            env_alpha_down,
-            attack_alpha,
-            release_alpha,
-            hold_frames,
-            threshold_linear,
-            hysteresis_linear,
-            min_gain_linear,
+            noise_floor: vec![300.0; channels],
+            speech_hangover: vec![0; channels],
             dc_x: vec![0.0; channels],
             dc_y: vec![0.0; channels],
             frame_in: (0..channels)
                 .map(|_| Box::new([0.0; AUDIO_FRAME_SIZE]))
                 .collect(),
+            frame_out: (0..channels)
+                .map(|_| Box::new([0.0; AUDIO_FRAME_SIZE]))
+                .collect(),
+            primed: false,
+            attack_alpha: Self::alpha_from_ms(1.0),
+            release_alpha: Self::alpha_from_ms(30.0),
         }
     }
 
     #[inline]
-    fn dc_block(&mut self, ch: usize, x: f32) -> f32 {
-        let y = x - self.dc_x[ch] + Self::DC_COEFF * self.dc_y[ch];
-        self.dc_x[ch] = x;
-        self.dc_y[ch] = y;
-        y
+    fn alpha_from_ms(ms: f32) -> f32 {
+        if ms <= 0.0 {
+            return 1.0;
+        }
+
+        let sample_rate = 48_000.0;
+        let tau_seconds = ms / 1000.0;
+        let alpha = 1.0 - (-1.0 / (sample_rate * tau_seconds)).exp();
+        alpha.clamp(0.000001, 1.0)
+    }
+
+    #[inline]
+    fn dc_block(&mut self, channel: usize, sample: f32) -> f32 {
+        let filtered = sample - self.dc_x[channel] + Self::DC_COEFF * self.dc_y[channel];
+        self.dc_x[channel] = sample;
+        self.dc_y[channel] = filtered;
+        filtered
     }
 
     #[allow(clippy::needless_range_loop)]
     fn process(&mut self, data: &mut [u8]) {
-        if data.len() % (self.channels * 2) != 0 {
+        if self.channels == 0 || data.len() % (self.channels * 2) != 0 {
             return;
         }
 
@@ -554,75 +539,86 @@ impl SmarterNoiseGate {
             std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut i16, data.len() / 2)
         };
 
-        for s in samples.iter() {
-            self.in_buf.push(*s as f32);
+        self.in_buf.reserve(samples.len());
+        for sample in samples.iter() {
+            self.in_buf.push(*sample as f32);
         }
 
-        let interleaved_frame = AUDIO_FRAME_SIZE * self.channels;
-        while (self.in_buf.len() - self.in_head) >= interleaved_frame {
+        let frame_size = AUDIO_FRAME_SIZE * self.channels;
+        while (self.in_buf.len() - self.in_head) >= frame_size {
             let out_start = self.out_buf.len();
-            self.out_buf.resize(out_start + interleaved_frame, 0.0);
+            self.out_buf.resize(out_start + frame_size, 0.0);
             let frame_start = self.in_head;
 
-            for ch in 0..self.channels {
-                for i in 0..AUDIO_FRAME_SIZE {
-                    self.frame_in[ch][i] = self.in_buf[frame_start + i * self.channels + ch];
+            for channel in 0..self.channels {
+                for index in 0..AUDIO_FRAME_SIZE {
+                    self.frame_in[channel][index] =
+                        self.in_buf[frame_start + index * self.channels + channel];
                 }
 
-                let mut current_env = self.envelope[ch];
-                let mut current_gain = self.gain[ch];
-                let mut current_hold = self.hold_count[ch];
-                let mut gate_open = self.is_open[ch];
+                let vad = self.states[channel].process_frame(
+                    self.frame_out[channel].as_mut_slice(),
+                    self.frame_in[channel].as_slice(),
+                );
 
-                for i in 0..AUDIO_FRAME_SIZE {
-                    let s_abs = self.frame_in[ch][i].abs();
+                let mut energy = 0.0;
+                for index in 0..AUDIO_FRAME_SIZE {
+                    let sample = self.frame_out[channel][index];
+                    energy += sample * sample;
+                }
+                let frame_rms = (energy / AUDIO_FRAME_SIZE as f32).sqrt();
 
-                    // Smoother envelope tracking (asymmetric)
-                    let env_alpha = if s_abs > current_env {
-                        self.env_alpha_up
+                let floor = &mut self.noise_floor[channel];
+                let floor_alpha = if vad < Self::VAD_NOISE_THRESHOLD {
+                    Self::NOISE_FLOOR_FAST_ALPHA
+                } else {
+                    Self::NOISE_FLOOR_SLOW_ALPHA
+                };
+                *floor += floor_alpha * (frame_rms - *floor);
+                *floor = floor.max(10.0);
+
+                let snr = frame_rms / (*floor + 1.0);
+                let snr_gate =
+                    ((snr - Self::SNR_MIN) / (Self::SNR_MAX - Self::SNR_MIN)).clamp(0.0, 1.0);
+                let vad_gate = ((vad - Self::VAD_NOISE_THRESHOLD)
+                    / (Self::VAD_GATE_THRESHOLD - Self::VAD_NOISE_THRESHOLD))
+                    .clamp(0.0, 1.0);
+
+                let mut gate_confidence = vad_gate.max(snr_gate);
+                if vad >= Self::VAD_GATE_THRESHOLD {
+                    self.speech_hangover[channel] = Self::HANGOVER_FRAMES;
+                } else if self.speech_hangover[channel] > 0 {
+                    self.speech_hangover[channel] -= 1;
+                    gate_confidence = gate_confidence.max(0.60);
+                }
+
+                let target_gain = Self::MIN_GAIN + (1.0 - Self::MIN_GAIN) * gate_confidence;
+                let mut current_gain = self.gain[channel];
+                let discard_frame = !self.primed;
+
+                for index in 0..AUDIO_FRAME_SIZE {
+                    let gain_alpha = if target_gain > current_gain {
+                        self.attack_alpha
                     } else {
-                        self.env_alpha_down
+                        self.release_alpha
                     };
-                    current_env += env_alpha * (s_abs - current_env);
+                    current_gain += gain_alpha * (target_gain - current_gain);
 
-                    // Gate logic with hysteresis
-                    if gate_open {
-                        if current_env < self.threshold_linear {
-                            if current_hold > 0 {
-                                current_hold -= 1;
-                            } else {
-                                gate_open = false;
-                            }
-                        } else {
-                            current_hold = self.hold_frames;
-                        }
+                    let denoised = if discard_frame {
+                        0.0
                     } else {
-                        if current_env > self.hysteresis_linear {
-                            gate_open = true;
-                            current_hold = self.hold_frames;
-                        }
-                    }
-
-                    let target_gain = if gate_open { 1.0 } else { self.min_gain_linear };
-
-                    // Gain smoothing
-                    if target_gain > current_gain {
-                        current_gain += self.attack_alpha * (target_gain - current_gain);
-                    } else {
-                        current_gain += self.release_alpha * (target_gain - current_gain);
-                    }
-
-                    let processed = self.dc_block(ch, self.frame_in[ch][i] * current_gain);
-                    self.out_buf[out_start + i * self.channels + ch] = soft_limit(processed);
+                        self.frame_out[channel][index] * current_gain
+                    };
+                    let dc_blocked = self.dc_block(channel, denoised);
+                    self.out_buf[out_start + index * self.channels + channel] =
+                        soft_limit(dc_blocked);
                 }
 
-                self.envelope[ch] = current_env;
-                self.gain[ch] = current_gain;
-                self.hold_count[ch] = current_hold;
-                self.is_open[ch] = gate_open;
+                self.gain[channel] = current_gain;
             }
 
-            self.in_head += interleaved_frame;
+            self.primed = true;
+            self.in_head += frame_size;
             if self.in_head > 0 && self.in_head >= self.in_buf.len() / 2 {
                 self.in_buf.drain(0..self.in_head);
                 self.in_head = 0;
@@ -630,8 +626,8 @@ impl SmarterNoiseGate {
         }
 
         let available = (self.out_buf.len() - self.out_head).min(samples.len());
-        for i in 0..available {
-            samples[i] = self.out_buf[self.out_head + i].clamp(-32768.0, 32767.0) as i16;
+        for index in 0..available {
+            samples[index] = self.out_buf[self.out_head + index].clamp(-32768.0, 32767.0) as i16;
         }
 
         self.out_head += available;
@@ -640,8 +636,8 @@ impl SmarterNoiseGate {
             self.out_head = 0;
         }
 
-        for i in available..samples.len() {
-            samples[i] = 0;
+        for sample in &mut samples[available..] {
+            *sample = 0;
         }
     }
 }
@@ -659,5 +655,35 @@ mod tests {
         assert_eq!(config.buffer_duration, Duration::from_millis(100));
         assert!(config.device_id.is_none());
         assert!(config.noise_reduction_enabled);
+    }
+
+    #[test]
+    fn test_rnnoise_processor_latency() {
+        let mut processor = RNNoiseProcessor::new(1);
+
+        // Input 480 samples (10ms at 48kHz) of strong signal
+        let mut data: Vec<u8> = (0..480)
+            .map(|i| ((i as f32 * 0.1).sin() * 20000.0) as i16)
+            .flat_map(|s| s.to_ne_bytes())
+            .collect();
+        processor.process(&mut data);
+
+        // Should NOT be all zeros because we provided exactly one frame
+        let samples: &[i16] =
+            unsafe { std::slice::from_raw_parts(data.as_ptr() as *const i16, data.len() / 2) };
+        assert!(!samples.iter().all(|&s| s == 0));
+    }
+
+    #[test]
+    fn test_rnnoise_stereo() {
+        let mut processor = RNNoiseProcessor::new(2);
+
+        // Provide 480 stereo frames
+        let mut data = vec![0u8; 480 * 2 * 2];
+        processor.process(&mut data);
+
+        let samples: &[i16] =
+            unsafe { std::slice::from_raw_parts(data.as_ptr() as *const i16, data.len() / 2) };
+        assert_eq!(samples.len(), 960);
     }
 }
