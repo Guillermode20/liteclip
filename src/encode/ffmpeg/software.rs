@@ -179,12 +179,21 @@ impl FfmpegEncoder {
             let warmup_frames = super::WARMUP_FRAMES;
             let post_warmup_frames = self.frame_count - warmup_frames;
             let post_warmup_packets = self.packet_count - self.warmup_packet_count;
-            tracing::info!(
+            let ratio = post_warmup_packets as f64 / post_warmup_frames.max(1) as f64;
+            tracing::trace!(
                 "encoder stats: frames={}, packets={}, ratio={:.2}",
                 post_warmup_frames,
                 post_warmup_packets,
-                post_warmup_packets as f64 / post_warmup_frames.max(1) as f64
+                ratio
             );
+            if ratio < 0.90 || ratio > 1.10 {
+                tracing::warn!(
+                    "Unexpected encoder packet/frame ratio {:.2} (frames={}, packets={})",
+                    ratio,
+                    post_warmup_frames,
+                    post_warmup_packets
+                );
+            }
         }
 
         Ok(())

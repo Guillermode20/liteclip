@@ -40,6 +40,8 @@ struct SharedPlaybackState {
     playing_since: Mutex<Option<PlaybackClock>>,
     latest_frame: Mutex<Option<PlaybackFrame>>,
     frame_queue: Mutex<VecDeque<TimedFrame>>,
+    playback_empty_polls: AtomicU64,
+    playback_drop_bursts: AtomicU64,
     last_error: Mutex<Option<String>>,
     request_generation: AtomicU64,
     video_request_in_flight: AtomicBool,
@@ -124,6 +126,8 @@ impl PlaybackController {
             playing_since: Mutex::new(None),
             latest_frame: Mutex::new(None),
             frame_queue: Mutex::new(VecDeque::new()),
+            playback_empty_polls: AtomicU64::new(0),
+            playback_drop_bursts: AtomicU64::new(0),
             last_error: Mutex::new(None),
             request_generation: AtomicU64::new(1),
             video_request_in_flight: AtomicBool::new(false),
@@ -274,16 +278,30 @@ impl PlaybackController {
         let wall_time_secs = self.playback_position_secs();
         let mut queue = self.shared.frame_queue.lock().unwrap();
         if queue.is_empty() {
+            let empty_polls = self
+                .shared
+                .playback_empty_polls
+                .fetch_add(1, Ordering::SeqCst)
+                + 1;
+            if empty_polls == 60 || empty_polls == 180 || empty_polls % 600 == 0 {
+                tracing::warn!(
+                    "Playback queue has been empty for {} polls at wall={:.3}s",
+                    empty_polls,
+                    wall_time_secs
+                );
+            }
             return None;
         }
 
         let frame_duration = 1.0 / self.metadata.fps.max(1.0);
+        let mut dropped_count = 0u32;
 
         // Drop frames that are too old (more than 1 frame behind wall time)
         while queue.len() > 1 {
             if let Some(front) = queue.front() {
                 if wall_time_secs - front.pts_secs > frame_duration {
                     queue.pop_front();
+                    dropped_count += 1;
                 } else {
                     break;
                 }
@@ -292,11 +310,35 @@ impl PlaybackController {
             }
         }
 
+        if dropped_count >= 4 {
+            let burst = self
+                .shared
+                .playback_drop_bursts
+                .fetch_add(1, Ordering::SeqCst)
+                + 1;
+            if burst <= 3 || burst % 30 == 0 {
+                tracing::warn!(
+                    "Playback dropped {} stale frame(s) at wall={:.3}s (burst #{})",
+                    dropped_count,
+                    wall_time_secs,
+                    burst
+                );
+            }
+        }
+
         if queue.is_empty() {
-            tracing::info!(
-                "take_playback_frame: queue empty after dropping old frames, wall={:.3}s",
-                wall_time_secs
-            );
+            let empty_polls = self
+                .shared
+                .playback_empty_polls
+                .fetch_add(1, Ordering::SeqCst)
+                + 1;
+            if empty_polls == 60 || empty_polls == 180 || empty_polls % 600 == 0 {
+                tracing::warn!(
+                    "Playback queue drained after dropping stale frames for {} poll(s) at wall={:.3}s",
+                    empty_polls,
+                    wall_time_secs
+                );
+            }
             return None;
         }
 
@@ -315,7 +357,8 @@ impl PlaybackController {
                 queue.pop_front();
             }
             let frame = queue.pop_front().unwrap();
-            tracing::info!(
+            self.shared.playback_empty_polls.store(0, Ordering::SeqCst);
+            tracing::trace!(
                 "take_playback_frame: wall={:.3}s, pts={:.3}s, {} remaining",
                 wall_time_secs,
                 frame.pts_secs,
@@ -330,7 +373,8 @@ impl PlaybackController {
             let ahead_by = front.pts_secs - wall_time_secs;
             if ahead_by <= frame_duration {
                 let frame = queue.pop_front().unwrap();
-                tracing::info!(
+                self.shared.playback_empty_polls.store(0, Ordering::SeqCst);
+                tracing::trace!(
                     "take_playback_frame: wall={:.3}s, taking early frame pts={:.3}s (ahead by {:.3}s)",
                     wall_time_secs,
                     frame.pts_secs,
@@ -338,7 +382,7 @@ impl PlaybackController {
                 );
                 return Some(frame.image);
             }
-            tracing::info!(
+            tracing::trace!(
                 "take_playback_frame: wall={:.3}s, waiting for pts={:.3}s (ahead by {:.3}s)",
                 wall_time_secs,
                 front.pts_secs,
@@ -393,7 +437,7 @@ impl PlaybackController {
                     });
                     frame_count += 1;
                     if frame_count <= 5 {
-                        tracing::info!(
+                        tracing::trace!(
                             "poll: queued frame pts={:.3}s, queue_len={}",
                             pts,
                             queue.len()
@@ -845,7 +889,7 @@ fn decoder_worker_loop(
                         Ok(Some((pts_secs, image))) => {
                             frame_count += 1;
                             if frame_count <= 3 {
-                                tracing::info!(
+                                tracing::trace!(
                                     "Decoded frame #{} pts={:.3}s",
                                     frame_count,
                                     pts_secs

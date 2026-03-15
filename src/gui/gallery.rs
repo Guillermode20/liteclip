@@ -30,13 +30,15 @@ const ALL_GAMES_FILTER: &str = "All Games";
 const DEFAULT_TARGET_SIZE_MB: u32 = 25;
 const DEFAULT_AUDIO_BITRATE_KBPS: u32 = 128;
 const PREVIEW_FRAME_WIDTH: u32 = 640;
-const PREVIEW_FRAME_INTERVAL_SECS: f64 = 0.25;
 const SCRUB_SAMPLE_MIN_DT_SECS: f64 = 0.01;
 const SCRUB_FAST_RATE_SECS_PER_SEC: f64 = 6.0;
 const MIN_RANGE_SECS: f64 = 0.1;
 const EDITOR_SIDEBAR_WIDTH: f32 = 340.0;
 const EDITOR_SIDEBAR_MIN_WIDTH: f32 = 280.0;
 const EDITOR_STACK_BREAKPOINT: f32 = 960.0;
+const BROWSER_DELETE_HOLD_SECS: f32 = 1.0;
+const EDITOR_SMALL_SEEK_SECS: f64 = 1.0;
+const EDITOR_LARGE_SEEK_SECS: f64 = 5.0;
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -82,6 +84,12 @@ struct ExportState {
     message: String,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EditorFocusZone {
+    MainPanel,
+    Sidebar,
+}
+
 struct EditorState {
     video: VideoEntry,
     current_time_secs: f64,
@@ -104,6 +112,8 @@ struct EditorState {
     was_playing_before_scrub: bool,
     last_scrub_time: Option<Instant>,
     last_scrub_position: Option<f64>,
+    focus_zone: EditorFocusZone,
+    selected_snippet_index: Option<usize>,
 }
 
 impl EditorState {
@@ -137,6 +147,8 @@ impl EditorState {
             was_playing_before_scrub: false,
             last_scrub_time: None,
             last_scrub_position: None,
+            focus_zone: EditorFocusZone::MainPanel,
+            selected_snippet_index: Some(0),
         }
     }
 
@@ -187,6 +199,9 @@ pub struct ClipCompressApp {
     pub selection_mode: bool,
     pub selected_videos: HashSet<PathBuf>,
     pub delete_slider_progress: f32,
+    keyboard_selected_video: Option<PathBuf>,
+    delete_hold_started_at: Option<Instant>,
+    focus_filter_requested: bool,
 }
 
 pub type GalleryApp = ClipCompressApp;
@@ -212,6 +227,9 @@ impl ClipCompressApp {
             selection_mode: false,
             selected_videos: HashSet::new(),
             delete_slider_progress: 0.0,
+            keyboard_selected_video: None,
+            delete_hold_started_at: None,
+            focus_filter_requested: false,
         }
     }
 
@@ -601,6 +619,9 @@ impl ClipCompressApp {
     }
 
     fn should_repaint(&self) -> bool {
+        if self.delete_hold_started_at.is_some() {
+            return true;
+        }
         if !self.thumbnails_generating.is_empty() {
             return true;
         }
@@ -629,6 +650,9 @@ impl ClipCompressApp {
         self.videos_by_game.clear();
         self.thumbnails.clear();
         self.thumbnails_generating.clear();
+        self.keyboard_selected_video = None;
+        self.delete_hold_started_at = None;
+        self.delete_slider_progress = 0.0;
     }
 }
 
@@ -715,16 +739,7 @@ fn render_preview_panel(
         ui.horizontal(|ui| {
             let label = if editor.is_playing { "Pause" } else { "Play" };
             if ui.button(label).clicked() {
-                if editor.is_playing {
-                    editor.playback.pause_at(editor.current_time_secs);
-                    editor.is_playing = false;
-                } else {
-                    editor.last_tick = Instant::now();
-                    editor.is_playing = true;
-                    editor.preview_frame_in_flight = false;
-                    editor.pending_preview_request = None;
-                    editor.playback.play_from(editor.current_time_secs);
-                }
+                toggle_editor_playback(editor);
             }
             ui.label(format!(
                 "Current: {}",
@@ -779,6 +794,48 @@ fn render_editor_stats(ui: &mut egui::Ui, editor: &EditorState) {
     });
 }
 
+fn toggle_editor_playback(editor: &mut EditorState) {
+    if editor.is_playing {
+        editor.playback.pause_at(editor.current_time_secs);
+        editor.is_playing = false;
+        return;
+    }
+
+    editor.last_tick = Instant::now();
+    editor.is_playing = true;
+    editor.preview_frame_in_flight = false;
+    editor.pending_preview_request = None;
+    editor.playback.play_from(editor.current_time_secs);
+}
+
+fn seek_editor(editor: &mut EditorState, outcome: &mut EditorUiOutcome, delta_secs: f64) {
+    editor.playback.pause_at(editor.current_time_secs);
+    editor.is_playing = false;
+    editor.current_time_secs =
+        (editor.current_time_secs + delta_secs).clamp(0.0, editor.duration_secs());
+    outcome.preview_request = Some(editor.current_time_secs);
+}
+
+fn cycle_editor_focus_zone(editor: &mut EditorState, backwards: bool) {
+    editor.focus_zone = match (editor.focus_zone, backwards) {
+        (EditorFocusZone::MainPanel, false) => EditorFocusZone::Sidebar,
+        (EditorFocusZone::Sidebar, false) => EditorFocusZone::MainPanel,
+        (EditorFocusZone::MainPanel, true) => EditorFocusZone::Sidebar,
+        (EditorFocusZone::Sidebar, true) => EditorFocusZone::MainPanel,
+    };
+}
+
+fn clamp_selected_snippet_index(editor: &mut EditorState) {
+    let snippet_count = editor.snippets().len();
+    if snippet_count == 0 {
+        editor.selected_snippet_index = None;
+        return;
+    }
+
+    let current = editor.selected_snippet_index.unwrap_or(0);
+    editor.selected_snippet_index = Some(current.min(snippet_count - 1));
+}
+
 fn render_timeline_panel(
     ui: &mut egui::Ui,
     editor: &mut EditorState,
@@ -791,7 +848,7 @@ fn render_timeline_panel(
         // Controls are above the timeline so they remain visible even when the
         // timeline is constrained vertically.
         ui.horizontal(|ui| {
-            if ui.button("Add Cut at Playhead").clicked()
+            if ui.button("Add Cut at Playhead (A)").clicked()
                 && add_cut_point(editor, editor.current_time_secs)
             {
                 outcome.preview_request = Some(editor.current_time_secs);
@@ -799,7 +856,7 @@ fn render_timeline_panel(
             if ui
                 .add_enabled(
                     editor.selected_cut_point.is_some(),
-                    egui::Button::new("Remove Selected Cut"),
+                    egui::Button::new("Remove Selected Cut (Del)"),
                 )
                 .clicked()
             {
@@ -1054,7 +1111,8 @@ fn render_action_section(
         if ui
             .add_enabled(
                 can_export,
-                egui::Button::new("Export Clip").min_size(egui::vec2(ui.available_width(), 32.0)),
+                egui::Button::new("Export Clip (Ctrl+E / Ctrl+S)")
+                    .min_size(egui::vec2(ui.available_width(), 32.0)),
             )
             .clicked()
         {
@@ -1080,6 +1138,8 @@ fn hit_test_cut_point(editor: &EditorState, rect: egui::Rect, pointer_x: f32) ->
 }
 
 fn render_snippet_list(ui: &mut egui::Ui, editor: &mut EditorState, outcome: &mut EditorUiOutcome) {
+    clamp_selected_snippet_index(editor);
+
     egui::Frame::group(ui.style()).show(ui, |ui| {
         ui.label(egui::RichText::new("Snippets").strong());
         ui.label(egui::RichText::new("Use the timeline and add cuts at the playhead to split the clip into snippets. Disabled snippets are skipped in preview/export.").weak());
@@ -1090,12 +1150,19 @@ fn render_snippet_list(ui: &mut egui::Ui, editor: &mut EditorState, outcome: &mu
             .max_height(260.0)
             .show(ui, |ui| {
                 for (index, snippet) in snippets.iter().copied().enumerate() {
-                    egui::Frame::group(ui.style())
+                    let is_keyboard_selected = editor.selected_snippet_index == Some(index);
+                    let mut snippet_frame = egui::Frame::group(ui.style()).inner_margin(egui::Margin::same(8));
+                    if is_keyboard_selected {
+                        snippet_frame = snippet_frame.stroke(egui::Stroke::new(2.0, egui::Color32::from_rgb(236, 201, 75)));
+                    }
+
+                    snippet_frame
                         .inner_margin(egui::Margin::same(8))
                         .show(ui, |ui| {
                             ui.horizontal_wrapped(|ui| {
                                 let mut enabled = editor.snippet_enabled.get(index).copied().unwrap_or(true);
                                 if ui.checkbox(&mut enabled, format!("Snippet {}", index + 1)).changed() {
+                                    editor.selected_snippet_index = Some(index);
                                     if let Some(flag) = editor.snippet_enabled.get_mut(index) {
                                         *flag = enabled;
                                     }
@@ -1108,6 +1175,7 @@ fn render_snippet_list(ui: &mut egui::Ui, editor: &mut EditorState, outcome: &mu
                                     format_compact_duration(snippet.duration_secs()),
                                 ));
                                 if index < editor.cut_points.len() && ui.button("Remove following cut").clicked() {
+                                    editor.selected_snippet_index = Some(index);
                                     remove_cut_point(editor, index);
                                     outcome.preview_request = Some(editor.current_time_secs);
                                 }
@@ -1155,7 +1223,7 @@ fn render_size_section(ui: &mut egui::Ui, editor: &mut EditorState) {
     });
 }
 
-fn update_playback_clock(editor: &mut EditorState, outcome: &mut EditorUiOutcome) {
+fn update_playback_clock(editor: &mut EditorState, _outcome: &mut EditorUiOutcome) {
     if !editor.is_playing || editor.has_active_export() {
         editor.last_tick = Instant::now();
         return;
@@ -1166,16 +1234,6 @@ fn update_playback_clock(editor: &mut EditorState, outcome: &mut EditorUiOutcome
         editor.current_time_secs = editor.duration_secs();
         editor.is_playing = false;
         editor.playback.pause_at(editor.current_time_secs);
-    }
-
-    if editor.preview_frame_in_flight {
-        editor.pending_preview_request = Some(editor.current_time_secs);
-    } else if editor
-        .last_requested_preview_time
-        .map(|last| (editor.current_time_secs - last).abs() >= PREVIEW_FRAME_INTERVAL_SECS)
-        .unwrap_or(true)
-    {
-        outcome.preview_request = Some(editor.current_time_secs);
     }
 }
 
@@ -1269,7 +1327,7 @@ fn render_completion_screen(ui: &mut egui::Ui, editor: &mut EditorState) -> Edit
     let output_path = editor.export_output.clone().unwrap();
 
     ui.horizontal(|ui| {
-        if ui.button("< Back to Videos").clicked() {
+        if ui.button("< Back to Videos (Esc)").clicked() {
             outcome.back_to_browser = true;
             outcome.refresh_browser = true;
         }
