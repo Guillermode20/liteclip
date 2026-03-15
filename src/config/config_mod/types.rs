@@ -4,7 +4,7 @@
 //! including video, audio, hotkeys, and general settings.
 
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::path::PathBuf;
 
 use super::functions::{
@@ -12,10 +12,11 @@ use super::functions::{
     default_compression_ratio, default_compression_release, default_compression_threshold,
     default_encoder, default_false, default_framerate, default_gpu_index, default_hotkey_gallery,
     default_hotkey_save, default_hotkey_screenshot, default_hotkey_toggle,
-    default_keyframe_interval, default_master_volume, default_mic_device, default_mic_ns_attack_ms,
-    default_mic_ns_hangover_frames, default_mic_ns_min_gain_percent,
-    default_mic_ns_noise_floor_fast_percent, default_mic_ns_noise_floor_slow_percent,
-    default_mic_ns_release_ms, default_mic_ns_snr_max_tenths, default_mic_ns_snr_min_tenths,
+    default_keyframe_interval, default_master_volume, default_mic_device,
+    default_mic_noise_suppression_mode, default_mic_ns_attack_ms, default_mic_ns_hangover_frames,
+    default_mic_ns_min_gain_percent, default_mic_ns_noise_floor_fast_percent,
+    default_mic_ns_noise_floor_slow_percent, default_mic_ns_release_ms,
+    default_mic_ns_snr_max_tenths, default_mic_ns_snr_min_tenths,
     default_mic_ns_vad_gate_threshold_percent, default_mic_ns_vad_noise_threshold_percent,
     default_mic_volume, default_quality_preset, default_quality_value,
     default_quality_value_for_preset, default_rate_control, default_replay_duration,
@@ -343,7 +344,7 @@ impl Config {
             || self.audio.capture_system != other.audio.capture_system
             || self.audio.capture_mic != other.audio.capture_mic
             || self.audio.mic_device != other.audio.mic_device
-            || self.audio.mic_noise_reduction != other.audio.mic_noise_reduction
+            || self.audio.mic_noise_suppression_mode != other.audio.mic_noise_suppression_mode
             || self.audio.mic_ns_min_gain_percent != other.audio.mic_ns_min_gain_percent
             || self.audio.mic_ns_vad_noise_threshold_percent
                 != other.audio.mic_ns_vad_noise_threshold_percent
@@ -387,6 +388,43 @@ pub enum RateControl {
     Vbr,
     Cq,
 }
+
+/// Microphone noise suppression processing mode.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MicNoiseSuppressionMode {
+    None,
+    NoiseGate,
+    Rnnoise,
+}
+
+impl Default for MicNoiseSuppressionMode {
+    fn default() -> Self {
+        Self::Rnnoise
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum MicNoiseSuppressionModeCompat {
+    Mode(MicNoiseSuppressionMode),
+    Bool(bool),
+}
+
+fn deserialize_mic_noise_suppression_mode<'de, D>(
+    deserializer: D,
+) -> Result<MicNoiseSuppressionMode, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<MicNoiseSuppressionModeCompat>::deserialize(deserializer)?;
+    Ok(match value {
+        Some(MicNoiseSuppressionModeCompat::Mode(mode)) => mode,
+        Some(MicNoiseSuppressionModeCompat::Bool(true)) => MicNoiseSuppressionMode::Rnnoise,
+        Some(MicNoiseSuppressionModeCompat::Bool(false)) => MicNoiseSuppressionMode::None,
+        None => default_mic_noise_suppression_mode(),
+    })
+}
 /// Audio capture settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioConfig {
@@ -414,8 +452,11 @@ pub struct AudioConfig {
     pub compression_attack: u8, // 1ms to 100ms
     #[serde(default = "default_compression_release")]
     pub compression_release: u8, // 50ms to 500ms
-    #[serde(default = "default_false")]
-    pub mic_noise_reduction: bool,
+    #[serde(
+        default = "default_mic_noise_suppression_mode",
+        deserialize_with = "deserialize_mic_noise_suppression_mode"
+    )]
+    pub mic_noise_suppression_mode: MicNoiseSuppressionMode,
     #[serde(default = "default_mic_ns_min_gain_percent")]
     pub mic_ns_min_gain_percent: u8,
     #[serde(default = "default_mic_ns_vad_noise_threshold_percent")]

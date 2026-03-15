@@ -11,11 +11,13 @@ use std::thread;
 use std::time::Duration;
 use tracing::{debug, error, warn};
 
-use crate::capture::audio::mic::{NoiseSuppressorSettings, WasapiMicConfig};
+use crate::capture::audio::mic::{
+    MicNoiseProcessingMode, NoiseSuppressorSettings, WasapiMicConfig,
+};
 use crate::capture::audio::mixer::AudioMixer;
 use crate::capture::audio::system::WasapiSystemConfig;
 use crate::capture::audio::{WasapiMicCapture, WasapiSystemCapture};
-use crate::config::AudioConfig;
+use crate::config::{AudioConfig, MicNoiseSuppressionMode};
 use crate::encode::EncodedPacket;
 
 /// WASAPI audio manager that coordinates system and microphone capture
@@ -83,7 +85,11 @@ impl WasapiAudioManager {
                 } else {
                     Some(config.mic_device.clone())
                 },
-                noise_reduction: config.mic_noise_reduction,
+                noise_processing_mode: match config.mic_noise_suppression_mode {
+                    MicNoiseSuppressionMode::None => MicNoiseProcessingMode::None,
+                    MicNoiseSuppressionMode::NoiseGate => MicNoiseProcessingMode::NoiseGate,
+                    MicNoiseSuppressionMode::Rnnoise => MicNoiseProcessingMode::Rnnoise,
+                },
                 noise_suppressor_settings: NoiseSuppressorSettings {
                     min_gain: config.mic_ns_min_gain_percent as f32 / 100.0,
                     vad_noise_threshold: config.mic_ns_vad_noise_threshold_percent as f32 / 100.0,

@@ -243,12 +243,33 @@ impl SettingsApp {
                         egui::Slider::new(&mut self.config.audio.mic_volume, 0..=200)
                             .text("Mic Volume %"),
                     );
-                    ui.checkbox(
-                        &mut self.config.audio.mic_noise_reduction,
-                        "Mic Noise Reduction (AI)",
-                    );
+                    egui::ComboBox::from_label("Mic Noise Suppression")
+                        .selected_text(match self.config.audio.mic_noise_suppression_mode {
+                            MicNoiseSuppressionMode::Rnnoise => "RNNoise (Quality)",
+                            MicNoiseSuppressionMode::NoiseGate => "Noise Gate (Performance)",
+                            MicNoiseSuppressionMode::None => "Off",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.config.audio.mic_noise_suppression_mode,
+                                MicNoiseSuppressionMode::Rnnoise,
+                                "RNNoise (Quality)",
+                            );
+                            ui.selectable_value(
+                                &mut self.config.audio.mic_noise_suppression_mode,
+                                MicNoiseSuppressionMode::NoiseGate,
+                                "Noise Gate (Performance)",
+                            );
+                            ui.selectable_value(
+                                &mut self.config.audio.mic_noise_suppression_mode,
+                                MicNoiseSuppressionMode::None,
+                                "Off",
+                            );
+                        });
 
-                    if self.config.audio.mic_noise_reduction {
+                    if self.config.audio.mic_noise_suppression_mode
+                        == MicNoiseSuppressionMode::Rnnoise
+                    {
                         ui.indent("noise_suppression_settings", |ui| {
                             egui::ComboBox::from_label("Sensitivity")
                                 .selected_text(

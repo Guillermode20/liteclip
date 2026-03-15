@@ -2,7 +2,7 @@
 //!
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
-use super::types::{EncoderType, QualityPreset, RateControl, Resolution};
+use super::types::{EncoderType, MicNoiseSuppressionMode, QualityPreset, RateControl, Resolution};
 
 pub const MAX_FRAMERATE: u32 = 240;
 pub const RECOMMENDED_BUFFER_HEADROOM_PERCENT: u64 = 135;
@@ -120,6 +120,9 @@ pub fn default_mic_ns_attack_ms() -> u8 {
 pub fn default_mic_ns_release_ms() -> u8 {
     30
 }
+pub fn default_mic_noise_suppression_mode() -> MicNoiseSuppressionMode {
+    MicNoiseSuppressionMode::Rnnoise
+}
 pub(super) fn default_hotkey_save() -> String {
     "Alt+F9".to_string()
 }
@@ -155,7 +158,10 @@ mod tests {
         assert_eq!(config.advanced.memory_limit_mb, 0);
         assert!(config.audio.capture_system);
         assert!(config.audio.capture_mic);
-        assert!(config.audio.mic_noise_reduction);
+        assert_eq!(
+            config.audio.mic_noise_suppression_mode,
+            MicNoiseSuppressionMode::Rnnoise
+        );
     }
     #[test]
     fn test_validate_quality_value_clamps() {
