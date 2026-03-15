@@ -82,6 +82,49 @@ impl FfmpegEncoder {
         })
     }
 
+    pub(super) fn init_hardware_encoder(
+        &mut self,
+        gpu_frame: &crate::capture::D3d11Frame,
+        width: u32,
+        height: u32,
+    ) -> Result<()> {
+        match self.config.encoder_type {
+            crate::config::EncoderType::Nvenc => {
+                self.init_nvenc_hardware_encoder(gpu_frame, width, height)
+            }
+            crate::config::EncoderType::Amf => {
+                self.init_amf_hardware_encoder(gpu_frame, width, height)
+            }
+            crate::config::EncoderType::Qsv => {
+                self.init_qsv_hardware_encoder(gpu_frame, width, height)
+            }
+            _ => anyhow::bail!(
+                "Hardware encoder initialization not supported for {:?}",
+                self.config.encoder_type
+            ),
+        }
+    }
+
+    pub(super) fn encode_gpu_frame(
+        &mut self,
+        frame: &crate::capture::CapturedFrame,
+        gpu_frame: &crate::capture::D3d11Frame,
+        pts: i64,
+        gop: i64,
+    ) -> Result<()> {
+        match self.config.encoder_type {
+            crate::config::EncoderType::Nvenc => {
+                self.encode_nvenc_gpu_frame(frame, gpu_frame, pts, gop)
+            }
+            crate::config::EncoderType::Amf => self.encode_amf_gpu_frame(frame, gpu_frame, pts, gop),
+            crate::config::EncoderType::Qsv => self.encode_qsv_gpu_frame(frame, gpu_frame, pts, gop),
+            _ => anyhow::bail!(
+                "Hardware encoding not supported for {:?}",
+                self.config.encoder_type
+            ),
+        }
+    }
+
     fn supports_gpu_frames(&self) -> bool {
         self.config.supports_gpu_frame_transport()
     }

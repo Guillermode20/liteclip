@@ -23,8 +23,9 @@ impl FfmpegEncoder {
 
     pub(super) fn encoder_pixel_format(&self) -> Pixel {
         match self.config.encoder_type {
-            EncoderType::Nvenc => Pixel::BGRA,
-            EncoderType::Amf | EncoderType::Qsv | EncoderType::Auto => Pixel::NV12,
+            EncoderType::Nvenc | EncoderType::Amf | EncoderType::Qsv | EncoderType::Auto => {
+                Pixel::NV12
+            }
         }
     }
 

@@ -177,16 +177,19 @@ impl EncoderConfig {
     pub fn supports_gpu_frame_transport(&self) -> bool {
         matches!(
             self.encoder_type,
-            crate::config::EncoderType::Nvenc | crate::config::EncoderType::Amf
+            crate::config::EncoderType::Nvenc
+                | crate::config::EncoderType::Amf
+                | crate::config::EncoderType::Qsv
         )
     }
 
     #[cfg(windows)]
     pub fn gpu_texture_format(&self) -> Option<GpuTextureFormat> {
         match self.encoder_type {
-            crate::config::EncoderType::Nvenc => Some(GpuTextureFormat::Bgra),
-            crate::config::EncoderType::Amf => Some(GpuTextureFormat::Nv12),
-            crate::config::EncoderType::Qsv | crate::config::EncoderType::Auto => None,
+            crate::config::EncoderType::Nvenc
+            | crate::config::EncoderType::Amf
+            | crate::config::EncoderType::Qsv => Some(GpuTextureFormat::Nv12),
+            crate::config::EncoderType::Auto => None,
         }
     }
 }

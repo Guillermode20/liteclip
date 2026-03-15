@@ -101,7 +101,7 @@ impl FfmpegEncoder {
 
             let reusable_hw_frame = ffmpeg::ffi::av_frame_alloc();
             if reusable_hw_frame.is_null() {
-                ffmpeg::ffi::av_buffer_unref(&mut frames_ctx_ref as *mut _);
+                ffmpeg::ffi::av_buffer_unref(&mut frames_ctx_ref);
                 ffmpeg::ffi::av_buffer_unref(&mut device_ctx_ref);
                 anyhow::bail!("Failed to allocate reusable hardware frame");
             }
@@ -152,5 +152,79 @@ impl FfmpegEncoder {
 
             Ok(frames_ctx_ref)
         }
+    }
+
+    pub(super) unsafe fn prepare_hw_frame(
+        hw_context: &mut D3d11HardwareContext,
+        hw_frame: *mut ffmpeg::ffi::AVFrame,
+        gpu_frame: &crate::capture::D3d11Frame,
+    ) -> Result<()> {
+        ffmpeg::ffi::av_frame_unref(hw_frame);
+
+        let get_buffer_res =
+            ffmpeg::ffi::av_hwframe_get_buffer(hw_context.frames_ctx_ref, hw_frame, 0);
+        if get_buffer_res < 0 {
+            anyhow::bail!("Failed to get hardware frame buffer: {}", get_buffer_res);
+        }
+
+        // For shared device, use the source texture directly
+        (*hw_frame).data[0] = gpu_frame.texture.as_raw() as *mut _;
+        (*hw_frame).data[1] = std::ptr::null_mut();
+        (*hw_frame).data[2] = std::ptr::null_mut();
+        (*hw_frame).data[3] = std::ptr::null_mut();
+
+        if !hw_context.is_shared_device {
+            // Cross-device logic (OpenSharedResource + Fence wait)
+            let texture_ptr = (*hw_frame).data[0] as *mut ID3D11Texture2D;
+            let dst_texture = &*texture_ptr;
+            let dest_subresource = (*hw_frame).data[1] as usize as u32;
+
+            let shared_texture = if let Some(found) = hw_context
+                .cached_shared_textures
+                .iter()
+                .find(|(h, _)| *h == gpu_frame.shared_handle)
+                .map(|(_, t)| t)
+            {
+                found.clone()
+            } else {
+                let mut opened_opt: Option<ID3D11Texture2D> = None;
+                if let Some(ref encoder_device) = hw_context.encoder_device {
+                    encoder_device
+                        .OpenSharedResource(gpu_frame.shared_handle, &mut opened_opt)
+                        .context("Failed to open shared texture on encoder device")?;
+                } else {
+                    anyhow::bail!("No encoder device available for cross-device texture sharing");
+                }
+                let opened = opened_opt.context("OpenSharedResource returned null")?;
+                hw_context
+                    .cached_shared_textures
+                    .push((gpu_frame.shared_handle, opened.clone()));
+                opened
+            };
+
+            if let (Some(ref fence), Some(_handle)) =
+                (&hw_context.encoder_fence, gpu_frame.fence_shared_handle)
+            {
+                let ctx4: windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext4 = hw_context
+                    .copy_context
+                    .cast()
+                    .context("Failed to get ID3D11DeviceContext4 for encoder wait")?;
+                ctx4.Wait(fence, gpu_frame.fence_value)
+                    .context("Failed to wait on shared fence in encoder")?;
+            }
+
+            hw_context.copy_context.CopySubresourceRegion(
+                dst_texture,
+                dest_subresource,
+                0,
+                0,
+                0,
+                &shared_texture,
+                0,
+                None,
+            );
+        }
+
+        Ok(())
     }
 }
