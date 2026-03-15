@@ -45,10 +45,10 @@ impl AudioMixer {
         // Calculate synchronization parameters (QPC ticks)
         // QPC frequency is ~10MHz (1 tick = 100ns)
         // Audio packets are 100ms duration
-        // Allow 50ms sync threshold and 200ms timeout
+        // Increased tolerance to handle varying packet timings better
         const QPC_TICKS_PER_MILLISECOND: i64 = 10_000; // ~10MHz
-        let sync_threshold = 50 * QPC_TICKS_PER_MILLISECOND; // 50ms tolerance
-        let timeout = 200 * QPC_TICKS_PER_MILLISECOND; // 200ms timeout
+        let sync_threshold = 100 * QPC_TICKS_PER_MILLISECOND; // 100ms tolerance
+        let timeout = 300 * QPC_TICKS_PER_MILLISECOND; // 300ms timeout
 
         Self {
             config: config.clone(),
@@ -149,8 +149,26 @@ impl AudioMixer {
                         let mic_packet = self.mic_packets.remove(&mic_ts);
                         return Some((system_packet, mic_packet, system_ts.min(mic_ts)));
                     } else {
-                        // Packets are not in sync, don't process yet
-                        return None;
+                        // Packets are not in sync - process the earlier packet and pad the other
+                        let (earlier_ts, later_ts) = if system_ts < mic_ts {
+                            (system_ts, mic_ts)
+                        } else {
+                            (mic_ts, system_ts)
+                        };
+
+                        // If the gap is too large, process the earlier packet and pad
+                        if later_ts - earlier_ts > self.timeout {
+                            if system_ts < mic_ts {
+                                let system_packet = self.system_packets.remove(&system_ts);
+                                return Some((system_packet, None, system_ts));
+                            } else {
+                                let mic_packet = self.mic_packets.remove(&mic_ts);
+                                return Some((None, mic_packet, mic_ts));
+                            }
+                        } else {
+                            // Wait for matching packet
+                            return None;
+                        }
                     }
                 }
             }
@@ -323,7 +341,7 @@ impl AudioMixer {
 
     /// Improved soft clipping algorithm using tanh
     fn improved_soft_clip(sample: f32) -> f32 {
-        const THRESHOLD: f32 = 20000.0;
+        const THRESHOLD: f32 = 16384.0; // -6dB
         const MAX: f32 = 32767.0;
 
         if sample.abs() < THRESHOLD {
@@ -548,8 +566,8 @@ mod tests {
         mic_data.extend_from_slice(&4000i16.to_le_bytes());
         let mic_packet = EncodedPacket::new(
             mic_data.freeze(),
-            600000, // 60ms (exceeds 50ms sync threshold)
-            600000,
+            1100000, // 110ms (exceeds 100ms sync threshold)
+            1100000,
             false,
             crate::encode::StreamType::Microphone,
         );

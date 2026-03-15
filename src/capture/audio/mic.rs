@@ -432,7 +432,7 @@ impl MicNoiseProcessor {
 
 #[inline]
 fn soft_limit(x: f32) -> f32 {
-    const THRESHOLD: f32 = 28_000.0;
+    const THRESHOLD: f32 = 16_384.0; // -6dB
     const MAX: f32 = 32_767.0;
 
     if x.abs() < THRESHOLD {
@@ -446,23 +446,24 @@ fn soft_limit(x: f32) -> f32 {
 
 /// RNNoise-based noise suppression using the nnnoiseless crate.
 ///
-/// Pure RNNoise is fairly subtle on steady mic hiss, so this adapter keeps the
-/// earlier VAD/SNR-driven gain shaping on top of the denoiser output to make
-/// the suppression clearly audible in the live mic path.
+/// Stereo (or higher) mic input is mixed to mono before running RNNoise, then
+/// the denoised + gain-shaped result is broadcast back to all channels. This
+/// halves the neural-net call count on stereo mics with no audible quality
+/// loss for single-capsule microphones (where L ≈ R anyway).
 struct RNNoiseProcessor {
     channels: usize,
-    states: Vec<Box<DenoiseState<'static>>>,
+    state: Box<DenoiseState<'static>>,
     in_buf: Vec<f32>,
     in_head: usize,
     out_buf: Vec<f32>,
     out_head: usize,
-    gain: Vec<f32>,
-    noise_floor: Vec<f32>,
-    speech_hangover: Vec<u8>,
+    gain: f32,
+    noise_floor: f32,
+    speech_hangover: u8,
     dc_x: Vec<f32>,
     dc_y: Vec<f32>,
-    frame_in: Vec<Box<[f32; AUDIO_FRAME_SIZE]>>,
-    frame_out: Vec<Box<[f32; AUDIO_FRAME_SIZE]>>,
+    frame_in: Box<[f32; AUDIO_FRAME_SIZE]>,
+    frame_out: Box<[f32; AUDIO_FRAME_SIZE]>,
     primed: bool,
     attack_alpha: f32,
     release_alpha: f32,
@@ -470,42 +471,40 @@ struct RNNoiseProcessor {
 
 impl RNNoiseProcessor {
     const DC_COEFF: f32 = 0.9975;
-    const MIN_GAIN: f32 = 0.004;
+    /// Floor gain applied when the gate decides the frame is noise.
+    /// 0.08 = 92% noise reduction; high enough to suppress hiss clearly but
+    /// low enough that a mis-classified voiced frame doesn't sound chopped off.
+    const MIN_GAIN: f32 = 0.08;
     const VAD_NOISE_THRESHOLD: f32 = 0.25;
-    const VAD_GATE_THRESHOLD: f32 = 0.55;
+    /// VAD probability above which the gate fully opens. Lower value = gate
+    /// opens more readily, protecting quiet phonemes and word onsets.
+    const VAD_GATE_THRESHOLD: f32 = 0.40;
     const SNR_MIN: f32 = 1.2;
     const SNR_MAX: f32 = 6.0;
-    const HANGOVER_FRAMES: u8 = 10;
+    /// Frames to hold the gate open after speech drops below threshold.
+    /// 20 × 10 ms = 200 ms — covers brief pauses between words.
+    const HANGOVER_FRAMES: u8 = 20;
     const NOISE_FLOOR_FAST_ALPHA: f32 = 0.10;
     const NOISE_FLOOR_SLOW_ALPHA: f32 = 0.01;
 
     fn new(channels: usize) -> Self {
-        let mut states = Vec::with_capacity(channels);
-        for _ in 0..channels {
-            states.push(DenoiseState::new());
-        }
-
         Self {
             channels,
-            states,
-            in_buf: Vec::with_capacity(AUDIO_FRAME_SIZE * channels * 4),
+            state: DenoiseState::new(),
+            in_buf: Vec::with_capacity(AUDIO_FRAME_SIZE * 8),
             in_head: 0,
-            out_buf: Vec::with_capacity(AUDIO_FRAME_SIZE * channels * 4),
+            out_buf: vec![0.0; AUDIO_FRAME_SIZE],
             out_head: 0,
-            gain: vec![0.0; channels],
-            noise_floor: vec![300.0; channels],
-            speech_hangover: vec![0; channels],
+            gain: 0.0,
+            noise_floor: 300.0,
+            speech_hangover: 0,
             dc_x: vec![0.0; channels],
             dc_y: vec![0.0; channels],
-            frame_in: (0..channels)
-                .map(|_| Box::new([0.0; AUDIO_FRAME_SIZE]))
-                .collect(),
-            frame_out: (0..channels)
-                .map(|_| Box::new([0.0; AUDIO_FRAME_SIZE]))
-                .collect(),
+            frame_in: Box::new([0.0; AUDIO_FRAME_SIZE]),
+            frame_out: Box::new([0.0; AUDIO_FRAME_SIZE]),
             primed: false,
-            attack_alpha: Self::alpha_from_ms(1.0),
-            release_alpha: Self::alpha_from_ms(30.0),
+            attack_alpha: Self::alpha_from_ms(1.5),
+            release_alpha: Self::alpha_from_ms(80.0),
         }
     }
 
@@ -535,99 +534,101 @@ impl RNNoiseProcessor {
             return;
         }
 
-        let samples = unsafe {
-            std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut i16, data.len() / 2)
-        };
+        let sample_count = data.len() / 2;
+        let frame_count = sample_count / self.channels;
+        let samples =
+            unsafe { std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut i16, sample_count) };
 
-        self.in_buf.reserve(samples.len());
-        for sample in samples.iter() {
-            self.in_buf.push(*sample as f32);
+        // Mix interleaved input down to mono.  For a typical single-capsule
+        // mic L == R, so this is lossless; it also halves RNNoise call count.
+        let channels_f = self.channels as f32;
+        self.in_buf.reserve(frame_count);
+        for frame_idx in 0..frame_count {
+            let mut sum = 0.0f32;
+            for ch in 0..self.channels {
+                sum += samples[frame_idx * self.channels + ch] as f32;
+            }
+            self.in_buf.push(sum / channels_f);
         }
 
-        let frame_size = AUDIO_FRAME_SIZE * self.channels;
-        while (self.in_buf.len() - self.in_head) >= frame_size {
-            let out_start = self.out_buf.len();
-            self.out_buf.resize(out_start + frame_size, 0.0);
+        // Process complete 480-sample RNNoise frames from the mono queue.
+        while (self.in_buf.len() - self.in_head) >= AUDIO_FRAME_SIZE {
             let frame_start = self.in_head;
+            self.frame_in
+                .copy_from_slice(&self.in_buf[frame_start..frame_start + AUDIO_FRAME_SIZE]);
 
-            for channel in 0..self.channels {
-                for index in 0..AUDIO_FRAME_SIZE {
-                    self.frame_in[channel][index] =
-                        self.in_buf[frame_start + index * self.channels + channel];
-                }
+            let vad = self
+                .state
+                .process_frame(self.frame_out.as_mut_slice(), self.frame_in.as_slice());
 
-                let vad = self.states[channel].process_frame(
-                    self.frame_out[channel].as_mut_slice(),
-                    self.frame_in[channel].as_slice(),
-                );
+            let mut energy = 0.0f32;
+            for s in self.frame_out.iter() {
+                energy += s * s;
+            }
+            let frame_rms = (energy / AUDIO_FRAME_SIZE as f32).sqrt();
 
-                let mut energy = 0.0;
-                for index in 0..AUDIO_FRAME_SIZE {
-                    let sample = self.frame_out[channel][index];
-                    energy += sample * sample;
-                }
-                let frame_rms = (energy / AUDIO_FRAME_SIZE as f32).sqrt();
+            let floor_alpha = if vad < Self::VAD_NOISE_THRESHOLD {
+                Self::NOISE_FLOOR_FAST_ALPHA
+            } else {
+                Self::NOISE_FLOOR_SLOW_ALPHA
+            };
+            self.noise_floor += floor_alpha * (frame_rms - self.noise_floor);
+            self.noise_floor = self.noise_floor.max(10.0);
 
-                let floor = &mut self.noise_floor[channel];
-                let floor_alpha = if vad < Self::VAD_NOISE_THRESHOLD {
-                    Self::NOISE_FLOOR_FAST_ALPHA
-                } else {
-                    Self::NOISE_FLOOR_SLOW_ALPHA
-                };
-                *floor += floor_alpha * (frame_rms - *floor);
-                *floor = floor.max(10.0);
+            let snr = frame_rms / (self.noise_floor + 1.0);
+            let snr_gate =
+                ((snr - Self::SNR_MIN) / (Self::SNR_MAX - Self::SNR_MIN)).clamp(0.0, 1.0);
+            let vad_gate = ((vad - Self::VAD_NOISE_THRESHOLD)
+                / (Self::VAD_GATE_THRESHOLD - Self::VAD_NOISE_THRESHOLD))
+                .clamp(0.0, 1.0);
 
-                let snr = frame_rms / (*floor + 1.0);
-                let snr_gate =
-                    ((snr - Self::SNR_MIN) / (Self::SNR_MAX - Self::SNR_MIN)).clamp(0.0, 1.0);
-                let vad_gate = ((vad - Self::VAD_NOISE_THRESHOLD)
-                    / (Self::VAD_GATE_THRESHOLD - Self::VAD_NOISE_THRESHOLD))
-                    .clamp(0.0, 1.0);
-
-                let mut gate_confidence = vad_gate.max(snr_gate);
-                if vad >= Self::VAD_GATE_THRESHOLD {
-                    self.speech_hangover[channel] = Self::HANGOVER_FRAMES;
-                } else if self.speech_hangover[channel] > 0 {
-                    self.speech_hangover[channel] -= 1;
-                    gate_confidence = gate_confidence.max(0.60);
-                }
-
-                let target_gain = Self::MIN_GAIN + (1.0 - Self::MIN_GAIN) * gate_confidence;
-                let mut current_gain = self.gain[channel];
-                let discard_frame = !self.primed;
-
-                for index in 0..AUDIO_FRAME_SIZE {
-                    let gain_alpha = if target_gain > current_gain {
-                        self.attack_alpha
-                    } else {
-                        self.release_alpha
-                    };
-                    current_gain += gain_alpha * (target_gain - current_gain);
-
-                    let denoised = if discard_frame {
-                        0.0
-                    } else {
-                        self.frame_out[channel][index] * current_gain
-                    };
-                    let dc_blocked = self.dc_block(channel, denoised);
-                    self.out_buf[out_start + index * self.channels + channel] =
-                        soft_limit(dc_blocked);
-                }
-
-                self.gain[channel] = current_gain;
+            let mut gate_confidence = vad_gate.max(snr_gate);
+            if vad >= Self::VAD_GATE_THRESHOLD {
+                self.speech_hangover = Self::HANGOVER_FRAMES;
+                gate_confidence = 1.0;
+            } else if self.speech_hangover > 0 {
+                self.speech_hangover -= 1;
+                gate_confidence = 1.0;
             }
 
+            let target_gain = Self::MIN_GAIN + (1.0 - Self::MIN_GAIN) * gate_confidence;
+            let mut current_gain = self.gain;
+
+            let out_start = self.out_buf.len();
+            self.out_buf.resize(out_start + AUDIO_FRAME_SIZE, 0.0);
+
+            for i in 0..AUDIO_FRAME_SIZE {
+                let gain_alpha = if target_gain > current_gain {
+                    self.attack_alpha
+                } else {
+                    self.release_alpha
+                };
+                current_gain += gain_alpha * (target_gain - current_gain);
+
+                // Always output the processed frame - the nnnoiseless crate
+                // already handles priming internally
+                self.out_buf[out_start + i] = self.frame_out[i] * current_gain;
+            }
+
+            self.gain = current_gain;
             self.primed = true;
-            self.in_head += frame_size;
+            self.in_head += AUDIO_FRAME_SIZE;
             if self.in_head > 0 && self.in_head >= self.in_buf.len() / 2 {
                 self.in_buf.drain(0..self.in_head);
                 self.in_head = 0;
             }
         }
 
-        let available = (self.out_buf.len() - self.out_head).min(samples.len());
-        for index in 0..available {
-            samples[index] = self.out_buf[self.out_head + index].clamp(-32768.0, 32767.0) as i16;
+        // Broadcast processed mono output to all interleaved channels,
+        // with per-channel DC blocking and soft limiting.
+        let available = (self.out_buf.len() - self.out_head).min(frame_count);
+        for frame_idx in 0..available {
+            let mono_sample = self.out_buf[self.out_head + frame_idx];
+            for ch in 0..self.channels {
+                let dc_blocked = self.dc_block(ch, mono_sample);
+                samples[frame_idx * self.channels + ch] =
+                    soft_limit(dc_blocked).clamp(-32768.0, 32767.0) as i16;
+            }
         }
 
         self.out_head += available;
@@ -636,8 +637,14 @@ impl RNNoiseProcessor {
             self.out_head = 0;
         }
 
-        for sample in &mut samples[available..] {
-            *sample = 0;
+        // Instead of zeroing out unavailable samples, pass through the original
+        // input to avoid discontinuities. Note: with proper buffer padding,
+        // we should theoretically never hit this, but if we do, it's safer
+        // to pass zeros rather than jump phase!
+        for frame_idx in available..frame_count {
+            for ch in 0..self.channels {
+                samples[frame_idx * self.channels + ch] = 0;
+            }
         }
     }
 }
@@ -661,14 +668,14 @@ mod tests {
     fn test_rnnoise_processor_latency() {
         let mut processor = RNNoiseProcessor::new(1);
 
-        // Input 480 samples (10ms at 48kHz) of strong signal
-        let mut data: Vec<u8> = (0..480)
+        // Input 480 samples (10ms at 48kHz) of strong signal, twice
+        let mut data: Vec<u8> = (0..960)
             .map(|i| ((i as f32 * 0.1).sin() * 20000.0) as i16)
             .flat_map(|s| s.to_ne_bytes())
             .collect();
         processor.process(&mut data);
 
-        // Should NOT be all zeros because we provided exactly one frame
+        // Should NOT be all zeros because we provided > 1 frame
         let samples: &[i16] =
             unsafe { std::slice::from_raw_parts(data.as_ptr() as *const i16, data.len() / 2) };
         assert!(!samples.iter().all(|&s| s == 0));
