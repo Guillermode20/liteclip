@@ -280,7 +280,7 @@ impl AudioMixer {
             pts,
             pts,
             false,
-            crate::encode::StreamType::Video, // We'll use a single stream type for mixed audio
+            crate::encode::StreamType::SystemAudio, // Use SystemAudio for mixed output
         ))
     }
 
@@ -421,6 +421,7 @@ fn decode_packet_into(packet: &EncodedPacket, buffer: &mut Vec<i16>) {
 }
 
 /// Decode an EncodedPacket to i16 samples (compatibility function for tests)
+#[cfg(test)]
 fn decode_packet(packet: &EncodedPacket) -> Vec<i16> {
     let mut buffer = Vec::with_capacity(packet.data.len() / 2);
     decode_packet_into(packet, &mut buffer);

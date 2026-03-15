@@ -161,6 +161,22 @@ pub fn spawn_clip_saver(
             duration.as_secs()
         );
 
+        // Clean up any leftover fragmented MP4s from prior failed saves.
+        if let Some(stem) = final_path.file_stem().and_then(|s| s.to_str()) {
+            let fragmented_path = final_path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .join(format!("{}.fragmented.mp4", stem));
+            if fragmented_path.exists() {
+                if let Err(err) = std::fs::remove_file(&fragmented_path) {
+                    warn!(
+                        "Failed to remove stale fragmented MP4 {:?}: {}",
+                        fragmented_path, err
+                    );
+                }
+            }
+        }
+
         // Generate thumbnail immediately after saving
         debug!("Generating thumbnail for saved clip");
         match generate_thumbnail(&final_path, &save_directory) {

@@ -1,5 +1,5 @@
 use super::{
-    functions::{ffmpeg_executable_path, h264_nal_type, hevc_nal_type, remux_fragmented_mp4},
+    functions::{h264_nal_type, hevc_nal_type},
     mp4::FfmpegMuxer,
 };
 use crate::encode::{EncodedPacket, StreamType};
@@ -173,14 +173,10 @@ impl Muxer {
             );
         }
 
-        let fragmented_output_path = fragmented_output_path(output_path);
-        info!(
-            "Writing fragmented intermediate clip to {:?} before final remux",
-            fragmented_output_path
-        );
+        info!("Writing MP4 to {:?}", output_path);
 
         let mut muxer = FfmpegMuxer::new(
-            &fragmented_output_path,
+            output_path,
             &detected_video_codec,
             config.width,
             config.height,
@@ -188,44 +184,8 @@ impl Muxer {
             config,
         )?;
 
-        let mux_result = muxer.write_packets(&video_packets, &audio_packets);
+        let (video_count, audio_count) = muxer.write_packets(&video_packets, &audio_packets)?;
         drop(muxer);
-
-        let fragmented_size = fragmented_output_path
-            .metadata()
-            .map(|meta| meta.len())
-            .unwrap_or(0);
-
-        let (video_count, audio_count) = match mux_result {
-            Ok(counts) => counts,
-            Err(err) if fragmented_size > 0 => {
-                warn!(
-                    "Fragmented MP4 trailer/finalize failed but intermediate file exists ({} bytes); attempting external remux anyway: {}",
-                    fragmented_size,
-                    err
-                );
-                (video_packets.len(), audio_packets.len())
-            }
-            Err(err) => return Err(err),
-        };
-
-        remux_fragmented_mp4(&fragmented_output_path, output_path, config.faststart).with_context(
-            || {
-                format!(
-                    "Failed to remux fragmented intermediate {:?} to final output {:?} using {:?}",
-                    fragmented_output_path,
-                    output_path,
-                    ffmpeg_executable_path()
-                )
-            },
-        )?;
-
-        if let Err(err) = std::fs::remove_file(&fragmented_output_path) {
-            warn!(
-                "Failed to remove temporary fragmented MP4 {:?}: {}",
-                fragmented_output_path, err
-            );
-        }
 
         info!(
             "MP4 finalized natively: {:?} ({} video packets, {} audio packets)",
@@ -320,15 +280,6 @@ fn is_parameter_set_packet(packet: &EncodedPacket) -> bool {
 
     let data = packet.data.as_ref();
     matches!(h264_nal_type(data), Some(7 | 8)) || matches!(hevc_nal_type(data), Some(32..=34))
-}
-
-fn fragmented_output_path(output_path: &Path) -> PathBuf {
-    let parent = output_path.parent().unwrap_or_else(|| Path::new("."));
-    let stem = output_path
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or("clip");
-    parent.join(format!("{}.fragmented.mp4", stem))
 }
 
 /// Configuration for the MP4 muxer.

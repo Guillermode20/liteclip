@@ -28,6 +28,7 @@ pub struct FfmpegMuxer {
     video_frame_rate: i32,
     audio_time_base: (i32, i32),
     expect_audio: bool,
+    faststart: bool,
 }
 
 impl FfmpegMuxer {
@@ -129,6 +130,7 @@ impl FfmpegMuxer {
             video_frame_rate: rounded_fps,
             audio_time_base,
             expect_audio: config.expect_audio,
+            faststart: config.faststart,
         })
     }
 
@@ -158,22 +160,27 @@ impl FfmpegMuxer {
         }
 
         let base_qpc = video_packets
-            .first()
-            .map(|packet| packet.pts)
-            .into_iter()
-            .chain(audio_packets.first().map(|packet| packet.pts))
+            .iter()
+            .map(|packet| packet.dts)
+            .chain(audio_packets.iter().map(|packet| packet.pts))
             .min()
             .unwrap_or(0);
+
+        // Estimate end time based on the latest presentation timestamp.
+        let max_video_pts = video_packets
+            .iter()
+            .map(|packet| packet.pts)
+            .max()
+            .unwrap_or(0);
         let video_end_qpc =
-            estimate_video_end_qpc(video_packets, self.video_frame_rate, self.video_time_base.1);
+            max_video_pts.saturating_add(default_video_frame_qpc(self.video_frame_rate));
 
         let mut options = ffmpeg::Dictionary::new();
-        // +frag_keyframe avoids FFmpeg's delay_moov packet queue, which would
-        // otherwise copy every packet in RAM until the final moov box can be
-        // written. Keep the output fragmented here so save-time memory stays
-        // flat; converting back to a regular MP4 at trailer time reintroduces
-        // a large whole-file rewrite and RAM spike.
-        options.set("movflags", "+frag_keyframe");
+        // Enable faststart if requested so the moov atom is written at the
+        // beginning of the file (useful for playback before download completes).
+        if self.faststart {
+            options.set("movflags", "+faststart");
+        }
         self.format_context
             .write_header_with(options)
             .context("Failed to write MP4 header")?;
@@ -200,10 +207,10 @@ impl FfmpegMuxer {
         // Log video stream info.
         {
             let qpc_freq = crate::buffer::ring::qpc_frequency();
-            let first_pts = video_packets.first().map(|p| p.pts).unwrap_or(0);
-            let last_pts = video_packets.last().map(|p| p.pts).unwrap_or(0);
+            let min_pts = video_packets.iter().map(|p| p.pts).min().unwrap_or(0);
+            let max_pts = video_packets.iter().map(|p| p.pts).max().unwrap_or(0);
             let duration_ms = if qpc_freq > 0 {
-                last_pts.saturating_sub(first_pts) * 1000 / qpc_freq
+                max_pts.saturating_sub(min_pts) * 1000 / qpc_freq
             } else {
                 0
             };
@@ -223,9 +230,8 @@ impl FfmpegMuxer {
             );
         }
 
-        // Merge-sort video and audio by presentation time, writing each packet via
-        // av_write_frame (non-interleaved, since we handle the ordering ourselves).
-        // +frag_keyframe flushes a new fragment to disk at each video keyframe.
+        // Merge-sort video and audio by decode time (DTS) and write each packet.
+        // This aligns with FFmpeg's expectations for fragmented MP4 output.
         let qpc_freq = crate::buffer::ring::qpc_frequency().max(1);
         let mut aac_iter = encoded_audio.iter().peekable();
         let audio_stream_idx = self.audio_stream_index;
@@ -233,9 +239,18 @@ impl FfmpegMuxer {
         let mut video_count = 0usize;
         let mut audio_count = 0usize;
 
-        for (idx, pkt) in video_packets.iter().enumerate() {
-            // Flush AAC packets whose PTS is at or before this video packet.
-            let video_us = pkt.pts.saturating_sub(base_qpc).saturating_mul(1_000_000) / qpc_freq;
+        let mut video_packets_ordered: Vec<&EncodedPacket> = video_packets.to_vec();
+        video_packets_ordered.sort_by_key(|pkt| (pkt.dts, pkt.pts));
+
+        let default_duration = qpc_to_time_base(
+            default_video_frame_qpc(self.video_frame_rate),
+            self.video_time_base.1 as i64,
+        )
+        .max(1);
+
+        for pkt in &video_packets_ordered {
+            // Flush AAC packets whose PTS/DTS is at or before this video packet.
+            let video_us = pkt.dts.saturating_sub(base_qpc).saturating_mul(1_000_000) / qpc_freq;
 
             while let Some(audio_packet) = aac_iter.peek() {
                 let audio_us =
@@ -266,15 +281,6 @@ impl FfmpegMuxer {
                 pkt.dts.saturating_sub(base_qpc),
                 self.video_time_base.1 as i64,
             );
-            let next_pts = video_packets
-                .get(idx + 1)
-                .map(|n| n.pts)
-                .unwrap_or_else(|| {
-                    pkt.pts
-                        .saturating_add(default_video_frame_qpc(self.video_frame_rate))
-                });
-            let duration_qpc = next_pts.saturating_sub(pkt.pts).max(0);
-            let duration = qpc_to_time_base(duration_qpc, self.video_time_base.1 as i64).max(1);
 
             write_borrowed_video_packet(
                 &mut self.format_context,
@@ -282,7 +288,7 @@ impl FfmpegMuxer {
                 pkt,
                 pts.max(0),
                 dts.max(0),
-                duration,
+                default_duration,
             )?;
             video_count += 1;
         }
@@ -335,10 +341,10 @@ fn write_borrowed_video_packet(
             raw_packet.flags |= ffmpeg::ffi::AV_PKT_FLAG_KEY;
         }
 
-        // av_write_frame bypasses the interleaver since we merge video and audio
-        // in time order in the caller. +frag_keyframe still triggers a fragment
-        // flush at each keyframe via ff_mov_write_packet inside the muxer.
-        match ffmpeg::ffi::av_write_frame(format_context.as_mut_ptr(), &mut raw_packet) {
+        // av_interleaved_write_frame lets FFmpeg handle any remaining interleaving
+        // details (especially important for fragmented MP4 output).
+        match ffmpeg::ffi::av_interleaved_write_frame(format_context.as_mut_ptr(), &mut raw_packet)
+        {
             0 => Ok(()),
             err => Err(ffmpeg::Error::from(err).into()),
         }
@@ -350,35 +356,12 @@ fn default_video_frame_qpc(video_frame_rate: i32) -> i64 {
     (qpc_freq / video_frame_rate.max(1) as i64).max(1)
 }
 
-fn estimate_video_end_qpc(
-    video_packets: &[&EncodedPacket],
-    video_frame_rate: i32,
-    video_tb_den: i32,
-) -> i64 {
-    video_packets
-        .last()
-        .map(|packet| {
-            let frame_qpc = default_video_frame_qpc(video_frame_rate)
-                .max(qpc_to_qpc(1, video_tb_den as i64).max(1));
-            packet.pts.saturating_add(frame_qpc)
-        })
-        .unwrap_or(0)
-}
-
 fn qpc_to_time_base(delta_qpc: i64, time_base_den: i64) -> i64 {
     let qpc_freq = crate::buffer::ring::qpc_frequency();
     if qpc_freq <= 0 {
         return 0;
     }
     ((delta_qpc as i128) * (time_base_den as i128) / (qpc_freq as i128)) as i64
-}
-
-fn qpc_to_qpc(delta: i64, source_den: i64) -> i64 {
-    if source_den <= 0 {
-        return 0;
-    }
-    let qpc_freq = crate::buffer::ring::qpc_frequency();
-    ((delta as i128) * (qpc_freq as i128) / (source_den as i128)) as i64
 }
 
 fn qpc_to_sample_index(delta_qpc: i64) -> usize {
@@ -632,7 +615,8 @@ fn write_audio_frame_direct(
         raw_packet.dts = pts;
         raw_packet.duration = duration.max(1);
         raw_packet.pos = -1;
-        match ffmpeg::ffi::av_write_frame(format_context.as_mut_ptr(), &mut raw_packet) {
+        match ffmpeg::ffi::av_interleaved_write_frame(format_context.as_mut_ptr(), &mut raw_packet)
+        {
             0 => Ok(()),
             err => Err(ffmpeg::Error::from(err).into()),
         }

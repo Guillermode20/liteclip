@@ -215,33 +215,47 @@ pub fn remux_fragmented_mp4(input_path: &Path, output_path: &Path, faststart: bo
     {
         use std::os::windows::process::CommandExt;
 
-        let status = Command::new(&ffmpeg)
+        let output = Command::new(&ffmpeg)
             .args(args.iter().map(|s| s.as_str()))
             .creation_flags(CREATE_NO_WINDOW)
-            .status()
+            .output()
             .with_context(|| format!("Failed to spawn ffmpeg remux process via {:?}", ffmpeg))?;
 
-        if status.success() {
+        if output.status.success() {
             info!("Remuxed fragmented MP4 to regular MP4: {:?}", output_path);
             return Ok(());
         }
 
-        anyhow::bail!("FFmpeg remux failed with status {:?}", status);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "FFmpeg remux failed with status {:?}\n--- ffmpeg stdout ---\n{}\n--- ffmpeg stderr ---\n{}",
+            output.status,
+            stdout,
+            stderr
+        );
     }
 
     #[cfg(not(target_os = "windows"))]
     {
-        let status = Command::new(&ffmpeg)
+        let output = Command::new(&ffmpeg)
             .args(args.iter().map(|s| s.as_str()))
-            .status()
+            .output()
             .with_context(|| format!("Failed to spawn ffmpeg remux process via {:?}", ffmpeg))?;
 
-        if status.success() {
+        if output.status.success() {
             info!("Remuxed fragmented MP4 to regular MP4: {:?}", output_path);
             return Ok(());
         }
 
-        anyhow::bail!("FFmpeg remux failed with status {:?}", status);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "FFmpeg remux failed with status {:?}\n--- ffmpeg stdout ---\n{}\n--- ffmpeg stderr ---\n{}",
+            output.status,
+            stdout,
+            stderr
+        );
     }
 }
 
