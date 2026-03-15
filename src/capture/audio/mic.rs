@@ -488,14 +488,18 @@ impl RNNoiseProcessor {
     const NOISE_FLOOR_SLOW_ALPHA: f32 = 0.01;
 
     fn new(channels: usize) -> Self {
+        // Pre-prime the input queue with one silent frame so the RNNoise
+        // pipeline always has output ready before real audio arrives.
+        let mut in_buf = Vec::with_capacity(AUDIO_FRAME_SIZE * 8);
+        in_buf.resize(AUDIO_FRAME_SIZE, 0.0);
         Self {
             channels,
             state: DenoiseState::new(),
-            in_buf: Vec::with_capacity(AUDIO_FRAME_SIZE * 8),
+            in_buf,
             in_head: 0,
             out_buf: vec![0.0; AUDIO_FRAME_SIZE],
             out_head: 0,
-            gain: 0.0,
+            gain: Self::MIN_GAIN,
             noise_floor: 300.0,
             speech_hangover: 0,
             dc_x: vec![0.0; channels],
@@ -637,15 +641,10 @@ impl RNNoiseProcessor {
             self.out_head = 0;
         }
 
-        // Instead of zeroing out unavailable samples, pass through the original
-        // input to avoid discontinuities. Note: with proper buffer padding,
-        // we should theoretically never hit this, but if we do, it's safer
-        // to pass zeros rather than jump phase!
-        for frame_idx in available..frame_count {
-            for ch in 0..self.channels {
-                samples[frame_idx * self.channels + ch] = 0;
-            }
-        }
+        // For any frames the output buffer couldn't cover, leave the original
+        // WASAPI PCM in place (no noise reduction for those samples).  Injecting
+        // zeros would create a hard discontinuity → crackling; un-reduced audio
+        // is inaudible for the brief (<1 ms) moments this can occur.
     }
 }
 
