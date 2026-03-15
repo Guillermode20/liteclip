@@ -394,9 +394,15 @@ fn mix_audio_packets_to_pcm(
     base_qpc: i64,
     video_end_qpc: i64,
 ) -> Vec<i16> {
-    let mut mixed = Vec::<i32>::new();
+    let mut stream_buffers: std::collections::HashMap<u8, Vec<i32>> =
+        std::collections::HashMap::new();
 
     for packet in audio_packets {
+        let stream_id = match packet.stream {
+            crate::encode::StreamType::SystemAudio => 1,
+            crate::encode::StreamType::Microphone => 2,
+            _ => 0,
+        };
         let start_frames = qpc_to_sample_index(packet.pts.saturating_sub(base_qpc));
         let start_index = start_frames.saturating_mul(AUDIO_CHANNELS as usize);
 
@@ -411,25 +417,47 @@ fn mix_audio_packets_to_pcm(
         }
 
         let required_len = start_index.saturating_add(samples.len());
-        if mixed.len() < required_len {
-            mixed.resize(required_len, 0);
+        let stream_buffer = stream_buffers.entry(stream_id).or_default();
+        if stream_buffer.len() < required_len {
+            stream_buffer.resize(required_len, 0);
         }
 
         for (offset, sample) in samples.into_iter().enumerate() {
-            let slot = &mut mixed[start_index + offset];
-            *slot = slot.saturating_add(sample as i32);
+            // Overwrite rather than accumulate to prevent intra-stream
+            // timestamp jitter overlapping and causing huge volume spikes.
+            stream_buffer[start_index + offset] = sample as i32;
         }
     }
 
     let video_required_samples = qpc_to_sample_index(video_end_qpc.saturating_sub(base_qpc))
         .saturating_mul(AUDIO_CHANNELS as usize);
-    if mixed.len() < video_required_samples {
-        mixed.resize(video_required_samples, 0);
+
+    let mut final_len = video_required_samples;
+    for buf in stream_buffers.values() {
+        final_len = final_len.max(buf.len());
+    }
+
+    let mut mixed = vec![0_i32; final_len];
+    for buf in stream_buffers.values() {
+        for (i, &sample) in buf.iter().enumerate() {
+            mixed[i] = mixed[i].saturating_add(sample);
+        }
     }
 
     mixed
         .into_iter()
-        .map(|sample| sample.clamp(i16::MIN as i32, i16::MAX as i32) as i16)
+        .map(|sample| {
+            let limit = 24000.0;
+            let sample_f32 = sample as f32;
+            let clipped = if sample_f32 > limit {
+                limit + (sample_f32 - limit) / (1.0 + (sample_f32 - limit) / (32767.0 - limit))
+            } else if sample_f32 < -limit {
+                -limit + (sample_f32 + limit) / (1.0 - (sample_f32 + limit) / (32768.0 - limit))
+            } else {
+                sample_f32
+            };
+            clipped.clamp(-32768.0, 32767.0).round() as i16
+        })
         .collect()
 }
 

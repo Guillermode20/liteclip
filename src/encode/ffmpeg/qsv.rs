@@ -66,7 +66,10 @@ impl FfmpegEncoder {
             if derive_frames_res < 0 {
                 ffmpeg::ffi::av_buffer_unref(&mut qsv_frames_ctx_ref);
                 ffmpeg::ffi::av_buffer_unref(&mut qsv_device_ctx_ref);
-                anyhow::bail!("Failed to derive QSV frames from D3D11: {}", derive_frames_res);
+                anyhow::bail!(
+                    "Failed to derive QSV frames from D3D11: {}",
+                    derive_frames_res
+                );
             }
 
             // Replace D3D11 references in context with QSV ones for the encoder
@@ -191,12 +194,13 @@ impl FfmpegEncoder {
             ffmpeg::ffi::av_frame_free(&mut qsv_frame);
 
             if send_result < 0 {
-                anyhow::bail!("Failed to send mapped QSV frame to encoder: {}", send_result);
+                anyhow::bail!(
+                    "Failed to send mapped QSV frame to encoder: {}",
+                    send_result
+                );
             }
         }
 
         Ok(())
     }
 }
-
-

@@ -116,8 +116,12 @@ impl FfmpegEncoder {
             crate::config::EncoderType::Nvenc => {
                 self.encode_nvenc_gpu_frame(frame, gpu_frame, pts, gop)
             }
-            crate::config::EncoderType::Amf => self.encode_amf_gpu_frame(frame, gpu_frame, pts, gop),
-            crate::config::EncoderType::Qsv => self.encode_qsv_gpu_frame(frame, gpu_frame, pts, gop),
+            crate::config::EncoderType::Amf => {
+                self.encode_amf_gpu_frame(frame, gpu_frame, pts, gop)
+            }
+            crate::config::EncoderType::Qsv => {
+                self.encode_qsv_gpu_frame(frame, gpu_frame, pts, gop)
+            }
             _ => anyhow::bail!(
                 "Hardware encoding not supported for {:?}",
                 self.config.encoder_type

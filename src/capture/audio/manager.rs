@@ -264,10 +264,26 @@ pub(crate) fn apply_volume_to_packet(
 
     for chunk in buffer.chunks_exact_mut(2) {
         let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
-        let scaled = (sample as f32 * gain)
-            .round()
-            .clamp(i16::MIN as f32, i16::MAX as f32) as i16;
-        let bytes = scaled.to_le_bytes();
+        let scaled = sample as f32 * gain;
+
+        // Custom simple soft clip for sample within standard range.
+        let clipped = if scaled >= 32767.0 {
+            32767.0
+        } else if scaled <= -32768.0 {
+            -32768.0
+        } else {
+            let limit = 24000.0;
+            if scaled > limit {
+                limit + (scaled - limit) / (1.0 + (scaled - limit) / (32767.0 - limit))
+            } else if scaled < -limit {
+                -limit + (scaled + limit) / (1.0 - (scaled + limit) / (32768.0 - limit))
+            } else {
+                scaled
+            }
+        };
+
+        let final_sample = clipped.round() as i16;
+        let bytes = final_sample.to_le_bytes();
         chunk[0] = bytes[0];
         chunk[1] = bytes[1];
     }

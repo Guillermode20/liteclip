@@ -10,7 +10,7 @@ use tokio::sync::mpsc::Sender as TokioSender;
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::{
     GetSystemMetrics, GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, SM_CXSCREEN, SM_CYSCREEN,
-    WS_EX_TRANSPARENT,
+    WS_EX_NOACTIVATE, WS_EX_TRANSPARENT,
 };
 
 pub enum GuiMessage {
@@ -58,6 +58,7 @@ pub fn init_gui_manager() {
                     .with_always_on_top()
                     .with_decorations(false)
                     .with_taskbar(false)
+                    .with_active(false)
                     .with_inner_size(TOAST_WINDOW_SIZE)
                     .with_position(pos),
                 event_loop_builder: Some(Box::new(|builder| {
@@ -161,12 +162,16 @@ impl GuiManagerApp {
             unsafe {
                 let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
                 if click_through {
-                    SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex_style | WS_EX_TRANSPARENT.0 as isize);
+                    SetWindowLongPtrW(
+                        hwnd,
+                        GWL_EXSTYLE,
+                        ex_style | WS_EX_TRANSPARENT.0 as isize | WS_EX_NOACTIVATE.0 as isize,
+                    );
                 } else {
                     SetWindowLongPtrW(
                         hwnd,
                         GWL_EXSTYLE,
-                        ex_style & !(WS_EX_TRANSPARENT.0 as isize),
+                        (ex_style & !(WS_EX_TRANSPARENT.0 as isize)) | WS_EX_NOACTIVATE.0 as isize,
                     );
                 }
             }
