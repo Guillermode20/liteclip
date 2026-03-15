@@ -10,6 +10,25 @@ use super::{
     calculate_clip_start_pts, generate_thumbnail, h264_nal_type, hevc_nal_type, Muxer, MuxerConfig,
 };
 
+/// Spawns a background task to extract packets from the replay buffer and save them to an MP4 file.
+///
+/// This function coordinates the following:
+/// 1. Snapshotting: Atomsically clones the relevant range of packets from the lock-free `SharedReplayBuffer`.
+/// 2. Keyframe Seeking: Ensures the clip starts on a decodable keyframe (IDR frame) to avoid green/corrupt frames.
+/// 3. Muxing: Uses `FfmpegMuxer` to interleave video and audio streams into a valid MP4 container.
+/// 4. Thumbnail Generation: Spawns a side task to create a JPG preview for the gallery.
+///
+/// # Arguments
+///
+/// * `buffer` - The ring buffer containing encoded packets.
+/// * `duration` - Requested duration of the clip in seconds.
+/// * `output_path` - Target file path for the MP4.
+/// * `config` - Muxing parameters (bitrate, flags).
+/// * `save_directory` - Root directory for clips (used for thumbnail placement).
+///
+/// # Returns
+///
+/// A `JoinHandle` representing the background operation. It resolves to the `PathBuf` of the saved file.
 pub fn spawn_clip_saver(
     buffer: SharedReplayBuffer,
     duration: Duration,

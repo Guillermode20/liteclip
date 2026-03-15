@@ -1045,6 +1045,21 @@ impl DxgiCapture {
     // Manual scaler removed - replaced with FFmpeg swscale in encoder thread
 
     /// Capture thread entry point
+    /// The main capture loop for DXGI Desktop Duplication.
+    ///
+    /// This function runs in a dedicated thread and performs the following:
+    /// 1. Initializes DXGI and D3D11 resources for the target monitor.
+    /// 2. Enters a high-frequency loop to acquire frames at the target FPS.
+    /// 3. Handles frame capture, CPU readback (if configured), and GPU scaling/format conversion.
+    /// 4. Manages errors and automatic re-initialization with exponential backoff if the session is lost.
+    /// 5. Reports fatal errors via the `fatal_tx` channel.
+    ///
+    /// # Arguments
+    ///
+    /// * `running` - Atomic flag to control the loop lifetime.
+    /// * `frame_tx` - Channel to send captured frames to the encoder.
+    /// * `fatal_tx` - Channel to report unrecoverable errors.
+    /// * `config` - Capture configuration (FPS, resolution, format).
     pub(crate) fn capture_loop(
         running: Arc<AtomicBool>,
         frame_tx: Sender<CapturedFrame>,

@@ -87,8 +87,17 @@ impl AppState {
     /// # Returns
     ///
     /// - `Ok(Some(reason))` if pipeline has failed with the given reason
-    /// - `Ok(None)` if pipeline is healthy
-    /// - `Err(...)` if health check itself failed
+    /// Checks the health of the recording pipeline.
+    ///
+    /// This method should be called periodically (e.g., in the main event loop)
+    /// to ensure that the capture and encode threads are still running and haven't
+    /// encountered fatal errors.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(None)` if the pipeline is healthy or not running.
+    /// - `Ok(Some(reason))` if a fatal error was detected and the pipeline was stopped.
+    /// - `Err(...)` if the health check itself failed.
     pub async fn enforce_pipeline_health(&mut self) -> Result<Option<String>> {
         self.pipeline.enforce_health().await
     }

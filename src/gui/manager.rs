@@ -32,7 +32,17 @@ static GUI_INIT: Once = Once::new();
 const TOAST_WINDOW_SIZE: [f32; 2] = [350.0, 300.0];
 const TOAST_WINDOW_MARGIN: [f32; 2] = [20.0, 20.0];
 const IDLE_REPAINT_MS: u64 = 100;
-
+/// GUI Manager for the application.
+///
+/// Handles the centralized display of toasts and oversees the creation
+/// of main GUI windows (Settings and Gallery).
+///
+/// # Threading
+///
+/// The GUI manager initializes a dedicated background thread for the `egui`
+/// overlay which manages notifications (toasts). Other windows like Settings
+/// and Gallery are spawned as needed from their respective modules, each
+/// running in its own native thread to avoid stalling the recording pipeline.
 pub fn init_gui_manager() {
     GUI_INIT.call_once(|| {
         let (tx, rx) = channel();

@@ -1,6 +1,20 @@
 //! Platform Abstraction Layer
 //!
-//! Hidden HWND for hotkeys and system tray integration.
+//! This module provides Windows-specific integration for the application,
+//! including global hotkeys, system tray, and autostart management.
+//!
+//! # Architecture
+//!
+//! The platform logic runs on a dedicated Windows thread using a hidden HWND
+//! message loop. This is required because Win32 hotkeys and tray icons are
+//! tied to a window's message queue.
+//!
+//! # Components
+//!
+//! - **Hotkeys**: Global keyboard shortcuts (Save Clip, Toggle Recording).
+//! - **Tray**: System tray icon with context menu and status updates.
+//! - **Message Loop**: The core Win32 event loop that processes UI events.
+//! - **Autostart**: Logic for registering the app to run on Windows startup.
 
 use anyhow::Result;
 use crossbeam::channel::{Receiver, Sender};

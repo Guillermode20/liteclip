@@ -177,7 +177,20 @@ impl RecordingPipeline {
         }
         Ok(())
     }
-
+    /// Checks and enforces the health of all active pipeline components.
+    ///
+    /// This method polls for fatal errors from the encoder and capture threads.
+    /// If a fatal error is detected, or if a thread has unexpectedly exited,
+    /// it transitions the pipeline to the `Faulted` state and performs a clean stop.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(None)` if all components are healthy or if the pipeline is not running.
+    /// - `Ok(Some(reason))` if a fatal error was detected and handled.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if attempting to stop the pipeline fails after a fault detection.
     pub async fn enforce_health(&mut self) -> Result<Option<String>> {
         if !matches!(self.lifecycle, RecordingLifecycle::Running) {
             return Ok(None);

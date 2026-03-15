@@ -132,6 +132,22 @@ impl FfmpegMuxer {
         })
     }
 
+    /// Writes encoded video and audio packets to the MP4 file.
+    ///
+    /// This method handles:
+    /// 1. Calculating a common base timestamp (QPC-based) to normalize all packets to start at 0.
+    /// 2. Normalizing and interleaved writing of video and audio packets.
+    /// 3. Normalizing PTS/DTS values for the target MP4 timebase.
+    /// 4. Handling fragmented MP4 (+frag_keyframe) to minimize memory usage during save.
+    ///
+    /// # Arguments
+    ///
+    /// * `video_packets` - Slice of video packets to write.
+    /// * `audio_packets` - Slice of audio packets to write.
+    ///
+    /// # Returns
+    ///
+    /// Tuple of (video_count, audio_count) written.
     pub fn write_packets(
         &mut self,
         video_packets: &[&EncodedPacket],

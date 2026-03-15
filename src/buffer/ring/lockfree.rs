@@ -227,7 +227,20 @@ impl LockFreeReplayBuffer {
     pub fn push(&self, packet: EncodedPacket) {
         self.push_single(packet);
     }
-
+    /// Pushes a single encoded packet into the ring buffer.
+    ///
+    /// This method performs the following steps:
+    /// 1. Caches parameter sets (SPS/PPS/VPS) if the packet contains them.
+    /// 2. If it's the first video packet, detects its type (for clip start logic).
+    /// 3. Atomically increments the write index and acquires a slot in the ring.
+    /// 4. Replaces the old packet in the slot and updates buffer-wide stats (total bytes, keyframes).
+    /// 5. Enforces the configured memory budget by evicting the oldest packets
+    ///    via the `evict_frontier` index if necessary.
+    ///
+    /// # Thread Safety
+    ///
+    /// This is safe to call from a single producer thread. Multiple producers
+    /// would require coordinating the `write_idx` increment to prevent races.
     fn push_single(&self, packet: EncodedPacket) {
         let inner = &self.inner;
         let packet_size = packet.data.len();

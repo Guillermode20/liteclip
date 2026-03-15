@@ -1,18 +1,32 @@
 //! Backpressure signaling between capture and encoder threads.
 //!
 //! Provides atomic state for coordinating frame dropping and FPS adaptation
-//! when the encoder cannot keep up with capture rate.
+//! when the encoder (GPU or CPU) cannot keep up with the frame acquisition rate.
+//!
+//! # Why it exists
+//!
+//! High-quality screen capture can generate large amounts of data. If the encoder
+//! gets backed up, RAM usage will grow unbounded. This module signals the capture
+//! loop to proactively drop frames (`fps_divisor`) or stop altogether if the
+//! overload persists.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
+/// Shared state for monitoring and responding to encoder saturation.
 pub struct BackpressureState {
+    /// Number of frames currently in the pipeline (captured but not encoded).
     pub queued_frames: AtomicU32,
+    /// Maximum number of frames allowed in the pipeline before applying pressure.
     pub max_queued_frames: AtomicU32,
+    /// Global flag indicating the encoder is consistently falling behind.
     pub encoder_overloaded: AtomicBool,
+    /// When greater than 1, capture loop will only process 1 out of every `N` frames.
+    /// This effectively reduces capture FPS to prevent stutter and RAM growth.
     pub fps_divisor: AtomicU32,
 }
 
 impl BackpressureState {
+    /// Creates a new backpressure tracker with default limits.
     pub fn new() -> Self {
         Self {
             queued_frames: AtomicU32::new(0),

@@ -1,10 +1,12 @@
-//! Auto-generated module
-//!
-//! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
+//! Helper utilities for the lock-free ring buffer.
 
 use std::sync::OnceLock;
 
-/// Cached QPC frequency (queried once, reused everywhere)
+/// Returns the Windows QueryPerformanceCounter (QPC) frequency.
+///
+/// This frequency is used to convert high-resolution hardware timestamps
+/// into seconds or standard media timebases. The value is cached after
+/// the first query to avoid redundant syscalls.
 pub fn qpc_frequency() -> i64 {
     static FREQ: OnceLock<i64> = OnceLock::new();
     *FREQ.get_or_init(|| {
@@ -17,6 +19,15 @@ pub fn qpc_frequency() -> i64 {
     })
 }
 
+/// Extracts the NAL unit type from an H.264 byte stream.
+///
+/// This function identifies the NAL type by looking for the `00 00 00 01` or
+/// `00 00 01` start code and masking the following byte with `0x1f`.
+///
+/// Useful for Identifying:
+/// - IDR Frames (Keyframes: 5)
+/// - SPS (Sequence Parameter Set: 7)
+/// - PPS (Picture Parameter Set: 8)
 pub(crate) fn h264_nal_type(data: &[u8]) -> Option<u8> {
     if data.len() >= 5 && data[0..4] == [0x00, 0x00, 0x00, 0x01] {
         return Some(data[4] & 0x1f);
@@ -27,6 +38,17 @@ pub(crate) fn h264_nal_type(data: &[u8]) -> Option<u8> {
     None
 }
 
+/// Extracts the NAL unit type from an HEVC (H.265) byte stream.
+///
+/// This function identifies the NAL type by looking for the `00 00 00 01` or
+/// `00 00 01` start code, extracting the NAL unit header (typically 2 bytes),
+/// and shifting the first byte right by 1 and masking with `0x3f`.
+///
+/// Useful for Identifying:
+/// - IDR Frames (Keyframes: 19 or 20)
+/// - VPS (Video Parameter Set: 32)
+/// - SPS (Sequence Parameter Set: 33)
+/// - PPS (Picture Parameter Set: 34)
 pub(crate) fn hevc_nal_type(data: &[u8]) -> Option<u8> {
     if data.len() >= 6 && data[0..4] == [0x00, 0x00, 0x00, 0x01] {
         return Some((data[4] >> 1) & 0x3f);
