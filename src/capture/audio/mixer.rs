@@ -1,0 +1,564 @@
+// Audio Mixer
+//
+// Handles real-time audio mixing, compression, and clipping for system and microphone audio.
+
+use bytes::BytesMut;
+use std::collections::BTreeMap;
+
+use crate::config::AudioConfig;
+use crate::encode::EncodedPacket;
+
+/// Audio mixer for combining system and microphone audio with timestamp-based synchronization
+pub struct AudioMixer {
+    config: AudioConfig,
+    system_packets: BTreeMap<i64, EncodedPacket>, // PTS -> Packet (sorted for fast access)
+    mic_packets: BTreeMap<i64, EncodedPacket>,    // PTS -> Packet (sorted for fast access)
+    output_buffer: BytesMut,
+    compression_state: Option<CompressionState>,
+    /// Maximum time difference (in QPC ticks) allowed between packets to be considered matching
+    sync_threshold: i64,
+    /// Timeout for waiting for matching packets (in QPC ticks)
+    timeout: i64,
+    /// Last processed timestamp to track synchronization progress
+    last_processed_pts: i64,
+    /// Reusable buffers for decoding packets
+    system_decode_buf: Vec<i16>,
+    mic_decode_buf: Vec<i16>,
+    /// Reusable buffer for mixed samples
+    mixed_samples_buf: Vec<i16>,
+}
+
+impl AudioMixer {
+    /// Create a new audio mixer with synchronization capabilities
+    pub fn new(config: &AudioConfig) -> Self {
+        let compression_state = if config.compression_enabled {
+            Some(CompressionState::new(
+                config.compression_threshold,
+                config.compression_ratio,
+                config.compression_attack,
+                config.compression_release,
+            ))
+        } else {
+            None
+        };
+
+        // Calculate synchronization parameters (QPC ticks)
+        // QPC frequency is ~10MHz (1 tick = 100ns)
+        // Audio packets are 100ms duration
+        // Allow 50ms sync threshold and 200ms timeout
+        const QPC_TICKS_PER_MILLISECOND: i64 = 10_000; // ~10MHz
+        let sync_threshold = 50 * QPC_TICKS_PER_MILLISECOND; // 50ms tolerance
+        let timeout = 200 * QPC_TICKS_PER_MILLISECOND; // 200ms timeout
+
+        Self {
+            config: config.clone(),
+            system_packets: BTreeMap::new(),
+            mic_packets: BTreeMap::new(),
+            output_buffer: BytesMut::with_capacity(4096),
+            compression_state,
+            sync_threshold,
+            timeout,
+            last_processed_pts: -1,
+            system_decode_buf: Vec::with_capacity(4096 / 2), // 2 bytes per sample
+            mic_decode_buf: Vec::with_capacity(4096 / 2),
+            mixed_samples_buf: Vec::with_capacity(4096 / 2),
+        }
+    }
+
+    /// Update mixer configuration
+    pub fn update_config(&mut self, config: &AudioConfig) {
+        self.config = config.clone();
+
+        if config.compression_enabled && self.compression_state.is_none() {
+            self.compression_state = Some(CompressionState::new(
+                config.compression_threshold,
+                config.compression_ratio,
+                config.compression_attack,
+                config.compression_release,
+            ));
+        } else if !config.compression_enabled {
+            self.compression_state = None;
+        } else if let Some(compression) = &mut self.compression_state {
+            compression.update_config(
+                config.compression_threshold,
+                config.compression_ratio,
+                config.compression_attack,
+                config.compression_release,
+            );
+        }
+    }
+
+    /// Mix audio packets from system and microphone with timestamp-based synchronization
+    pub fn mix_packets(
+        &mut self,
+        system_packet: Option<EncodedPacket>,
+        mic_packet: Option<EncodedPacket>,
+    ) -> Vec<EncodedPacket> {
+        let mut output = Vec::new();
+
+        // Add received packets to their respective buffers
+        if let Some(packet) = system_packet {
+            self.system_packets.insert(packet.pts, packet);
+        }
+        if let Some(packet) = mic_packet {
+            self.mic_packets.insert(packet.pts, packet);
+        }
+
+        // Try to find matching packets for synchronization
+        while let Some((system_packet, mic_packet, pts)) = self.find_matching_packets() {
+            // Process the matching packets
+            if let Some(mixed) =
+                self.process_matching_packets(system_packet.as_ref(), mic_packet.as_ref(), pts)
+            {
+                output.push(mixed);
+            }
+
+            // Update last processed timestamp
+            self.last_processed_pts = pts;
+        }
+
+        // Handle timeout for packets that are too old
+        self.handle_timeouts();
+
+        output
+    }
+
+    /// Find and remove the earliest matching packets from both streams
+    fn find_matching_packets(
+        &mut self,
+    ) -> Option<(Option<EncodedPacket>, Option<EncodedPacket>, i64)> {
+        // If we have packets from both streams
+        if !self.system_packets.is_empty() && !self.mic_packets.is_empty() {
+            // Get earliest system and mic packets after last processed timestamp
+            let system_pts_iter = self
+                .system_packets
+                .keys()
+                .filter(|&&ts| ts > self.last_processed_pts);
+            let mic_pts_iter = self
+                .mic_packets
+                .keys()
+                .filter(|&&ts| ts > self.last_processed_pts);
+
+            if let Some(&system_ts) = system_pts_iter.clone().next() {
+                if let Some(&mic_ts) = mic_pts_iter.clone().next() {
+                    let diff = (system_ts - mic_ts).abs();
+
+                    if diff <= self.sync_threshold {
+                        // Packets are in sync, remove and return
+                        let system_packet = self.system_packets.remove(&system_ts);
+                        let mic_packet = self.mic_packets.remove(&mic_ts);
+                        return Some((system_packet, mic_packet, system_ts.min(mic_ts)));
+                    } else {
+                        // Packets are not in sync, don't process yet
+                        return None;
+                    }
+                }
+            }
+        } else if !self.system_packets.is_empty() {
+            // If only system has packets, return earliest available
+            if let Some(&ts) = self
+                .system_packets
+                .keys()
+                .find(|&&ts| ts > self.last_processed_pts)
+            {
+                let system_packet = self.system_packets.remove(&ts);
+                return Some((system_packet, None, ts));
+            }
+        } else if !self.mic_packets.is_empty() {
+            // If only mic has packets, return earliest available
+            if let Some(&ts) = self
+                .mic_packets
+                .keys()
+                .find(|&&ts| ts > self.last_processed_pts)
+            {
+                let mic_packet = self.mic_packets.remove(&ts);
+                return Some((None, mic_packet, ts));
+            }
+        }
+
+        None
+    }
+
+    /// Process packets with matching timestamps
+    fn process_matching_packets(
+        &mut self,
+        system_packet: Option<&EncodedPacket>,
+        mic_packet: Option<&EncodedPacket>,
+        pts: i64,
+    ) -> Option<EncodedPacket> {
+        // Decode packets into reusable buffers
+        self.system_decode_buf.clear();
+        self.mic_decode_buf.clear();
+
+        if let Some(packet) = system_packet {
+            decode_packet_into(packet, &mut self.system_decode_buf);
+        }
+
+        if let Some(packet) = mic_packet {
+            decode_packet_into(packet, &mut self.mic_decode_buf);
+        }
+
+        // Determine the maximum buffer size
+        let max_samples = self.system_decode_buf.len().max(self.mic_decode_buf.len());
+
+        if max_samples == 0 {
+            return None;
+        }
+
+        // Resize buffers to match
+        if self.system_decode_buf.len() < max_samples {
+            self.system_decode_buf.resize(max_samples, 0);
+        }
+        if self.mic_decode_buf.len() < max_samples {
+            self.mic_decode_buf.resize(max_samples, 0);
+        }
+
+        // Calculate gains
+        let system_gain = (self.config.system_volume as f32 / 100.0).clamp(0.0, 2.0);
+        let mic_gain = (self.config.mic_volume as f32 / 100.0).clamp(0.0, 2.0);
+        let master_gain = (self.config.master_volume as f32 / 100.0).clamp(0.0, 2.0);
+
+        // Calculate balance (stereo only)
+        let (left_balance, right_balance) = if self.config.balance < 0 {
+            // Left bias
+            let bias = (self.config.balance as f32 / -100.0).clamp(0.0, 1.0);
+            (1.0, 1.0 - bias)
+        } else {
+            // Right bias
+            let bias = (self.config.balance as f32 / 100.0).clamp(0.0, 1.0);
+            (1.0 - bias, 1.0)
+        };
+
+        // Reuse mixed samples buffer
+        self.mixed_samples_buf.clear();
+        self.mixed_samples_buf.reserve(max_samples);
+
+        // Mix and process audio
+        for i in 0..max_samples {
+            let system_sample = self.system_decode_buf[i];
+            let mic_sample = self.mic_decode_buf[i];
+
+            // Apply per-stream gains
+            let system_scaled = (system_sample as f32) * system_gain;
+            let mic_scaled = (mic_sample as f32) * mic_gain;
+
+            // Mix samples
+            let mixed = system_scaled + mic_scaled;
+
+            // Apply balance if stereo (even indices are left, odd are right)
+            let mut balanced = mixed;
+            if i % 2 == 0 {
+                balanced *= left_balance;
+            } else {
+                balanced *= right_balance;
+            }
+
+            // Apply compression if enabled
+            let compressed = if let Some(compression) = &mut self.compression_state {
+                compression.process(balanced)
+            } else {
+                balanced
+            };
+
+            // Apply master volume
+            let final_sample = compressed * master_gain;
+
+            // Apply improved soft clipping
+            let clipped = Self::improved_soft_clip(final_sample);
+
+            self.mixed_samples_buf.push(clipped.round() as i16);
+        }
+
+        // Encode back to bytes
+        self.output_buffer.clear();
+        for sample in &self.mixed_samples_buf {
+            self.output_buffer.extend_from_slice(&sample.to_le_bytes());
+        }
+
+        Some(EncodedPacket::new(
+            self.output_buffer.split().freeze(),
+            pts,
+            pts,
+            false,
+            crate::encode::StreamType::Video, // We'll use a single stream type for mixed audio
+        ))
+    }
+
+    /// Handle packets that have timed out waiting for a matching packet
+    fn handle_timeouts(&mut self) {
+        let current_pts = self
+            .system_packets
+            .keys()
+            .chain(self.mic_packets.keys())
+            .cloned()
+            .min();
+
+        if let Some(current) = current_pts {
+            // Check for packets that are too old compared to current earliest
+            let timeout_threshold = current - self.timeout;
+
+            // Remove system packets that have timed out
+            let system_to_remove: Vec<_> = self
+                .system_packets
+                .keys()
+                .filter(|&&ts| ts < timeout_threshold)
+                .cloned()
+                .collect();
+            for ts in system_to_remove {
+                self.system_packets.remove(&ts);
+            }
+
+            // Remove mic packets that have timed out
+            let mic_to_remove: Vec<_> = self
+                .mic_packets
+                .keys()
+                .filter(|&&ts| ts < timeout_threshold)
+                .cloned()
+                .collect();
+            for ts in mic_to_remove {
+                self.mic_packets.remove(&ts);
+            }
+        }
+    }
+
+    /// Improved soft clipping algorithm using tanh
+    fn improved_soft_clip(sample: f32) -> f32 {
+        const THRESHOLD: f32 = 20000.0;
+        const MAX: f32 = 32767.0;
+
+        if sample.abs() < THRESHOLD {
+            return sample;
+        }
+
+        let sign = sample.signum();
+        let magnitude = sample.abs();
+
+        let over = (magnitude - THRESHOLD) / (MAX - THRESHOLD);
+        let clipped = THRESHOLD + (MAX - THRESHOLD) * over.tanh();
+
+        sign * clipped
+    }
+}
+
+/// Compression state for dynamic range compression
+struct CompressionState {
+    threshold: f32, // in dB
+    ratio: f32,     // compression ratio
+    attack: f32,    // attack time in seconds
+    release: f32,   // release time in seconds
+    envelope: f32,  // current envelope value
+}
+
+impl CompressionState {
+    /// Create a new compression state
+    fn new(threshold: u8, ratio: u8, attack: u8, release: u8) -> Self {
+        // Convert threshold from 0-100 to -40dB to 0dB
+        let threshold_db = (threshold as f32 / 100.0) * 40.0 - 40.0;
+
+        Self {
+            threshold: threshold_db,
+            ratio: ratio as f32,
+            attack: attack as f32 / 1000.0,   // ms to seconds
+            release: release as f32 / 1000.0, // ms to seconds
+            envelope: 0.0,
+        }
+    }
+
+    /// Update compression configuration
+    fn update_config(&mut self, threshold: u8, ratio: u8, attack: u8, release: u8) {
+        self.threshold = (threshold as f32 / 100.0) * 40.0 - 40.0;
+        self.ratio = ratio as f32;
+        self.attack = attack as f32 / 1000.0;
+        self.release = release as f32 / 1000.0;
+    }
+
+    /// Process a single audio sample
+    fn process(&mut self, sample: f32) -> f32 {
+        // Calculate sample level in dB (optimized calculation)
+        let abs_sample = sample.abs();
+        if abs_sample < 0.0001 {
+            // Avoid log10 of very small values
+            return sample;
+        }
+
+        let level_db = 20.0 * (abs_sample / 32768.0).log10();
+
+        // Calculate target gain
+        let gain_db = if level_db > self.threshold {
+            (level_db - self.threshold) * (1.0 / self.ratio - 1.0)
+        } else {
+            0.0
+        };
+
+        // Calculate envelope (smoothed gain)
+        let time_constant = if gain_db < self.envelope {
+            self.attack
+        } else {
+            self.release
+        };
+
+        // Approximate exponential smoothing (precompute constants if possible)
+        const SAMPLE_RATE: f32 = 48000.0;
+        let alpha = (1.0 - (-1.0 / (time_constant * SAMPLE_RATE)).exp()).clamp(0.0, 1.0);
+        self.envelope += alpha * (gain_db - self.envelope);
+
+        // Apply gain (optimized calculation)
+        let gain = 10.0f32.powf(self.envelope / 20.0);
+        sample * gain
+    }
+}
+
+/// Decode an EncodedPacket to i16 samples into a pre-allocated buffer
+fn decode_packet_into(packet: &EncodedPacket, buffer: &mut Vec<i16>) {
+    buffer.clear();
+    buffer.reserve(packet.data.len() / 2);
+    buffer.extend(
+        packet
+            .data
+            .chunks_exact(2)
+            .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]])),
+    );
+}
+
+/// Decode an EncodedPacket to i16 samples (compatibility function for tests)
+fn decode_packet(packet: &EncodedPacket) -> Vec<i16> {
+    let mut buffer = Vec::with_capacity(packet.data.len() / 2);
+    decode_packet_into(packet, &mut buffer);
+    buffer
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+
+    #[test]
+    fn test_mixer_basic() {
+        let config = Config::default().audio;
+        let mut mixer = AudioMixer::new(&config);
+
+        // Create test packets
+        let mut system_data = BytesMut::with_capacity(4);
+        system_data.extend_from_slice(&1000i16.to_le_bytes());
+        system_data.extend_from_slice(&2000i16.to_le_bytes());
+        let system_packet = EncodedPacket::new(
+            system_data.freeze(),
+            0,
+            0,
+            false,
+            crate::encode::StreamType::SystemAudio,
+        );
+
+        let mut mic_data = BytesMut::with_capacity(4);
+        mic_data.extend_from_slice(&3000i16.to_le_bytes());
+        mic_data.extend_from_slice(&4000i16.to_le_bytes());
+        let mic_packet = EncodedPacket::new(
+            mic_data.freeze(),
+            0,
+            0,
+            false,
+            crate::encode::StreamType::Microphone,
+        );
+
+        let result = mixer.mix_packets(Some(system_packet), Some(mic_packet));
+        assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn test_compression() {
+        let mut config = Config::default().audio;
+        config.compression_enabled = true;
+        config.compression_threshold = 50; // -20dB
+        config.compression_ratio = 4; // 4:1
+        let mut mixer = AudioMixer::new(&config);
+
+        // Create loud test packet
+        let mut data = BytesMut::with_capacity(4);
+        data.extend_from_slice(&30000i16.to_le_bytes()); // ~-3dB
+        data.extend_from_slice(&30000i16.to_le_bytes());
+        let packet = EncodedPacket::new(
+            data.freeze(),
+            0,
+            0,
+            false,
+            crate::encode::StreamType::SystemAudio,
+        );
+
+        let result = mixer.mix_packets(Some(packet), None);
+        assert!(!result.is_empty());
+
+        // Verify compression
+        let decoded = decode_packet(&result[0]);
+        assert!(decoded[0].abs() < 30000);
+    }
+
+    #[test]
+    fn test_synchronization() {
+        let config = Config::default().audio;
+        let mut mixer = AudioMixer::new(&config);
+
+        // Create test packets with slightly different timestamps
+        let mut system_data = BytesMut::with_capacity(4);
+        system_data.extend_from_slice(&1000i16.to_le_bytes());
+        system_data.extend_from_slice(&2000i16.to_le_bytes());
+        let system_packet = EncodedPacket::new(
+            system_data.freeze(),
+            1000, // 100us
+            1000,
+            false,
+            crate::encode::StreamType::SystemAudio,
+        );
+
+        let mut mic_data = BytesMut::with_capacity(4);
+        mic_data.extend_from_slice(&3000i16.to_le_bytes());
+        mic_data.extend_from_slice(&4000i16.to_le_bytes());
+        let mic_packet = EncodedPacket::new(
+            mic_data.freeze(),
+            1050, // 105us (within sync threshold)
+            1050,
+            false,
+            crate::encode::StreamType::Microphone,
+        );
+
+        let result = mixer.mix_packets(Some(system_packet), Some(mic_packet));
+        assert!(!result.is_empty());
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_sync_threshold() {
+        let config = Config::default().audio;
+        let mut mixer = AudioMixer::new(&config);
+
+        // Create test packets with timestamps exceeding sync threshold
+        let mut system_data = BytesMut::with_capacity(4);
+        system_data.extend_from_slice(&1000i16.to_le_bytes());
+        system_data.extend_from_slice(&2000i16.to_le_bytes());
+        let system_packet = EncodedPacket::new(
+            system_data.freeze(),
+            1000,
+            1000,
+            false,
+            crate::encode::StreamType::SystemAudio,
+        );
+
+        let mut mic_data = BytesMut::with_capacity(4);
+        mic_data.extend_from_slice(&3000i16.to_le_bytes());
+        mic_data.extend_from_slice(&4000i16.to_le_bytes());
+        let mic_packet = EncodedPacket::new(
+            mic_data.freeze(),
+            600000, // 60ms (exceeds 50ms sync threshold)
+            600000,
+            false,
+            crate::encode::StreamType::Microphone,
+        );
+
+        // First call should buffer both packets
+        let result1 = mixer.mix_packets(Some(system_packet), Some(mic_packet));
+        assert!(result1.is_empty());
+
+        // Verify packets are buffered
+        assert!(!mixer.system_packets.is_empty());
+        assert!(!mixer.mic_packets.is_empty());
+    }
+}

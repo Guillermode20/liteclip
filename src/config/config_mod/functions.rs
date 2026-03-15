@@ -69,6 +69,27 @@ pub(super) fn default_mic_volume() -> u8 {
 pub(super) fn default_system_volume() -> u8 {
     100
 }
+pub fn default_balance() -> i8 {
+    0
+}
+pub fn default_master_volume() -> u8 {
+    100
+}
+pub fn default_compression_enabled() -> bool {
+    false
+}
+pub fn default_compression_threshold() -> u8 {
+    50 // -20dB (50% of 0dB)
+}
+pub fn default_compression_ratio() -> u8 {
+    4 // 4:1 ratio
+}
+pub fn default_compression_attack() -> u8 {
+    10 // 10ms
+}
+pub fn default_compression_release() -> u8 {
+    100 // 100ms
+}
 pub(super) fn default_hotkey_save() -> String {
     "Alt+F9".to_string()
 }

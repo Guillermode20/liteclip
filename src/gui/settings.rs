@@ -247,6 +247,56 @@ impl SettingsApp {
                         &mut self.config.audio.mic_noise_reduction,
                         "Mic Noise Reduction (AI)",
                     );
+
+                    ui.add_space(10.0);
+                    ui.separator();
+                    ui.add_space(10.0);
+
+                    ui.add(
+                        egui::Slider::new(&mut self.config.audio.master_volume, 0..=200)
+                            .text("Master Volume %"),
+                    );
+
+                    ui.add(
+                        egui::Slider::new(&mut self.config.audio.balance, -100..=100)
+                            .text("Stereo Balance"),
+                    );
+
+                    ui.add_space(10.0);
+                    ui.checkbox(
+                        &mut self.config.audio.compression_enabled,
+                        "Enable Compression",
+                    );
+
+                    if self.config.audio.compression_enabled {
+                        ui.indent("compression_settings", |ui| {
+                            ui.add(
+                                egui::Slider::new(
+                                    &mut self.config.audio.compression_threshold,
+                                    0..=100,
+                                )
+                                .text("Compression Threshold"),
+                            );
+                            ui.add(
+                                egui::Slider::new(&mut self.config.audio.compression_ratio, 1..=20)
+                                    .text("Compression Ratio"),
+                            );
+                            ui.add(
+                                egui::Slider::new(
+                                    &mut self.config.audio.compression_attack,
+                                    1..=100,
+                                )
+                                .text("Attack Time (ms)"),
+                            );
+                            ui.add(
+                                egui::Slider::new(
+                                    &mut self.config.audio.compression_release,
+                                    50..=255,
+                                )
+                                .text("Release Time (ms)"),
+                            );
+                        });
+                    }
                 });
 
                 // Hotkey Settings

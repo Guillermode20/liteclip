@@ -8,13 +8,16 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 use super::functions::{
-    default_bitrate, default_encoder, default_false, default_framerate, default_gpu_index,
-    default_hotkey_gallery, default_hotkey_save, default_hotkey_screenshot, default_hotkey_toggle,
-    default_keyframe_interval, default_mic_device, default_mic_volume, default_quality_preset,
-    default_quality_value, default_quality_value_for_preset, default_rate_control,
-    default_replay_duration, default_resolution, default_save_directory, default_system_volume,
-    default_true, ESTIMATED_MIC_AUDIO_BITRATE_BPS, ESTIMATED_SYSTEM_AUDIO_BITRATE_BPS,
-    MAX_FRAMERATE, RECOMMENDED_BUFFER_BASE_OVERHEAD_MB, RECOMMENDED_BUFFER_HEADROOM_PERCENT,
+    default_balance, default_bitrate, default_compression_attack, default_compression_enabled,
+    default_compression_ratio, default_compression_release, default_compression_threshold,
+    default_encoder, default_false, default_framerate, default_gpu_index, default_hotkey_gallery,
+    default_hotkey_save, default_hotkey_screenshot, default_hotkey_toggle,
+    default_keyframe_interval, default_master_volume, default_mic_device, default_mic_volume,
+    default_quality_preset, default_quality_value, default_quality_value_for_preset,
+    default_rate_control, default_replay_duration, default_resolution, default_save_directory,
+    default_system_volume, default_true, ESTIMATED_MIC_AUDIO_BITRATE_BPS,
+    ESTIMATED_SYSTEM_AUDIO_BITRATE_BPS, MAX_FRAMERATE, RECOMMENDED_BUFFER_BASE_OVERHEAD_MB,
+    RECOMMENDED_BUFFER_HEADROOM_PERCENT,
 };
 
 /// Encoder selection for video encoding.
@@ -236,6 +239,16 @@ impl Config {
                 self.video.resolution
             );
         }
+
+        // Validate audio settings
+        self.audio.balance = self.audio.balance.clamp(-100, 100);
+        self.audio.master_volume = self.audio.master_volume.clamp(0, 200);
+        self.audio.system_volume = self.audio.system_volume.clamp(0, 200);
+        self.audio.mic_volume = self.audio.mic_volume.clamp(0, 200);
+        self.audio.compression_threshold = self.audio.compression_threshold.clamp(0, 100);
+        self.audio.compression_ratio = self.audio.compression_ratio.clamp(1, 20);
+        self.audio.compression_attack = self.audio.compression_attack.clamp(1, 100);
+        self.audio.compression_release = self.audio.compression_release.clamp(50, 255);
     }
 
     pub fn estimated_replay_storage_bytes(&self) -> usize {
@@ -301,6 +314,12 @@ impl Config {
             || self.audio.capture_mic != other.audio.capture_mic
             || self.audio.mic_device != other.audio.mic_device
             || self.audio.mic_noise_reduction != other.audio.mic_noise_reduction
+            // Audio processing settings that require restart
+            || self.audio.compression_enabled != other.audio.compression_enabled
+            || self.audio.compression_threshold != other.audio.compression_threshold
+            || self.audio.compression_ratio != other.audio.compression_ratio
+            || self.audio.compression_attack != other.audio.compression_attack
+            || self.audio.compression_release != other.audio.compression_release
             || self.advanced.gpu_index != other.advanced.gpu_index
             || self.advanced.keyframe_interval_secs != other.advanced.keyframe_interval_secs
             || self.advanced.use_cpu_readback != other.advanced.use_cpu_readback
@@ -337,6 +356,20 @@ pub struct AudioConfig {
     pub mic_volume: u8,
     #[serde(default = "default_system_volume")]
     pub system_volume: u8,
+    #[serde(default = "default_balance")]
+    pub balance: i8, // -100 (left) to 100 (right)
+    #[serde(default = "default_master_volume")]
+    pub master_volume: u8,
+    #[serde(default = "default_compression_enabled")]
+    pub compression_enabled: bool,
+    #[serde(default = "default_compression_threshold")]
+    pub compression_threshold: u8, // -40dB to 0dB (0-100)
+    #[serde(default = "default_compression_ratio")]
+    pub compression_ratio: u8, // 1:1 to 20:1
+    #[serde(default = "default_compression_attack")]
+    pub compression_attack: u8, // 1ms to 100ms
+    #[serde(default = "default_compression_release")]
+    pub compression_release: u8, // 50ms to 500ms
     #[serde(default = "default_false")]
     pub mic_noise_reduction: bool,
 }
