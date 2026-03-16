@@ -64,10 +64,10 @@ pub(super) fn default_mic_device() -> String {
     "default".to_string()
 }
 pub(super) fn default_mic_volume() -> u16 {
-    150
+    180
 }
 pub(super) fn default_system_volume() -> u8 {
-    100
+    72
 }
 pub fn default_balance() -> i8 {
     0
@@ -76,19 +76,19 @@ pub fn default_master_volume() -> u8 {
     100
 }
 pub fn default_compression_enabled() -> bool {
-    false
+    true
 }
 pub fn default_compression_threshold() -> u8 {
-    50 // -20dB (50% of 0dB)
+    58 // -16.8dB
 }
 pub fn default_compression_ratio() -> u8 {
-    4 // 4:1 ratio
+    3 // 3:1 ratio
 }
 pub fn default_compression_attack() -> u8 {
-    10 // 10ms
+    8 // 8ms
 }
 pub fn default_compression_release() -> u8 {
-    100 // 100ms
+    140 // 140ms
 }
 pub(super) fn default_hotkey_save() -> String {
     "Alt+F9".to_string()
@@ -125,6 +125,13 @@ mod tests {
         assert_eq!(config.advanced.memory_limit_mb, 0);
         assert!(config.audio.capture_system);
         assert!(config.audio.capture_mic);
+        assert_eq!(config.audio.system_volume, 72);
+        assert_eq!(config.audio.mic_volume, 180);
+        assert!(config.audio.compression_enabled);
+        assert_eq!(config.audio.compression_threshold, 58);
+        assert_eq!(config.audio.compression_ratio, 3);
+        assert_eq!(config.audio.compression_attack, 8);
+        assert_eq!(config.audio.compression_release, 140);
         assert!(config.audio.mic_noise_reduction);
     }
     #[test]

@@ -235,6 +235,7 @@ impl AudioMixer {
         let system_gain = (self.config.system_volume as f32 / 100.0).clamp(0.0, 2.0);
         let mic_gain = (self.config.mic_volume as f32 / 100.0).clamp(0.0, 4.0);
         let master_gain = (self.config.master_volume as f32 / 100.0).clamp(0.0, 2.0);
+        let duck_gain = Self::system_duck_gain(&self.mic_decode_buf);
 
         // Calculate balance (stereo only)
         let (left_balance, right_balance) = if self.config.balance < 0 {
@@ -257,7 +258,7 @@ impl AudioMixer {
             let mic_sample = self.mic_decode_buf[i];
 
             // Apply per-stream gains
-            let system_scaled = (system_sample as f32) * system_gain;
+            let system_scaled = (system_sample as f32) * system_gain * duck_gain;
             let mic_scaled = (mic_sample as f32) * mic_gain;
 
             // Mix samples
@@ -355,6 +356,39 @@ impl AudioMixer {
         let clipped = THRESHOLD + (MAX - THRESHOLD) * over.tanh();
 
         sign * clipped
+    }
+
+    fn system_duck_gain(mic_samples: &[i16]) -> f32 {
+        const DUCK_START_LEVEL: f32 = 0.025;
+        const DUCK_FULL_LEVEL: f32 = 0.08;
+        const MIN_SYSTEM_DUCK_GAIN: f32 = 0.72;
+
+        if mic_samples.is_empty() {
+            return 1.0;
+        }
+
+        let mut peak = 0.0_f32;
+        let mut sum_squares = 0.0_f32;
+
+        for &sample in mic_samples {
+            let normalized = (sample as f32).abs() / 32768.0;
+            peak = peak.max(normalized);
+            sum_squares += normalized * normalized;
+        }
+
+        let rms = (sum_squares / mic_samples.len() as f32).sqrt();
+        let activity = peak.max(rms * 1.25);
+
+        if activity <= DUCK_START_LEVEL {
+            return 1.0;
+        }
+
+        if activity >= DUCK_FULL_LEVEL {
+            return MIN_SYSTEM_DUCK_GAIN;
+        }
+
+        let progress = (activity - DUCK_START_LEVEL) / (DUCK_FULL_LEVEL - DUCK_START_LEVEL);
+        1.0 - progress * (1.0 - MIN_SYSTEM_DUCK_GAIN)
     }
 }
 
@@ -579,5 +613,42 @@ mod tests {
         // Verify packets are buffered
         assert!(!mixer.system_packets.is_empty());
         assert!(!mixer.mic_packets.is_empty());
+    }
+
+    #[test]
+    fn test_mic_activity_ducks_system_audio() {
+        let mut config = Config::default().audio;
+        config.compression_enabled = false;
+        config.system_volume = 100;
+        config.mic_volume = 100;
+        let mut mixer = AudioMixer::new(&config);
+
+        let mut system_data = BytesMut::with_capacity(4);
+        system_data.extend_from_slice(&4000i16.to_le_bytes());
+        system_data.extend_from_slice(&4000i16.to_le_bytes());
+        let system_packet = EncodedPacket::new(
+            system_data.freeze(),
+            0,
+            0,
+            false,
+            crate::encode::StreamType::SystemAudio,
+        );
+
+        let mut mic_data = BytesMut::with_capacity(4);
+        mic_data.extend_from_slice(&4000i16.to_le_bytes());
+        mic_data.extend_from_slice(&4000i16.to_le_bytes());
+        let mic_packet = EncodedPacket::new(
+            mic_data.freeze(),
+            0,
+            0,
+            false,
+            crate::encode::StreamType::Microphone,
+        );
+
+        let result = mixer.mix_packets(Some(system_packet), Some(mic_packet));
+        assert_eq!(result.len(), 1);
+
+        let decoded = decode_packet(&result[0]);
+        assert_eq!(decoded, vec![6880, 6880]);
     }
 }

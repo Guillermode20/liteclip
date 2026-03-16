@@ -256,12 +256,9 @@ impl WasapiMicCapture {
                 );
                 None
             };
-
-        let mut standalone_agc = if noise_tx.is_none() {
-            Some(AgcState::new())
-        } else {
-            None
-        };
+        if noise_tx.is_none() {
+            tracing::info!("Microphone raw passthrough enabled (noise reduction disabled)");
+        }
 
         let mut total_frames: u64 = 0;
         let mut capture_discontinuities: u64 = 0;
@@ -363,21 +360,6 @@ impl WasapiMicCapture {
                         break;
                     }
                 } else {
-                    if let Some(ref mut agc) = standalone_agc {
-                        let sample_count = byte_count / 2;
-                        let samples = unsafe {
-                            std::slice::from_raw_parts_mut(
-                                audio_buffer.as_mut_ptr() as *mut i16,
-                                sample_count,
-                            )
-                        };
-                        let mut float_samples: Vec<f32> =
-                            samples.iter().map(|&s| s as f32).collect();
-                        agc.process_frame(&mut float_samples);
-                        for (i, &s) in float_samples.iter().enumerate() {
-                            samples[i] = soft_limit(s).clamp(-32768.0, 32767.0) as i16;
-                        }
-                    }
                     let packet = EncodedPacket::new(
                         audio_buffer.split_to(byte_count).freeze(),
                         pts,
