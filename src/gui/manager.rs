@@ -1,3 +1,4 @@
+use crate::capture::audio::AudioLevelMonitor;
 use crate::platform::AppEvent;
 use eframe::egui;
 use egui_notify::{Anchor, Toasts};
@@ -14,7 +15,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 pub enum GuiMessage {
-    ShowSettings(TokioSender<AppEvent>),
+    ShowSettings(TokioSender<AppEvent>, Option<AudioLevelMonitor>),
     ShowGallery(TokioSender<AppEvent>),
     Toast(ToastKind, String),
 }
@@ -190,10 +191,13 @@ impl eframe::App for GuiManagerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
-                GuiMessage::ShowSettings(tx) => {
+                GuiMessage::ShowSettings(tx, level_monitor) => {
                     let config = crate::config::Config::load_sync().unwrap_or_default();
-                    *self.settings.lock().unwrap() =
-                        Some(crate::gui::settings::SettingsApp::new(config, tx));
+                    *self.settings.lock().unwrap() = Some(crate::gui::settings::SettingsApp::new(
+                        config,
+                        tx,
+                        level_monitor,
+                    ));
                 }
                 GuiMessage::ShowGallery(tx) => {
                     let config = crate::config::Config::load_sync().unwrap_or_default();
@@ -237,7 +241,8 @@ impl eframe::App for GuiManagerApp {
                 egui::ViewportBuilder::default()
                     .with_title("LiteClip Replay Settings")
                     .with_inner_size([600.0, 700.0])
-                    .with_resizable(true),
+                    .with_resizable(true)
+                    .with_min_inner_size([600.0, 500.0]),
                 move |ctx, class| {
                     if class == egui::ViewportClass::Embedded {
                         return;

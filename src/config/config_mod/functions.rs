@@ -63,8 +63,8 @@ pub fn default_quality_value_for_preset(preset: QualityPreset) -> u8 {
 pub(super) fn default_mic_device() -> String {
     "default".to_string()
 }
-pub(super) fn default_mic_volume() -> u8 {
-    80
+pub(super) fn default_mic_volume() -> u16 {
+    150
 }
 pub(super) fn default_system_volume() -> u8 {
     100
@@ -153,6 +153,14 @@ mod tests {
         config.video.framerate = 1000;
         config.validate();
         assert_eq!(config.video.framerate, MAX_FRAMERATE);
+    }
+
+    #[test]
+    fn test_validate_mic_volume_upper_clamp() {
+        let mut config = Config::default();
+        config.audio.mic_volume = u16::MAX;
+        config.validate();
+        assert_eq!(config.audio.mic_volume, 400);
     }
 
     #[test]

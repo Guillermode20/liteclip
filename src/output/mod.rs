@@ -49,6 +49,7 @@ pub use functions::{
 pub use saver::spawn_clip_saver;
 pub use types::{Muxer, MuxerConfig};
 pub use video_file::{
-    extract_preview_frame, probe_video_file, spawn_clip_export, ClipExportPhase, ClipExportRequest,
-    ClipExportUpdate, TimeRange, VideoFileMetadata,
+    estimate_export_bitrates, extract_preview_frame, probe_video_file, spawn_clip_export,
+    ClipExportPhase, ClipExportRequest, ClipExportUpdate, ExportBitrateEstimate, TimeRange,
+    VideoFileMetadata,
 };

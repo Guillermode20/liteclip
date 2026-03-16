@@ -233,7 +233,7 @@ impl AudioMixer {
 
         // Calculate gains
         let system_gain = (self.config.system_volume as f32 / 100.0).clamp(0.0, 2.0);
-        let mic_gain = (self.config.mic_volume as f32 / 100.0).clamp(0.0, 2.0);
+        let mic_gain = (self.config.mic_volume as f32 / 100.0).clamp(0.0, 4.0);
         let master_gain = (self.config.master_volume as f32 / 100.0).clamp(0.0, 2.0);
 
         // Calculate balance (stereo only)

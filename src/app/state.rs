@@ -1,4 +1,9 @@
-use crate::{app::RecordingPipeline, buffer::ReplayBuffer, config::Config};
+use crate::{
+    app::RecordingPipeline,
+    buffer::ReplayBuffer,
+    capture::audio::AudioLevelMonitor,
+    config::Config,
+};
 use anyhow::Result;
 use tracing::{error, info, warn};
 
@@ -20,6 +25,8 @@ pub struct AppState {
     buffer: ReplayBuffer,
     /// Recording pipeline for capture → encode → buffer flow.
     pipeline: RecordingPipeline,
+    /// Audio level monitor for GUI visualization.
+    level_monitor: AudioLevelMonitor,
 }
 
 impl AppState {
@@ -47,11 +54,15 @@ impl AppState {
     /// ```
     pub fn new(config: Config) -> Result<Self> {
         let buffer = ReplayBuffer::new(&config)?;
+        let level_monitor = AudioLevelMonitor::new();
+        let mut pipeline = RecordingPipeline::new();
+        pipeline.set_level_monitor(level_monitor.clone());
 
         Ok(Self {
             config,
             buffer,
-            pipeline: RecordingPipeline::new(),
+            pipeline,
+            level_monitor,
         })
     }
 
@@ -146,6 +157,7 @@ impl AppState {
     pub async fn apply_config(&mut self, new_config: Config) -> Result<bool> {
         let needs_restart = self.config.requires_pipeline_restart(&new_config);
         let needs_hotkey_reregister = self.config.requires_hotkey_reregister(&new_config);
+        let audio_changed = self.config.audio != new_config.audio;
 
         if needs_restart {
             let old_config = self.config.clone();
@@ -183,6 +195,10 @@ impl AppState {
         } else {
             self.config = new_config;
             self.config.validate();
+
+            if audio_changed && self.pipeline.is_recording() {
+                self.pipeline.update_audio_config(&self.config.audio);
+            }
         }
 
         Ok(needs_hotkey_reregister)
@@ -195,5 +211,18 @@ impl AppState {
     /// Reference to the configuration.
     pub fn config(&self) -> &Config {
         &self.config
+    }
+
+    /// Updates audio configuration at runtime without restarting the pipeline.
+    ///
+    /// This should be called when audio settings (volume levels, etc.) change
+    /// but don't require a full pipeline restart.
+    pub fn update_audio_config(&self, audio_config: &crate::config::AudioConfig) {
+        self.pipeline.update_audio_config(audio_config);
+    }
+
+    /// Gets the audio level monitor for visualization.
+    pub fn level_monitor(&self) -> &AudioLevelMonitor {
+        &self.level_monitor
     }
 }

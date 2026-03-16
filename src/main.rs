@@ -385,7 +385,11 @@ async fn main() -> Result<()> {
                                             }
         liteclip_replay::platform::TrayEvent::OpenSettings => {
                                                  info!("Tray: Open Settings selected");
-                                                 liteclip_replay::gui::show_settings_gui(tokio_tx.clone());
+                                                 let level_monitor = {
+                                                     let state = app_state.read().await;
+                                                     state.level_monitor().clone()
+                                                 };
+                                                 liteclip_replay::gui::show_settings_gui(tokio_tx.clone(), Some(level_monitor));
                                              }
                                              liteclip_replay::platform::TrayEvent::OpenGallery => {
                                                  info!("Tray: Open Gallery selected");

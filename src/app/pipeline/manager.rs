@@ -1,5 +1,6 @@
 use crate::{
-    buffer::ReplayBuffer, capture::dxgi::DxgiCapture, config::Config, encode::EncoderHandle,
+    buffer::ReplayBuffer, capture::audio::AudioLevelMonitor, capture::dxgi::DxgiCapture,
+    config::Config, encode::EncoderHandle,
 };
 use anyhow::Result;
 use tracing::{error, info, warn};
@@ -25,6 +26,8 @@ pub struct RecordingPipeline {
     audio_manager: Option<crate::capture::audio::WasapiAudioManager>,
     /// Current lifecycle state.
     lifecycle: RecordingLifecycle,
+    /// Audio level monitor for GUI visualization.
+    level_monitor: Option<AudioLevelMonitor>,
 }
 
 impl Default for RecordingPipeline {
@@ -41,7 +44,18 @@ impl RecordingPipeline {
             capture: None,
             audio_manager: None,
             lifecycle: RecordingLifecycle::Idle,
+            level_monitor: None,
         }
+    }
+
+    /// Sets the audio level monitor for this pipeline.
+    pub fn set_level_monitor(&mut self, monitor: AudioLevelMonitor) {
+        self.level_monitor = Some(monitor);
+    }
+
+    /// Gets the audio level monitor, if available.
+    pub fn level_monitor(&self) -> Option<&AudioLevelMonitor> {
+        self.level_monitor.as_ref()
     }
 
     /// Gets the current lifecycle state.
@@ -56,6 +70,16 @@ impl RecordingPipeline {
     /// `true` if the pipeline is in the Running state.
     pub fn is_recording(&self) -> bool {
         matches!(self.lifecycle, RecordingLifecycle::Running)
+    }
+
+    /// Updates audio configuration at runtime.
+    ///
+    /// This allows changing volume levels and other audio settings
+    /// without restarting the entire recording pipeline.
+    pub fn update_audio_config(&self, config: &crate::config::AudioConfig) {
+        if let Some(ref audio_manager) = self.audio_manager {
+            audio_manager.update_config(config);
+        }
     }
 
     /// Rolls back startup by cleaning up partially-initialized resources.
@@ -96,7 +120,8 @@ impl RecordingPipeline {
         info!("Recording: starting pipeline");
         self.lifecycle = RecordingLifecycle::Starting;
 
-        match start_audio_capture(config, buffer, "capture mode") {
+        let level_monitor = self.level_monitor.clone();
+        match start_audio_capture(config, buffer, "capture mode", level_monitor) {
             Ok(audio_manager) => {
                 if audio_manager.is_running() {
                     self.audio_manager = Some(audio_manager);

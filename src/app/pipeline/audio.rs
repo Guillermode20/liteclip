@@ -1,4 +1,8 @@
-use crate::{buffer::ReplayBuffer, capture::audio::WasapiAudioManager, config::Config};
+use crate::{
+    buffer::ReplayBuffer,
+    capture::audio::{AudioLevelMonitor, WasapiAudioManager},
+    config::Config,
+};
 use anyhow::{Context, Result};
 use tracing::{debug, info};
 
@@ -6,12 +10,14 @@ pub fn start_audio_capture(
     config: &Config,
     buffer: &ReplayBuffer,
     context: &str,
+    level_monitor: Option<AudioLevelMonitor>,
 ) -> Result<WasapiAudioManager> {
     if !config.audio.capture_system && !config.audio.capture_mic {
         return WasapiAudioManager::new();
     }
 
-    let mut audio_manager = WasapiAudioManager::new().context("Failed to create audio manager")?;
+    let mut audio_manager = WasapiAudioManager::with_level_monitor(level_monitor)
+        .context("Failed to create audio manager")?;
     audio_manager
         .start(&config.audio)
         .context("Failed to start audio capture")?;

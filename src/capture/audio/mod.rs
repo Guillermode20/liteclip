@@ -35,11 +35,13 @@
 //! ```
 
 pub mod device_info;
+pub mod level_monitor;
 pub mod manager;
 pub mod mic;
 pub mod mixer;
 pub mod system;
 
+pub use level_monitor::AudioLevelMonitor;
 pub use manager::WasapiAudioManager;
 pub use mic::WasapiMicCapture;
 pub use mixer::AudioMixer;

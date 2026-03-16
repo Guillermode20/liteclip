@@ -21,8 +21,8 @@ use decode_pipeline::PlaybackController;
 use crate::config::Config;
 use crate::gui::manager::{show_toast, ToastKind};
 use crate::output::{
-    generate_thumbnail, probe_video_file, spawn_clip_export, ClipExportRequest, ClipExportUpdate,
-    TimeRange, VideoFileMetadata,
+    estimate_export_bitrates, generate_thumbnail, probe_video_file, spawn_clip_export,
+    ClipExportRequest, ClipExportUpdate, TimeRange, VideoFileMetadata,
 };
 use crate::platform::AppEvent;
 
@@ -1609,45 +1609,22 @@ fn estimate_bitrate_kbps(
     kept_duration_secs: f64,
     has_audio: bool,
     num_segments: usize,
-    fps: f64,
+    _fps: f64,
 ) -> (u32, u32) {
-    // Apply frame rate scaling: 60fps needs ~1.5x more bitrate than 30fps
-    let fps_factor = (fps / 30.0).clamp(0.67, 2.0);
+    let estimate = estimate_export_bitrates(
+        target_size_mb,
+        kept_duration_secs,
+        has_audio,
+        DEFAULT_AUDIO_BITRATE_KBPS,
+        num_segments,
+    );
 
-    // Dynamic container overhead based on segment count (more segments = more overhead)
-    let container_overhead_kbps = 16.0 + (num_segments as f64 * 8.0);
-
-    // Adaptive audio bitrate based on available video bandwidth
-    let base_video_kbps =
-        (f64::from(target_size_mb) * 8192.0 / kept_duration_secs.max(1.0)).max(256.0);
-
-    // Scale audio bitrate: smaller files get lower audio bitrate
-    let audio_kbps = if has_audio {
-        if base_video_kbps > 3000.0 {
-            DEFAULT_AUDIO_BITRATE_KBPS // 128 kbps
-        } else if base_video_kbps > 1500.0 {
-            96
-        } else {
-            64
-        }
-    } else {
-        0
-    };
-
-    // Calculate video bitrate with FPS scaling and dynamic overhead
-    let total_kbps = base_video_kbps * fps_factor;
-    let video_kbps = (total_kbps - f64::from(audio_kbps) - container_overhead_kbps)
-        .max(300.0)
-        .round() as u32;
-
-    (video_kbps, total_kbps.round() as u32)
+    (estimate.video_kbps, estimate.total_kbps)
 }
 
 fn quality_estimate(metadata: &VideoFileMetadata, video_kbps: u32) -> (&'static str, usize) {
-    // Pixel factor: unclamped to properly support 4K+ (4K = 4.0, 8K = 16.0)
     let pixel_factor = (metadata.width as f64 * metadata.height as f64) / (1920.0 * 1080.0);
 
-    // Frame rate factor: higher fps needs more bitrate for same quality
     let fps_factor = (metadata.fps / 30.0).clamp(0.5, 3.0);
 
     // Combined factor for bitrate thresholds

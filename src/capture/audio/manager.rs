@@ -8,9 +8,10 @@ use crossbeam::channel::{Receiver, Sender, TryRecvError};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{debug, error, warn};
 
+use crate::capture::audio::level_monitor::{calculate_levels_stereo, AudioLevelMonitor};
 use crate::capture::audio::mic::WasapiMicConfig;
 use crate::capture::audio::mixer::AudioMixer;
 use crate::capture::audio::system::WasapiSystemConfig;
@@ -26,12 +27,21 @@ pub struct WasapiAudioManager {
     packet_tx: Sender<EncodedPacket>,
     packet_rx: Receiver<EncodedPacket>,
     forward_thread: Option<thread::JoinHandle<()>>,
+    config_update_tx: Sender<AudioConfig>,
+    config_update_rx: Receiver<AudioConfig>,
+    level_monitor: Option<AudioLevelMonitor>,
 }
 
 impl WasapiAudioManager {
     /// Create a new WASAPI audio manager
     pub fn new() -> Result<Self> {
+        Self::with_level_monitor(None)
+    }
+
+    /// Create a new WASAPI audio manager with an optional level monitor
+    pub fn with_level_monitor(level_monitor: Option<AudioLevelMonitor>) -> Result<Self> {
         let (packet_tx, packet_rx) = crossbeam::channel::bounded(64);
+        let (config_update_tx, config_update_rx) = crossbeam::channel::bounded(16);
 
         Ok(Self {
             system_capture: None,
@@ -40,6 +50,9 @@ impl WasapiAudioManager {
             packet_tx,
             packet_rx,
             forward_thread: None,
+            config_update_tx,
+            config_update_rx,
+            level_monitor,
         })
     }
 
@@ -108,6 +121,8 @@ impl WasapiAudioManager {
         let running = Arc::clone(&self.running);
         let packet_tx = self.packet_tx.clone();
         let config_clone = config.clone();
+        let config_update_rx = self.config_update_rx.clone();
+        let level_monitor = self.level_monitor.clone();
         self.forward_thread = Some(thread::spawn(move || {
             Self::forward_loop(
                 running,
@@ -115,6 +130,8 @@ impl WasapiAudioManager {
                 &mut system_rx,
                 &mut mic_rx,
                 config_clone,
+                config_update_rx,
+                level_monitor,
             )
         }));
 
@@ -159,19 +176,38 @@ impl WasapiAudioManager {
         self.running.load(Ordering::SeqCst)
     }
 
+    /// Update audio configuration at runtime
+    ///
+    /// This allows changing volume levels and other settings without restarting capture.
+    pub fn update_config(&self, config: &AudioConfig) {
+        if self.running.load(Ordering::SeqCst) {
+            if let Err(e) = self.config_update_tx.try_send(config.clone()) {
+                warn!("Failed to send config update to audio manager: {}", e);
+            }
+        }
+    }
+
     fn forward_loop(
         running: Arc<AtomicBool>,
         packet_tx: Sender<EncodedPacket>,
         system_rx: &mut Option<Receiver<EncodedPacket>>,
         mic_rx: &mut Option<Receiver<EncodedPacket>>,
         config: AudioConfig,
+        config_update_rx: Receiver<AudioConfig>,
+        level_monitor: Option<AudioLevelMonitor>,
     ) {
         let mut mixer = AudioMixer::new(&config);
         let mut system_packet: Option<EncodedPacket> = None;
         let mut mic_packet: Option<EncodedPacket> = None;
         let mut forwarded_total: u64 = 0;
+        let mut last_peak_decay = Instant::now();
 
         while running.load(Ordering::SeqCst) {
+            while let Ok(new_config) = config_update_rx.try_recv() {
+                mixer.update_config(&new_config);
+                debug!("Audio mixer config updated");
+            }
+
             let mut system_disconnected = false;
             let mut mic_disconnected = false;
 
@@ -179,7 +215,18 @@ impl WasapiAudioManager {
             if system_packet.is_none() {
                 if let Some(rx) = system_rx.as_ref() {
                     match rx.try_recv() {
-                        Ok(packet) => system_packet = Some(packet),
+                        Ok(packet) => {
+                            if let Some(ref monitor) = level_monitor {
+                                let samples: Vec<i16> = packet
+                                    .data
+                                    .chunks_exact(2)
+                                    .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
+                                    .collect();
+                                let (left, right) = calculate_levels_stereo(&samples);
+                                monitor.update_system_levels(left, right);
+                            }
+                            system_packet = Some(packet);
+                        }
                         Err(TryRecvError::Empty) => {}
                         Err(TryRecvError::Disconnected) => {
                             warn!("System audio capture channel disconnected");
@@ -193,13 +240,32 @@ impl WasapiAudioManager {
             if mic_packet.is_none() {
                 if let Some(rx) = mic_rx.as_ref() {
                     match rx.try_recv() {
-                        Ok(packet) => mic_packet = Some(packet),
+                        Ok(packet) => {
+                            if let Some(ref monitor) = level_monitor {
+                                let samples: Vec<i16> = packet
+                                    .data
+                                    .chunks_exact(2)
+                                    .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
+                                    .collect();
+                                let (left, right) = calculate_levels_stereo(&samples);
+                                monitor.update_mic_levels(left, right);
+                            }
+                            mic_packet = Some(packet);
+                        }
                         Err(TryRecvError::Empty) => {}
                         Err(TryRecvError::Disconnected) => {
                             warn!("Microphone capture channel disconnected");
                             mic_disconnected = true;
                         }
                     }
+                }
+            }
+
+            // Decay peak levels periodically
+            if let Some(ref monitor) = level_monitor {
+                if last_peak_decay.elapsed() >= Duration::from_millis(50) {
+                    monitor.decay_peak_levels();
+                    last_peak_decay = Instant::now();
                 }
             }
 

@@ -80,6 +80,18 @@ enum ExportOutcome {
     Cancelled,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct ExportBitrateEstimate {
+    pub video_kbps: u32,
+    pub audio_kbps: u32,
+    pub total_kbps: u32,
+}
+
+const MIN_VIDEO_BITRATE_KBPS: u32 = 300;
+const MAX_EXPORT_ATTEMPTS: usize = 4;
+const TARGET_SIZE_UNDERFILL_RATIO: f64 = 0.985;
+const MAX_VIDEO_BITRATE_KBPS: u32 = 400_000;
+
 pub fn probe_video_file(video_path: &Path) -> Result<VideoFileMetadata> {
     let ffprobe = ffprobe_executable_path();
     let output = command_output(Command::new(&ffprobe).args([
@@ -246,38 +258,165 @@ fn run_clip_export(
     })?;
 
     let output_duration_secs = request.output_duration_secs().max(0.1);
-    let audio_bitrate_kbps = if request.metadata.has_audio {
-        request.audio_bitrate_kbps.max(64)
-    } else {
-        0
-    };
-
-    // Dynamic container overhead based on segment count
-    let container_overhead_kbps = 16.0 + (request.keep_ranges.len() as f64 * 8.0);
-
-    // Frame rate scaling: higher fps needs more bitrate
-    let fps_factor = (request.metadata.fps / 30.0).clamp(0.67, 2.0);
-
-    let total_bitrate_kbps =
-        (f64::from(request.target_size_mb) * 8192.0 / output_duration_secs).max(256.0) * fps_factor;
-
-    let video_bitrate_kbps =
-        (total_bitrate_kbps - f64::from(audio_bitrate_kbps) - container_overhead_kbps)
-            .max(300.0)
-            .round() as u32;
-
-    let first_pass_filter = build_filter_complex(&request.keep_ranges, false);
-    let second_pass_filter = build_filter_complex(&request.keep_ranges, request.metadata.has_audio);
-    let passlog_prefix = std::env::temp_dir().join(format!(
-        "liteclip-pass-{}-{}",
+    let bitrate_estimate = estimate_export_bitrates(
+        request.target_size_mb,
+        output_duration_secs,
+        request.metadata.has_audio,
+        request.audio_bitrate_kbps,
+        request.keep_ranges.len(),
+    );
+    let target_size_bytes = target_size_bytes(request.target_size_mb);
+    let non_video_bytes = estimate_non_video_bytes(
+        output_duration_secs,
+        bitrate_estimate.audio_kbps,
+        request.keep_ranges.len(),
+    );
+    let export_work_dir = std::env::temp_dir().join(format!(
+        "liteclip-export-{}-{}",
         std::process::id(),
         chrono::Utc::now().timestamp_millis()
     ));
-    let passlog_prefix_str = passlog_prefix.to_string_lossy().into_owned();
-    let ffmpeg = ffmpeg_executable_path();
+    std::fs::create_dir_all(&export_work_dir).with_context(|| {
+        format!(
+            "Failed to create temporary export directory {:?}",
+            export_work_dir
+        )
+    })?;
 
-    // Determine adaptive preset based on bitrate
-    let preset = select_adaptive_preset(video_bitrate_kbps);
+    let export_result = (|| -> Result<ExportOutcome> {
+        let mut current_video_bitrate_kbps = bitrate_estimate.video_kbps.max(MIN_VIDEO_BITRATE_KBPS);
+        let mut low_video_bitrate_kbps = MIN_VIDEO_BITRATE_KBPS;
+        let mut high_video_bitrate_kbps: Option<u32> = None;
+        let mut best_under_target: Option<ExportAttemptResult> = None;
+        let mut best_over_target: Option<ExportAttemptResult> = None;
+
+        for attempt_index in 0..MAX_EXPORT_ATTEMPTS {
+            if cancel_flag.load(Ordering::SeqCst) {
+                return Ok(ExportOutcome::Cancelled);
+            }
+
+            let output_path = export_work_dir.join(format!("attempt-{}.mp4", attempt_index + 1));
+            let attempt_result = match attempt_export(
+                request,
+                &output_path,
+                current_video_bitrate_kbps,
+                bitrate_estimate.audio_kbps,
+                progress_tx,
+                cancel_flag,
+                attempt_index,
+                MAX_EXPORT_ATTEMPTS,
+            )? {
+                Some(attempt_result) => attempt_result,
+                None => return Ok(ExportOutcome::Cancelled),
+            };
+
+            info!(
+                "Export attempt {}/{} produced {} bytes at {} kbps (target {} bytes)",
+                attempt_index + 1,
+                MAX_EXPORT_ATTEMPTS,
+                attempt_result.size_bytes,
+                attempt_result.video_bitrate_kbps,
+                target_size_bytes
+            );
+
+            if attempt_result.size_bytes <= target_size_bytes {
+                let replace_best_under = match best_under_target.as_ref() {
+                    Some(best_attempt) => {
+                        attempt_result.size_bytes > best_attempt.size_bytes
+                            || (attempt_result.size_bytes == best_attempt.size_bytes
+                                && attempt_result.video_bitrate_kbps > best_attempt.video_bitrate_kbps)
+                    }
+                    None => true,
+                };
+                if replace_best_under {
+                    best_under_target = Some(attempt_result.clone());
+                }
+                low_video_bitrate_kbps = low_video_bitrate_kbps.max(current_video_bitrate_kbps);
+            } else {
+                let replace_best_over = match best_over_target.as_ref() {
+                    Some(best_attempt) => {
+                        attempt_result.size_bytes < best_attempt.size_bytes
+                            || (attempt_result.size_bytes == best_attempt.size_bytes
+                                && attempt_result.video_bitrate_kbps < best_attempt.video_bitrate_kbps)
+                    }
+                    None => true,
+                };
+                if replace_best_over {
+                    best_over_target = Some(attempt_result.clone());
+                }
+                high_video_bitrate_kbps = Some(match high_video_bitrate_kbps {
+                    Some(high_bitrate) => high_bitrate.min(current_video_bitrate_kbps),
+                    None => current_video_bitrate_kbps,
+                });
+            }
+
+            if attempt_result.size_bytes <= target_size_bytes
+                && (attempt_result.size_bytes as f64)
+                    >= (target_size_bytes as f64 * TARGET_SIZE_UNDERFILL_RATIO)
+            {
+                break;
+            }
+
+            let next_video_bitrate_kbps = next_export_video_bitrate_kbps(
+                current_video_bitrate_kbps,
+                attempt_result.size_bytes,
+                target_size_bytes,
+                non_video_bytes,
+                low_video_bitrate_kbps,
+                high_video_bitrate_kbps,
+            );
+
+            if next_video_bitrate_kbps == current_video_bitrate_kbps {
+                break;
+            }
+
+            if let Some(high_bitrate) = high_video_bitrate_kbps {
+                if high_bitrate <= low_video_bitrate_kbps.saturating_add(24) {
+                    break;
+                }
+            }
+
+            current_video_bitrate_kbps = next_video_bitrate_kbps;
+        }
+
+        let preferred_attempt = select_preferred_attempt(
+            best_under_target,
+            best_over_target,
+            target_size_bytes,
+        )
+        .context("Clip export did not produce an output file")?;
+
+        move_or_copy_file(&preferred_attempt.output_path, &request.output_path).with_context(|| {
+            format!(
+                "Failed to move export output from {:?} to {:?}",
+                preferred_attempt.output_path, request.output_path
+            )
+        })?;
+
+        Ok(ExportOutcome::Finished(request.output_path.clone()))
+    })();
+
+    cleanup_export_work_dir(&export_work_dir);
+    export_result
+}
+
+fn attempt_export(
+    request: &ClipExportRequest,
+    output_path: &Path,
+    video_bitrate_kbps: u32,
+    audio_bitrate_kbps: u32,
+    progress_tx: &Sender<ClipExportUpdate>,
+    cancel_flag: &Arc<AtomicBool>,
+    attempt_index: usize,
+    attempt_count: usize,
+) -> Result<Option<ExportAttemptResult>> {
+    let first_pass_filter = build_filter_complex(&request.keep_ranges, false);
+    let second_pass_filter = build_filter_complex(&request.keep_ranges, request.metadata.has_audio);
+    let ffmpeg = ffmpeg_executable_path();
+    let passlog_prefix = output_path.with_extension("passlog");
+    let passlog_prefix_str = passlog_prefix.to_string_lossy().into_owned();
+
+    let preset = select_adaptive_preset(video_bitrate_kbps, &request.metadata);
 
     let _ = progress_tx.send(ClipExportUpdate::Progress {
         phase: ClipExportPhase::Preparing,
@@ -288,7 +427,7 @@ fn run_clip_export(
     info!(
         "Exporting clipped video {:?} -> {:?} ({} kept ranges, target={} MB, video bitrate={} kbps, preset={})",
         request.input_path,
-        request.output_path,
+        output_path,
         request.keep_ranges.len(),
         request.target_size_mb,
         video_bitrate_kbps,
@@ -300,30 +439,34 @@ fn run_clip_export(
         &first_pass_filter,
         &passlog_prefix_str,
         video_bitrate_kbps,
+        audio_bitrate_kbps,
         true,
         &preset,
+        output_path,
     );
     if run_ffmpeg_phase(
         &ffmpeg,
         &first_pass_args,
-        output_duration_secs,
+        request.output_duration_secs().max(0.1),
         FFmpegProgressContext {
             phase: ClipExportPhase::FirstPass,
             start_fraction: 0.0,
             span_fraction: 0.5,
             progress_tx: progress_tx.clone(),
             cancel_flag: cancel_flag.clone(),
+            attempt_index,
+            attempt_count,
         },
     )? {
         cleanup_passlog_files(&passlog_prefix);
-        let _ = std::fs::remove_file(&request.output_path);
-        return Ok(ExportOutcome::Cancelled);
+        let _ = std::fs::remove_file(output_path);
+        return Ok(None);
     }
 
     if cancel_flag.load(Ordering::SeqCst) {
         cleanup_passlog_files(&passlog_prefix);
-        let _ = std::fs::remove_file(&request.output_path);
-        return Ok(ExportOutcome::Cancelled);
+        let _ = std::fs::remove_file(output_path);
+        return Ok(None);
     }
 
     let second_pass_args = build_ffmpeg_args(
@@ -331,44 +474,41 @@ fn run_clip_export(
         &second_pass_filter,
         &passlog_prefix_str,
         video_bitrate_kbps,
+        audio_bitrate_kbps,
         false,
         &preset,
+        output_path,
     );
     if run_ffmpeg_phase(
         &ffmpeg,
         &second_pass_args,
-        output_duration_secs,
+        request.output_duration_secs().max(0.1),
         FFmpegProgressContext {
             phase: ClipExportPhase::SecondPass,
             start_fraction: 0.5,
             span_fraction: 0.5,
             progress_tx: progress_tx.clone(),
             cancel_flag: cancel_flag.clone(),
+            attempt_index,
+            attempt_count,
         },
     )? {
         cleanup_passlog_files(&passlog_prefix);
-        let _ = std::fs::remove_file(&request.output_path);
-        return Ok(ExportOutcome::Cancelled);
+        let _ = std::fs::remove_file(output_path);
+        return Ok(None);
     }
+
+    let size_bytes = std::fs::metadata(output_path)
+        .with_context(|| format!("Failed to get size of export output file {:?}", output_path))?
+        .len();
 
     cleanup_passlog_files(&passlog_prefix);
 
-    Ok(ExportOutcome::Finished(request.output_path.clone()))
-}
-
-fn select_adaptive_preset(video_bitrate_kbps: u32) -> &'static str {
-    // Adaptive preset selection: use slower presets at lower bitrates
-    // for better compression efficiency, and faster presets at high bitrates
-    match video_bitrate_kbps {
-        // Very low bitrate: use veryslow for maximum compression
-        0..=1000 => "veryslow",
-        // Low bitrate: use slower for good compression
-        1001..=3000 => "slow",
-        // Medium bitrate: standard preset
-        3001..=8000 => "medium",
-        // High bitrate: faster encoding (quality less critical)
-        _ => "fast",
-    }
+    Ok(Some(ExportAttemptResult {
+        output_path: output_path.to_path_buf(),
+        video_bitrate_kbps,
+        size_bytes,
+    }))
 }
 
 fn build_ffmpeg_args(
@@ -376,8 +516,10 @@ fn build_ffmpeg_args(
     filter_complex: &str,
     passlog_prefix: &str,
     video_bitrate_kbps: u32,
+    audio_bitrate_kbps: u32,
     first_pass: bool,
     preset: &str,
+    output_path: &Path,
 ) -> Vec<String> {
     let mut args = vec![
         "-y".to_string(),
@@ -428,14 +570,14 @@ fn build_ffmpeg_args(
             "-c:a".to_string(),
             "aac".to_string(),
             "-b:a".to_string(),
-            format!("{}k", request.audio_bitrate_kbps.max(64)),
+            format!("{}k", audio_bitrate_kbps.max(64)),
         ]);
     }
 
     args.extend([
         "-movflags".to_string(),
         "+faststart".to_string(),
-        request.output_path.to_string_lossy().into_owned(),
+        output_path.to_string_lossy().into_owned(),
     ]);
     args
 }
@@ -446,6 +588,8 @@ struct FFmpegProgressContext {
     span_fraction: f32,
     progress_tx: Sender<ClipExportUpdate>,
     cancel_flag: Arc<AtomicBool>,
+    attempt_index: usize,
+    attempt_count: usize,
 }
 
 fn run_ffmpeg_phase(
@@ -511,7 +655,9 @@ fn run_ffmpeg_phase(
                     phase: progress_ctx.phase,
                     fraction: adjusted_fraction.clamp(0.0, 1.0),
                     message: format!(
-                        "{}: {}",
+                        "Attempt {}/{} - {}: {}",
+                        progress_ctx.attempt_index + 1,
+                        progress_ctx.attempt_count,
                         phase_label(progress_ctx.phase),
                         format_seconds_arg(processed_secs)
                     ),
@@ -540,7 +686,12 @@ fn run_ffmpeg_phase(
     let _ = progress_ctx.progress_tx.send(ClipExportUpdate::Progress {
         phase: progress_ctx.phase,
         fraction: (progress_ctx.start_fraction + progress_ctx.span_fraction).clamp(0.0, 1.0),
-        message: format!("{} complete", phase_label(progress_ctx.phase)),
+        message: format!(
+            "Attempt {}/{} - {} complete",
+            progress_ctx.attempt_index + 1,
+            progress_ctx.attempt_count,
+            phase_label(progress_ctx.phase)
+        ),
     });
 
     Ok(false)
@@ -617,6 +768,187 @@ fn cleanup_passlog_files(prefix: &Path) {
     }
 }
 
+fn cleanup_export_work_dir(work_dir: &Path) {
+    let _ = std::fs::remove_dir_all(work_dir);
+}
+
+pub fn estimate_export_bitrates(
+    target_size_mb: u32,
+    output_duration_secs: f64,
+    has_audio: bool,
+    requested_audio_bitrate_kbps: u32,
+    num_segments: usize,
+) -> ExportBitrateEstimate {
+    let duration_secs = output_duration_secs.max(0.1);
+    let total_kbps = ((target_size_bytes(target_size_mb) as f64) * 8.0 / duration_secs / 1000.0)
+        .max(f64::from(MIN_VIDEO_BITRATE_KBPS));
+    let audio_kbps = select_audio_bitrate_kbps(has_audio, requested_audio_bitrate_kbps, total_kbps);
+    let non_video_bytes = estimate_non_video_bytes(duration_secs, audio_kbps, num_segments);
+    let video_kbps = ((((target_size_bytes(target_size_mb).saturating_sub(non_video_bytes)) as f64)
+        * 8.0)
+        / duration_secs
+        / 1000.0)
+        .max(f64::from(MIN_VIDEO_BITRATE_KBPS))
+        .round() as u32;
+
+    ExportBitrateEstimate {
+        video_kbps,
+        audio_kbps,
+        total_kbps: total_kbps.round() as u32,
+    }
+}
+
+fn target_size_bytes(target_size_mb: u32) -> u64 {
+    u64::from(target_size_mb).saturating_mul(1024 * 1024)
+}
+
+fn estimate_non_video_bytes(output_duration_secs: f64, audio_bitrate_kbps: u32, num_segments: usize) -> u64 {
+    let duration_secs = output_duration_secs.max(0.0);
+    let audio_bytes =
+        (duration_secs * f64::from(audio_bitrate_kbps) * 1000.0 / 8.0).round() as u64;
+    audio_bytes.saturating_add(estimate_container_overhead_bytes(output_duration_secs, num_segments))
+}
+
+fn estimate_container_overhead_bytes(output_duration_secs: f64, num_segments: usize) -> u64 {
+    let stream_bytes =
+        (output_duration_secs.max(0.0) * (8.0 + (num_segments as f64 * 3.0)) * 1000.0 / 8.0)
+            .round() as u64;
+    (32 * 1024) as u64 + stream_bytes
+}
+
+fn select_audio_bitrate_kbps(
+    has_audio: bool,
+    requested_audio_bitrate_kbps: u32,
+    total_bitrate_kbps: f64,
+) -> u32 {
+    if !has_audio {
+        return 0;
+    }
+
+    let requested_audio_bitrate_kbps = requested_audio_bitrate_kbps.max(64);
+    if total_bitrate_kbps < 900.0 {
+        64
+    } else if total_bitrate_kbps < 1800.0 {
+        requested_audio_bitrate_kbps.min(96)
+    } else {
+        requested_audio_bitrate_kbps.min(128)
+    }
+}
+
+fn next_export_video_bitrate_kbps(
+    current_video_bitrate_kbps: u32,
+    actual_size_bytes: u64,
+    target_size_bytes: u64,
+    estimated_non_video_bytes: u64,
+    low_video_bitrate_kbps: u32,
+    high_video_bitrate_kbps: Option<u32>,
+) -> u32 {
+    let current_video_bytes = actual_size_bytes.saturating_sub(estimated_non_video_bytes).max(1);
+    let target_video_bytes = target_size_bytes.saturating_sub(estimated_non_video_bytes).max(1);
+    let scaled_video_bitrate_kbps = ((f64::from(current_video_bitrate_kbps)
+        * (target_video_bytes as f64)
+        / (current_video_bytes as f64))
+        * if actual_size_bytes > target_size_bytes {
+            0.985
+        } else {
+            1.01
+        })
+        .round() as u32;
+
+    let growth_limited_video_bitrate_kbps = scaled_video_bitrate_kbps.min(
+        current_video_bitrate_kbps
+            .saturating_mul(4)
+            .max(MIN_VIDEO_BITRATE_KBPS),
+    );
+    let mut next_video_bitrate_kbps = growth_limited_video_bitrate_kbps
+        .max(low_video_bitrate_kbps.max(MIN_VIDEO_BITRATE_KBPS));
+
+    if let Some(high_video_bitrate_kbps) = high_video_bitrate_kbps {
+        if high_video_bitrate_kbps <= low_video_bitrate_kbps.saturating_add(24) {
+            return low_video_bitrate_kbps.max(MIN_VIDEO_BITRATE_KBPS);
+        }
+
+        next_video_bitrate_kbps = next_video_bitrate_kbps.min(high_video_bitrate_kbps);
+        if next_video_bitrate_kbps == current_video_bitrate_kbps {
+            let span = high_video_bitrate_kbps.saturating_sub(low_video_bitrate_kbps);
+            next_video_bitrate_kbps = low_video_bitrate_kbps.saturating_add((span + 1) / 2);
+        }
+    }
+
+    next_video_bitrate_kbps.min(MAX_VIDEO_BITRATE_KBPS)
+}
+
+fn select_preferred_attempt(
+    best_under_target: Option<ExportAttemptResult>,
+    best_over_target: Option<ExportAttemptResult>,
+    target_size_bytes: u64,
+) -> Option<ExportAttemptResult> {
+    match (best_under_target, best_over_target) {
+        (Some(under_target), Some(over_target)) => {
+            let under_delta = target_size_bytes.saturating_sub(under_target.size_bytes);
+            let over_delta = over_target.size_bytes.saturating_sub(target_size_bytes);
+            if over_delta < under_delta {
+                Some(over_target)
+            } else {
+                Some(under_target)
+            }
+        }
+        (Some(under_target), None) => Some(under_target),
+        (None, Some(over_target)) => Some(over_target),
+        (None, None) => None,
+    }
+}
+
+fn move_or_copy_file(source_path: &Path, destination_path: &Path) -> Result<()> {
+    let _ = std::fs::remove_file(destination_path);
+    match std::fs::rename(source_path, destination_path) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            std::fs::copy(source_path, destination_path).with_context(|| {
+                format!(
+                    "Failed to copy export output from {:?} to {:?}",
+                    source_path, destination_path
+                )
+            })?;
+            let _ = std::fs::remove_file(source_path);
+            Ok(())
+        }
+    }
+}
+
+fn select_adaptive_preset(video_bitrate_kbps: u32, metadata: &VideoFileMetadata) -> &'static str {
+    // Adaptive preset selection: use slower presets at lower bitrates
+    // for better compression efficiency, and faster presets at high bitrates
+    let pixels_per_frame = f64::from(metadata.width.max(1)) * f64::from(metadata.height.max(1));
+    let bits_per_pixel_frame =
+        (f64::from(video_bitrate_kbps) * 1000.0) / (pixels_per_frame * metadata.fps.max(1.0));
+    let high_throughput_source = pixels_per_frame * metadata.fps.max(1.0) >= 2560.0 * 1440.0 * 60.0;
+
+    if bits_per_pixel_frame < 0.05 {
+        "veryslow"
+    } else if bits_per_pixel_frame < 0.09 {
+        if high_throughput_source {
+            "slower"
+        } else {
+            "veryslow"
+        }
+    } else if bits_per_pixel_frame < 0.16 {
+        "slower"
+    } else if high_throughput_source {
+        "slow"
+    } else {
+        "slower"
+    }
+}
+
+fn phase_label(phase: ClipExportPhase) -> &'static str {
+    match phase {
+        ClipExportPhase::Preparing => "Preparing export",
+        ClipExportPhase::FirstPass => "Encoding pass 1",
+        ClipExportPhase::SecondPass => "Encoding pass 2",
+    }
+}
+
 fn ffprobe_executable_path() -> PathBuf {
     let ffmpeg = ffmpeg_executable_path();
     let sibling = ffmpeg.with_file_name(if cfg!(target_os = "windows") {
@@ -629,14 +961,6 @@ fn ffprobe_executable_path() -> PathBuf {
         sibling
     } else {
         PathBuf::from("ffprobe")
-    }
-}
-
-fn phase_label(phase: ClipExportPhase) -> &'static str {
-    match phase {
-        ClipExportPhase::Preparing => "Preparing export",
-        ClipExportPhase::FirstPass => "Encoding pass 1",
-        ClipExportPhase::SecondPass => "Encoding pass 2",
     }
 }
 
@@ -689,6 +1013,13 @@ fn null_output_path() -> &'static str {
     }
 }
 
+#[derive(Debug, Clone)]
+struct ExportAttemptResult {
+    output_path: PathBuf,
+    video_bitrate_kbps: u32,
+    size_bytes: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -701,6 +1032,30 @@ mod tests {
             Some(2.5)
         );
         assert_eq!(parse_progress_seconds("progress=continue"), None);
+    }
+
+    #[test]
+    fn estimate_export_bitrates_scales_audio_down_for_small_budgets() {
+        let estimate = estimate_export_bitrates(1, 20.0, true, 128, 2);
+
+        assert_eq!(estimate.audio_kbps, 64);
+        assert!(estimate.video_kbps >= MIN_VIDEO_BITRATE_KBPS);
+        assert!(estimate.total_kbps >= estimate.video_kbps);
+    }
+
+    #[test]
+    fn next_export_video_bitrate_tracks_video_budget_instead_of_total_size() {
+        let next_video_bitrate_kbps = next_export_video_bitrate_kbps(
+            4000,
+            4_500_000,
+            4_000_000,
+            1_500_000,
+            MIN_VIDEO_BITRATE_KBPS,
+            None,
+        );
+
+        assert!(next_video_bitrate_kbps < 4000);
+        assert!(next_video_bitrate_kbps > 3000);
     }
 
     #[test]

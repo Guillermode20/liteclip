@@ -28,9 +28,9 @@
 //! // Initialize the GUI manager (call once at startup)
 //! init_gui_manager();
 //!
-//! // Show settings window
+//! // Show settings window (level_monitor is None for testing)
 //! let (tx, rx) = channel(1);
-//! show_settings_gui(tx);
+//! show_settings_gui(tx, None);
 //! ```
 
 pub mod manager;

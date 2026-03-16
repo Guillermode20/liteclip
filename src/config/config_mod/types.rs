@@ -244,7 +244,7 @@ impl Config {
         self.audio.balance = self.audio.balance.clamp(-100, 100);
         self.audio.master_volume = self.audio.master_volume.clamp(0, 200);
         self.audio.system_volume = self.audio.system_volume.clamp(0, 200);
-        self.audio.mic_volume = self.audio.mic_volume.clamp(0, 200);
+        self.audio.mic_volume = self.audio.mic_volume.clamp(0, 400);
         self.audio.compression_threshold = self.audio.compression_threshold.clamp(0, 100);
         self.audio.compression_ratio = self.audio.compression_ratio.clamp(1, 20);
         self.audio.compression_attack = self.audio.compression_attack.clamp(1, 100);
@@ -346,7 +346,7 @@ pub enum RateControl {
 }
 
 /// Audio capture settings
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AudioConfig {
     #[serde(default = "default_true")]
     pub capture_system: bool,
@@ -355,7 +355,7 @@ pub struct AudioConfig {
     #[serde(default = "default_mic_device")]
     pub mic_device: String,
     #[serde(default = "default_mic_volume")]
-    pub mic_volume: u8,
+    pub mic_volume: u16,
     #[serde(default = "default_system_volume")]
     pub system_volume: u8,
     #[serde(default = "default_balance")]

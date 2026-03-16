@@ -2,19 +2,15 @@ use eframe::egui;
 use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
 
+use crate::capture::audio::AudioLevelMonitor;
 use crate::config::{config_mod::types::*, Config};
 use crate::platform::AppEvent;
 
-/// Shows the settings GUI window.
-///
-/// Spawns a new egui window for configuring application settings.
-/// Changes are sent back to the main application via the event channel.
-///
-/// # Arguments
-///
-/// * `event_tx` - Channel to send configuration update events.
-pub fn show_settings_gui(event_tx: Sender<AppEvent>) {
-    crate::gui::manager::send_gui_message(crate::gui::manager::GuiMessage::ShowSettings(event_tx));
+pub fn show_settings_gui(event_tx: Sender<AppEvent>, level_monitor: Option<AudioLevelMonitor>) {
+    crate::gui::manager::send_gui_message(crate::gui::manager::GuiMessage::ShowSettings(
+        event_tx,
+        level_monitor,
+    ));
 }
 
 #[derive(Default)]
@@ -54,20 +50,110 @@ fn render_hotkey_field(
     });
 }
 
+use crate::capture::audio::level_monitor::AudioLevels;
+
+fn render_audio_level_meter(ui: &mut egui::Ui, active: bool, levels: AudioLevels) {
+    let meter_width = 160.0;
+    let meter_height = 8.0;
+    let rounding = 4.0;
+
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(meter_width, meter_height), egui::Sense::hover());
+
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+
+        painter.rect_filled(rect, rounding, egui::Color32::from_rgb(30, 30, 30));
+
+        if active && levels.level > 0 {
+            let level_frac = levels.level as f32 / 100.0;
+            let filled_width = level_frac * meter_width;
+
+            let level_color = if levels.level >= 95 {
+                egui::Color32::from_rgb(0xED, 0x42, 0x42)
+            } else if levels.level >= 80 {
+                egui::Color32::from_rgb(0xFA, 0xA6, 0x1A)
+            } else if levels.level >= 50 {
+                egui::Color32::from_rgb(0xF0, 0xB2, 0x32)
+            } else {
+                egui::Color32::from_rgb(0x23, 0xA5, 0x5A)
+            };
+
+            let filled_rect = egui::Rect::from_min_size(
+                rect.min,
+                egui::vec2(filled_width.min(meter_width), meter_height),
+            );
+            painter.rect_filled(filled_rect, rounding, level_color);
+
+            if levels.peak > levels.level {
+                let peak_frac = levels.peak.min(100) as f32 / 100.0;
+                let peak_x = rect.min.x + peak_frac * meter_width - 2.0;
+                let peak_rect = egui::Rect::from_min_size(
+                    egui::pos2(peak_x.max(rect.min.x), rect.min.y),
+                    egui::vec2(3.0, meter_height),
+                );
+                painter.rect_filled(peak_rect, 1.0, egui::Color32::WHITE);
+            }
+        }
+    }
+}
+
+const SIDEBAR_WIDTH: f32 = 120.0;
+
+#[derive(Default, PartialEq, Eq, Clone, Copy)]
+enum SettingsTab {
+    #[default]
+    General,
+    Video,
+    Audio,
+    Hotkeys,
+    Advanced,
+}
+
+impl SettingsTab {
+    fn label(&self) -> &'static str {
+        match self {
+            SettingsTab::General => "General",
+            SettingsTab::Video => "Video",
+            SettingsTab::Audio => "Audio",
+            SettingsTab::Hotkeys => "Hotkeys",
+            SettingsTab::Advanced => "Advanced",
+        }
+    }
+
+    fn all() -> [SettingsTab; 5] {
+        [
+            SettingsTab::General,
+            SettingsTab::Video,
+            SettingsTab::Audio,
+            SettingsTab::Hotkeys,
+            SettingsTab::Advanced,
+        ]
+    }
+}
+
 pub struct SettingsApp {
     pub config: Config,
     pub event_tx: Sender<AppEvent>,
     pub save_status: Option<String>,
     hotkey_errors: HotkeyValidationErrors,
+    level_monitor: Option<AudioLevelMonitor>,
+    current_tab: SettingsTab,
 }
 
 impl SettingsApp {
-    pub fn new(config: Config, event_tx: Sender<AppEvent>) -> Self {
+    pub fn new(
+        config: Config,
+        event_tx: Sender<AppEvent>,
+        level_monitor: Option<AudioLevelMonitor>,
+    ) -> Self {
         Self {
             config,
             event_tx,
             save_status: None,
             hotkey_errors: HotkeyValidationErrors::default(),
+            level_monitor,
+            current_tab: SettingsTab::default(),
         }
     }
 
@@ -76,312 +162,383 @@ impl SettingsApp {
     }
 
     fn render(&mut self, ctx: &egui::Context, is_open: &mut bool) {
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("LiteClip Replay Settings");
-            ui.separator();
+        // Render sidebar on the left
+        egui::SidePanel::left("settings_sidebar")
+            .exact_width(SIDEBAR_WIDTH)
+            .resizable(false)
+            .show(ctx, |ui| {
+                self.render_sidebar(ui);
+            });
 
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                // General Settings
-                ui.collapsing("General", |ui| {
+        // Render main content in central panel
+        egui::CentralPanel::default().show(ctx, |ui| {
+            egui::Frame::NONE
+                .inner_margin(egui::Margin::same(8))
+                .show(ui, |ui| {
+                    // Header
                     ui.horizontal(|ui| {
-                        ui.label("Save Directory:");
-                        ui.text_edit_singleline(&mut self.config.general.save_directory);
-                        if ui.button("Browse...").clicked() {
-                            if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                                self.config.general.save_directory =
-                                    folder.to_string_lossy().to_string();
+                        ui.heading("LiteClip Replay Settings");
+                        ui.label(egui::RichText::new("—").weak());
+                        ui.label(egui::RichText::new(self.current_tab.label()).strong());
+                    });
+                    ui.separator();
+
+                    // Content area with scrolling
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| match self.current_tab {
+                            SettingsTab::General => self.render_general_settings(ui),
+                            SettingsTab::Video => self.render_video_settings(ui),
+                            SettingsTab::Audio => self.render_audio_settings(ui),
+                            SettingsTab::Hotkeys => self.render_hotkeys_settings(ui),
+                            SettingsTab::Advanced => self.render_advanced_settings(ui),
+                        });
+                });
+
+            // Bottom button bar
+            ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+                ui.add_space(5.0);
+                ui.separator();
+                ui.add_space(5.0);
+
+                ui.horizontal(|ui| {
+                    if ui.button("Apply").clicked() {
+                        self.config.validate();
+                        match self
+                            .event_tx
+                            .try_send(AppEvent::ConfigUpdated(Arc::new(self.config.clone())))
+                        {
+                            Ok(_) => {
+                                *is_open = false;
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                            }
+                            Err(e) => {
+                                self.save_status = Some(format!("Error: {}", e));
                             }
                         }
-                    });
-
-                    ui.add(
-                        egui::Slider::new(&mut self.config.general.replay_duration_secs, 5..=300)
-                            .text("Replay Duration (s)"),
-                    );
-                    ui.checkbox(
-                        &mut self.config.general.auto_start_with_windows,
-                        "Auto Start with Windows",
-                    );
-                    ui.checkbox(&mut self.config.general.start_minimised, "Start Minimised");
-                    ui.checkbox(
-                        &mut self.config.general.auto_detect_game,
-                        "Auto Detect Game",
-                    );
-                });
-
-                // Video Settings
-                ui.collapsing("Video", |ui| {
-                    ui.checkbox(
-                        &mut self.config.video.use_native_resolution,
-                        "Use Native Resolution",
-                    );
-                    if !self.config.video.use_native_resolution {
-                        egui::ComboBox::from_label("Resolution")
-                            .selected_text(format!("{:?}", self.config.video.resolution))
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(
-                                    &mut self.config.video.resolution,
-                                    Resolution::Native,
-                                    "Native",
-                                );
-                                ui.selectable_value(
-                                    &mut self.config.video.resolution,
-                                    Resolution::P1080,
-                                    "1080p",
-                                );
-                                ui.selectable_value(
-                                    &mut self.config.video.resolution,
-                                    Resolution::P720,
-                                    "720p",
-                                );
-                                ui.selectable_value(
-                                    &mut self.config.video.resolution,
-                                    Resolution::P480,
-                                    "480p",
-                                );
-                            });
                     }
 
-                    ui.add(
-                        egui::Slider::new(&mut self.config.video.framerate, 10..=144)
-                            .text("Framerate"),
-                    );
-                    ui.add(
-                        egui::Slider::new(&mut self.config.video.bitrate_mbps, 1..=150)
-                            .text("Bitrate (Mbps)"),
-                    );
+                    if ui.button("Cancel").clicked() {
+                        *is_open = false;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
 
-                    // Codec is fixed to HEVC for performance
-                    ui.label("Codec: HEVC (H.265)");
-
-                    egui::ComboBox::from_label("Encoder")
-                        .selected_text(format!("{:?}", self.config.video.encoder))
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(
-                                &mut self.config.video.encoder,
-                                EncoderType::Auto,
-                                "Auto",
-                            );
-                            ui.selectable_value(
-                                &mut self.config.video.encoder,
-                                EncoderType::Nvenc,
-                                "NVENC (NVIDIA)",
-                            );
-                            ui.selectable_value(
-                                &mut self.config.video.encoder,
-                                EncoderType::Amf,
-                                "AMF (AMD)",
-                            );
-                            ui.selectable_value(
-                                &mut self.config.video.encoder,
-                                EncoderType::Qsv,
-                                "QSV (Intel)",
-                            );
-                        });
-
-                    egui::ComboBox::from_label("Quality Preset")
-                        .selected_text(format!("{:?}", self.config.video.quality_preset))
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(
-                                &mut self.config.video.quality_preset,
-                                QualityPreset::Performance,
-                                "Performance",
-                            );
-                            ui.selectable_value(
-                                &mut self.config.video.quality_preset,
-                                QualityPreset::Balanced,
-                                "Balanced",
-                            );
-                            ui.selectable_value(
-                                &mut self.config.video.quality_preset,
-                                QualityPreset::Quality,
-                                "Quality",
-                            );
-                        });
-
-                    egui::ComboBox::from_label("Rate Control")
-                        .selected_text(format!("{:?}", self.config.video.rate_control))
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(
-                                &mut self.config.video.rate_control,
-                                RateControl::Cbr,
-                                "CBR",
-                            );
-                            ui.selectable_value(
-                                &mut self.config.video.rate_control,
-                                RateControl::Vbr,
-                                "VBR",
-                            );
-                            ui.selectable_value(
-                                &mut self.config.video.rate_control,
-                                RateControl::Cq,
-                                "CQ",
-                            );
-                        });
-
-                    if self.config.video.rate_control == RateControl::Cq {
-                        let mut cq_val = self.config.video.quality_value.unwrap_or(23);
-                        ui.add(egui::Slider::new(&mut cq_val, 1..=51).text("CQ Level"));
-                        self.config.video.quality_value = Some(cq_val);
+                    if let Some(status) = &self.save_status {
+                        ui.label(status);
                     }
                 });
-
-                // Audio Settings
-                ui.collapsing("Audio", |ui| {
-                    ui.checkbox(
-                        &mut self.config.audio.capture_system,
-                        "Capture System Audio",
-                    );
-                    ui.add(
-                        egui::Slider::new(&mut self.config.audio.system_volume, 0..=200)
-                            .text("System Volume %"),
-                    );
-
-                    ui.checkbox(&mut self.config.audio.capture_mic, "Capture Microphone");
-                    ui.text_edit_singleline(&mut self.config.audio.mic_device);
-                    ui.add(
-                        egui::Slider::new(&mut self.config.audio.mic_volume, 0..=200)
-                            .text("Mic Volume %"),
-                    );
-                    ui.checkbox(
-                        &mut self.config.audio.mic_noise_reduction,
-                        "Reduce mic background hiss",
-                    );
-                    ui.label(
-                        egui::RichText::new(
-                            "When enabled, high-quality AI-powered noise suppression removes background hiss and hum.",
-                        )
-                        .small(),
-                    );
-
-
-                    ui.add_space(10.0);
-                    ui.separator();
-                    ui.add_space(10.0);
-
-                    ui.add(
-                        egui::Slider::new(&mut self.config.audio.master_volume, 0..=200)
-                            .text("Master Volume %"),
-                    );
-
-                    ui.add(
-                        egui::Slider::new(&mut self.config.audio.balance, -100..=100)
-                            .text("Stereo Balance"),
-                    );
-
-                    ui.add_space(10.0);
-                    ui.checkbox(
-                        &mut self.config.audio.compression_enabled,
-                        "Enable Compression",
-                    );
-
-                    if self.config.audio.compression_enabled {
-                        ui.indent("compression_settings", |ui| {
-                            ui.add(
-                                egui::Slider::new(
-                                    &mut self.config.audio.compression_threshold,
-                                    0..=100,
-                                )
-                                .text("Compression Threshold"),
-                            );
-                            ui.add(
-                                egui::Slider::new(&mut self.config.audio.compression_ratio, 1..=20)
-                                    .text("Compression Ratio"),
-                            );
-                            ui.add(
-                                egui::Slider::new(
-                                    &mut self.config.audio.compression_attack,
-                                    1..=100,
-                                )
-                                .text("Attack Time (ms)"),
-                            );
-                            ui.add(
-                                egui::Slider::new(
-                                    &mut self.config.audio.compression_release,
-                                    50..=255,
-                                )
-                                .text("Release Time (ms)"),
-                            );
-                        });
-                    }
-                });
-
-                // Hotkey Settings
-                ui.collapsing("Hotkeys", |ui| {
-                    render_hotkey_field(
-                        ui,
-                        "Save Clip:",
-                        &mut self.config.hotkeys.save_clip,
-                        &mut self.hotkey_errors.save_clip,
-                    );
-                    render_hotkey_field(
-                        ui,
-                        "Toggle Recording:",
-                        &mut self.config.hotkeys.toggle_recording,
-                        &mut self.hotkey_errors.toggle_recording,
-                    );
-                    render_hotkey_field(
-                        ui,
-                        "Screenshot:",
-                        &mut self.config.hotkeys.screenshot,
-                        &mut self.hotkey_errors.screenshot,
-                    );
-                    render_hotkey_field(
-                        ui,
-                        "Open Clip & Compress:",
-                        &mut self.config.hotkeys.open_gallery,
-                        &mut self.hotkey_errors.open_gallery,
-                    );
-                });
-
-                // Advanced Settings
-                ui.collapsing("Advanced", |ui| {
-                    ui.add(
-                        egui::Slider::new(&mut self.config.advanced.gpu_index, 0..=4)
-                            .text("GPU Index"),
-                    );
-                    ui.add(
-                        egui::Slider::new(&mut self.config.advanced.keyframe_interval_secs, 1..=10)
-                            .text("Keyframe Interval (s)"),
-                    );
-                    ui.checkbox(
-                        &mut self.config.advanced.use_cpu_readback,
-                        "Use CPU Readback for HW Encoding",
-                    );
-                });
-            });
-
-            ui.add_space(10.0);
-            ui.separator();
-            ui.add_space(5.0);
-
-            ui.horizontal(|ui| {
-                if ui.button("Apply").clicked() {
-                    self.config.validate();
-                    match self
-                        .event_tx
-                        .try_send(AppEvent::ConfigUpdated(Arc::new(self.config.clone())))
-                    {
-                        Ok(_) => {
-                            *is_open = false;
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                        }
-                        Err(e) => {
-                            self.save_status = Some(format!("Error: {}", e));
-                        }
-                    }
-                }
-
-                if ui.button("Cancel").clicked() {
-                    *is_open = false;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                }
-
-                if let Some(status) = &self.save_status {
-                    ui.label(status);
-                }
             });
         });
+    }
+
+    fn render_sidebar(&mut self, ui: &mut egui::Ui) {
+        ui.vertical_centered(|ui| {
+            ui.add_space(8.0);
+            ui.heading("Settings");
+            ui.add_space(16.0);
+
+            for tab in SettingsTab::all() {
+                let is_selected = self.current_tab == tab;
+                let button_text = egui::RichText::new(tab.label()).size(14.0);
+
+                let button = if is_selected {
+                    egui::Button::new(button_text.strong())
+                        .fill(egui::Color32::from_rgb(60, 60, 70))
+                        .stroke(egui::Stroke::new(
+                            1.0,
+                            egui::Color32::from_rgb(100, 100, 120),
+                        ))
+                        .min_size(egui::vec2(100.0, 28.0))
+                } else {
+                    egui::Button::new(button_text)
+                        .fill(egui::Color32::TRANSPARENT)
+                        .stroke(egui::Stroke::NONE)
+                        .min_size(egui::vec2(100.0, 28.0))
+                };
+
+                if ui.add(button).clicked() {
+                    self.current_tab = tab;
+                }
+                ui.add_space(4.0);
+            }
+        });
+    }
+
+    fn render_general_settings(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label("Save Directory:");
+            ui.text_edit_singleline(&mut self.config.general.save_directory);
+            if ui.button("Browse...").clicked() {
+                if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                    self.config.general.save_directory = folder.to_string_lossy().to_string();
+                }
+            }
+        });
+
+        ui.add_space(8.0);
+
+        ui.add(
+            egui::Slider::new(&mut self.config.general.replay_duration_secs, 5..=300)
+                .text("Replay Duration (s)"),
+        );
+
+        ui.add_space(8.0);
+
+        ui.checkbox(
+            &mut self.config.general.auto_start_with_windows,
+            "Auto Start with Windows",
+        );
+        ui.checkbox(&mut self.config.general.start_minimised, "Start Minimised");
+        ui.checkbox(
+            &mut self.config.general.auto_detect_game,
+            "Auto Detect Game",
+        );
+    }
+
+    fn render_video_settings(&mut self, ui: &mut egui::Ui) {
+        ui.checkbox(
+            &mut self.config.video.use_native_resolution,
+            "Use Native Resolution",
+        );
+
+        if !self.config.video.use_native_resolution {
+            egui::ComboBox::from_label("Resolution")
+                .selected_text(format!("{:?}", self.config.video.resolution))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut self.config.video.resolution,
+                        Resolution::Native,
+                        "Native",
+                    );
+                    ui.selectable_value(
+                        &mut self.config.video.resolution,
+                        Resolution::P1080,
+                        "1080p",
+                    );
+                    ui.selectable_value(
+                        &mut self.config.video.resolution,
+                        Resolution::P720,
+                        "720p",
+                    );
+                    ui.selectable_value(
+                        &mut self.config.video.resolution,
+                        Resolution::P480,
+                        "480p",
+                    );
+                });
+        }
+
+        ui.add_space(8.0);
+
+        ui.add(egui::Slider::new(&mut self.config.video.framerate, 10..=144).text("Framerate"));
+        ui.add(
+            egui::Slider::new(&mut self.config.video.bitrate_mbps, 1..=150).text("Bitrate (Mbps)"),
+        );
+
+        ui.add_space(8.0);
+
+        ui.label("Codec: HEVC (H.265)");
+
+        ui.add_space(4.0);
+
+        egui::ComboBox::from_label("Encoder")
+            .selected_text(format!("{:?}", self.config.video.encoder))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.config.video.encoder, EncoderType::Auto, "Auto");
+                ui.selectable_value(
+                    &mut self.config.video.encoder,
+                    EncoderType::Nvenc,
+                    "NVENC (NVIDIA)",
+                );
+                ui.selectable_value(
+                    &mut self.config.video.encoder,
+                    EncoderType::Amf,
+                    "AMF (AMD)",
+                );
+                ui.selectable_value(
+                    &mut self.config.video.encoder,
+                    EncoderType::Qsv,
+                    "QSV (Intel)",
+                );
+            });
+
+        ui.add_space(4.0);
+
+        egui::ComboBox::from_label("Quality Preset")
+            .selected_text(format!("{:?}", self.config.video.quality_preset))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut self.config.video.quality_preset,
+                    QualityPreset::Performance,
+                    "Performance",
+                );
+                ui.selectable_value(
+                    &mut self.config.video.quality_preset,
+                    QualityPreset::Balanced,
+                    "Balanced",
+                );
+                ui.selectable_value(
+                    &mut self.config.video.quality_preset,
+                    QualityPreset::Quality,
+                    "Quality",
+                );
+            });
+
+        ui.add_space(4.0);
+
+        egui::ComboBox::from_label("Rate Control")
+            .selected_text(format!("{:?}", self.config.video.rate_control))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.config.video.rate_control, RateControl::Cbr, "CBR");
+                ui.selectable_value(&mut self.config.video.rate_control, RateControl::Vbr, "VBR");
+                ui.selectable_value(&mut self.config.video.rate_control, RateControl::Cq, "CQ");
+            });
+
+        if self.config.video.rate_control == RateControl::Cq {
+            let mut cq_val = self.config.video.quality_value.unwrap_or(23);
+            ui.add(egui::Slider::new(&mut cq_val, 1..=51).text("CQ Level"));
+            self.config.video.quality_value = Some(cq_val);
+        }
+    }
+
+    fn render_audio_settings(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.checkbox(
+                &mut self.config.audio.capture_system,
+                "Capture System Audio",
+            );
+            if let Some(ref monitor) = self.level_monitor {
+                let levels = monitor.get_system_levels();
+                render_audio_level_meter(ui, self.config.audio.capture_system, levels);
+            }
+        });
+
+        ui.add(
+            egui::Slider::new(&mut self.config.audio.system_volume, 0..=200)
+                .text("System Volume %"),
+        );
+
+        ui.add_space(8.0);
+
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.config.audio.capture_mic, "Capture Microphone");
+            if let Some(ref monitor) = self.level_monitor {
+                let levels = monitor.get_mic_levels();
+                render_audio_level_meter(ui, self.config.audio.capture_mic, levels);
+            }
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("Device:");
+            ui.text_edit_singleline(&mut self.config.audio.mic_device);
+        });
+
+        ui.add(egui::Slider::new(&mut self.config.audio.mic_volume, 0..=400).text("Mic Volume %"));
+        ui.checkbox(
+            &mut self.config.audio.mic_noise_reduction,
+            "Reduce mic background hiss",
+        );
+        ui.label(
+            egui::RichText::new(
+                "When enabled, high-quality AI-powered noise suppression removes background hiss and hum.",
+            )
+            .small(),
+        );
+
+        ui.add_space(12.0);
+        ui.separator();
+        ui.add_space(12.0);
+
+        ui.add(
+            egui::Slider::new(&mut self.config.audio.master_volume, 0..=200)
+                .text("Master Volume %"),
+        );
+
+        ui.add(
+            egui::Slider::new(&mut self.config.audio.balance, -100..=100).text("Stereo Balance"),
+        );
+
+        ui.add_space(12.0);
+
+        ui.checkbox(
+            &mut self.config.audio.compression_enabled,
+            "Enable Compression",
+        );
+
+        if self.config.audio.compression_enabled {
+            ui.indent("compression_settings", |ui| {
+                ui.add(
+                    egui::Slider::new(&mut self.config.audio.compression_threshold, 0..=100)
+                        .text("Compression Threshold"),
+                );
+                ui.add(
+                    egui::Slider::new(&mut self.config.audio.compression_ratio, 1..=20)
+                        .text("Compression Ratio"),
+                );
+                ui.add(
+                    egui::Slider::new(&mut self.config.audio.compression_attack, 1..=100)
+                        .text("Attack Time (ms)"),
+                );
+                ui.add(
+                    egui::Slider::new(&mut self.config.audio.compression_release, 50..=255)
+                        .text("Release Time (ms)"),
+                );
+            });
+        }
+    }
+
+    fn render_hotkeys_settings(&mut self, ui: &mut egui::Ui) {
+        render_hotkey_field(
+            ui,
+            "Save Clip:",
+            &mut self.config.hotkeys.save_clip,
+            &mut self.hotkey_errors.save_clip,
+        );
+
+        ui.add_space(4.0);
+
+        render_hotkey_field(
+            ui,
+            "Toggle Recording:",
+            &mut self.config.hotkeys.toggle_recording,
+            &mut self.hotkey_errors.toggle_recording,
+        );
+
+        ui.add_space(4.0);
+
+        render_hotkey_field(
+            ui,
+            "Screenshot:",
+            &mut self.config.hotkeys.screenshot,
+            &mut self.hotkey_errors.screenshot,
+        );
+
+        ui.add_space(4.0);
+
+        render_hotkey_field(
+            ui,
+            "Open Clip & Compress:",
+            &mut self.config.hotkeys.open_gallery,
+            &mut self.hotkey_errors.open_gallery,
+        );
+    }
+
+    fn render_advanced_settings(&mut self, ui: &mut egui::Ui) {
+        ui.add(egui::Slider::new(&mut self.config.advanced.gpu_index, 0..=4).text("GPU Index"));
+
+        ui.add_space(4.0);
+
+        ui.add(
+            egui::Slider::new(&mut self.config.advanced.keyframe_interval_secs, 1..=10)
+                .text("Keyframe Interval (s)"),
+        );
+
+        ui.add_space(4.0);
+
+        ui.checkbox(
+            &mut self.config.advanced.use_cpu_readback,
+            "Use CPU Readback for HW Encoding",
+        );
     }
 }
 
@@ -389,5 +546,9 @@ impl eframe::App for SettingsApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let mut _dummy = true;
         self.render(ctx, &mut _dummy);
+
+        if self.level_monitor.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(33));
+        }
     }
 }
