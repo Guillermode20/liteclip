@@ -562,7 +562,7 @@ impl RNNoiseProcessor {
     const DC_COEFF: f32 = 0.9975;
     const MIN_GAIN: f32 = 0.18;
     const QUIET_SPEECH_GAIN: f32 = 0.90;
-    const MAX_GAIN: f32 = 1.60;
+    const MAX_GAIN: f32 = 4.00;
     const QUIET_SPEECH_MAKEUP_GAIN: f32 = 1.10;
     const VAD_NOISE_THRESHOLD: f32 = 0.22;
     const VAD_GATE_THRESHOLD: f32 = 0.52;
@@ -1012,12 +1012,14 @@ impl AgcState {
         }
 
         let snr = frame_rms / (self.noise_floor_rms + 1.0);
-        let snr_factor =
-            ((snr - Self::SPEECH_SNR_MIN) / (Self::SPEECH_SNR_MAX - Self::SPEECH_SNR_MIN))
-                .clamp(0.0, 1.0);
-        let level_factor = ((frame_rms - Self::MIN_ACTIVE_RMS) / (self.target_level - Self::MIN_ACTIVE_RMS))
+        let snr_factor = ((snr - Self::SPEECH_SNR_MIN)
+            / (Self::SPEECH_SNR_MAX - Self::SPEECH_SNR_MIN))
             .clamp(0.0, 1.0);
-        let peak_factor = ((frame_peak - Self::MIN_ACTIVE_RMS) / (self.target_level * 1.35 - Self::MIN_ACTIVE_RMS))
+        let level_factor = ((frame_rms - Self::MIN_ACTIVE_RMS)
+            / (self.target_level - Self::MIN_ACTIVE_RMS))
+            .clamp(0.0, 1.0);
+        let peak_factor = ((frame_peak - Self::MIN_ACTIVE_RMS)
+            / (self.target_level * 1.35 - Self::MIN_ACTIVE_RMS))
             .clamp(0.0, 1.0);
         (snr_factor * 0.55 + level_factor * 0.25 + peak_factor * 0.20).clamp(0.0, 1.0)
     }
@@ -1034,7 +1036,9 @@ impl AgcState {
         } else {
             self.max_gain
         };
-        let unclamped_target = rms_gain.min(peak_limited_gain).clamp(self.min_gain, self.max_gain);
+        let unclamped_target = rms_gain
+            .min(peak_limited_gain)
+            .clamp(self.min_gain, self.max_gain);
         let speech_weighted_gain = if unclamped_target >= 1.0 {
             let activation = (0.45 + self.speech_presence * 0.55).clamp(0.0, 1.0);
             1.0 + (unclamped_target - 1.0) * activation
@@ -1065,9 +1069,10 @@ impl AgcState {
             self.noise_floor_slow_alpha
         };
         self.noise_floor_rms += noise_floor_alpha * (noise_floor_target - self.noise_floor_rms);
-        self.noise_floor_rms = self
-            .noise_floor_rms
-            .clamp(Self::MIN_NOISE_FLOOR_RMS, self.target_level.max(Self::MIN_NOISE_FLOOR_RMS));
+        self.noise_floor_rms = self.noise_floor_rms.clamp(
+            Self::MIN_NOISE_FLOOR_RMS,
+            self.target_level.max(Self::MIN_NOISE_FLOOR_RMS),
+        );
 
         let target_gain = self.compute_target_gain();
         let alpha = if target_gain >= self.current_gain {
@@ -1093,7 +1098,9 @@ mod tests {
     }
 
     fn test_frame_peak(frame: &[f32]) -> f32 {
-        frame.iter().fold(0.0f32, |peak, sample| peak.max(sample.abs()))
+        frame
+            .iter()
+            .fold(0.0f32, |peak, sample| peak.max(sample.abs()))
     }
 
     fn synth_sine_frame(amplitude: f32, frame_index: usize) -> Vec<f32> {
