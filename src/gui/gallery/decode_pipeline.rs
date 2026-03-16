@@ -277,18 +277,28 @@ impl PlaybackController {
     pub fn take_playback_frame(&self) -> Option<RgbaImage> {
         let wall_time_secs = self.playback_position_secs();
         let mut queue = self.shared.frame_queue.lock().unwrap();
+
+        let is_buffering = {
+            let clock = self.shared.playing_since.lock().unwrap();
+            clock.as_ref().map_or(false, |c| c.started_at.is_none())
+        };
+
         if queue.is_empty() {
-            let empty_polls = self
-                .shared
-                .playback_empty_polls
-                .fetch_add(1, Ordering::SeqCst)
-                + 1;
-            if empty_polls == 60 || empty_polls == 180 || empty_polls % 600 == 0 {
-                tracing::warn!(
-                    "Playback queue has been empty for {} polls at wall={:.3}s",
-                    empty_polls,
-                    wall_time_secs
-                );
+            if is_buffering {
+                self.shared.playback_empty_polls.store(0, Ordering::SeqCst);
+            } else {
+                let empty_polls = self
+                    .shared
+                    .playback_empty_polls
+                    .fetch_add(1, Ordering::SeqCst)
+                    + 1;
+                if empty_polls == 60 || empty_polls == 180 || empty_polls % 600 == 0 {
+                    tracing::warn!(
+                        "Playback queue has been empty for {} polls at wall={:.3}s",
+                        empty_polls,
+                        wall_time_secs
+                    );
+                }
             }
             return None;
         }
@@ -758,6 +768,16 @@ fn decoder_worker_loop(
                 time_secs,
             } => {
                 tracing::debug!("Preview request {} at {:.2}s", request_id, time_secs);
+                if let Err(err) =
+                    session.set_skip_frame_mode(ffmpeg::ffi::AVDiscard::AVDISCARD_NONREF)
+                {
+                    tracing::error!("Failed to set preview skip frame mode: {err:#}");
+                    let _ = error_tx.send(DecoderError {
+                        request_id,
+                        message: format!("Failed to set preview skip frame mode: {err:#}"),
+                    });
+                    continue;
+                }
                 if let Err(err) = session.seek_to(time_secs) {
                     tracing::error!("Preview seek failed: {err:#}");
                     let _ = error_tx.send(DecoderError {
@@ -795,6 +815,16 @@ fn decoder_worker_loop(
                 time_secs,
             } => {
                 tracing::info!("Playback request {} at {:.2}s", request_id, time_secs);
+                if let Err(err) =
+                    session.set_skip_frame_mode(ffmpeg::ffi::AVDiscard::AVDISCARD_DEFAULT)
+                {
+                    tracing::error!("Failed to set playback skip frame mode: {err:#}");
+                    let _ = error_tx.send(DecoderError {
+                        request_id,
+                        message: format!("Failed to set playback skip frame mode: {err:#}"),
+                    });
+                    continue;
+                }
                 if let Err(err) = session.seek_to(time_secs) {
                     tracing::error!("Playback seek failed: {err:#}");
                     let _ = error_tx.send(DecoderError {
@@ -829,7 +859,16 @@ fn decoder_worker_loop(
                             request_id,
                             time_secs,
                         }) => {
-                            if let Err(err) = session.seek_to(time_secs) {
+                            if let Err(err) = session
+                                .set_skip_frame_mode(ffmpeg::ffi::AVDiscard::AVDISCARD_NONREF)
+                            {
+                                let _ = error_tx.send(DecoderError {
+                                    request_id,
+                                    message: format!(
+                                        "Failed to set preview skip frame mode: {err:#}"
+                                    ),
+                                });
+                            } else if let Err(err) = session.seek_to(time_secs) {
                                 let _ = error_tx.send(DecoderError {
                                     request_id,
                                     message: format!("Preview seek failed: {err:#}"),
@@ -866,6 +905,17 @@ fn decoder_worker_loop(
                             time_secs,
                         }) => {
                             active_request_id = request_id;
+                            if let Err(err) = session
+                                .set_skip_frame_mode(ffmpeg::ffi::AVDiscard::AVDISCARD_DEFAULT)
+                            {
+                                let _ = error_tx.send(DecoderError {
+                                    request_id,
+                                    message: format!(
+                                        "Failed to set playback skip frame mode: {err:#}"
+                                    ),
+                                });
+                                break 'playback;
+                            }
                             if let Err(err) = session.seek_to(time_secs) {
                                 let _ = error_tx.send(DecoderError {
                                     request_id,
@@ -1168,6 +1218,17 @@ impl DecoderSession {
                 }
             }
         }
+    }
+
+    fn set_skip_frame_mode(&mut self, skip_mode: ffmpeg::ffi::AVDiscard) -> Result<()> {
+        unsafe {
+            let codec_ctx = self.decoder.as_mut_ptr();
+            if codec_ctx.is_null() {
+                bail!("Codec context is null");
+            }
+            (*codec_ctx).skip_frame = skip_mode;
+        }
+        Ok(())
     }
 
     fn frame_pts_secs(&self) -> f64 {
