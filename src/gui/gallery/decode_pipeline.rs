@@ -1,9 +1,11 @@
 use anyhow::{anyhow, bail, Context, Result};
 use crossbeam::channel::{bounded, Receiver, Sender, TryRecvError, TrySendError};
 use ffmpeg_next as ffmpeg;
+use ffmpeg_next::packet::Mut;
 use image::RgbaImage;
 use rodio::{Sink, Source};
 use std::collections::VecDeque;
+use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -11,12 +13,215 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
+use windows::Win32::Graphics::Direct3D11::{
+    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+    D3D11_SDK_VERSION,
+};
+use windows_core::Interface;
 
 use crate::output::functions::ffmpeg_executable_path;
 use crate::output::VideoFileMetadata;
 
-const FRAME_CHANNEL_CAPACITY: usize = 24; // Increased from 12 for better buffering
-const PLAYBACK_QUEUE_DEPTH: usize = 20; // Increased from 10 for smoother playback
+const FRAME_CHANNEL_CAPACITY: usize = 24;
+const PLAYBACK_QUEUE_DEPTH: usize = 20;
+const FRAME_POOL_SIZE: usize = 32;
+
+struct FramePool {
+    buffers: Mutex<VecDeque<Vec<u8>>>,
+    buffer_size: usize,
+}
+
+impl FramePool {
+    fn new(width: u32, height: u32, capacity: usize) -> Self {
+        let buffer_size = (width as usize) * (height as usize) * 4;
+        let buffers: VecDeque<Vec<u8>> = (0..capacity).map(|_| vec![0u8; buffer_size]).collect();
+        Self {
+            buffers: Mutex::new(buffers),
+            buffer_size,
+        }
+    }
+
+    fn acquire(&self) -> Vec<u8> {
+        self.buffers
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| vec![0u8; self.buffer_size])
+    }
+
+    fn release(&self, buffer: Vec<u8>) {
+        let mut guard = self.buffers.lock().unwrap();
+        if guard.len() < FRAME_POOL_SIZE * 2 {
+            guard.push_back(buffer);
+        }
+    }
+
+    fn buffer_size(&self) -> usize {
+        self.buffer_size
+    }
+}
+
+#[repr(C)]
+struct AvD3d11vaDeviceContext {
+    device: *mut c_void,
+    device_context: *mut c_void,
+    video_device: *mut c_void,
+    video_context: *mut c_void,
+    lock: Option<unsafe extern "C" fn(*mut c_void)>,
+    unlock: Option<unsafe extern "C" fn(*mut c_void)>,
+    lock_ctx: *mut c_void,
+}
+
+struct HardwareDecodeContext {
+    device_ctx_ref: *mut ffmpeg::ffi::AVBufferRef,
+    frames_ctx_ref: *mut ffmpeg::ffi::AVBufferRef,
+    _device: ID3D11Device,
+    _context: ID3D11DeviceContext,
+    sw_frame: ffmpeg::util::frame::video::Video,
+}
+
+struct DecoderHardwareContext {
+    device_ctx_ref: *mut ffmpeg::ffi::AVBufferRef,
+}
+
+unsafe impl Send for DecoderHardwareContext {}
+
+impl Drop for DecoderHardwareContext {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.device_ctx_ref.is_null() {
+                ffmpeg::ffi::av_buffer_unref(&mut self.device_ctx_ref);
+            }
+        }
+    }
+}
+
+unsafe impl Send for HardwareDecodeContext {}
+
+impl Drop for HardwareDecodeContext {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.frames_ctx_ref.is_null() {
+                ffmpeg::ffi::av_buffer_unref(&mut self.frames_ctx_ref);
+            }
+            if !self.device_ctx_ref.is_null() {
+                ffmpeg::ffi::av_buffer_unref(&mut self.device_ctx_ref);
+            }
+        }
+    }
+}
+
+impl HardwareDecodeContext {
+    fn new(output_width: u32, output_height: u32) -> Result<Self> {
+        unsafe {
+            let feature_levels = [
+                windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_1,
+                windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_0,
+            ];
+            let mut device_opt: Option<ID3D11Device> = None;
+            let mut context_opt: Option<ID3D11DeviceContext> = None;
+
+            D3D11CreateDevice(
+                None,
+                windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE,
+                windows::Win32::Foundation::HMODULE::default(),
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                Some(&feature_levels),
+                D3D11_SDK_VERSION,
+                Some(&mut device_opt),
+                None,
+                Some(&mut context_opt),
+            )
+            .context("Failed to create D3D11 device for hardware decoding")?;
+
+            let device = device_opt.context("D3D11 device is null")?;
+            let context = context_opt.context("D3D11 context is null")?;
+
+            let mut device_ctx_ref = ffmpeg::ffi::av_hwdevice_ctx_alloc(
+                ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA,
+            );
+            if device_ctx_ref.is_null() {
+                bail!("Failed to allocate D3D11VA device context");
+            }
+
+            let hw_device_ctx = (*device_ctx_ref).data as *mut ffmpeg::ffi::AVHWDeviceContext;
+            let d3d11_ctx = (*hw_device_ctx).hwctx as *mut AvD3d11vaDeviceContext;
+
+            (*d3d11_ctx).device = device.as_raw() as *mut _;
+            (*d3d11_ctx).device_context = context.as_raw() as *mut _;
+
+            let init_result = ffmpeg::ffi::av_hwdevice_ctx_init(device_ctx_ref);
+            if init_result < 0 {
+                ffmpeg::ffi::av_buffer_unref(&mut device_ctx_ref);
+                bail!(
+                    "Failed to initialize D3D11VA device context: {}",
+                    init_result
+                );
+            }
+
+            let mut frames_ctx_ref = ffmpeg::ffi::av_hwframe_ctx_alloc(device_ctx_ref);
+            if frames_ctx_ref.is_null() {
+                ffmpeg::ffi::av_buffer_unref(&mut device_ctx_ref);
+                bail!("Failed to allocate D3D11VA frames context");
+            }
+
+            let frames_ctx = (*frames_ctx_ref).data as *mut ffmpeg::ffi::AVHWFramesContext;
+            (*frames_ctx).format = ffmpeg::format::Pixel::D3D11.into();
+            (*frames_ctx).sw_format = ffmpeg::format::Pixel::NV12.into();
+            (*frames_ctx).width = output_width as i32;
+            (*frames_ctx).height = output_height as i32;
+            (*frames_ctx).initial_pool_size = 6;
+
+            let init_frames_result = ffmpeg::ffi::av_hwframe_ctx_init(frames_ctx_ref);
+            if init_frames_result < 0 {
+                ffmpeg::ffi::av_buffer_unref(&mut frames_ctx_ref);
+                ffmpeg::ffi::av_buffer_unref(&mut device_ctx_ref);
+                bail!(
+                    "Failed to initialize D3D11VA frames context: {}",
+                    init_frames_result
+                );
+            }
+
+            let sw_frame = ffmpeg::util::frame::video::Video::new(
+                ffmpeg::format::Pixel::NV12,
+                output_width,
+                output_height,
+            );
+
+            tracing::info!("Created hardware decode context (D3D11VA)");
+
+            Ok(Self {
+                device_ctx_ref,
+                frames_ctx_ref,
+                _device: device,
+                _context: context,
+                sw_frame,
+            })
+        }
+    }
+
+    fn transfer_frame_to_cpu(
+        &mut self,
+        hw_frame: &ffmpeg::util::frame::video::Video,
+    ) -> Result<ffmpeg::util::frame::video::Video> {
+        unsafe {
+            let mut sw_frame = ffmpeg::util::frame::video::Video::new(
+                ffmpeg::format::Pixel::NV12,
+                hw_frame.width() as u32,
+                hw_frame.height() as u32,
+            );
+
+            let result =
+                ffmpeg::ffi::av_hwframe_transfer_data(sw_frame.as_mut_ptr(), hw_frame.as_ptr(), 0);
+
+            if result < 0 {
+                bail!("Failed to transfer hardware frame to CPU: {}", result);
+            }
+
+            Ok(sw_frame)
+        }
+    }
+}
 
 pub struct PlaybackFrame {
     pub image: RgbaImage,
@@ -49,6 +254,7 @@ struct SharedPlaybackState {
     audio_buffer: Mutex<Option<AudioBuffer>>,
     audio_generation: AtomicU64,
     audio_started_generation: AtomicU64,
+    frame_pool: Arc<FramePool>,
 }
 
 struct PlaybackClock {
@@ -114,13 +320,17 @@ struct DecoderSession {
     stream_time_base_den: i32,
     seek_target_secs: f64,
     last_pts_secs: f64,
-    /// Track keyframe positions for smarter seeking
     keyframe_positions: Vec<f64>,
+    keyframes_scanned: bool,
+    frame_pool: Arc<FramePool>,
+    hw_context: Option<DecoderHardwareContext>,
 }
 
 impl PlaybackController {
     pub fn new(video_path: PathBuf, metadata: VideoFileMetadata, preview_width: u32) -> Self {
         let (output_width, output_height) = scaled_dimensions(preview_width, &metadata);
+        let frame_pool = Arc::new(FramePool::new(output_width, output_height, FRAME_POOL_SIZE));
+
         let shared = Arc::new(SharedPlaybackState {
             current_time_secs: Mutex::new(0.0),
             playing_since: Mutex::new(None),
@@ -135,6 +345,7 @@ impl PlaybackController {
             audio_buffer: Mutex::new(None),
             audio_generation: AtomicU64::new(1),
             audio_started_generation: AtomicU64::new(0),
+            frame_pool: frame_pool.clone(),
         });
 
         let decoder = DecodePipeline::new(
@@ -142,6 +353,7 @@ impl PlaybackController {
             output_width,
             output_height,
             metadata.fps.clamp(1.0, 120.0),
+            frame_pool,
         );
 
         let (audio_shutdown_tx, audio_shutdown_rx) = std::sync::mpsc::channel();
@@ -512,6 +724,17 @@ impl PlaybackController {
         (count, mb)
     }
 
+    pub fn queue_health(&self) -> (usize, u64) {
+        let queue_len = self.shared.frame_queue.lock().unwrap().len();
+        let empty_polls = self.shared.playback_empty_polls.load(Ordering::SeqCst);
+        (queue_len, empty_polls)
+    }
+
+    pub fn needs_quality_reduction(&self) -> bool {
+        let (queue_len, empty_polls) = self.queue_health();
+        empty_polls > 10 && queue_len < 3
+    }
+
     fn clamp_time(&self, time_secs: f64) -> f64 {
         time_secs.clamp(0.0, self.metadata.duration_secs)
     }
@@ -601,7 +824,13 @@ impl Drop for PlaybackController {
 }
 
 impl DecodePipeline {
-    fn new(video_path: PathBuf, output_width: u32, output_height: u32, fps: f64) -> Self {
+    fn new(
+        video_path: PathBuf,
+        output_width: u32,
+        output_height: u32,
+        fps: f64,
+        frame_pool: Arc<FramePool>,
+    ) -> Self {
         let (command_tx, command_rx) = bounded(16);
         let (frame_tx, frame_rx) = bounded(FRAME_CHANNEL_CAPACITY);
         let (error_tx, error_rx) = bounded(16);
@@ -614,6 +843,7 @@ impl DecodePipeline {
                 command_rx,
                 frame_tx,
                 error_tx,
+                frame_pool,
             );
         });
         Self {
@@ -726,23 +956,25 @@ fn decoder_worker_loop(
     command_rx: Receiver<DecoderCommand>,
     frame_tx: Sender<DecoderFrame>,
     error_tx: Sender<DecoderError>,
+    frame_pool: Arc<FramePool>,
 ) {
     tracing::info!("Decoder worker starting for {:?}", video_path);
     let _ = ffmpeg::init();
-    let mut session = match DecoderSession::open(&video_path, output_width, output_height, fps) {
-        Ok(session) => {
-            tracing::info!("Decoder session opened successfully");
-            session
-        }
-        Err(err) => {
-            tracing::error!("Failed to initialize video decoder: {err:#}");
-            let _ = error_tx.send(DecoderError {
-                request_id: 0,
-                message: format!("Failed to initialize video decoder: {err:#}"),
-            });
-            return;
-        }
-    };
+    let mut session =
+        match DecoderSession::open(&video_path, output_width, output_height, fps, frame_pool) {
+            Ok(session) => {
+                tracing::info!("Decoder session opened successfully");
+                session
+            }
+            Err(err) => {
+                tracing::error!("Failed to initialize video decoder: {err:#}");
+                let _ = error_tx.send(DecoderError {
+                    request_id: 0,
+                    message: format!("Failed to initialize video decoder: {err:#}"),
+                });
+                return;
+            }
+        };
 
     tracing::info!("Decoder worker entering main loop");
     loop {
@@ -1040,7 +1272,13 @@ fn decoder_worker_loop(
 }
 
 impl DecoderSession {
-    fn open(video_path: &Path, output_width: u32, output_height: u32, _fps: f64) -> Result<Self> {
+    fn open(
+        video_path: &Path,
+        output_width: u32,
+        output_height: u32,
+        _fps: f64,
+        frame_pool: Arc<FramePool>,
+    ) -> Result<Self> {
         let input = ffmpeg::format::input(video_path)
             .with_context(|| format!("Failed to open video file: {video_path:?}"))?;
         let input_stream = input
@@ -1049,18 +1287,31 @@ impl DecoderSession {
             .context("No video stream found")?;
         let stream_index = input_stream.index();
         let stream_time_base = input_stream.time_base();
-        let context = ffmpeg::codec::context::Context::from_parameters(input_stream.parameters())
-            .context("Failed to create decoder context")?;
-        let decoder = context
-            .decoder()
-            .video()
-            .context("Failed to open video decoder")?;
+
+        let mut hw_context = Self::create_decoder_hardware_context().ok();
+        let (decoder, using_hw) = match Self::open_video_decoder(&input_stream, hw_context.as_ref()) {
+            Ok(decoder) => (decoder, hw_context.is_some()),
+            Err(err) => {
+                if hw_context.is_some() {
+                    tracing::warn!("Hardware decode unavailable, falling back to software: {err:#}");
+                }
+                hw_context = None;
+                (Self::open_video_decoder(&input_stream, None)?, false)
+            }
+        };
 
         let input_format = decoder.format();
         let input_width = decoder.width();
         let input_height = decoder.height();
+
+        let sw_format = if using_hw {
+            ffmpeg::format::Pixel::NV12
+        } else {
+            input_format
+        };
+
         let scaler = ffmpeg::software::scaling::Context::get(
-            input_format,
+            sw_format,
             input_width,
             input_height,
             ffmpeg::format::Pixel::RGBA,
@@ -1070,7 +1321,7 @@ impl DecoderSession {
         )
         .context("Failed to create decoder scaler")?;
 
-        Ok(Self {
+        let mut session = Self {
             input,
             decoder,
             scaler,
@@ -1088,13 +1339,186 @@ impl DecoderSession {
             seek_target_secs: 0.0,
             last_pts_secs: 0.0,
             keyframe_positions: Vec::new(),
-        })
+            keyframes_scanned: false,
+            frame_pool,
+            hw_context,
+        };
+
+        if using_hw {
+            tracing::info!("Using hardware decoding (D3D11VA)");
+        } else {
+            tracing::info!("Using software decoding");
+        }
+
+        session.scan_keyframes();
+
+        Ok(session)
+    }
+
+    fn create_decoder_hardware_context() -> Result<DecoderHardwareContext> {
+        unsafe {
+            let mut device_ctx_ref = std::ptr::null_mut();
+            let result = ffmpeg::ffi::av_hwdevice_ctx_create(
+                &mut device_ctx_ref,
+                ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA,
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                0,
+            );
+            if result < 0 {
+                bail!("Failed to create D3D11VA hardware device: {}", result);
+            }
+
+            Ok(DecoderHardwareContext { device_ctx_ref })
+        }
+    }
+
+    fn open_video_decoder(
+        input_stream: &ffmpeg::format::stream::Stream<'_>,
+        hw_context: Option<&DecoderHardwareContext>,
+    ) -> Result<ffmpeg::decoder::Video> {
+        let mut context = ffmpeg::codec::context::Context::from_parameters(input_stream.parameters())
+            .context("Failed to create decoder context")?;
+
+        let mut hw_device_ctx_ref = std::ptr::null_mut();
+        if let Some(hw_context) = hw_context {
+            unsafe {
+                hw_device_ctx_ref = ffmpeg::ffi::av_buffer_ref(hw_context.device_ctx_ref);
+                if hw_device_ctx_ref.is_null() {
+                    bail!("Failed to reference D3D11VA hardware device");
+                }
+
+                let codec_ctx = context.as_mut_ptr();
+                (*codec_ctx).hw_device_ctx = hw_device_ctx_ref;
+                (*codec_ctx).get_format = Some(Self::select_decoder_format);
+                (*codec_ctx).hwaccel_flags |= ffmpeg::ffi::AV_HWACCEL_FLAG_IGNORE_LEVEL;
+            }
+        }
+
+        let decoder = match context.decoder().video() {
+            Ok(decoder) => decoder,
+            Err(err) => {
+                if !hw_device_ctx_ref.is_null() {
+                    unsafe {
+                        ffmpeg::ffi::av_buffer_unref(&mut hw_device_ctx_ref);
+                    }
+                }
+                return Err(anyhow!(err).context("Failed to open video decoder"));
+            }
+        };
+
+        Ok(decoder)
+    }
+
+    unsafe extern "C" fn select_decoder_format(
+        _ctx: *mut ffmpeg::ffi::AVCodecContext,
+        pix_fmts: *const ffmpeg::ffi::AVPixelFormat,
+    ) -> ffmpeg::ffi::AVPixelFormat {
+        let mut fmt = pix_fmts;
+        while !fmt.is_null() && *fmt != ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_NONE {
+            if *fmt == ffmpeg::format::Pixel::D3D11.into() {
+                return *fmt;
+            }
+            fmt = fmt.add(1);
+        }
+        if pix_fmts.is_null() {
+            ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_NONE
+        } else {
+            *pix_fmts
+        }
+    }
+
+    fn scan_keyframes(&mut self) {
+        let start = Instant::now();
+        let mut keyframe_pts: Vec<i64> = Vec::new();
+
+        loop {
+            let mut packet = ffmpeg::Packet::empty();
+            match packet.read(&mut self.input) {
+                Ok(()) => {
+                    if packet.stream() == self.stream_index {
+                        let flags = unsafe { (*packet.as_mut_ptr()).flags };
+                        if flags & ffmpeg::ffi::AV_PKT_FLAG_KEY != 0 {
+                            let pts = unsafe { (*packet.as_mut_ptr()).pts };
+                            if pts != ffmpeg::ffi::AV_NOPTS_VALUE {
+                                keyframe_pts.push(pts);
+                            }
+                        }
+                    }
+                }
+                Err(ffmpeg::Error::Eof) => break,
+                Err(_) => break,
+            }
+        }
+
+        let time_base = self.stream_time_base_num as f64 / self.stream_time_base_den as f64;
+        let mut positions: Vec<f64> = keyframe_pts
+            .into_iter()
+            .map(|pts| (pts as f64 * time_base).max(0.0))
+            .filter(|&t| t.is_finite())
+            .collect();
+
+        positions.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        positions.dedup_by(|a, b| (*a - *b).abs() < 0.01);
+
+        if positions.len() > 500 {
+            let step = positions.len() as f64 / 500.0;
+            positions = positions
+                .into_iter()
+                .enumerate()
+                .filter(|(i, _)| (*i as f64 / step).fract() < 0.5)
+                .map(|(_, v)| v)
+                .collect();
+        }
+
+        self.keyframe_positions = positions;
+        self.keyframes_scanned = true;
+
+        tracing::info!(
+            "Scanned {} keyframes in {:.1}ms",
+            self.keyframe_positions.len(),
+            start.elapsed().as_secs_f64() * 1000.0
+        );
+
+        let _ = unsafe {
+            ffmpeg::ffi::av_seek_frame(
+                self.input.as_mut_ptr(),
+                -1,
+                0,
+                ffmpeg::ffi::AVSEEK_FLAG_BACKWARD,
+            )
+        };
     }
 
     fn seek_to(&mut self, time_secs: f64) -> Result<()> {
-        // Find the nearest keyframe before the target time for more efficient seeking
-        let seek_time = if !self.keyframe_positions.is_empty() {
-            // Find the keyframe just before our target time
+        let seek_time = if self.keyframes_scanned && !self.keyframe_positions.is_empty() {
+            let idx = self
+                .keyframe_positions
+                .partition_point(|&k| k <= time_secs)
+                .saturating_sub(1);
+
+            match self.keyframe_positions.get(idx) {
+                Some(&kf) if (time_secs - kf) > 1.5 => {
+                    tracing::debug!(
+                        "Seek to {:.3}s: using keyframe at {:.3}s (idx {}/{})",
+                        time_secs,
+                        kf,
+                        idx,
+                        self.keyframe_positions.len()
+                    );
+                    kf
+                }
+                Some(&kf) => {
+                    tracing::trace!(
+                        "Seek to {:.3}s: close to keyframe at {:.3}s, seeking directly",
+                        time_secs,
+                        kf
+                    );
+                    time_secs
+                }
+                None => time_secs,
+            }
+        } else if !self.keyframe_positions.is_empty() {
             let nearest_keyframe = self
                 .keyframe_positions
                 .iter()
@@ -1103,15 +1527,7 @@ impl DecoderSession {
                 .copied();
 
             match nearest_keyframe {
-                Some(kf) if (time_secs - kf) > 2.0 => {
-                    // If we're more than 2 seconds past a keyframe, seek to keyframe first
-                    tracing::debug!(
-                        "Seeking to keyframe at {:.3}s instead of {:.3}s",
-                        kf,
-                        time_secs
-                    );
-                    kf
-                }
+                Some(kf) if (time_secs - kf) > 2.0 => kf,
                 _ => time_secs,
             }
         } else {
@@ -1145,31 +1561,10 @@ impl DecoderSession {
                 Ok(()) => {
                     let pts_secs = self.frame_pts_secs();
 
-                    // Check if this is a keyframe
-                    let is_keyframe = unsafe {
-                        let flags = (*self.decoded_frame.as_ptr()).flags;
-                        flags & ffmpeg::ffi::AV_FRAME_FLAG_KEY != 0
-                    };
-
-                    // Track keyframe positions for smarter seeking
-                    if is_keyframe {
-                        self.keyframe_positions.push(pts_secs);
-                        // Keep keyframe list sorted and remove duplicates
-                        self.keyframe_positions
-                            .sort_by(|a, b| a.partial_cmp(b).unwrap());
-                        self.keyframe_positions
-                            .dedup_by(|a, b| (*a - *b).abs() < 0.001);
-                        // Limit the list size to prevent memory bloat
-                        if self.keyframe_positions.len() > 1000 {
-                            self.keyframe_positions.remove(0);
-                        }
-                    }
-
                     tracing::trace!(
-                        "decode_next_image: received frame pts={:.3}s, seek_target={:.3}s, keyframe={}",
+                        "decode_next_image: received frame pts={:.3}s, seek_target={:.3}s",
                         pts_secs,
                         self.seek_target_secs,
-                        is_keyframe
                     );
 
                     if pts_secs + 0.001 < self.seek_target_secs {
@@ -1177,13 +1572,22 @@ impl DecoderSession {
                         continue;
                     }
 
+                    let frame_to_scale = if self.hw_context.is_some()
+                        && self.decoded_frame.format() == ffmpeg::format::Pixel::D3D11
+                    {
+                        self.transfer_hw_frame_to_cpu()? 
+                    } else {
+                        self.decoded_frame.clone()
+                    };
+
                     self.scaler
-                        .run(&self.decoded_frame, &mut self.rgba_frame)
+                        .run(&frame_to_scale, &mut self.rgba_frame)
                         .context("Failed to scale decoded frame")?;
-                    let image = rgba_frame_to_image(
+                    let image = rgba_frame_to_image_pooled(
                         &self.rgba_frame,
                         self.output_width,
                         self.output_height,
+                        &self.frame_pool,
                     )?;
                     self.last_pts_secs = pts_secs;
                     return Ok(Some((pts_secs, image)));
@@ -1229,6 +1633,32 @@ impl DecoderSession {
             (*codec_ctx).skip_frame = skip_mode;
         }
         Ok(())
+    }
+
+    fn transfer_hw_frame_to_cpu(&mut self) -> Result<ffmpeg::util::frame::video::Video> {
+        let Some(_hw_context) = self.hw_context.as_mut() else {
+            bail!("Hardware decode context is missing");
+        };
+
+        unsafe {
+            let mut sw_frame = ffmpeg::util::frame::video::Video::new(
+                ffmpeg::format::Pixel::NV12,
+                self.decoded_frame.width() as u32,
+                self.decoded_frame.height() as u32,
+            );
+
+            let result = ffmpeg::ffi::av_hwframe_transfer_data(
+                sw_frame.as_mut_ptr(),
+                self.decoded_frame.as_ptr(),
+                0,
+            );
+
+            if result < 0 {
+                bail!("Failed to transfer hardware frame to CPU: {}", result);
+            }
+
+            Ok(sw_frame)
+        }
     }
 
     fn frame_pts_secs(&self) -> f64 {
@@ -1363,6 +1793,27 @@ fn rgba_frame_to_image(
     let data = frame.data(0);
     let row_bytes = width as usize * 4;
     let mut rgba = vec![0_u8; row_bytes * height as usize];
+
+    for y in 0..height as usize {
+        let src_offset = y * stride;
+        let dst_offset = y * row_bytes;
+        rgba[dst_offset..dst_offset + row_bytes]
+            .copy_from_slice(&data[src_offset..src_offset + row_bytes]);
+    }
+
+    RgbaImage::from_raw(width, height, rgba).context("Failed to create RGBA image from frame")
+}
+
+fn rgba_frame_to_image_pooled(
+    frame: &ffmpeg::util::frame::video::Video,
+    width: u32,
+    height: u32,
+    pool: &FramePool,
+) -> Result<RgbaImage> {
+    let stride = frame.stride(0);
+    let data = frame.data(0);
+    let row_bytes = width as usize * 4;
+    let mut rgba = pool.acquire();
 
     for y in 0..height as usize {
         let src_offset = y * stride;

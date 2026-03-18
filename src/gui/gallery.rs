@@ -12,6 +12,9 @@ use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::mpsc::Sender as TokioSender;
 use tracing::{info, warn};
 
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
 mod browser;
 mod decode_pipeline;
 mod editor;
@@ -65,6 +68,12 @@ struct ThumbnailResult {
     error: Option<String>,
 }
 
+struct ThumbnailStripResult {
+    video_path: PathBuf,
+    strip: Option<ThumbnailStrip>,
+    error: Option<String>,
+}
+
 #[derive(Clone, Copy)]
 struct SnippetSegment {
     start_secs: f64,
@@ -83,6 +92,36 @@ struct ExportState {
     cancel_flag: Arc<AtomicBool>,
     progress: f32,
     message: String,
+}
+
+const THUMBNAIL_STRIP_COUNT: usize = 20;
+const THUMBNAIL_STRIP_WIDTH: u32 = 160;
+
+struct ThumbnailStrip {
+    thumbnails: Vec<(f64, RgbaImage)>,
+    duration_secs: f64,
+}
+
+impl ThumbnailStrip {
+    fn new(thumbnails: Vec<(f64, RgbaImage)>, duration_secs: f64) -> Self {
+        Self {
+            thumbnails,
+            duration_secs,
+        }
+    }
+
+    fn nearest(&self, time_secs: f64) -> Option<&RgbaImage> {
+        if self.thumbnails.is_empty() {
+            return None;
+        }
+
+        let idx = self
+            .thumbnails
+            .partition_point(|(t, _)| *t <= time_secs)
+            .saturating_sub(1);
+
+        self.thumbnails.get(idx).map(|(_, img)| img)
+    }
 }
 
 #[allow(dead_code)]
@@ -110,12 +149,13 @@ struct EditorState {
     export_state: Option<ExportState>,
     export_output: Option<PathBuf>,
     playback: PlaybackController,
-    // Scrubbing optimization fields
     was_playing_before_scrub: bool,
     last_scrub_time: Option<Instant>,
     last_scrub_position: Option<f64>,
     focus_zone: EditorFocusZone,
     selected_snippet_index: Option<usize>,
+    thumbnail_strip: Option<ThumbnailStrip>,
+    thumbnail_strip_loading: bool,
 }
 
 impl EditorState {
@@ -151,6 +191,8 @@ impl EditorState {
             last_scrub_position: None,
             focus_zone: EditorFocusZone::MainPanel,
             selected_snippet_index: Some(0),
+            thumbnail_strip: None,
+            thumbnail_strip_loading: false,
         }
     }
 
@@ -197,6 +239,8 @@ pub struct ClipCompressApp {
     thumbnails_generating: HashSet<PathBuf>,
     thumbnail_tx: Sender<ThumbnailResult>,
     thumbnail_rx: Receiver<ThumbnailResult>,
+    thumbnail_strip_tx: Sender<ThumbnailStripResult>,
+    thumbnail_strip_rx: Receiver<ThumbnailStripResult>,
     editor: Option<EditorState>,
     pub selection_mode: bool,
     pub selected_videos: HashSet<PathBuf>,
@@ -213,6 +257,7 @@ impl ClipCompressApp {
         let save_directory = PathBuf::from(&config.general.save_directory);
         let cache_directory = save_directory.join(".cache");
         let (thumbnail_tx, thumbnail_rx) = mpsc::channel();
+        let (thumbnail_strip_tx, thumbnail_strip_rx) = mpsc::channel();
 
         Self {
             save_directory,
@@ -225,6 +270,8 @@ impl ClipCompressApp {
             thumbnails_generating: HashSet::new(),
             thumbnail_tx,
             thumbnail_rx,
+            thumbnail_strip_tx,
+            thumbnail_strip_rx,
             editor: None,
             selection_mode: false,
             selected_videos: HashSet::new(),
@@ -371,6 +418,23 @@ impl ClipCompressApp {
         self.thumbnails.insert(video_path, texture);
     }
 
+    fn set_preview_texture_from_image(
+        editor: &mut EditorState,
+        ctx: &egui::Context,
+        image: RgbaImage,
+    ) {
+        let color_image = color_image_from_rgba(&image);
+        if let Some(texture) = &mut editor.preview_texture {
+            texture.set(color_image, egui::TextureOptions::LINEAR);
+        } else {
+            editor.preview_texture = Some(ctx.load_texture(
+                format!("preview:{}", editor.video.filename),
+                color_image,
+                egui::TextureOptions::LINEAR,
+            ));
+        }
+    }
+
     fn schedule_thumbnail_generation(&mut self, video: &VideoEntry) {
         if self.thumbnails.contains_key(&video.path)
             || self.thumbnails_generating.contains(&video.path)
@@ -395,6 +459,40 @@ impl ClipCompressApp {
                 Err(err) => ThumbnailResult {
                     video_path,
                     image: None,
+                    error: Some(format!("{err:#}")),
+                },
+            };
+            let _ = tx.send(message);
+        });
+    }
+
+    fn generate_thumbnail_strip(&mut self) {
+        let Some(editor) = self.editor.as_mut() else {
+            return;
+        };
+
+        if editor.thumbnail_strip.is_some() || editor.thumbnail_strip_loading {
+            return;
+        }
+
+        editor.thumbnail_strip_loading = true;
+
+        let video_path = editor.video.path.clone();
+        let duration_secs = editor.video.metadata.duration_secs;
+        let has_audio = editor.video.metadata.has_audio;
+        let tx = self.thumbnail_strip_tx.clone();
+
+        std::thread::spawn(move || {
+            let result = generate_thumbnail_strip_frames(&video_path, duration_secs, has_audio);
+            let message = match result {
+                Ok(strip) => ThumbnailStripResult {
+                    video_path,
+                    strip: Some(strip),
+                    error: None,
+                },
+                Err(err) => ThumbnailStripResult {
+                    video_path,
+                    strip: None,
                     error: Some(format!("{err:#}")),
                 },
             };
@@ -440,24 +538,44 @@ impl ClipCompressApp {
         let timestamp_secs = timestamp_secs.clamp(0.0, editor.duration_secs());
 
         // Skip if decoder is already processing a request
-        if editor.playback.is_frame_request_in_flight() {
+        if editor.playback.is_frame_request_in_flight() || editor.preview_frame_in_flight {
+            editor.pending_preview_request = Some(timestamp_secs);
             return;
         }
 
         // More aggressive debouncing during scrubbing (150ms instead of 100ms)
         // This prevents overwhelming the decoder with requests during fast scrub
         if let Some(last_requested) = editor.last_requested_preview_time {
-            if editor.preview_texture.is_some() && (last_requested - timestamp_secs).abs() < 0.15 {
+            if editor.preview_texture.is_some() && (last_requested - timestamp_secs).abs() < 0.08 {
                 return;
             }
         }
 
         editor.last_requested_preview_time = Some(timestamp_secs);
+        editor.preview_frame_in_flight = true;
+        editor.pending_preview_request = None;
         editor.playback.request_preview_frame_fast(timestamp_secs);
     }
 
     fn poll_background_work(&mut self, ctx: &egui::Context) -> Option<f64> {
         let mut follow_up_preview = None;
+
+        while let Ok(result) = self.thumbnail_strip_rx.try_recv() {
+            if let Some(editor) = self.editor.as_mut() {
+                if editor.video.path == result.video_path {
+                    editor.thumbnail_strip_loading = false;
+                    if let Some(strip) = result.strip {
+                        tracing::info!(
+                            "Generated thumbnail strip with {} frames",
+                            strip.thumbnails.len()
+                        );
+                        editor.thumbnail_strip = Some(strip);
+                    } else if let Some(error) = result.error {
+                        tracing::warn!("Failed to generate thumbnail strip: {error}");
+                    }
+                }
+            }
+        }
 
         while let Ok(result) = self.thumbnail_rx.try_recv() {
             self.thumbnails_generating.remove(&result.video_path);
@@ -636,6 +754,7 @@ impl ClipCompressApp {
     fn open_editor(&mut self, video: VideoEntry) {
         info!("Opening Clip & Compress editor for {:?}", video.path);
         self.editor = Some(EditorState::new(video));
+        self.generate_thumbnail_strip();
     }
 
     fn render_browser(&mut self, ui: &mut egui::Ui) -> BrowserUiOutcome {
@@ -990,10 +1109,19 @@ fn render_timeline(ui: &mut egui::Ui, editor: &mut EditorState, outcome: &mut Ed
                         outcome.preview_request = Some(editor.current_time_secs);
                     }
                 } else if response.dragged() {
-                    // Continuous drag
-                    editor.playback.pause_at(editor.current_time_secs);
                     if is_fast_scrub {
-                        outcome.fast_preview_request = Some(editor.current_time_secs);
+                        if let Some(strip) = &editor.thumbnail_strip {
+                            if let Some(thumb) = strip.nearest(editor.current_time_secs).cloned() {
+                                ClipCompressApp::set_preview_texture_from_image(
+                                    editor,
+                                    ui.ctx(),
+                                    thumb,
+                                );
+                            }
+                            outcome.fast_preview_request = Some(editor.current_time_secs);
+                        } else {
+                            outcome.fast_preview_request = Some(editor.current_time_secs);
+                        }
                     } else {
                         outcome.preview_request = Some(editor.current_time_secs);
                     }
@@ -1658,6 +1786,80 @@ fn x_to_time(rect: egui::Rect, x: f32, duration_secs: f64) -> f64 {
     }
     let ratio = ((x - rect.left()) / rect.width()).clamp(0.0, 1.0);
     duration_secs * f64::from(ratio)
+}
+
+fn generate_thumbnail_strip_frames(
+    video_path: &Path,
+    duration_secs: f64,
+    _has_audio: bool,
+) -> anyhow::Result<ThumbnailStrip> {
+    use crate::output::functions::ffmpeg_executable_path;
+    use std::process::Command;
+
+    let ffmpeg = ffmpeg_executable_path();
+    let mut thumbnails = Vec::with_capacity(THUMBNAIL_STRIP_COUNT);
+
+    let step = duration_secs / (THUMBNAIL_STRIP_COUNT + 1) as f64;
+
+    for i in 1..=THUMBNAIL_STRIP_COUNT {
+        let time_secs = step * i as f64;
+        let timestamp = format!("{:.3}", time_secs);
+        let scale =
+            format!("scale={THUMBNAIL_STRIP_WIDTH}:-2:force_original_aspect_ratio=decrease");
+
+        #[cfg(target_os = "windows")]
+        let output = Command::new(&ffmpeg)
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-ss",
+                &timestamp,
+                "-i",
+                &video_path.to_string_lossy(),
+                "-frames:v",
+                "1",
+                "-vf",
+                &scale,
+                "-f",
+                "image2pipe",
+                "-vcodec",
+                "mjpeg",
+                "-",
+            ])
+            .creation_flags(0x08000000)
+            .output()?;
+
+        #[cfg(not(target_os = "windows"))]
+        let output = Command::new(&ffmpeg)
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-ss",
+                &timestamp,
+                "-i",
+                &video_path.to_string_lossy(),
+                "-frames:v",
+                "1",
+                "-vf",
+                &scale,
+                "-f",
+                "image2pipe",
+                "-vcodec",
+                "mjpeg",
+                "-",
+            ])
+            .output()?;
+
+        if output.status.success() && !output.stdout.is_empty() {
+            if let Ok(img) = image::load_from_memory(&output.stdout) {
+                thumbnails.push((time_secs, img.into_rgba8()));
+            }
+        }
+    }
+
+    Ok(ThumbnailStrip::new(thumbnails, duration_secs))
 }
 
 #[cfg(test)]
