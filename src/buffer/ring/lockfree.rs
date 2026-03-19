@@ -592,11 +592,11 @@ impl LockFreeReplayBuffer {
         let first_idx = write_idx.saturating_sub(inner.capacity);
         let evict_frontier = inner.evict_frontier.load(Ordering::Acquire);
         let first_idx = first_idx.max(evict_frontier);
+
+        let capacity_estimate = write_idx.saturating_sub(first_idx);
+        let mut packets: Vec<(usize, EncodedPacket)> = Vec::with_capacity(capacity_estimate);
         let mut first_keyframe_at_or_after = None;
         let mut last_keyframe_at_or_before = None;
-        let mut packet_count = 0usize;
-        let mut video_count = 0usize;
-        let mut keyframe_count = 0usize;
 
         for i in first_idx..write_idx {
             let slot_idx = i & inner.mask;
@@ -604,12 +604,7 @@ impl LockFreeReplayBuffer {
 
             if let Ok(packet_guard) = slot.packet.try_lock() {
                 if let Some(ref packet) = *packet_guard {
-                    packet_count += 1;
-                    if matches!(packet.stream, StreamType::Video) {
-                        video_count += 1;
-                    }
                     if packet.is_keyframe {
-                        keyframe_count += 1;
                         if packet.pts >= start_pts && first_keyframe_at_or_after.is_none() {
                             first_keyframe_at_or_after = Some(i);
                         }
@@ -617,39 +612,35 @@ impl LockFreeReplayBuffer {
                             last_keyframe_at_or_before = Some(i);
                         }
                     }
+                    packets.push((i, packet.clone()));
                 }
             }
         }
-
-        let audio_count = packet_count.saturating_sub(video_count);
-        debug!(
-            "snapshot_from: all_packets={} ({} video, {} audio, {} keyframes), start_pts={}",
-            packet_count, video_count, audio_count, keyframe_count, start_pts
-        );
 
         let start_idx = first_keyframe_at_or_after
             .or(last_keyframe_at_or_before)
             .unwrap_or(first_idx);
 
-        if start_idx > first_idx {
-            debug!(
-                "snapshot_from: skipping {} packets to reach keyframe at idx {}",
-                start_idx - first_idx,
-                start_idx
-            );
-        }
+        let video_count = packets
+            .iter()
+            .filter(|(_, p)| matches!(p.stream, StreamType::Video))
+            .count();
+        let keyframe_count = packets.iter().filter(|(_, p)| p.is_keyframe).count();
+        debug!(
+            "snapshot_from: all_packets={} ({} video, {} keyframes), start_pts={}, start_idx={}",
+            packets.len(),
+            video_count,
+            keyframe_count,
+            start_pts,
+            start_idx
+        );
 
-        let mut result = Vec::with_capacity(write_idx.saturating_sub(start_idx));
-        for i in start_idx..write_idx {
-            let slot_idx = i & inner.mask;
-            let slot = &inner.slots[slot_idx];
+        let drain_start = packets
+            .iter()
+            .position(|(i, _)| *i >= start_idx)
+            .unwrap_or(packets.len());
 
-            if let Ok(packet_guard) = slot.packet.try_lock() {
-                if let Some(ref packet) = *packet_guard {
-                    result.push(packet.clone());
-                }
-            }
-        }
+        let result: Vec<EncodedPacket> = packets.drain(drain_start..).map(|(_, p)| p).collect();
 
         let result_video = result
             .iter()

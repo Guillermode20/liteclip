@@ -1,4 +1,5 @@
-use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use parking_lot::RwLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -48,7 +49,7 @@ pub struct DetectedApp {
 /// }
 /// ```
 pub struct GameDetector {
-    detected: Arc<AtomicPtr<DetectedApp>>,
+    detected: Arc<RwLock<DetectedApp>>,
     running: Arc<AtomicBool>,
 }
 
@@ -59,13 +60,12 @@ impl Default for GameDetector {
 }
 
 impl GameDetector {
-    /// Creates a new GameDetector instance.
     pub fn new() -> Self {
-        let detected = Arc::new(AtomicPtr::new(Box::into_raw(Box::new(DetectedApp {
+        let detected = Arc::new(RwLock::new(DetectedApp {
             name: String::new(),
             folder_name: String::new(),
             is_game: false,
-        }))));
+        }));
 
         Self {
             detected,
@@ -86,13 +86,7 @@ impl GameDetector {
 
             while running.load(Ordering::SeqCst) {
                 if let Some(app) = detect_foreground_app() {
-                    let ptr = Box::into_raw(Box::new(app));
-                    let old_ptr = detected.swap(ptr, Ordering::SeqCst);
-                    if !old_ptr.is_null() {
-                        unsafe {
-                            let _ = Box::from_raw(old_ptr);
-                        }
-                    }
+                    *detected.write() = app;
                 }
 
                 thread::sleep(Duration::from_millis(500));
@@ -107,28 +101,13 @@ impl GameDetector {
     }
 
     pub fn get_detected_app(&self) -> DetectedApp {
-        let ptr = self.detected.load(Ordering::SeqCst);
-        if ptr.is_null() {
-            DetectedApp {
-                name: String::new(),
-                folder_name: String::new(),
-                is_game: false,
-            }
-        } else {
-            unsafe { (*ptr).clone() }
-        }
+        self.detected.read().clone()
     }
 }
 
 impl Drop for GameDetector {
     fn drop(&mut self) {
         self.stop();
-        let ptr = self.detected.load(Ordering::SeqCst);
-        if !ptr.is_null() {
-            unsafe {
-                let _ = Box::from_raw(ptr);
-            }
-        }
     }
 }
 

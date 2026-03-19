@@ -25,10 +25,12 @@ use crate::output::VideoFileMetadata;
 const FRAME_CHANNEL_CAPACITY: usize = 24;
 const PLAYBACK_QUEUE_DEPTH: usize = 20;
 const FRAME_POOL_SIZE: usize = 32;
+const FRAME_POOL_HARD_LIMIT: usize = 64;
 
 struct FramePool {
     buffers: Mutex<VecDeque<Vec<u8>>>,
     buffer_size: usize,
+    total_created: Mutex<usize>,
 }
 
 impl FramePool {
@@ -38,20 +40,27 @@ impl FramePool {
         Self {
             buffers: Mutex::new(buffers),
             buffer_size,
+            total_created: Mutex::new(capacity),
         }
     }
 
-    fn acquire(&self) -> Vec<u8> {
-        self.buffers
-            .lock()
-            .unwrap()
-            .pop_front()
-            .unwrap_or_else(|| vec![0u8; self.buffer_size])
+    fn acquire(&self) -> Option<Vec<u8>> {
+        let mut guard = self.buffers.lock().unwrap();
+        if let Some(buffer) = guard.pop_front() {
+            return Some(buffer);
+        }
+
+        let mut total = self.total_created.lock().unwrap();
+        if *total >= FRAME_POOL_HARD_LIMIT {
+            return None;
+        }
+        *total += 1;
+        Some(vec![0u8; self.buffer_size])
     }
 
     fn release(&self, buffer: Vec<u8>) {
         let mut guard = self.buffers.lock().unwrap();
-        if guard.len() < FRAME_POOL_SIZE * 2 {
+        if guard.len() < FRAME_POOL_HARD_LIMIT {
             guard.push_back(buffer);
         }
     }
@@ -1289,11 +1298,14 @@ impl DecoderSession {
         let stream_time_base = input_stream.time_base();
 
         let mut hw_context = Self::create_decoder_hardware_context().ok();
-        let (decoder, using_hw) = match Self::open_video_decoder(&input_stream, hw_context.as_ref()) {
+        let (decoder, using_hw) = match Self::open_video_decoder(&input_stream, hw_context.as_ref())
+        {
             Ok(decoder) => (decoder, hw_context.is_some()),
             Err(err) => {
                 if hw_context.is_some() {
-                    tracing::warn!("Hardware decode unavailable, falling back to software: {err:#}");
+                    tracing::warn!(
+                        "Hardware decode unavailable, falling back to software: {err:#}"
+                    );
                 }
                 hw_context = None;
                 (Self::open_video_decoder(&input_stream, None)?, false)
@@ -1377,8 +1389,9 @@ impl DecoderSession {
         input_stream: &ffmpeg::format::stream::Stream<'_>,
         hw_context: Option<&DecoderHardwareContext>,
     ) -> Result<ffmpeg::decoder::Video> {
-        let mut context = ffmpeg::codec::context::Context::from_parameters(input_stream.parameters())
-            .context("Failed to create decoder context")?;
+        let mut context =
+            ffmpeg::codec::context::Context::from_parameters(input_stream.parameters())
+                .context("Failed to create decoder context")?;
 
         let mut hw_device_ctx_ref = std::ptr::null_mut();
         if let Some(hw_context) = hw_context {
@@ -1575,7 +1588,7 @@ impl DecoderSession {
                     let frame_to_scale = if self.hw_context.is_some()
                         && self.decoded_frame.format() == ffmpeg::format::Pixel::D3D11
                     {
-                        self.transfer_hw_frame_to_cpu()? 
+                        self.transfer_hw_frame_to_cpu()?
                     } else {
                         self.decoded_frame.clone()
                     };
@@ -1813,7 +1826,9 @@ fn rgba_frame_to_image_pooled(
     let stride = frame.stride(0);
     let data = frame.data(0);
     let row_bytes = width as usize * 4;
-    let mut rgba = pool.acquire();
+    let mut rgba = pool
+        .acquire()
+        .unwrap_or_else(|| vec![0u8; pool.buffer_size()]);
 
     for y in 0..height as usize {
         let src_offset = y * stride;

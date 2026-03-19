@@ -8,6 +8,37 @@ use std::collections::BTreeMap;
 use crate::config::AudioConfig;
 use crate::encode::EncodedPacket;
 
+#[inline]
+fn fast_log10(x: f32) -> f32 {
+    const LOG10_2: f32 = 0.301029995663981;
+
+    let abs_x = x.abs();
+    if abs_x <= 0.0 {
+        return f32::NEG_INFINITY;
+    }
+
+    let bits = abs_x.to_bits();
+    let exponent = ((bits >> 23) & 0xFF) as i32 - 127;
+    let mantissa = f32::from_bits((bits & 0x7FFFFF) | 0x3F800000);
+
+    let log2_approx = exponent as f32 + (mantissa - 1.0) * 0.346605;
+    log2_approx * LOG10_2
+}
+
+#[inline]
+fn fast_pow10(x: f32) -> f32 {
+    const LOG2_10: f32 = 3.321928094887362;
+
+    let log2_x = x * LOG2_10;
+    let floor = log2_x.floor();
+    let frac = log2_x - floor;
+
+    let mantissa = 1.0 + frac * 0.693035 + frac * frac * 0.241764;
+
+    let exponent = (floor as i32 + 127) as u32;
+    f32::from_bits((exponent << 23) | (mantissa.to_bits() & 0x7FFFFF))
+}
+
 /// Audio mixer for combining system and microphone audio with timestamp-based synchronization
 pub struct AudioMixer {
     config: AudioConfig,
@@ -426,36 +457,30 @@ impl CompressionState {
 
     /// Process a single audio sample
     fn process(&mut self, sample: f32) -> f32 {
-        // Calculate sample level in dB (optimized calculation)
         let abs_sample = sample.abs();
         if abs_sample < 0.0001 {
-            // Avoid log10 of very small values
             return sample;
         }
 
-        let level_db = 20.0 * (abs_sample / 32768.0).log10();
+        let level_db = 20.0 * fast_log10(abs_sample / 32768.0);
 
-        // Calculate target gain
         let gain_db = if level_db > self.threshold {
             (level_db - self.threshold) * (1.0 / self.ratio - 1.0)
         } else {
             0.0
         };
 
-        // Calculate envelope (smoothed gain)
         let time_constant = if gain_db < self.envelope {
             self.attack
         } else {
             self.release
         };
 
-        // Approximate exponential smoothing (precompute constants if possible)
         const SAMPLE_RATE: f32 = 48000.0;
         let alpha = (1.0 - (-1.0 / (time_constant * SAMPLE_RATE)).exp()).clamp(0.0, 1.0);
         self.envelope += alpha * (gain_db - self.envelope);
 
-        // Apply gain (optimized calculation)
-        let gain = 10.0f32.powf(self.envelope / 20.0);
+        let gain = fast_pow10(self.envelope / 20.0);
         sample * gain
     }
 }
