@@ -5,7 +5,7 @@
 use crate::buffer::BufferResult;
 use crate::encode::EncodedPacket;
 
-use super::lockfree::LockFreeReplayBuffer;
+use super::spmc_ring::LockFreeReplayBuffer;
 
 /// Thread-safe wrapper around LockFreeReplayBuffer
 #[derive(Clone)]

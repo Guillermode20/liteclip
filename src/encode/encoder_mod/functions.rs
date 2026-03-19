@@ -20,13 +20,13 @@ use super::types::{
 /// Encoder trait
 ///
 /// All encoders must be Send + 'static as they run on dedicated threads.
-/// The encoder receives CapturedFrame from the capture thread and outputs
+/// The encoder receives [`crate::media::CapturedFrame`] from the capture thread and outputs
 /// EncodedPacket via the channel returned by packet_rx().
 pub trait Encoder: Send + 'static {
     /// Initialize encoder with configuration
     fn init(&mut self, config: &ResolvedEncoderConfig) -> EncodeResult<()>;
     /// Encode a frame
-    fn encode_frame(&mut self, frame: &crate::capture::CapturedFrame) -> EncodeResult<()>;
+    fn encode_frame(&mut self, frame: &crate::media::CapturedFrame) -> EncodeResult<()>;
     /// Flush encoder and get remaining packets
     fn flush(&mut self) -> EncodeResult<Vec<EncodedPacket>>;
     /// Get receiver for encoded packets
@@ -51,7 +51,7 @@ pub trait EncoderFactory: Send + Sync + 'static {
         &self,
         config: ResolvedEncoderConfig,
         buffer: crate::buffer::ring::SharedReplayBuffer,
-        frame_rx: Receiver<crate::capture::CapturedFrame>,
+        frame_rx: Receiver<crate::media::CapturedFrame>,
     ) -> EncodeResult<EncoderHandle>;
 }
 
@@ -66,7 +66,7 @@ impl EncoderFactory for DefaultEncoderFactory {
         &self,
         config: ResolvedEncoderConfig,
         buffer: crate::buffer::ring::SharedReplayBuffer,
-        frame_rx: Receiver<crate::capture::CapturedFrame>,
+        frame_rx: Receiver<crate::media::CapturedFrame>,
     ) -> EncodeResult<EncoderHandle> {
         spawn_encoder_with_receiver(config, buffer, frame_rx)
     }
@@ -345,7 +345,7 @@ pub fn create_encoder(config: &ResolvedEncoderConfig) -> EncodeResult<Box<dyn En
 pub fn spawn_encoder_with_receiver(
     effective_config: ResolvedEncoderConfig,
     buffer: crate::buffer::ring::SharedReplayBuffer,
-    frame_rx: Receiver<crate::capture::CapturedFrame>,
+    frame_rx: Receiver<crate::media::CapturedFrame>,
 ) -> EncodeResult<EncoderHandle> {
     const MAX_CONSECUTIVE_ENCODE_ERRORS: u32 = 8;
     let thread_config = effective_config.clone();
@@ -393,7 +393,7 @@ pub fn spawn_encoder_with_receiver(
                 match frame_rx.recv_timeout(std::time::Duration::from_millis(8)) {
                     Ok(frame) => {
                         let mut encode_one =
-                            |frame: crate::capture::CapturedFrame| -> EncodeResult<()> {
+                            |frame: crate::media::CapturedFrame| -> EncodeResult<()> {
                                 if let Err(e) = encoder.encode_frame(&frame) {
                                     warn!("Failed to encode frame: {}", e);
                                     consecutive_encode_errors =

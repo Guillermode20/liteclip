@@ -40,15 +40,15 @@
 //! ```
 
 use anyhow::Result;
-use bytes::Bytes;
-use crossbeam::channel::{Receiver, Sender};
-use std::sync::Arc;
+use crossbeam::channel::Receiver;
+
 #[cfg(windows)]
-use windows::Win32::Foundation::HANDLE;
-#[cfg(windows)]
-use windows::Win32::Graphics::Direct3D11::{
-    ID3D11Device, ID3D11Texture2D, ID3D11VideoProcessorOutputView,
+pub use crate::media::{
+    CapturedFrame, D3d11Frame, D3d11TexturePoolItem, GpuTextureFormat,
 };
+
+#[cfg(not(windows))]
+pub use crate::media::CapturedFrame;
 
 pub mod audio;
 pub mod backpressure;
@@ -112,153 +112,6 @@ impl From<&crate::config::Config> for CaptureConfig {
             #[cfg(windows)]
             gpu_texture_format: GpuTextureFormat::Nv12,
             target_resolution,
-        }
-    }
-}
-
-/// GPU texture format for D3D11 frames.
-///
-/// Determines the pixel format of GPU textures used for capture and encoding.
-/// Different encoders may require different formats for optimal performance.
-#[cfg(windows)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GpuTextureFormat {
-    /// BGRA format (B8G8R8A8_UNORM).
-    ///
-    /// This is the default capture format from DXGI Desktop Duplication.
-    /// Compatible with NVENC and most software encoders.
-    Bgra,
-    /// NV12 format (YUV 4:2:0).
-    ///
-    /// Required for AMD AMF encoder. Converted from BGRA using
-    /// Direct3D11 VideoProcessor for GPU-accelerated conversion.
-    Nv12,
-}
-
-/// Pool item for recycled D3D11 textures.
-///
-/// Textures are pooled and recycled to avoid allocation overhead during
-/// active capture. When a frame is processed, the texture is returned to
-/// the pool for reuse.
-#[cfg(windows)]
-pub(crate) struct D3d11TexturePoolItem {
-    /// The D3D11 texture containing frame data.
-    pub texture: ID3D11Texture2D,
-    /// Video processor output view for GPU-side NV12 conversion.
-    pub output_view: Option<ID3D11VideoProcessorOutputView>,
-    /// DXGI shared resource handle for cross-device sharing.
-    ///
-    /// Allows the encoder to open this texture on its own D3D11 device.
-    /// GPU ordering is provided by a shared ID3D11Fence — the capture
-    /// signals it after VideoProcessorBlt and the encoder GPU-waits on
-    /// it before CopySubresourceRegion.
-    pub shared_handle: HANDLE,
-}
-
-#[cfg(windows)]
-struct D3d11TextureRecycle {
-    return_tx: Sender<D3d11TexturePoolItem>,
-    item: Option<D3d11TexturePoolItem>,
-}
-
-#[cfg(windows)]
-impl Drop for D3d11TextureRecycle {
-    fn drop(&mut self) {
-        if let Some(item) = self.item.take() {
-            let _ = self.return_tx.send(item);
-        }
-    }
-}
-
-#[cfg(windows)]
-pub struct D3d11Frame {
-    pub texture: ID3D11Texture2D,
-    pub device: ID3D11Device,
-    /// Texture format - indicates whether this is BGRA or NV12
-    pub format: GpuTextureFormat,
-    /// DXGI shared resource handle for the encoder to open this texture on its own D3D11 device.
-    pub shared_handle: HANDLE,
-    /// The fence value that was signaled after the VideoProcessorBlt that wrote this frame.
-    /// The encoder submits a GPU-side Wait for this value before CopySubresourceRegion,
-    /// guaranteeing cross-device ordering without any CPU stall.
-    pub fence_value: u64,
-    /// NT kernel handle for the shared ID3D11Fence. The encoder opens the fence once via
-    /// OpenSharedFence and caches it. None if the fence could not be created.
-    pub fence_shared_handle: Option<HANDLE>,
-    #[allow(dead_code)]
-    recycle: Option<D3d11TextureRecycle>,
-}
-
-// HANDLE wraps a raw *mut c_void (a Windows kernel handle index) which is safe to send
-// and share between threads — kernel objects are reference-counted at the kernel level.
-// COM interfaces (ID3D11Texture2D, ID3D11Device) already implement Send+Sync in the
-// windows crate.
-#[cfg(windows)]
-unsafe impl Send for D3d11Frame {}
-#[cfg(windows)]
-unsafe impl Sync for D3d11Frame {}
-
-#[cfg(windows)]
-impl D3d11Frame {
-    pub(crate) fn from_pooled(
-        device: ID3D11Device,
-        format: GpuTextureFormat,
-        return_tx: Sender<D3d11TexturePoolItem>,
-        pool_item: D3d11TexturePoolItem,
-        fence_value: u64,
-        fence_shared_handle: Option<HANDLE>,
-    ) -> Self {
-        let texture = pool_item.texture.clone();
-        let shared_handle = pool_item.shared_handle;
-        Self {
-            texture,
-            device,
-            format,
-            shared_handle,
-            fence_value,
-            fence_shared_handle,
-            recycle: Some(D3d11TextureRecycle {
-                return_tx,
-                item: Some(pool_item),
-            }),
-        }
-    }
-}
-
-/// Captured frame data containing both CPU and GPU representations.
-///
-/// A captured frame may contain:
-/// - CPU-accessible BGRA pixel data (for software encoding)
-/// - GPU texture reference (for hardware encoding with zero-copy)
-///
-/// The frame includes timing information for A/V synchronization.
-///
-/// # Thread Safety
-///
-/// The `bgra` data uses `Bytes` for cheap reference-counted cloning.
-/// GPU texture access is managed via `Arc` for shared ownership.
-pub struct CapturedFrame {
-    /// CPU-readable BGRA frame bytes (packed, width*height*4).
-    ///
-    /// Uses `Bytes` for reference-counted sharing – cloning is O(1).
-    pub bgra: Bytes,
-    /// Optional GPU-backed frame payload for zero-copy encoder paths.
-    #[cfg(windows)]
-    pub d3d11: Option<Arc<D3d11Frame>>,
-    /// QPC (QueryPerformanceCounter) timestamp for A/V synchronization.
-    pub timestamp: i64,
-    /// Frame resolution as (width, height) in pixels.
-    pub resolution: (u32, u32),
-}
-
-impl Clone for CapturedFrame {
-    fn clone(&self) -> Self {
-        Self {
-            bgra: self.bgra.clone(),
-            #[cfg(windows)]
-            d3d11: self.d3d11.clone(),
-            timestamp: self.timestamp,
-            resolution: self.resolution,
         }
     }
 }

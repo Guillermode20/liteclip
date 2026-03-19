@@ -20,8 +20,8 @@
 //! # Threading Model
 //!
 //! - **Main Thread**: Tokio runtime drives the tray/hotkey event loop and config I/O.
-//!   Starting/stopping the recording pipeline runs **synchronously** on that runtime’s
-//!   worker thread and may block briefly (e.g. encoder thread join).
+//!   Pipeline start/stop/health runs on the **blocking thread pool** via
+//!   `tokio::task::spawn_blocking` so encoder thread joins do not block async workers.
 //! - **Platform Thread**: Windows message loop for hotkeys and tray
 //! - **Capture Thread**: DXGI frame acquisition (spawned by pipeline)
 //! - **Encode Thread**: Video/audio encoding (spawned by pipeline)
@@ -39,19 +39,56 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 use anyhow::{Context, Result};
-use liteclip_replay::{app::AppState, config::Config, detection::GameDetector};
+use liteclip_replay::{
+    app::AppState,
+    config::{Config, HotkeyConfig},
+    detection::GameDetector,
+};
 use std::env;
 use std::os::windows::process::CommandExt;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::sync::{Arc, Mutex};
 use tracing::{error, info, warn};
 #[cfg(windows)]
 use windows::Win32::Media::{timeBeginPeriod, timeEndPeriod, TIMERR_NOERROR};
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x01000000;
+
+/// Run a fallible synchronous operation on `AppState` without blocking Tokio worker threads.
+async fn app_state_blocking_try<T, F>(app_state: &Arc<Mutex<AppState>>, f: F) -> Result<T>
+where
+    F: FnOnce(&mut AppState) -> Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    let arc = Arc::clone(app_state);
+    tokio::task::spawn_blocking(move || {
+        let mut g = arc
+            .lock()
+            .map_err(|e| anyhow::anyhow!("AppState mutex poisoned: {e}"))?;
+        f(&mut *g)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("AppState blocking task join error: {e}"))?
+}
+
+/// Run an infallible synchronous operation on `AppState` on the blocking pool.
+async fn app_state_blocking<T, F>(app_state: &Arc<Mutex<AppState>>, f: F) -> Result<T>
+where
+    F: FnOnce(&mut AppState) -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let arc = Arc::clone(app_state);
+    tokio::task::spawn_blocking(move || {
+        let mut g = arc
+            .lock()
+            .map_err(|e| anyhow::anyhow!("AppState mutex poisoned: {e}"))?;
+        Ok(f(&mut *g))
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("AppState blocking task join error: {e}"))?
+}
 
 /// Guard for Windows multimedia timer resolution.
 ///
@@ -261,7 +298,7 @@ async fn main() -> Result<()> {
     }
 
     // Initialize application state
-    let app_state = Arc::new(RwLock::new(AppState::new(config.clone())?));
+    let app_state = Arc::new(Mutex::new(AppState::new(config.clone())?));
 
     // Initialize game detector if enabled
     let game_detector = if config.general.auto_detect_game {
@@ -306,13 +343,11 @@ async fn main() -> Result<()> {
     });
 
     // Initialize recording
-    {
-        let mut state = app_state.write().await;
-        if let Err(e) = state.start_recording() {
-            error!("Failed to start recording: {}", e);
-        } else {
+    match app_state_blocking_try(&app_state, |s| s.start_recording()).await {
+        Ok(()) => {
             let _ = platform_handle.update_recording_state(true);
         }
+        Err(e) => error!("Failed to start recording: {}", e),
     }
 
     let mut should_restart = false;
@@ -343,17 +378,24 @@ async fn main() -> Result<()> {
                                             }
                                             liteclip_replay::platform::HotkeyAction::ToggleRecording => {
                                                 info!("Hotkey: toggle recording");
-                                                let mut state = app_state.write().await;
-                                                if state.is_recording() {
-                                                    if let Err(e) = state.stop_recording() {
-                                                        error!("Failed to stop recording: {}", e);
+                                                match app_state_blocking_try(&app_state, |s| {
+                                                    if s.is_recording() {
+                                                        s.stop_recording().map(|_| false)
                                                     } else {
+                                                        s.start_recording().map(|_| true)
+                                                    }
+                                                })
+                                                .await
+                                                {
+                                                    Ok(false) => {
                                                         let _ = platform_handle.update_recording_state(false);
                                                     }
-                                                } else if let Err(e) = state.start_recording() {
-                                                    error!("Failed to start recording: {}", e);
-                                                } else {
-                                                    let _ = platform_handle.update_recording_state(true);
+                                                    Ok(true) => {
+                                                        let _ = platform_handle.update_recording_state(true);
+                                                    }
+                                                    Err(e) => {
+                                                        error!("Failed to toggle recording: {}", e);
+                                                    }
                                                 }
                                             }
                                             liteclip_replay::platform::HotkeyAction::Screenshot => {
@@ -389,11 +431,19 @@ async fn main() -> Result<()> {
                                             }
         liteclip_replay::platform::TrayEvent::OpenSettings => {
                                                  info!("Tray: Open Settings selected");
-                                                 let level_monitor = {
-                                                     let state = app_state.read().await;
-                                                     state.level_monitor().clone()
-                                                 };
-                                                 liteclip_replay::gui::show_settings_gui(tokio_tx.clone(), Some(level_monitor));
+                                                 match app_state_blocking(&app_state, |s| {
+                                                     s.level_monitor().clone()
+                                                 })
+                                                 .await
+                                                 {
+                                                     Ok(level_monitor) => {
+                                                         liteclip_replay::gui::show_settings_gui(
+                                                             tokio_tx.clone(),
+                                                             Some(level_monitor),
+                                                         );
+                                                     }
+                                                     Err(e) => error!("Failed to read app state for settings: {}", e),
+                                                 }
                                              }
                                              liteclip_replay::platform::TrayEvent::OpenGallery => {
                                                  info!("Tray: Open Gallery selected");
@@ -416,18 +466,31 @@ async fn main() -> Result<()> {
                                     }
                                     liteclip_replay::platform::AppEvent::ConfigUpdated(new_config) => {
                                         info!("ConfigUpdated event received from settings GUI");
-                                        let mut state = app_state.write().await;
-                                        match state.apply_config((*new_config).clone()).await {
+                                        let cfg = (*new_config).clone();
+                                        match app_state_blocking_try(&app_state, move |s| {
+                                            let needs_hotkey_reregister = s.apply_config(cfg)?;
+                                            s.config().save_sync()?;
+                                            Ok(needs_hotkey_reregister)
+                                        })
+                                        .await
+                                        {
                                             Ok(needs_hotkey_reregister) => {
-                                                if let Err(e) = state.config().save_sync() {
-                                                    error!("Failed to save config: {}", e);
-                                                }
                                                 if needs_hotkey_reregister {
-                                                    let hk = hotkey_config_from_config(state.config());
-                                                    if let Err(e) = platform_handle.re_register_hotkeys(hk) {
-                                                        error!("Failed to re-register hotkeys: {}", e);
+                                                    match app_state_blocking(&app_state, |s| {
+                                                        HotkeyConfig::from(s.config())
+                                                    })
+                                                    .await
+                                                    {
+                                                        Ok(hk) => {
+                                                            if let Err(e) =
+                                                                platform_handle.re_register_hotkeys(hk)
+                                                            {
+                                                                error!("Failed to re-register hotkeys: {}", e);
+                                                            }
+                                                        }
+                                                        Err(e) => error!("Failed to read hotkey config: {}", e),
                                                     }
-        }
+                                                }
                                                 let _ = platform_handle.update_recording_state(true);
                                             }
                                             Err(e) => {
@@ -443,8 +506,9 @@ async fn main() -> Result<()> {
                             }
                             Err(_) => {
                                 // Timeout tick: poll worker health and fail-closed when needed.
-                                let mut state = app_state.write().await;
-                                match state.enforce_pipeline_health() {
+                                match app_state_blocking_try(&app_state, |s| s.enforce_pipeline_health())
+                                    .await
+                                {
                                     Ok(Some(reason)) => {
                                         error!("Recording stopped due to fatal pipeline error: {}", reason);
                                         let _ = platform_handle.update_recording_state(false);
@@ -490,13 +554,10 @@ async fn main() -> Result<()> {
         }
     });
 
-    {
-        let mut state = app_state.write().await;
-        info!("Stopping recording pipeline...");
-        match state.stop_recording() {
-            Ok(()) => info!("Recording pipeline stopped"),
-            Err(e) => warn!("Error stopping recording: {}", e),
-        }
+    info!("Stopping recording pipeline...");
+    match app_state_blocking_try(&app_state, |s| s.stop_recording()).await {
+        Ok(()) => info!("Recording pipeline stopped"),
+        Err(e) => warn!("Error stopping recording: {}", e),
     }
 
     // Wait for platform thread (should be quick; we sent Quit above).
@@ -539,8 +600,8 @@ async fn main() -> Result<()> {
 /// # Returns
 ///
 /// A [`HotkeyConfig`] struct containing hotkey strings for all actions.
-fn hotkey_config_from_config(config: &Config) -> liteclip_replay::platform::HotkeyConfig {
-    config.hotkeys.clone()
+fn hotkey_config_from_config(config: &Config) -> HotkeyConfig {
+    HotkeyConfig::from(config)
 }
 
 /// Spawns an async task to save the current replay buffer to disk.
@@ -567,7 +628,7 @@ fn hotkey_config_from_config(config: &Config) -> liteclip_replay::platform::Hotk
 /// ).await;
 /// ```
 async fn spawn_save_clip_task(
-    app_state: &Arc<RwLock<AppState>>,
+    app_state: &Arc<Mutex<AppState>>,
     _platform_handle: &Arc<liteclip_replay::platform::PlatformHandle>,
     save_in_progress: &Arc<AtomicBool>,
     game_detector: &Option<Arc<GameDetector>>,
@@ -580,7 +641,15 @@ async fn spawn_save_clip_task(
         return;
     }
 
-    let (config, buffer) = app_state.read().await.save_context();
+    let save_ctx = app_state_blocking(app_state, |s| s.save_context()).await;
+    let (config, buffer) = match save_ctx {
+        Ok(x) => x,
+        Err(e) => {
+            error!("Failed to read app state for clip save: {}", e);
+            save_in_progress.store(false, Ordering::SeqCst);
+            return;
+        }
+    };
     let save_in_progress_clone = save_in_progress.clone();
 
     let game_name = game_detector.as_ref().and_then(|d| {

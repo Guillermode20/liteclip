@@ -1,11 +1,11 @@
 //! Replay Buffer Implementation
 //!
-//! This module provides the lock-free ring buffer implementation for storing
+//! This module provides the SPMC ring buffer implementation for storing
 //! encoded video and audio packets in memory.
 //!
 //! # Design
 //!
-//! SPMC ring with an atomic write index and per-slot mutexes (see `lockfree` module docs).
+//! SPMC ring with an atomic write index and per-slot mutexes (see [`spmc_ring`] module docs).
 //!
 //! - **Single Producer**: Encoder pushes packets
 //! - **Multiple Consumers**: Clip saving reads snapshots
@@ -13,7 +13,7 @@
 //! # Key Types
 //!
 //! - [`ReplayBuffer`] - Main buffer handle (type alias for `SharedReplayBuffer`)
-//! - [`LockFreeReplayBuffer`] - Core lock-free implementation
+//! - [`LockFreeReplayBuffer`] - Core ring implementation (`spmc_ring`)
 //! - [`SharedReplayBuffer`] - Thread-safe wrapper
 //! - [`BufferStats`] - Buffer statistics
 //!
@@ -46,11 +46,11 @@
 //! ```
 
 pub mod functions;
-pub mod lockfree;
+pub mod spmc_ring;
 pub mod types;
 
 pub use functions::*;
-pub use lockfree::LockFreeReplayBuffer;
+pub use spmc_ring::LockFreeReplayBuffer;
 pub use types::{BufferStats, SharedReplayBuffer};
 
 /// Main replay buffer type.

@@ -303,21 +303,22 @@ impl DxgiCaptureState {
                         {
                             // Create render target view for the scale texture
                             let mut rtv: Option<ID3D11RenderTargetView> = None;
-                            if d3d_device
-                                .CreateRenderTargetView(
-                                    texture.as_ref().unwrap(),
-                                    None,
-                                    Some(&mut rtv),
-                                )
-                                .is_ok()
-                            {
-                                info!(
-                                    "GPU scaling enabled: {}x{} -> {}x{}",
-                                    frame_width, frame_height, target_width, target_height
-                                );
-                                (vs, ps, il, smp, vb, rtv, texture)
+                            if let Some(tex) = texture.as_ref() {
+                                if d3d_device
+                                    .CreateRenderTargetView(tex, None, Some(&mut rtv))
+                                    .is_ok()
+                                {
+                                    info!(
+                                        "GPU scaling enabled: {}x{} -> {}x{}",
+                                        frame_width, frame_height, target_width, target_height
+                                    );
+                                    (vs, ps, il, smp, vb, rtv, texture)
+                                } else {
+                                    warn!("Failed to create RTV for scale texture, using CPU scaling");
+                                    (None, None, None, None, None, None, None)
+                                }
                             } else {
-                                warn!("Failed to create RTV for scale texture, using CPU scaling");
+                                warn!("Failed to create scale texture, using CPU scaling");
                                 (None, None, None, None, None, None, None)
                             }
                         } else {

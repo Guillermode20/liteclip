@@ -16,12 +16,11 @@ use tracing::{error, info, warn};
 ///
 /// # Thread Safety
 ///
-/// Uses `tokio::RwLock` for async-aware concurrent access.
-/// Multiple readers can access state simultaneously; writers get exclusive access.
+/// Prefer wrapping this type in `std::sync::Mutex` at the app root and driving lifecycle calls
+/// via `tokio::task::spawn_blocking` so encoder thread joins do not block Tokio worker threads.
 ///
 /// Recording lifecycle (`start_recording` / `stop_recording`) is synchronous and may block
-/// briefly (e.g. joining the encoder thread). Call it from an async context knowing it can stall
-/// the current Tokio worker until completion.
+/// briefly (e.g. joining the encoder thread).
 pub struct AppState {
     /// Application configuration.
     config: Config,
@@ -159,7 +158,7 @@ impl AppState {
     /// # Errors
     ///
     /// Returns an error if configuration is rejected and rollback fails.
-    pub async fn apply_config(&mut self, new_config: Config) -> Result<bool> {
+    pub fn apply_config(&mut self, new_config: Config) -> Result<bool> {
         let needs_restart = self.config.requires_pipeline_restart(&new_config);
         let needs_hotkey_reregister = self.config.requires_hotkey_reregister(&new_config);
         let audio_changed = self.config.audio != new_config.audio;

@@ -217,54 +217,24 @@ fn hotkey_id_to_action(id: i32) -> Option<HotkeyAction> {
 
 /// Parse hotkey string (e.g. "Alt+F9") into modifiers + virtual key code.
 pub fn parse_hotkey(hotkey: &str) -> Result<(HOT_KEY_MODIFIERS, u32)> {
-    let parts: Vec<&str> = hotkey.split('+').map(|s| s.trim()).collect();
-    if parts.is_empty() || parts.iter().any(|part| part.is_empty()) {
-        anyhow::bail!("Invalid hotkey format: '{}'", hotkey);
-    }
+    use crate::hotkey_parse::{
+        parse_hotkey_components, MOD_ALT_BIT, MOD_CTRL_BIT, MOD_SHIFT_BIT, MOD_WIN_BIT,
+    };
+
+    let (bits, key) = parse_hotkey_components(hotkey).map_err(|e| anyhow::anyhow!(e))?;
 
     let mut modifiers = HOT_KEY_MODIFIERS(0);
-    let mut key = 0u32;
-    let mut seen_key = false;
-
-    for part in &parts {
-        let normalized = part.to_ascii_lowercase();
-        match normalized.as_str() {
-            "alt" => modifiers.0 |= MOD_ALT.0,
-            "ctrl" | "control" => modifiers.0 |= MOD_CONTROL.0,
-            "shift" => modifiers.0 |= MOD_SHIFT.0,
-            "win" => modifiers.0 |= MOD_WIN.0,
-            _ => {
-                let mut parsed_key = None;
-                if normalized.len() >= 2 && normalized.starts_with('f') {
-                    if let Ok(n) = normalized[1..].parse::<u32>() {
-                        if (1..=24).contains(&n) {
-                            parsed_key = Some(0x6F + n); // VK_F1 = 0x70
-                        }
-                    }
-                } else if normalized.len() == 1 {
-                    let ch = normalized.chars().next().unwrap().to_ascii_uppercase() as u32;
-                    if (0x30..=0x39).contains(&ch) || (0x41..=0x5A).contains(&ch) {
-                        parsed_key = Some(ch);
-                    }
-                }
-
-                let Some(parsed_key) = parsed_key else {
-                    anyhow::bail!("Unsupported hotkey token '{}' in '{}'", part, hotkey);
-                };
-                if seen_key {
-                    anyhow::bail!("Hotkey '{}' contains multiple key tokens", hotkey);
-                }
-                key = parsed_key;
-                seen_key = true;
-            }
-        }
+    if bits & MOD_ALT_BIT != 0 {
+        modifiers.0 |= MOD_ALT.0;
     }
-
-    if key == 0 {
-        anyhow::bail!("Could not parse hotkey: {}", hotkey);
+    if bits & MOD_CTRL_BIT != 0 {
+        modifiers.0 |= MOD_CONTROL.0;
     }
-    if modifiers.0 == 0 {
-        anyhow::bail!("Hotkey '{}' must include at least one modifier", hotkey);
+    if bits & MOD_SHIFT_BIT != 0 {
+        modifiers.0 |= MOD_SHIFT.0;
+    }
+    if bits & MOD_WIN_BIT != 0 {
+        modifiers.0 |= MOD_WIN.0;
     }
 
     trace!("Parsed '{}' -> mods={:?} key={}", hotkey, modifiers, key);

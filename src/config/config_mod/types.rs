@@ -254,6 +254,8 @@ impl Config {
         self.audio.compression_attack = self.audio.compression_attack.clamp(1, 100);
         self.audio.compression_release = self.audio.compression_release.clamp(50, 255);
         // mic_noise_reduction is a simple on/off toggle, no per-parameter clamping required.
+
+        crate::hotkey_parse::validate_hotkey_config_strings(self);
     }
 
     pub fn estimated_replay_storage_bytes(&self) -> usize {
@@ -391,6 +393,13 @@ pub struct HotkeyConfig {
     #[serde(default = "default_hotkey_gallery")]
     pub open_gallery: String,
 }
+
+impl From<&Config> for HotkeyConfig {
+    fn from(config: &Config) -> Self {
+        config.hotkeys.clone()
+    }
+}
+
 /// Video capture and encoding settings (HEVC-only)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VideoConfig {

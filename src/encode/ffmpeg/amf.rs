@@ -78,7 +78,7 @@ impl FfmpegEncoder {
     #[allow(dead_code)]
     pub(super) fn create_d3d11_hardware_context(
         &self,
-        gpu_frame: &crate::capture::D3d11Frame,
+        gpu_frame: &crate::media::D3d11Frame,
         width: u32,
         height: u32,
     ) -> EncodeResult<D3d11HardwareContext> {
@@ -222,7 +222,7 @@ impl FfmpegEncoder {
 
     pub(super) fn init_amf_hardware_encoder(
         &mut self,
-        gpu_frame: &crate::capture::D3d11Frame,
+        gpu_frame: &crate::media::D3d11Frame,
         width: u32,
         height: u32,
     ) -> EncodeResult<()> {
@@ -291,8 +291,8 @@ impl FfmpegEncoder {
 impl FfmpegEncoder {
     pub(super) fn encode_amf_gpu_frame(
         &mut self,
-        _frame: &crate::capture::CapturedFrame,
-        gpu_frame: &crate::capture::D3d11Frame,
+        _frame: &crate::media::CapturedFrame,
+        gpu_frame: &crate::media::D3d11Frame,
         pts: i64,
         gop: i64,
     ) -> EncodeResult<()> {

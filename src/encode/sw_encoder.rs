@@ -111,7 +111,7 @@ fn bgra_to_jpeg_reuse(
 
 /// Convenience wrapper that allocates its own scratch buffer (used by StubEncoder).
 fn bgra_to_jpeg(
-    frame: &crate::capture::CapturedFrame,
+    frame: &crate::media::CapturedFrame,
     output_width: u32,
     output_height: u32,
     quality: u8,
@@ -167,7 +167,7 @@ impl Encoder for StubEncoder {
         Ok(())
     }
 
-    fn encode_frame(&mut self, frame: &crate::capture::CapturedFrame) -> EncodeResult<()> {
+    fn encode_frame(&mut self, frame: &crate::media::CapturedFrame) -> EncodeResult<()> {
         let is_keyframe = self.frame_count % 30 == 0;
 
         // Use native resolution if configured, otherwise use config resolution
@@ -337,7 +337,7 @@ impl Encoder for SoftwareEncoder {
         Ok(())
     }
 
-    fn encode_frame(&mut self, frame: &crate::capture::CapturedFrame) -> EncodeResult<()> {
+    fn encode_frame(&mut self, frame: &crate::media::CapturedFrame) -> EncodeResult<()> {
         if frame.d3d11.is_some() {
             return Err(EncodeError::msg(
                 "software encoder cannot consume GPU-backed frames",

@@ -5,10 +5,10 @@
 //!
 //! # Architecture
 //!
-//! SPMC ring: atomic write index plus mutex-backed slots (see `ring::lockfree`).
+//! SPMC ring: atomic write index plus mutex-backed slots (see `ring::spmc_ring`).
 //!
 //! - **Producer**: Encoding pipeline pushes packets
-//! - **Consumer**: Clip saver snapshots the ring; locking model documented in [`ring::lockfree`](crate::buffer::ring::lockfree)
+//! - **Consumer**: Clip saver snapshots the ring; locking model documented in [`ring::spmc_ring`](crate::buffer::ring::spmc_ring)
 //!
 //! # Key Types
 //!

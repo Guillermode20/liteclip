@@ -119,7 +119,7 @@ impl FfmpegEncoder {
 
     pub(super) fn init_hardware_encoder(
         &mut self,
-        gpu_frame: &crate::capture::D3d11Frame,
+        gpu_frame: &crate::media::D3d11Frame,
         width: u32,
         height: u32,
     ) -> EncodeResult<()> {
@@ -138,8 +138,8 @@ impl FfmpegEncoder {
 
     pub(super) fn encode_gpu_frame(
         &mut self,
-        frame: &crate::capture::CapturedFrame,
-        gpu_frame: &crate::capture::D3d11Frame,
+        frame: &crate::media::CapturedFrame,
+        gpu_frame: &crate::media::D3d11Frame,
         pts: i64,
         gop: i64,
     ) -> EncodeResult<()> {
@@ -164,7 +164,7 @@ impl FfmpegEncoder {
         self.frame_count
     }
 
-    fn gpu_frame_matches_encoder(&self, gpu_frame: &crate::capture::D3d11Frame) -> bool {
+    fn gpu_frame_matches_encoder(&self, gpu_frame: &crate::media::D3d11Frame) -> bool {
         match self.config.gpu_texture_format() {
             Some(expected_format) => gpu_frame.format == expected_format,
             None => false,
@@ -178,7 +178,7 @@ impl Encoder for FfmpegEncoder {
         Ok(())
     }
 
-    fn encode_frame(&mut self, frame: &crate::capture::CapturedFrame) -> EncodeResult<()> {
+    fn encode_frame(&mut self, frame: &crate::media::CapturedFrame) -> EncodeResult<()> {
         let gpu_frame = frame.d3d11.as_deref();
 
         // Check if we can use GPU frame transport

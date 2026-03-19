@@ -21,8 +21,8 @@ use super::{
 /// This type is not thread-safe and must be used from one task/thread at a time.
 ///
 /// `start`, `stop`, and `enforce_health` are **synchronous** and may block the current
-/// thread (e.g. joining the encoder thread on stop). Call them from `spawn_blocking` if
-/// you must not block the async runtime's thread pool.
+/// thread (e.g. joining the encoder thread on stop). The main binary invokes them from
+/// `tokio::task::spawn_blocking` so Tokio worker threads stay responsive.
 ///
 /// # Dependency Injection
 ///

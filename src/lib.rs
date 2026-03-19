@@ -9,15 +9,15 @@
 //! The application is organized into several key modules:
 //!
 //! - [`app`] - Application state management and recording pipeline coordination
-//! - [`buffer`] - Lock-free ring buffer for replay storage
+//! - [`buffer`] - SPMC ring buffer for replay storage
 //! - [`capture`] - DXGI screen capture and WASAPI audio capture
 //! - [`encode`] - Video encoding (NVENC, AMF, QSV, software)
-//! - [`clip`] - Clip saving and muxing functionality
 //! - [`config`] - Configuration management
 //! - [`platform`] - Windows integration (hotkeys, tray, notifications)
 //! - [`gui`] - User interface components (settings, Clip & Compress)
-//! - [`output`] - Output file handling and thumbnails
+//! - [`output`] - Output file handling, muxing, and thumbnails
 //! - [`detection`] - Running game detection
+//! - [`media`] - Shared frame types used by capture and encode
 //!
 //! # Data Flow
 //!
@@ -42,20 +42,13 @@
 //!
 //! ```no_run
 //! use liteclip_replay::{app::AppState, config::Config};
-//! use std::sync::Arc;
-//! use tokio::sync::RwLock;
+//! use std::sync::{Arc, Mutex};
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
-//!     // Load configuration
 //!     let config = Config::default();
-//!     
-//!     // Initialize application state
-//!     let state = Arc::new(RwLock::new(AppState::new(config)?));
-//!     
-//!     // Start recording
-//!     state.write().await.start_recording()?;
-//!     
+//!     let state = Arc::new(Mutex::new(AppState::new(config)?));
+//!     state.lock().unwrap().start_recording()?;
 //!     Ok(())
 //! }
 //! ```
@@ -63,21 +56,11 @@
 pub mod app;
 pub mod buffer;
 pub mod capture;
-pub mod clip;
 pub mod config;
 pub mod detection;
 pub mod encode;
 pub mod gui;
+pub mod hotkey_parse;
+pub mod media;
 pub mod output;
 pub mod platform;
-
-impl From<&config::Config> for platform::HotkeyConfig {
-    fn from(config: &config::Config) -> Self {
-        Self {
-            save_clip: config.hotkeys.save_clip.clone(),
-            toggle_recording: config.hotkeys.toggle_recording.clone(),
-            screenshot: config.hotkeys.screenshot.clone(),
-            open_gallery: config.hotkeys.open_gallery.clone(),
-        }
-    }
-}

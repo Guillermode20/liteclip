@@ -552,7 +552,9 @@ impl PlaybackController {
             for _ in 0..frames_to_remove - 1 {
                 queue.pop_front();
             }
-            let frame = queue.pop_front().unwrap();
+            let Some(frame) = queue.pop_front() else {
+                return None;
+            };
             self.shared.playback_empty_polls.store(0, Ordering::SeqCst);
             tracing::trace!(
                 "take_playback_frame: wall={:.3}s, pts={:.3}s, {} remaining",
@@ -568,7 +570,9 @@ impl PlaybackController {
         if let Some(front) = queue.front() {
             let ahead_by = front.pts_secs - wall_time_secs;
             if ahead_by <= frame_duration {
-                let frame = queue.pop_front().unwrap();
+                let Some(frame) = queue.pop_front() else {
+                    return None;
+                };
                 self.shared.playback_empty_polls.store(0, Ordering::SeqCst);
                 tracing::trace!(
                     "take_playback_frame: wall={:.3}s, taking early frame pts={:.3}s (ahead by {:.3}s)",
@@ -741,7 +745,7 @@ impl PlaybackController {
             .shared
             .audio_buffer
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .as_ref()
             .map(clone_audio_buffer)
         else {
@@ -1453,7 +1457,7 @@ impl DecoderSession {
             .filter(|&t| t.is_finite())
             .collect();
 
-        positions.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        positions.sort_by(|a, b| a.total_cmp(b));
         positions.dedup_by(|a, b| (*a - *b).abs() < 0.01);
 
         if positions.len() > 500 {

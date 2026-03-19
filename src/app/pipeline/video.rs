@@ -34,7 +34,7 @@ pub fn start_video_pipeline(
 
     if encoder_supports_gpu {
         #[cfg(windows)]
-        if requested_gpu_format == Some(crate::capture::GpuTextureFormat::Nv12)
+        if requested_gpu_format == Some(crate::media::GpuTextureFormat::Nv12)
             && !capture_supports_nv12
         {
             bail!(

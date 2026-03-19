@@ -61,7 +61,7 @@ pub(crate) fn hevc_nal_type(data: &[u8]) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
-    use crate::buffer::ring::lockfree::LockFreeReplayBuffer;
+    use crate::buffer::ring::spmc_ring::LockFreeReplayBuffer;
     use crate::encode::{EncodedPacket, StreamType};
     use bytes::Bytes;
 

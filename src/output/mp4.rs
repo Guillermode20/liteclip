@@ -259,7 +259,9 @@ impl FfmpegMuxer {
                 if audio_us > video_us {
                     break;
                 }
-                let audio_packet = aac_iter.next().unwrap();
+                let Some(audio_packet) = aac_iter.next() else {
+                    break;
+                };
                 if let Some(aidx) = audio_stream_idx {
                     write_audio_frame_direct(
                         &mut self.format_context,

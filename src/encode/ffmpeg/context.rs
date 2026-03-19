@@ -159,7 +159,7 @@ impl FfmpegEncoder {
     pub(super) unsafe fn prepare_hw_frame(
         hw_context: &mut D3d11HardwareContext,
         hw_frame: *mut ffmpeg::ffi::AVFrame,
-        gpu_frame: &crate::capture::D3d11Frame,
+        gpu_frame: &crate::media::D3d11Frame,
     ) -> EncodeResult<()> {
         ffmpeg::ffi::av_frame_unref(hw_frame);
 

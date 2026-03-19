@@ -1455,7 +1455,9 @@ fn poll_editor_export_updates(editor: &mut EditorState, outcome: &mut EditorUiOu
 
 fn render_completion_screen(ui: &mut egui::Ui, editor: &mut EditorState) -> EditorUiOutcome {
     let mut outcome = EditorUiOutcome::default();
-    let output_path = editor.export_output.clone().unwrap();
+    let Some(output_path) = editor.export_output.clone() else {
+        return outcome;
+    };
 
     ui.horizontal(|ui| {
         if ui.button("< Back to Videos (Esc)").clicked() {

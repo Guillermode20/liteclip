@@ -22,7 +22,7 @@ use super::FfmpegEncoder;
 impl FfmpegEncoder {
     pub(super) fn init_nvenc_hardware_encoder(
         &mut self,
-        gpu_frame: &crate::capture::D3d11Frame,
+        gpu_frame: &crate::media::D3d11Frame,
         width: u32,
         height: u32,
     ) -> EncodeResult<()> {
@@ -119,8 +119,8 @@ impl FfmpegEncoder {
 
     pub(super) fn encode_nvenc_gpu_frame(
         &mut self,
-        _frame: &crate::capture::CapturedFrame,
-        gpu_frame: &crate::capture::D3d11Frame,
+        _frame: &crate::media::CapturedFrame,
+        gpu_frame: &crate::media::D3d11Frame,
         pts: i64,
         gop: i64,
     ) -> EncodeResult<()> {

@@ -4,7 +4,7 @@
 //! packet types, configuration, and encoder handles.
 
 #[cfg(windows)]
-use crate::capture::GpuTextureFormat;
+use crate::media::GpuTextureFormat;
 use bytes::Bytes;
 use crossbeam::channel::{Receiver, Sender};
 
@@ -264,7 +264,7 @@ pub struct EncoderHandle {
     /// Join handle for the encoder thread
     pub thread: std::thread::JoinHandle<crate::encode::EncodeResult<()>>,
     /// Channel sender for frames (dropped to signal encoder thread to stop)
-    pub frame_tx: Sender<crate::capture::CapturedFrame>,
+    pub frame_tx: Sender<crate::media::CapturedFrame>,
     /// Health events emitted by encoder worker thread
     pub health_rx: Receiver<EncoderHealthEvent>,
     /// Effective encoder configuration after auto-selection/fallback decisions
