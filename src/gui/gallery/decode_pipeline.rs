@@ -317,6 +317,7 @@ pub struct DecodePipeline {
 }
 
 struct DecoderSession {
+    video_path: PathBuf,
     input: ffmpeg::format::context::Input,
     decoder: ffmpeg::decoder::Video,
     scaler: ffmpeg::software::scaling::Context,
@@ -1334,6 +1335,7 @@ impl DecoderSession {
         .context("Failed to create decoder scaler")?;
 
         let mut session = Self {
+            video_path: video_path.to_path_buf(),
             input,
             decoder,
             scaler,
@@ -1442,6 +1444,20 @@ impl DecoderSession {
     }
 
     fn scan_keyframes(&mut self) {
+        if self.try_load_cached_keyframes() {
+            tracing::info!("Loaded {} cached keyframes", self.keyframe_positions.len());
+            self.keyframes_scanned = true;
+            let _ = unsafe {
+                ffmpeg::ffi::av_seek_frame(
+                    self.input.as_mut_ptr(),
+                    -1,
+                    0,
+                    ffmpeg::ffi::AVSEEK_FLAG_BACKWARD,
+                )
+            };
+            return;
+        }
+
         let start = Instant::now();
         let mut keyframe_pts: Vec<i64> = Vec::new();
 
@@ -1493,6 +1509,8 @@ impl DecoderSession {
             start.elapsed().as_secs_f64() * 1000.0
         );
 
+        self.save_keyframes_cache();
+
         let _ = unsafe {
             ffmpeg::ffi::av_seek_frame(
                 self.input.as_mut_ptr(),
@@ -1501,6 +1519,83 @@ impl DecoderSession {
                 ffmpeg::ffi::AVSEEK_FLAG_BACKWARD,
             )
         };
+    }
+
+    fn get_keyframe_cache_path(&self) -> PathBuf {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.video_path.hash(&mut hasher);
+        if let Ok(metadata) = std::fs::metadata(&self.video_path) {
+            if let Ok(modified) = metadata.modified() {
+                if let Ok(duration) = modified.elapsed() {
+                    duration.as_secs().hash(&mut hasher);
+                }
+            }
+        }
+        let cache_dir = self
+            .video_path
+            .parent()
+            .map(|p| p.join(".liteclip_cache"))
+            .unwrap_or_else(|| std::env::temp_dir());
+        cache_dir.join(format!("kf_{:016x}.bin", hasher.finish()))
+    }
+
+    fn try_load_cached_keyframes(&mut self) -> bool {
+        let cache_path = self.get_keyframe_cache_path();
+        if !cache_path.exists() {
+            return false;
+        }
+
+        match std::fs::read(&cache_path) {
+            Ok(data) => {
+                if data.len() < 8 || &data[0..4] != b"KFC1" {
+                    return false;
+                }
+                let count = u32::from_le_bytes([data[4], data[5], data[6], data[7]]) as usize;
+                if data.len() != 8 + count * 8 {
+                    return false;
+                }
+                let mut positions = Vec::with_capacity(count);
+                for i in 0..count {
+                    let offset = 8 + i * 8;
+                    let val = f64::from_le_bytes([
+                        data[offset],
+                        data[offset + 1],
+                        data[offset + 2],
+                        data[offset + 3],
+                        data[offset + 4],
+                        data[offset + 5],
+                        data[offset + 6],
+                        data[offset + 7],
+                    ]);
+                    positions.push(val);
+                }
+                self.keyframe_positions = positions;
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    fn save_keyframes_cache(&self) {
+        if self.keyframe_positions.is_empty() {
+            return;
+        }
+
+        let cache_path = self.get_keyframe_cache_path();
+        if let Some(parent) = cache_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+
+        let count = self.keyframe_positions.len() as u32;
+        let mut data = Vec::with_capacity(8 + count as usize * 8);
+        data.extend_from_slice(b"KFC1");
+        data.extend_from_slice(&count.to_le_bytes());
+        for &pos in &self.keyframe_positions {
+            data.extend_from_slice(&pos.to_le_bytes());
+        }
+
+        let _ = std::fs::write(&cache_path, &data);
     }
 
     fn seek_to(&mut self, time_secs: f64) -> Result<()> {

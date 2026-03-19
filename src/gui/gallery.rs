@@ -435,16 +435,16 @@ impl ClipCompressApp {
         }
     }
 
-    fn schedule_thumbnail_generation(&mut self, video: &VideoEntry) {
-        if self.thumbnails.contains_key(&video.path)
-            || self.thumbnails_generating.contains(&video.path)
+    fn schedule_thumbnail_generation(&mut self, video_path: &PathBuf) {
+        if self.thumbnails.contains_key(video_path)
+            || self.thumbnails_generating.contains(video_path)
         {
             return;
         }
 
-        self.thumbnails_generating.insert(video.path.clone());
+        self.thumbnails_generating.insert(video_path.clone());
         let tx = self.thumbnail_tx.clone();
-        let video_path = video.path.clone();
+        let video_path = video_path.clone();
         let save_directory = self.save_directory.clone();
         std::thread::spawn(move || {
             let result = generate_thumbnail(&video_path, &save_directory)
@@ -675,8 +675,8 @@ impl ClipCompressApp {
             }
         });
 
-        for video in browser_outcome.thumbnails_to_generate {
-            self.schedule_thumbnail_generation(&video);
+        for video_path in browser_outcome.thumbnails_to_generate {
+            self.schedule_thumbnail_generation(&video_path);
         }
 
         if browser_outcome.refresh_requested || editor_outcome.refresh_browser {
@@ -779,7 +779,7 @@ impl ClipCompressApp {
 
 #[derive(Default)]
 struct BrowserUiOutcome {
-    thumbnails_to_generate: Vec<VideoEntry>,
+    thumbnails_to_generate: Vec<PathBuf>,
     selected_video: Option<VideoEntry>,
     videos_to_delete: Vec<VideoEntry>,
     video_to_open: Option<VideoEntry>,
@@ -1794,68 +1794,97 @@ fn generate_thumbnail_strip_frames(
     _has_audio: bool,
 ) -> anyhow::Result<ThumbnailStrip> {
     use crate::output::functions::ffmpeg_executable_path;
-    use std::process::Command;
+    use std::io::Read;
+    use std::process::{Command, Stdio};
 
     let ffmpeg = ffmpeg_executable_path();
     let mut thumbnails = Vec::with_capacity(THUMBNAIL_STRIP_COUNT);
 
-    let step = duration_secs / (THUMBNAIL_STRIP_COUNT + 1) as f64;
+    if duration_secs <= 0.0 {
+        return Ok(ThumbnailStrip::new(thumbnails, duration_secs));
+    }
 
-    for i in 1..=THUMBNAIL_STRIP_COUNT {
-        let time_secs = step * i as f64;
-        let timestamp = format!("{:.3}", time_secs);
-        let scale =
-            format!("scale={THUMBNAIL_STRIP_WIDTH}:-2:force_original_aspect_ratio=decrease");
+    let fps_value = (THUMBNAIL_STRIP_COUNT as f64) / duration_secs;
+    let fps_filter = format!("fps={:.6}", fps_value);
+    let scale_filter =
+        format!("scale={THUMBNAIL_STRIP_WIDTH}:-2:force_original_aspect_ratio=decrease");
+    let vf = format!("{},{}", fps_filter, scale_filter);
 
-        #[cfg(target_os = "windows")]
-        let output = Command::new(&ffmpeg)
-            .args([
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-ss",
-                &timestamp,
-                "-i",
-                &video_path.to_string_lossy(),
-                "-frames:v",
-                "1",
-                "-vf",
-                &scale,
-                "-f",
-                "image2pipe",
-                "-vcodec",
-                "mjpeg",
-                "-",
-            ])
-            .creation_flags(0x08000000)
-            .output()?;
+    let mut cmd = Command::new(&ffmpeg);
+    cmd.args([
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        &video_path.to_string_lossy(),
+        "-vf",
+        &vf,
+        "-f",
+        "image2pipe",
+        "-vcodec",
+        "mjpeg",
+        "-q:v",
+        "5",
+        "-",
+    ]);
 
-        #[cfg(not(target_os = "windows"))]
-        let output = Command::new(&ffmpeg)
-            .args([
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-ss",
-                &timestamp,
-                "-i",
-                &video_path.to_string_lossy(),
-                "-frames:v",
-                "1",
-                "-vf",
-                &scale,
-                "-f",
-                "image2pipe",
-                "-vcodec",
-                "mjpeg",
-                "-",
-            ])
-            .output()?;
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(0x08000000);
 
-        if output.status.success() && !output.stdout.is_empty() {
-            if let Ok(img) = image::load_from_memory(&output.stdout) {
-                thumbnails.push((time_secs, img.into_rgba8()));
+    let mut child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("Failed to spawn FFmpeg for thumbnail strip")?;
+
+    let stdout = child.stdout.take().context("FFmpeg stdout not available")?;
+    let mut reader = std::io::BufReader::new(stdout);
+
+    let mut jpeg_buffer = Vec::with_capacity(64 * 1024);
+    let frame_times: Vec<f64> = (1..=THUMBNAIL_STRIP_COUNT)
+        .map(|i| duration_secs * (i as f64) / (THUMBNAIL_STRIP_COUNT + 1) as f64)
+        .collect();
+    let mut frame_idx = 0;
+
+    loop {
+        let mut byte = [0u8; 1];
+        match reader.read_exact(&mut byte) {
+            Ok(()) => {
+                jpeg_buffer.push(byte[0]);
+
+                if jpeg_buffer.len() >= 2 {
+                    let len = jpeg_buffer.len();
+                    if jpeg_buffer[len - 2] == 0xFF && jpeg_buffer[len - 1] == 0xD9 {
+                        if jpeg_buffer.len() > 2 && jpeg_buffer[0] == 0xFF && jpeg_buffer[1] == 0xD8
+                        {
+                            if let Ok(img) = image::load_from_memory(&jpeg_buffer) {
+                                if frame_idx < frame_times.len() {
+                                    thumbnails.push((frame_times[frame_idx], img.into_rgba8()));
+                                    frame_idx += 1;
+                                }
+                            }
+                        }
+                        jpeg_buffer.clear();
+                        jpeg_buffer.push(0xFF);
+                        jpeg_buffer.push(0xD8);
+                    }
+                }
             }
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(e) => {
+                warn!("Error reading FFmpeg output: {}", e);
+                break;
+            }
+        }
+    }
+
+    let _ = child.wait();
+
+    while thumbnails.len() < THUMBNAIL_STRIP_COUNT {
+        if let Some(last) = thumbnails.last() {
+            thumbnails.push(last.clone());
+        } else {
+            break;
         }
     }
 

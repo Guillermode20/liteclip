@@ -284,14 +284,15 @@ fn run_clip_export(
     })?;
 
     let export_result = (|| -> Result<ExportOutcome> {
-        let mut current_video_bitrate_kbps = bitrate_estimate.video_kbps.max(MIN_VIDEO_BITRATE_KBPS);
+        let mut current_video_bitrate_kbps =
+            bitrate_estimate.video_kbps.max(MIN_VIDEO_BITRATE_KBPS);
         let mut low_video_bitrate_kbps = MIN_VIDEO_BITRATE_KBPS;
         let mut high_video_bitrate_kbps: Option<u32> = None;
         let mut best_under_target: Option<ExportAttemptResult> = None;
         let mut best_over_target: Option<ExportAttemptResult> = None;
 
         for attempt_index in 0..MAX_EXPORT_ATTEMPTS {
-            if cancel_flag.load(Ordering::SeqCst) {
+            if cancel_flag.load(Ordering::Relaxed) {
                 return Ok(ExportOutcome::Cancelled);
             }
 
@@ -324,7 +325,8 @@ fn run_clip_export(
                     Some(best_attempt) => {
                         attempt_result.size_bytes > best_attempt.size_bytes
                             || (attempt_result.size_bytes == best_attempt.size_bytes
-                                && attempt_result.video_bitrate_kbps > best_attempt.video_bitrate_kbps)
+                                && attempt_result.video_bitrate_kbps
+                                    > best_attempt.video_bitrate_kbps)
                     }
                     None => true,
                 };
@@ -337,7 +339,8 @@ fn run_clip_export(
                     Some(best_attempt) => {
                         attempt_result.size_bytes < best_attempt.size_bytes
                             || (attempt_result.size_bytes == best_attempt.size_bytes
-                                && attempt_result.video_bitrate_kbps < best_attempt.video_bitrate_kbps)
+                                && attempt_result.video_bitrate_kbps
+                                    < best_attempt.video_bitrate_kbps)
                     }
                     None => true,
                 };
@@ -379,19 +382,18 @@ fn run_clip_export(
             current_video_bitrate_kbps = next_video_bitrate_kbps;
         }
 
-        let preferred_attempt = select_preferred_attempt(
-            best_under_target,
-            best_over_target,
-            target_size_bytes,
-        )
-        .context("Clip export did not produce an output file")?;
+        let preferred_attempt =
+            select_preferred_attempt(best_under_target, best_over_target, target_size_bytes)
+                .context("Clip export did not produce an output file")?;
 
-        move_or_copy_file(&preferred_attempt.output_path, &request.output_path).with_context(|| {
-            format!(
-                "Failed to move export output from {:?} to {:?}",
-                preferred_attempt.output_path, request.output_path
-            )
-        })?;
+        move_or_copy_file(&preferred_attempt.output_path, &request.output_path).with_context(
+            || {
+                format!(
+                    "Failed to move export output from {:?} to {:?}",
+                    preferred_attempt.output_path, request.output_path
+                )
+            },
+        )?;
 
         Ok(ExportOutcome::Finished(request.output_path.clone()))
     })();
@@ -456,6 +458,7 @@ fn attempt_export(
             cancel_flag: cancel_flag.clone(),
             attempt_index,
             attempt_count,
+            last_progress_time: std::time::Instant::now(),
         },
     )? {
         cleanup_passlog_files(&passlog_prefix);
@@ -463,7 +466,7 @@ fn attempt_export(
         return Ok(None);
     }
 
-    if cancel_flag.load(Ordering::SeqCst) {
+    if cancel_flag.load(Ordering::Relaxed) {
         cleanup_passlog_files(&passlog_prefix);
         let _ = std::fs::remove_file(output_path);
         return Ok(None);
@@ -491,6 +494,7 @@ fn attempt_export(
             cancel_flag: cancel_flag.clone(),
             attempt_index,
             attempt_count,
+            last_progress_time: std::time::Instant::now(),
         },
     )? {
         cleanup_passlog_files(&passlog_prefix);
@@ -590,13 +594,14 @@ struct FFmpegProgressContext {
     cancel_flag: Arc<AtomicBool>,
     attempt_index: usize,
     attempt_count: usize,
+    last_progress_time: std::time::Instant,
 }
 
 fn run_ffmpeg_phase(
     ffmpeg: &Path,
     args: &[String],
     total_duration_secs: f64,
-    progress_ctx: FFmpegProgressContext,
+    mut progress_ctx: FFmpegProgressContext,
 ) -> Result<bool> {
     let mut command = Command::new(ffmpeg);
     command
@@ -636,7 +641,7 @@ fn run_ffmpeg_phase(
         let reader = BufReader::new(stdout);
         for line in reader.lines() {
             let line = line.context("Failed to read ffmpeg progress output")?;
-            if progress_ctx.cancel_flag.load(Ordering::SeqCst) {
+            if progress_ctx.cancel_flag.load(Ordering::Relaxed) {
                 let _ = child.kill();
                 let _ = child.wait();
                 let _ = stderr_handle.join();
@@ -644,24 +649,31 @@ fn run_ffmpeg_phase(
             }
 
             if let Some(processed_secs) = parse_progress_seconds(&line) {
-                let fraction = if total_duration_secs > 0.0 {
-                    (processed_secs / total_duration_secs) as f32
-                } else {
-                    0.0
-                };
-                let adjusted_fraction =
-                    progress_ctx.start_fraction + (fraction * progress_ctx.span_fraction);
-                let _ = progress_ctx.progress_tx.send(ClipExportUpdate::Progress {
-                    phase: progress_ctx.phase,
-                    fraction: adjusted_fraction.clamp(0.0, 1.0),
-                    message: format!(
-                        "Attempt {}/{} - {}: {}",
-                        progress_ctx.attempt_index + 1,
-                        progress_ctx.attempt_count,
-                        phase_label(progress_ctx.phase),
-                        format_seconds_arg(processed_secs)
-                    ),
-                });
+                let now = std::time::Instant::now();
+                const MIN_PROGRESS_INTERVAL: std::time::Duration =
+                    std::time::Duration::from_millis(100);
+
+                if now.duration_since(progress_ctx.last_progress_time) >= MIN_PROGRESS_INTERVAL {
+                    progress_ctx.last_progress_time = now;
+                    let fraction = if total_duration_secs > 0.0 {
+                        (processed_secs / total_duration_secs) as f32
+                    } else {
+                        0.0
+                    };
+                    let adjusted_fraction =
+                        progress_ctx.start_fraction + (fraction * progress_ctx.span_fraction);
+                    let _ = progress_ctx.progress_tx.send(ClipExportUpdate::Progress {
+                        phase: progress_ctx.phase,
+                        fraction: adjusted_fraction.clamp(0.0, 1.0),
+                        message: format!(
+                            "Attempt {}/{} - {}: {}",
+                            progress_ctx.attempt_index + 1,
+                            progress_ctx.attempt_count,
+                            phase_label(progress_ctx.phase),
+                            format_seconds_arg(processed_secs)
+                        ),
+                    });
+                }
             }
         }
     }
@@ -784,12 +796,12 @@ pub fn estimate_export_bitrates(
         .max(f64::from(MIN_VIDEO_BITRATE_KBPS));
     let audio_kbps = select_audio_bitrate_kbps(has_audio, requested_audio_bitrate_kbps, total_kbps);
     let non_video_bytes = estimate_non_video_bytes(duration_secs, audio_kbps, num_segments);
-    let video_kbps = ((((target_size_bytes(target_size_mb).saturating_sub(non_video_bytes)) as f64)
-        * 8.0)
-        / duration_secs
-        / 1000.0)
-        .max(f64::from(MIN_VIDEO_BITRATE_KBPS))
-        .round() as u32;
+    let video_kbps =
+        ((((target_size_bytes(target_size_mb).saturating_sub(non_video_bytes)) as f64) * 8.0)
+            / duration_secs
+            / 1000.0)
+            .max(f64::from(MIN_VIDEO_BITRATE_KBPS))
+            .round() as u32;
 
     ExportBitrateEstimate {
         video_kbps,
@@ -802,17 +814,25 @@ fn target_size_bytes(target_size_mb: u32) -> u64 {
     u64::from(target_size_mb).saturating_mul(1024 * 1024)
 }
 
-fn estimate_non_video_bytes(output_duration_secs: f64, audio_bitrate_kbps: u32, num_segments: usize) -> u64 {
+fn estimate_non_video_bytes(
+    output_duration_secs: f64,
+    audio_bitrate_kbps: u32,
+    num_segments: usize,
+) -> u64 {
     let duration_secs = output_duration_secs.max(0.0);
-    let audio_bytes =
-        (duration_secs * f64::from(audio_bitrate_kbps) * 1000.0 / 8.0).round() as u64;
-    audio_bytes.saturating_add(estimate_container_overhead_bytes(output_duration_secs, num_segments))
+    let audio_bytes = (duration_secs * f64::from(audio_bitrate_kbps) * 1000.0 / 8.0).round() as u64;
+    audio_bytes.saturating_add(estimate_container_overhead_bytes(
+        output_duration_secs,
+        num_segments,
+    ))
 }
 
 fn estimate_container_overhead_bytes(output_duration_secs: f64, num_segments: usize) -> u64 {
-    let stream_bytes =
-        (output_duration_secs.max(0.0) * (8.0 + (num_segments as f64 * 3.0)) * 1000.0 / 8.0)
-            .round() as u64;
+    let stream_bytes = (output_duration_secs.max(0.0)
+        * (8.0 + (num_segments as f64 * 3.0))
+        * 1000.0
+        / 8.0)
+        .round() as u64;
     (32 * 1024) as u64 + stream_bytes
 }
 
@@ -843,8 +863,12 @@ fn next_export_video_bitrate_kbps(
     low_video_bitrate_kbps: u32,
     high_video_bitrate_kbps: Option<u32>,
 ) -> u32 {
-    let current_video_bytes = actual_size_bytes.saturating_sub(estimated_non_video_bytes).max(1);
-    let target_video_bytes = target_size_bytes.saturating_sub(estimated_non_video_bytes).max(1);
+    let current_video_bytes = actual_size_bytes
+        .saturating_sub(estimated_non_video_bytes)
+        .max(1);
+    let target_video_bytes = target_size_bytes
+        .saturating_sub(estimated_non_video_bytes)
+        .max(1);
     let scaled_video_bitrate_kbps = ((f64::from(current_video_bitrate_kbps)
         * (target_video_bytes as f64)
         / (current_video_bytes as f64))
@@ -853,15 +877,15 @@ fn next_export_video_bitrate_kbps(
         } else {
             1.01
         })
-        .round() as u32;
+    .round() as u32;
 
     let growth_limited_video_bitrate_kbps = scaled_video_bitrate_kbps.min(
         current_video_bitrate_kbps
             .saturating_mul(4)
             .max(MIN_VIDEO_BITRATE_KBPS),
     );
-    let mut next_video_bitrate_kbps = growth_limited_video_bitrate_kbps
-        .max(low_video_bitrate_kbps.max(MIN_VIDEO_BITRATE_KBPS));
+    let mut next_video_bitrate_kbps =
+        growth_limited_video_bitrate_kbps.max(low_video_bitrate_kbps.max(MIN_VIDEO_BITRATE_KBPS));
 
     if let Some(high_video_bitrate_kbps) = high_video_bitrate_kbps {
         if high_video_bitrate_kbps <= low_video_bitrate_kbps.saturating_add(24) {

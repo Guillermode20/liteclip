@@ -23,8 +23,6 @@ pub(super) fn render_browser_ui(app: &mut ClipCompressApp, ui: &mut egui::Ui) ->
             .unwrap_or_default()
     };
 
-    let _flat_visible_videos = flatten_visible_videos(&display_groups);
-
     let mut filter_response = None;
     ui.horizontal(|ui| {
         ui.heading("Clip & Compress");
@@ -190,7 +188,7 @@ pub(super) fn render_browser_ui(app: &mut ClipCompressApp, ui: &mut egui::Ui) ->
                             let video = videos[index].clone();
                             let has_thumb = app.thumbnails.contains_key(&video.path);
                             if !has_thumb {
-                                outcome.thumbnails_to_generate.push(video.clone());
+                                outcome.thumbnails_to_generate.push(video.path.clone());
                             }
 
                             let response = ui
@@ -339,13 +337,6 @@ pub(super) fn render_browser_ui(app: &mut ClipCompressApp, ui: &mut egui::Ui) ->
         });
 
     outcome
-}
-
-fn flatten_visible_videos(display_groups: &[(String, Vec<VideoEntry>)]) -> Vec<VideoEntry> {
-    display_groups
-        .iter()
-        .flat_map(|(_, videos)| videos.iter().cloned())
-        .collect()
 }
 
 #[allow(dead_code)]
