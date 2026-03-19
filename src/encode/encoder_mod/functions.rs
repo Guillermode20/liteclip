@@ -1,8 +1,6 @@
-//! Auto-generated module
-//!
-//! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
+//! Encoder spawn, resolution, and trait definitions.
 
-use anyhow::{bail, Context, Result};
+use crate::encode::{EncodeError, EncodeResult};
 use crossbeam::channel::{bounded, Receiver, Sender};
 #[cfg(feature = "ffmpeg")]
 use ffmpeg::format::Pixel;
@@ -16,6 +14,7 @@ use windows::Win32::System::Threading::{
 
 use super::types::{
     EncodedPacket, EncoderConfig, EncoderHandle, EncoderHealthEvent, HardwareEncoder,
+    ResolvedEncoderConfig, ResolvedEncoderType,
 };
 
 /// Encoder trait
@@ -25,11 +24,11 @@ use super::types::{
 /// EncodedPacket via the channel returned by packet_rx().
 pub trait Encoder: Send + 'static {
     /// Initialize encoder with configuration
-    fn init(&mut self, config: &EncoderConfig) -> Result<()>;
+    fn init(&mut self, config: &ResolvedEncoderConfig) -> EncodeResult<()>;
     /// Encode a frame
-    fn encode_frame(&mut self, frame: &crate::capture::CapturedFrame) -> Result<()>;
+    fn encode_frame(&mut self, frame: &crate::capture::CapturedFrame) -> EncodeResult<()>;
     /// Flush encoder and get remaining packets
-    fn flush(&mut self) -> Result<Vec<EncodedPacket>>;
+    fn flush(&mut self) -> EncodeResult<Vec<EncodedPacket>>;
     /// Get receiver for encoded packets
     fn packet_rx(&self) -> Receiver<EncodedPacket>;
     /// Check if encoder is still running
@@ -47,21 +46,13 @@ pub trait Encoder: Send + 'static {
 pub trait EncoderFactory: Send + Sync + 'static {
     /// Spawn an encoder that receives frames from the given receiver.
     ///
-    /// # Arguments
-    ///
-    /// * `config` - Encoder configuration.
-    /// * `buffer` - Shared replay buffer to write encoded packets to.
-    /// * `frame_rx` - Channel receiver for captured frames.
-    ///
-    /// # Returns
-    ///
-    /// An `EncoderHandle` for managing the encoder thread.
+    /// `config` must already be resolved (no [`crate::config::EncoderType::Auto`]).
     fn spawn(
         &self,
-        config: EncoderConfig,
+        config: ResolvedEncoderConfig,
         buffer: crate::buffer::ring::SharedReplayBuffer,
         frame_rx: Receiver<crate::capture::CapturedFrame>,
-    ) -> Result<EncoderHandle>;
+    ) -> EncodeResult<EncoderHandle>;
 }
 
 /// Default encoder factory using FFmpeg.
@@ -73,17 +64,17 @@ pub struct DefaultEncoderFactory;
 impl EncoderFactory for DefaultEncoderFactory {
     fn spawn(
         &self,
-        config: EncoderConfig,
+        config: ResolvedEncoderConfig,
         buffer: crate::buffer::ring::SharedReplayBuffer,
         frame_rx: Receiver<crate::capture::CapturedFrame>,
-    ) -> Result<EncoderHandle> {
+    ) -> EncodeResult<EncoderHandle> {
         spawn_encoder_with_receiver(config, buffer, frame_rx)
     }
 }
 
 fn spawn_buffer_writer(
     buffer: crate::buffer::ring::SharedReplayBuffer,
-) -> (Sender<EncodedPacket>, std::thread::JoinHandle<(u64, usize)>) {
+) -> EncodeResult<(Sender<EncodedPacket>, std::thread::JoinHandle<(u64, usize)>)> {
     let (packet_tx, packet_rx) = bounded::<EncodedPacket>(2048);
     let thread = std::thread::Builder::new()
         .name("encoder-buffer-writer".to_string())
@@ -117,9 +108,9 @@ fn spawn_buffer_writer(
 
             (total_packets, flush_batches)
         })
-        .expect("failed to spawn encoder buffer writer thread");
+        .map_err(EncodeError::Io)?;
 
-    (packet_tx, thread)
+    Ok((packet_tx, thread))
 }
 
 fn forward_ready_packets(
@@ -137,53 +128,62 @@ fn forward_ready_packets(
 }
 
 // Hardware encoder registry: when changing NVENC/QSV/AMF codec strings, probe options, or auto-detect
-// order, see the contributor hub in `encode::ffmpeg` and the match arms in `EncoderConfig` methods in
-// `encoder_mod/types.rs` (`ffmpeg_codec_name`, `supports_gpu_frame_transport`, `gpu_texture_format`).
+// order, see the contributor hub in `encode::ffmpeg` and `ResolvedEncoderConfig` / `ResolvedEncoderType`.
 #[cfg(feature = "ffmpeg")]
-fn encoder_name_for_type(encoder_type: crate::config::EncoderType) -> Option<&'static str> {
-    match encoder_type {
-        crate::config::EncoderType::Nvenc => Some("hevc_nvenc"),
-        crate::config::EncoderType::Amf => Some("hevc_amf"),
-        crate::config::EncoderType::Qsv => Some("hevc_qsv"),
-        crate::config::EncoderType::Auto => None,
+fn ensure_requested_encoder_available(ty: ResolvedEncoderType) -> EncodeResult<()> {
+    let codec_name = ty.ffmpeg_hevc_codec_name();
+    if !probe_encoder_available(codec_name) {
+        return Err(EncodeError::EncoderUnavailable {
+            encoder: ty.into(),
+        });
     }
-}
-
-#[cfg(feature = "ffmpeg")]
-fn ensure_requested_encoder_available(config: &EncoderConfig) -> Result<()> {
-    if let Some(codec_name) = encoder_name_for_type(config.encoder_type) {
-        if !probe_encoder_available(codec_name) {
-            bail!(
-                "Selected encoder {:?} is not available in the current FFmpeg/runtime environment",
-                config.encoder_type
-            );
-        }
-    }
-
     Ok(())
 }
 
 #[cfg(not(feature = "ffmpeg"))]
-fn ensure_requested_encoder_available(_config: &EncoderConfig) -> Result<()> {
+fn ensure_requested_encoder_available(_ty: ResolvedEncoderType) -> EncodeResult<()> {
     Ok(())
 }
 
-fn resolve_encoder_config(config: &EncoderConfig) -> Result<EncoderConfig> {
+fn encoder_fields_to_resolved(c: EncoderConfig, ty: ResolvedEncoderType) -> ResolvedEncoderConfig {
+    ResolvedEncoderConfig {
+        bitrate_mbps: c.bitrate_mbps,
+        framerate: c.framerate,
+        resolution: c.resolution,
+        use_native_resolution: c.use_native_resolution,
+        encoder_type: ty,
+        quality_preset: c.quality_preset,
+        rate_control: c.rate_control,
+        quality_value: c.quality_value,
+        keyframe_interval_secs: c.keyframe_interval_secs,
+        use_cpu_readback: c.use_cpu_readback,
+        output_index: c.output_index,
+    }
+}
+
+fn resolve_encoder_config(config: &EncoderConfig) -> EncodeResult<ResolvedEncoderConfig> {
     let mut resolved = config.clone();
     if resolved.encoder_type == crate::config::EncoderType::Auto {
         let detected_encoder = detect_hardware_encoder();
         if matches!(detected_encoder, HardwareEncoder::None) {
-            bail!("Auto encoder selection could not find NVENC, AMF, or QSV on this system");
+            return Err(EncodeError::NoHardwareForAuto);
         }
         apply_auto_encoder_selection(&mut resolved, detected_encoder);
         info!("Auto-detected encoder: {:?}", resolved.encoder_type);
     }
 
-    ensure_requested_encoder_available(&resolved)?;
-    Ok(resolved)
+    let ty = match resolved.encoder_type {
+        crate::config::EncoderType::Nvenc => ResolvedEncoderType::Nvenc,
+        crate::config::EncoderType::Amf => ResolvedEncoderType::Amf,
+        crate::config::EncoderType::Qsv => ResolvedEncoderType::Qsv,
+        crate::config::EncoderType::Auto => return Err(EncodeError::NoHardwareForAuto),
+    };
+
+    ensure_requested_encoder_available(ty)?;
+    Ok(encoder_fields_to_resolved(resolved, ty))
 }
 
-pub fn resolve_effective_encoder_config(config: &EncoderConfig) -> Result<EncoderConfig> {
+pub fn resolve_effective_encoder_config(config: &EncoderConfig) -> EncodeResult<ResolvedEncoderConfig> {
     resolve_encoder_config(config)
 }
 
@@ -331,30 +331,23 @@ pub(super) fn apply_auto_encoder_selection(
     }
 }
 
-/// Create the best available encoder based on configuration
-///
-/// If encoder_type is Auto, performs hardware detection.
-/// Falls back to software encoder if hardware initialization fails.
-pub fn create_encoder(config: &EncoderConfig) -> Result<Box<dyn Encoder>> {
-    let config = resolve_encoder_config(config)?;
-
+/// Create the FFmpeg encoder for a **resolved** configuration (after `Auto` handling).
+pub fn create_encoder(config: &ResolvedEncoderConfig) -> EncodeResult<Box<dyn Encoder>> {
     info!("Creating native FFmpeg encoder: {:?}", config.encoder_type);
-    Ok(Box::new(crate::encode::ffmpeg::FfmpegEncoder::new(
-        &config,
-    )?))
+    Ok(Box::new(crate::encode::ffmpeg::FfmpegEncoder::new(config)?))
 }
+
 /// Spawn an encoder that receives frames from an existing receiver
 ///
 /// This is used when the capture provides its own frame channel.
 /// The encoder thread reads frames from frame_rx and pushes encoded packets
 /// directly to the SharedReplayBuffer.
 pub fn spawn_encoder_with_receiver(
-    config: EncoderConfig,
+    effective_config: ResolvedEncoderConfig,
     buffer: crate::buffer::ring::SharedReplayBuffer,
     frame_rx: Receiver<crate::capture::CapturedFrame>,
-) -> Result<EncoderHandle> {
+) -> EncodeResult<EncoderHandle> {
     const MAX_CONSECUTIVE_ENCODE_ERRORS: u32 = 8;
-    let effective_config = resolve_encoder_config(&config)?;
     let thread_config = effective_config.clone();
     let (health_tx, health_rx) = bounded(8);
     let thread = std::thread::Builder::new()
@@ -382,33 +375,44 @@ pub fn spawn_encoder_with_receiver(
             }
             debug!("Encoder initialized");
             let packet_rx = encoder.packet_rx();
-            let (buffer_packet_tx, buffer_writer_thread) = spawn_buffer_writer(buffer.clone());
+            let (buffer_packet_tx, buffer_writer_thread) = match spawn_buffer_writer(buffer.clone())
+            {
+                Ok(x) => x,
+                Err(e) => {
+                    let _ = health_tx.try_send(EncoderHealthEvent::Fatal(format!(
+                        "Failed to spawn buffer writer: {}",
+                        e
+                    )));
+                    return Err(e);
+                }
+            };
             let mut consecutive_encode_errors = 0u32;
             const MAX_FRAME_BURST: usize = 8;
             loop {
                 let _ = forward_ready_packets(&packet_rx, &buffer_packet_tx);
                 match frame_rx.recv_timeout(std::time::Duration::from_millis(8)) {
                     Ok(frame) => {
-                        let mut encode_one = |frame: crate::capture::CapturedFrame| -> Result<()> {
-                            if let Err(e) = encoder.encode_frame(&frame) {
-                                warn!("Failed to encode frame: {}", e);
-                                consecutive_encode_errors =
-                                    consecutive_encode_errors.saturating_add(1);
-                                if consecutive_encode_errors >= MAX_CONSECUTIVE_ENCODE_ERRORS {
-                                    let reason = format!(
-                                        "{} consecutive frame encode failures",
-                                        consecutive_encode_errors
-                                    );
-                                    let _ = health_tx
-                                        .try_send(EncoderHealthEvent::Fatal(reason.clone()));
-                                    return Err(anyhow::anyhow!(reason));
+                        let mut encode_one =
+                            |frame: crate::capture::CapturedFrame| -> EncodeResult<()> {
+                                if let Err(e) = encoder.encode_frame(&frame) {
+                                    warn!("Failed to encode frame: {}", e);
+                                    consecutive_encode_errors =
+                                        consecutive_encode_errors.saturating_add(1);
+                                    if consecutive_encode_errors >= MAX_CONSECUTIVE_ENCODE_ERRORS {
+                                        let reason = format!(
+                                            "{} consecutive frame encode failures",
+                                            consecutive_encode_errors
+                                        );
+                                        let _ = health_tx
+                                            .try_send(EncoderHealthEvent::Fatal(reason.clone()));
+                                        return Err(EncodeError::msg(reason));
+                                    }
+                                } else {
+                                    consecutive_encode_errors = 0;
                                 }
-                            } else {
-                                consecutive_encode_errors = 0;
-                            }
-                            let _ = forward_ready_packets(&packet_rx, &buffer_packet_tx);
-                            Ok(())
-                        };
+                                let _ = forward_ready_packets(&packet_rx, &buffer_packet_tx);
+                                Ok(())
+                            };
 
                         encode_one(frame)?;
 
@@ -460,7 +464,8 @@ pub fn spawn_encoder_with_receiver(
             }
             debug!("Encoder thread stopped");
             Ok(())
-        })?;
+        })
+        .map_err(EncodeError::Io)?;
     let (dummy_frame_tx, _) = bounded(1);
     let handle = EncoderHandle {
         thread,
@@ -470,20 +475,24 @@ pub fn spawn_encoder_with_receiver(
     };
     Ok(handle)
 }
+
 /// Initialize FFmpeg (call once at startup)
 #[cfg(feature = "ffmpeg")]
-pub fn init_ffmpeg() -> Result<()> {
-    ffmpeg_next::init().context("Failed to initialize FFmpeg")?;
+pub fn init_ffmpeg() -> EncodeResult<()> {
+    ffmpeg_next::init().map_err(|e| {
+        EncodeError::msg(format!("Failed to initialize FFmpeg: {}", e))
+    })?;
     info!("FFmpeg initialized successfully");
     Ok(())
 }
 
 /// Initialize FFmpeg (call once at startup)
 #[cfg(not(feature = "ffmpeg"))]
-pub fn init_ffmpeg() -> Result<()> {
+pub fn init_ffmpeg() -> EncodeResult<()> {
     info!("FFmpeg initialization skipped (not compiled in)");
     Ok(())
 }
+
 impl From<HardwareEncoder> for crate::config::EncoderType {
     fn from(hw: HardwareEncoder) -> Self {
         match hw {

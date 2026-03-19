@@ -1,22 +1,24 @@
-use anyhow::{Context, Result};
 use bytes::Bytes;
 use ffmpeg::format::Pixel;
 use ffmpeg_next as ffmpeg;
 use tracing::info;
 
+use crate::encode::{EncodeError, EncodeResult};
+
 use super::{EncodedPacket, FfmpegEncoder, StreamType};
 
 impl FfmpegEncoder {
-    pub(super) fn init_encoder(&mut self, width: u32, height: u32) -> Result<()> {
+    pub(super) fn init_encoder(&mut self, width: u32, height: u32) -> EncodeResult<()> {
         let codec_name = self.config.ffmpeg_codec_name();
-        let codec = ffmpeg::encoder::find_by_name(codec_name)
-            .context(format!("Failed to find encoder: {}", codec_name))?;
+        let codec = ffmpeg::encoder::find_by_name(codec_name).ok_or_else(|| {
+            EncodeError::msg(format!("Failed to find encoder: {}", codec_name))
+        })?;
 
         let encoder_ctx = ffmpeg::codec::context::Context::new_with_codec(codec);
         let mut encoder = encoder_ctx
             .encoder()
             .video()
-            .context("Failed to create encoder context")?;
+            .map_err(|e| EncodeError::ffmpeg(e))?;
 
         let (out_w, out_h) = if self.config.use_native_resolution {
             (width, height)
@@ -41,9 +43,7 @@ impl FfmpegEncoder {
         options.set("bf", "0");
         self.apply_codec_specific_options(&mut options, bitrate)?;
 
-        let encoder = encoder
-            .open_with(options)
-            .context("Failed to open encoder")?;
+        let encoder = encoder.open_with(options)?;
 
         self.encoder = Some(encoder);
 
@@ -72,7 +72,7 @@ impl FfmpegEncoder {
                     out_h,
                     ffmpeg::software::scaling::flag::Flags::POINT,
                 )
-                .context("Failed to create scaler context")?,
+                .map_err(|e| EncodeError::ffmpeg(e))?,
             );
             info!(
                 "Native FFmpeg encoder initialized: {} ({}x{}) with NV12 scaling (fast)",
@@ -96,7 +96,7 @@ impl FfmpegEncoder {
         Ok(())
     }
 
-    pub(super) fn drain_encoder_packets(&mut self, fallback_timestamp: i64) -> Result<()> {
+    pub(super) fn drain_encoder_packets(&mut self, fallback_timestamp: i64) -> EncodeResult<()> {
         let mut packets_data: Vec<(Bytes, bool)> = Vec::with_capacity(8);
 
         if let Some(ref mut encoder) = self.encoder {

@@ -47,7 +47,7 @@ const IDLE_REPAINT_MS: u64 = 100;
 pub fn init_gui_manager() {
     GUI_INIT.call_once(|| {
         let (tx, rx) = channel();
-        *GUI_TX.lock().unwrap() = Some(tx);
+        *GUI_TX.lock().unwrap_or_else(|e| e.into_inner()) = Some(tx);
 
         std::thread::spawn(move || {
             let pos = get_toast_window_pos();
@@ -101,7 +101,7 @@ fn get_toast_window_pos() -> [f32; 2] {
 
 pub fn send_gui_message(msg: GuiMessage) {
     init_gui_manager();
-    if let Some(tx) = GUI_TX.lock().unwrap().as_ref() {
+    if let Some(tx) = GUI_TX.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
         let _ = tx.send(msg);
     }
 }
@@ -193,7 +193,7 @@ impl eframe::App for GuiManagerApp {
             match msg {
                 GuiMessage::ShowSettings(tx, level_monitor) => {
                     let config = crate::config::Config::load_sync().unwrap_or_default();
-                    *self.settings.lock().unwrap() = Some(crate::gui::settings::SettingsApp::new(
+                    *self.settings.lock().unwrap_or_else(|e| e.into_inner()) = Some(crate::gui::settings::SettingsApp::new(
                         config,
                         tx,
                         level_monitor,
@@ -201,7 +201,7 @@ impl eframe::App for GuiManagerApp {
                 }
                 GuiMessage::ShowGallery(tx) => {
                     let config = crate::config::Config::load_sync().unwrap_or_default();
-                    *self.gallery.lock().unwrap() =
+                    *self.gallery.lock().unwrap_or_else(|e| e.into_inner()) =
                         Some(crate::gui::gallery::GalleryApp::new(&config, tx));
                 }
                 GuiMessage::Toast(kind, message) => {
@@ -234,7 +234,7 @@ impl eframe::App for GuiManagerApp {
             .show(ctx, |_ui| {});
 
         let settings_clone = self.settings.clone();
-        let show_settings = settings_clone.lock().unwrap().is_some();
+        let show_settings = settings_clone.lock().unwrap_or_else(|e| e.into_inner()).is_some();
         if show_settings {
             ctx.show_viewport_deferred(
                 egui::ViewportId::from_hash_of("settings"),
@@ -248,7 +248,7 @@ impl eframe::App for GuiManagerApp {
                         return;
                     }
 
-                    let mut lock = settings_clone.lock().unwrap();
+                    let mut lock = settings_clone.lock().unwrap_or_else(|e| e.into_inner());
                     if let Some(settings) = lock.as_mut() {
                         let mut is_open = true;
                         settings.update(ctx, &mut is_open);
@@ -261,7 +261,7 @@ impl eframe::App for GuiManagerApp {
         }
 
         let gallery_clone = self.gallery.clone();
-        let show_gallery = gallery_clone.lock().unwrap().is_some();
+        let show_gallery = gallery_clone.lock().unwrap_or_else(|e| e.into_inner()).is_some();
         if show_gallery {
             ctx.show_viewport_deferred(
                 egui::ViewportId::from_hash_of("gallery"),
@@ -275,7 +275,7 @@ impl eframe::App for GuiManagerApp {
                         return;
                     }
 
-                    let mut lock = gallery_clone.lock().unwrap();
+                    let mut lock = gallery_clone.lock().unwrap_or_else(|e| e.into_inner());
                     if let Some(gallery) = lock.as_mut() {
                         let mut is_open = true;
                         gallery.update(ctx, &mut is_open);

@@ -12,10 +12,10 @@
 //! - **Init + per-frame GPU path:** [`nvenc`](crate::encode::ffmpeg::nvenc), [`qsv`](crate::encode::ffmpeg::qsv), [`amf`](crate::encode::ffmpeg::amf)
 //! - **Shared FFmpeg options:** [`options`](crate::encode::ffmpeg::options)
 //! - **Dispatch:** `init_hardware_encoder` / `encode_gpu_frame` in this module
-//! - **Codec name, GPU transport flags:** [`EncoderConfig`](crate::encode::encoder_mod::EncoderConfig) in `encoder_mod/types.rs`
-//!   (`ffmpeg_codec_name`, `supports_gpu_frame_transport`, `gpu_texture_format`)
-//! - **Availability probe + auto-detect order:** `encoder_mod/functions.rs` (`encoder_name_for_type`,
-//!   `probe_encoder_available`, `detect_hardware_encoder`)
+//! - **Codec name, GPU transport flags:** [`ResolvedEncoderConfig`](crate::encode::encoder_mod::ResolvedEncoderConfig)
+//!   in `encoder_mod/types.rs` (`ffmpeg_codec_name`, `supports_gpu_frame_transport`, `gpu_texture_format`)
+//! - **Availability probe + auto-detect order:** `encoder_mod/functions.rs` (`probe_encoder_available`,
+//!   `detect_hardware_encoder`)
 //! - **User-facing enum + labels:** `config/config_mod/types.rs` (`EncoderType`), `gui/settings.rs` (encoder picker)
 //!
 //! **FFmpeg / runtime:** Encoders must exist in the FFmpeg build linked at runtime. NVENC requires an NVIDIA
@@ -41,8 +41,8 @@ pub mod qsv;
 pub mod software;
 
 use self::context::D3d11HardwareContext;
-use super::{EncodedPacket, Encoder, EncoderConfig, StreamType};
-use anyhow::{Context, Result};
+use super::{EncodedPacket, Encoder, ResolvedEncoderConfig, ResolvedEncoderType, StreamType};
+use crate::encode::EncodeResult;
 use bytes::BytesMut;
 use crossbeam::channel::{unbounded, Receiver, Sender};
 use ffmpeg::color::{Primaries, Range, Space, TransferCharacteristic};
@@ -51,7 +51,7 @@ use std::collections::VecDeque;
 use tracing::{info, warn};
 
 pub struct FfmpegEncoder {
-    config: EncoderConfig,
+    config: ResolvedEncoderConfig,
     encoder: Option<ffmpeg::encoder::Video>,
     packet_tx: Sender<EncodedPacket>,
     packet_rx: Receiver<EncodedPacket>,
@@ -96,7 +96,7 @@ impl FfmpegEncoder {
         (*frame).color_trc = TransferCharacteristic::BT709.into();
     }
 
-    pub fn new(config: &EncoderConfig) -> Result<Self> {
+    pub fn new(config: &ResolvedEncoderConfig) -> EncodeResult<Self> {
         let (tx, rx) = unbounded();
         Ok(Self {
             config: config.clone(),
@@ -122,21 +122,17 @@ impl FfmpegEncoder {
         gpu_frame: &crate::capture::D3d11Frame,
         width: u32,
         height: u32,
-    ) -> Result<()> {
+    ) -> EncodeResult<()> {
         match self.config.encoder_type {
-            crate::config::EncoderType::Nvenc => {
+            ResolvedEncoderType::Nvenc => {
                 self.init_nvenc_hardware_encoder(gpu_frame, width, height)
             }
-            crate::config::EncoderType::Amf => {
+            ResolvedEncoderType::Amf => {
                 self.init_amf_hardware_encoder(gpu_frame, width, height)
             }
-            crate::config::EncoderType::Qsv => {
+            ResolvedEncoderType::Qsv => {
                 self.init_qsv_hardware_encoder(gpu_frame, width, height)
             }
-            _ => anyhow::bail!(
-                "Hardware encoder initialization not supported for {:?}",
-                self.config.encoder_type
-            ),
         }
     }
 
@@ -146,21 +142,17 @@ impl FfmpegEncoder {
         gpu_frame: &crate::capture::D3d11Frame,
         pts: i64,
         gop: i64,
-    ) -> Result<()> {
+    ) -> EncodeResult<()> {
         match self.config.encoder_type {
-            crate::config::EncoderType::Nvenc => {
+            ResolvedEncoderType::Nvenc => {
                 self.encode_nvenc_gpu_frame(frame, gpu_frame, pts, gop)
             }
-            crate::config::EncoderType::Amf => {
+            ResolvedEncoderType::Amf => {
                 self.encode_amf_gpu_frame(frame, gpu_frame, pts, gop)
             }
-            crate::config::EncoderType::Qsv => {
+            ResolvedEncoderType::Qsv => {
                 self.encode_qsv_gpu_frame(frame, gpu_frame, pts, gop)
             }
-            _ => anyhow::bail!(
-                "Hardware encoding not supported for {:?}",
-                self.config.encoder_type
-            ),
         }
     }
 
@@ -181,18 +173,19 @@ impl FfmpegEncoder {
 }
 
 impl Encoder for FfmpegEncoder {
-    fn init(&mut self, _config: &EncoderConfig) -> Result<()> {
+    fn init(&mut self, _config: &ResolvedEncoderConfig) -> EncodeResult<()> {
         self.running = true;
         Ok(())
     }
 
-    fn encode_frame(&mut self, frame: &crate::capture::CapturedFrame) -> Result<()> {
+    fn encode_frame(&mut self, frame: &crate::capture::CapturedFrame) -> EncodeResult<()> {
         let gpu_frame = frame.d3d11.as_deref();
 
         // Check if we can use GPU frame transport
-        let can_use_gpu = gpu_frame.is_some()
-            && self.supports_gpu_frames()
-            && self.gpu_frame_matches_encoder(gpu_frame.unwrap());
+        let can_use_gpu = match gpu_frame {
+            Some(gf) => self.supports_gpu_frames() && self.gpu_frame_matches_encoder(gf),
+            None => false,
+        };
         let needs_transport_reinit = if can_use_gpu {
             self.hw_context.is_none()
         } else {
@@ -281,9 +274,7 @@ impl Encoder for FfmpegEncoder {
                 dst_frame.set_kind(ffmpeg::picture::Type::None);
             }
 
-            encoder
-                .send_frame(dst_frame)
-                .context("Failed to send frame to encoder")?;
+            encoder.send_frame(dst_frame)?;
         }
 
         self.drain_encoder_packets(frame.timestamp)?;
@@ -291,7 +282,7 @@ impl Encoder for FfmpegEncoder {
         Ok(())
     }
 
-    fn flush(&mut self) -> Result<Vec<EncodedPacket>> {
+    fn flush(&mut self) -> EncodeResult<Vec<EncodedPacket>> {
         if let Some(ref mut encoder) = self.encoder {
             encoder.send_eof().ok();
         }

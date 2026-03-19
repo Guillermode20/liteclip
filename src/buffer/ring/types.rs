@@ -2,8 +2,8 @@
 //!
 //! SharedReplayBuffer wraps LockFreeReplayBuffer for thread-safe access.
 
+use crate::buffer::BufferResult;
 use crate::encode::EncodedPacket;
-use anyhow::Result;
 
 use super::lockfree::LockFreeReplayBuffer;
 
@@ -14,7 +14,7 @@ pub struct SharedReplayBuffer {
 }
 
 impl SharedReplayBuffer {
-    pub fn new(config: &crate::config::Config) -> Result<Self> {
+    pub fn new(config: &crate::config::Config) -> BufferResult<Self> {
         let inner = LockFreeReplayBuffer::new(config)?;
         Ok(Self { inner })
     }
@@ -27,11 +27,11 @@ impl SharedReplayBuffer {
         self.inner.push(packet);
     }
 
-    pub fn snapshot(&self) -> Result<Vec<EncodedPacket>> {
+    pub fn snapshot(&self) -> BufferResult<Vec<EncodedPacket>> {
         self.inner.snapshot()
     }
 
-    pub fn snapshot_from(&self, start_pts: i64) -> Result<Vec<EncodedPacket>> {
+    pub fn snapshot_from(&self, start_pts: i64) -> BufferResult<Vec<EncodedPacket>> {
         self.inner.snapshot_from(start_pts)
     }
 

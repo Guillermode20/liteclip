@@ -21,7 +21,7 @@
 //! let mut state = AppState::new(config).unwrap();
 //!
 //! // Start recording
-//! // state.start_recording().await.unwrap();
+//! // state.start_recording().unwrap();
 //! ```
 
 pub mod clip;

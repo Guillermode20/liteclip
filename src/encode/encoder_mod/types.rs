@@ -5,7 +5,6 @@
 
 #[cfg(windows)]
 use crate::capture::GpuTextureFormat;
-use anyhow::Result;
 use bytes::Bytes;
 use crossbeam::channel::{Receiver, Sender};
 
@@ -95,10 +94,88 @@ pub enum HardwareEncoder {
     None,
 }
 
-/// Encoder configuration for video encoding.
+/// Concrete hardware encoder after `Auto` has been resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolvedEncoderType {
+    Nvenc,
+    Amf,
+    Qsv,
+}
+
+impl ResolvedEncoderType {
+    /// FFmpeg HEVC encoder name for probe / open.
+    pub fn ffmpeg_hevc_codec_name(self) -> &'static str {
+        match self {
+            ResolvedEncoderType::Nvenc => "hevc_nvenc",
+            ResolvedEncoderType::Amf => "hevc_amf",
+            ResolvedEncoderType::Qsv => "hevc_qsv",
+        }
+    }
+}
+
+impl From<ResolvedEncoderType> for crate::config::EncoderType {
+    fn from(t: ResolvedEncoderType) -> Self {
+        match t {
+            ResolvedEncoderType::Nvenc => Self::Nvenc,
+            ResolvedEncoderType::Amf => Self::Amf,
+            ResolvedEncoderType::Qsv => Self::Qsv,
+        }
+    }
+}
+
+/// Encoder configuration after `EncoderType::Auto` has been resolved.
 ///
-/// Controls encoding parameters including bitrate, framerate, resolution,
-/// encoder selection (NVENC/AMF/QSV/software), and quality settings.
+/// All FFmpeg codec / GPU-transport helpers are only available here so missing resolution
+/// cannot compile or become a runtime panic.
+#[derive(Debug, Clone)]
+pub struct ResolvedEncoderConfig {
+    /// Target bitrate in Mbps.
+    pub bitrate_mbps: u32,
+    /// Target framerate.
+    pub framerate: u32,
+    /// Output resolution as (width, height).
+    pub resolution: (u32, u32),
+    /// Whether to use native capture resolution (ignores resolution field).
+    pub use_native_resolution: bool,
+    pub encoder_type: ResolvedEncoderType,
+    /// Quality preset preference (speed vs quality).
+    pub quality_preset: crate::config::QualityPreset,
+    /// Rate control mode preference.
+    pub rate_control: crate::config::RateControl,
+    /// Optional quality scalar (e.g., CQ/CRF-like).
+    pub quality_value: Option<u8>,
+    /// Keyframe interval in seconds.
+    pub keyframe_interval_secs: u32,
+    /// Force CPU readback path (Phase 1 fallback).
+    pub use_cpu_readback: bool,
+    /// Desktop output index for capture/desktop-grab input selection.
+    pub output_index: u32,
+}
+
+impl ResolvedEncoderConfig {
+    /// FFmpeg HEVC encoder name for this resolved encoder.
+    pub fn ffmpeg_codec_name(&self) -> &'static str {
+        self.encoder_type.ffmpeg_hevc_codec_name()
+    }
+
+    pub fn keyframe_interval_frames(&self) -> u32 {
+        self.keyframe_interval_secs * self.framerate
+    }
+
+    pub fn supports_gpu_frame_transport(&self) -> bool {
+        true
+    }
+
+    #[cfg(windows)]
+    pub fn gpu_texture_format(&self) -> Option<GpuTextureFormat> {
+        Some(GpuTextureFormat::Nv12)
+    }
+}
+
+/// User / config-phase encoder parameters (may include [`crate::config::EncoderType::Auto`]).
+///
+/// Call [`crate::encode::resolve_effective_encoder_config`] (or the internal resolver) before
+/// opening FFmpeg or interpreting hardware codec names.
 #[derive(Debug, Clone)]
 pub struct EncoderConfig {
     /// Target bitrate in Mbps.
@@ -156,23 +233,7 @@ impl EncoderConfig {
             output_index: 0,
         }
     }
-    // Hardware encoder registry: changing codec names or which types use GPU transport must stay
-    // aligned with `encode::ffmpeg` (see module docs there), `encoder_mod/functions.rs`
-    // (`encoder_name_for_type`, `probe_encoder_available`, `detect_hardware_encoder`),
-    // `config::EncoderType`, and `gui/settings.rs`.
-    /// Get the FFmpeg HEVC encoder name based on encoder type
-    pub fn ffmpeg_codec_name(&self) -> &'static str {
-        match self.encoder_type {
-            crate::config::EncoderType::Nvenc => "hevc_nvenc",
-            crate::config::EncoderType::Amf => "hevc_amf",
-            crate::config::EncoderType::Qsv => "hevc_qsv",
-            crate::config::EncoderType::Auto => {
-                unreachable!(
-                    "auto encoder selection must be resolved before choosing an FFmpeg codec"
-                )
-            }
-        }
-    }
+
     /// Calculate keyframe interval in frames
     pub fn keyframe_interval_frames(&self) -> u32 {
         self.keyframe_interval_secs * self.framerate
@@ -197,14 +258,15 @@ impl EncoderConfig {
         }
     }
 }
+
 /// Encoder thread handle
 pub struct EncoderHandle {
     /// Join handle for the encoder thread
-    pub thread: std::thread::JoinHandle<Result<()>>,
+    pub thread: std::thread::JoinHandle<crate::encode::EncodeResult<()>>,
     /// Channel sender for frames (dropped to signal encoder thread to stop)
     pub frame_tx: Sender<crate::capture::CapturedFrame>,
     /// Health events emitted by encoder worker thread
     pub health_rx: Receiver<EncoderHealthEvent>,
     /// Effective encoder configuration after auto-selection/fallback decisions
-    pub effective_config: EncoderConfig,
+    pub effective_config: ResolvedEncoderConfig,
 }

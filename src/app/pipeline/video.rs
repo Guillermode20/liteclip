@@ -2,7 +2,10 @@ use crate::{
     buffer::ReplayBuffer,
     capture::{CaptureBackend, CaptureConfig, CaptureFactory, CapturedFrame},
     config::Config,
-    encode::{resolve_effective_encoder_config, EncoderConfig, EncoderFactory, EncoderHandle},
+    encode::{
+        resolve_effective_encoder_config, EncoderConfig, EncoderFactory, EncoderHandle,
+        ResolvedEncoderConfig,
+    },
 };
 use anyhow::{bail, Context, Result};
 use crossbeam::channel::Receiver;
@@ -15,7 +18,8 @@ pub fn start_video_pipeline(
     encoder_factory: &dyn EncoderFactory,
 ) -> Result<(Box<dyn CaptureBackend>, EncoderHandle)> {
     let requested_encoder_config = EncoderConfig::from(config);
-    let mut encoder_config = resolve_effective_encoder_config(&requested_encoder_config)?;
+    let mut encoder_config: ResolvedEncoderConfig =
+        resolve_effective_encoder_config(&requested_encoder_config)?;
 
     let mut capture = capture_factory
         .create()
@@ -65,6 +69,7 @@ pub fn start_video_pipeline(
     let frame_rx: Receiver<CapturedFrame> = capture.frame_rx();
     let encoder_handle = encoder_factory
         .spawn(encoder_config, buffer.clone(), frame_rx)
+        .map_err(anyhow::Error::from)
         .context("Failed to spawn encoder")?;
 
     Ok((capture, encoder_handle))

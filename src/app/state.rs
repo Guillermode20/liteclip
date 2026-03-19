@@ -18,6 +18,10 @@ use tracing::{error, info, warn};
 ///
 /// Uses `tokio::RwLock` for async-aware concurrent access.
 /// Multiple readers can access state simultaneously; writers get exclusive access.
+///
+/// Recording lifecycle (`start_recording` / `stop_recording`) is synchronous and may block
+/// briefly (e.g. joining the encoder thread). Call it from an async context knowing it can stall
+/// the current Tokio worker until completion.
 pub struct AppState {
     /// Application configuration.
     config: Config,
@@ -74,8 +78,8 @@ impl AppState {
     /// # Errors
     ///
     /// Returns an error if pipeline fails to start.
-    pub async fn start_recording(&mut self) -> Result<()> {
-        self.pipeline.start(&self.config, &self.buffer).await
+    pub fn start_recording(&mut self) -> Result<()> {
+        self.pipeline.start(&self.config, &self.buffer)
     }
 
     /// Stops the recording pipeline.
@@ -86,8 +90,8 @@ impl AppState {
     /// # Errors
     ///
     /// Returns an error if pipeline fails to stop cleanly.
-    pub async fn stop_recording(&mut self) -> Result<()> {
-        self.pipeline.stop().await
+    pub fn stop_recording(&mut self) -> Result<()> {
+        self.pipeline.stop()
     }
 
     /// Enforces pipeline health by checking for errors.
@@ -110,8 +114,8 @@ impl AppState {
     /// - `Ok(None)` if the pipeline is healthy or not running.
     /// - `Ok(Some(reason))` if a fatal error was detected and the pipeline was stopped.
     /// - `Err(...)` if the health check itself failed.
-    pub async fn enforce_pipeline_health(&mut self) -> Result<Option<String>> {
-        self.pipeline.enforce_health().await
+    pub fn enforce_pipeline_health(&mut self) -> Result<Option<String>> {
+        self.pipeline.enforce_health()
     }
 
     /// Gets the context needed for clip saving.
@@ -164,7 +168,7 @@ impl AppState {
             let old_config = self.config.clone();
 
             info!("Stopping pipeline for configuration change...");
-            self.pipeline.stop().await?;
+            self.pipeline.stop()?;
 
             info!("Restarting pipeline with new configuration...");
             self.config = new_config;
@@ -172,14 +176,14 @@ impl AppState {
 
             self.buffer = ReplayBuffer::new(&self.config)?;
 
-            if let Err(e) = self.pipeline.start(&self.config, &self.buffer).await {
+            if let Err(e) = self.pipeline.start(&self.config, &self.buffer) {
                 error!("Failed to start pipeline with new config: {}", e);
                 error!("Rolling back to previous configuration...");
 
                 self.config = old_config;
                 self.buffer = ReplayBuffer::new(&self.config)?;
 
-                match self.pipeline.start(&self.config, &self.buffer).await {
+                match self.pipeline.start(&self.config, &self.buffer) {
                     Ok(()) => {
                         warn!("Rollback successful - using previous configuration");
                     }

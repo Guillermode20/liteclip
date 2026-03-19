@@ -53,8 +53,10 @@ use windows::Win32::Graphics::Direct3D11::{
 pub mod audio;
 pub mod backpressure;
 pub mod dxgi;
+pub mod error;
 
 pub use dxgi::{DxgiCapture, DxgiCaptureFactory};
+pub use error::{CaptureError, CaptureResult};
 
 /// Configuration for screen capture.
 ///

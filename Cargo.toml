@@ -18,8 +18,6 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"
 
 # Concurrency
 crossbeam = "0.8"
-parking_lot = "0.12"
-
 # Config
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
@@ -41,8 +39,6 @@ windows = { version = "0.58", features = ["Win32_Media", "Win32_Graphics_Dxgi", 
 dirs = "6"
 chrono = "0.4"
 windows-core = "0.58"
-memchr = "2"
-
 # Tray
 tray-icon = "0.19"
 eframe = { version = "0.33.3", features = ["glow"] }

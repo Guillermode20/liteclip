@@ -5,11 +5,10 @@
 //!
 //! # Design
 //!
-//! The buffer uses a lock-free design optimized for the single-producer,
-//! multi-consumer (SPMC) pattern:
+//! SPMC ring with an atomic write index and per-slot mutexes (see `lockfree` module docs).
 //!
-//! - **Single Producer**: The encoding thread pushes packets atomically
-//! - **Multiple Consumers**: Clip saving operations read snapshots
+//! - **Single Producer**: Encoder pushes packets
+//! - **Multiple Consumers**: Clip saving reads snapshots
 //!
 //! # Key Types
 //!

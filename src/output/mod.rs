@@ -36,12 +36,14 @@
 //! let muxer_config = MuxerConfig::new(1920, 1080, 60.0, output_path);
 //! ```
 
+pub mod error;
 pub mod functions;
 pub mod mp4;
 pub mod saver;
 pub mod types;
 pub mod video_file;
 
+pub use error::{OutputError, OutputResult};
 pub use functions::{
     calculate_clip_start_pts, generate_output_path, generate_thumbnail, h264_nal_type,
     hevc_nal_type,

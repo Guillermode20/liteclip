@@ -1,19 +1,22 @@
-//! Lock-free replay buffer implementation
+//! SPMC replay buffer: atomic write index + per-slot mutexes
 //!
-//! This module provides a high-performance, lock-free ring buffer for storing
-//! encoded video and audio packets in memory.
+//! Stores encoded video and audio packets for the replay ring.
 //!
 //! # Design
 //!
-//! The buffer uses atomic indices for single-producer, multi-consumer (SPMC) access:
+//! Single-producer / multi-consumer (SPMC) **ring addressing** uses an atomic write index
+//! (`fetch_add`). Each slot still holds the packet behind a **per-slot `Mutex`** (and codec
+//! parameter metadata uses a small shared mutex until cached). That is **not** a lock-free
+//! push in the strict sense; it avoids one global queue lock while keeping snapshots safe.
 //!
-//! - **Single Producer**: The encoder thread pushes packets atomically via `fetch_add`
-//! - **Multiple Consumers**: Clip saving reads snapshots via optimistic locking
+//! Until `param_cache_complete` is set, **video** pushes also take `param_cache` to parse and
+//! store VPS/SPS/PPS — if profiling shows contention, consider supplying parameter sets from
+//! the encoder init path instead of NAL scanning here.
 //!
 //! # Features
 //!
-//! - Lock-free push operations (O(1))
-//! - Lock-free snapshot operations (O(n))
+//! - Push path: atomic slot selection + fine-grained slot locks (typical O(1) aside from lock hold time)
+//! - Snapshots walk the ring with `try_lock` on slots (non-blocking where possible; see implementation)
 //! - Parameter set caching (SPS/PPS/VPS) for proper clip decoding
 //! - Keyframe tracking for seekable clips
 //! - Memory and duration-based eviction
@@ -35,8 +38,8 @@
 //! let buffer = LockFreeReplayBuffer::new(&config).unwrap();
 //! ```
 
+use crate::buffer::BufferResult;
 use crate::encode::{EncodedPacket, StreamType};
-use anyhow::Result;
 use bytes::Bytes;
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -95,16 +98,15 @@ impl FirstVideoKind {
     }
 }
 
-/// Lock-free replay buffer.
+/// Replay buffer ring: atomic write cursor with mutex-protected slots.
 ///
-/// A high-performance ring buffer for storing encoded video and audio packets.
-/// Uses atomic indices for lock-free single-producer, multi-consumer access.
+/// See the [module-level description](self) for the locking model.
 ///
 /// # Thread Safety
 ///
-/// - Push operations are safe from a single producer thread
-/// - Snapshot/clear operations can be called from multiple consumer threads
-/// - Clone is cheap (shallow copy of Arc)
+/// - Push: intended for **one** producer thread (encoder / buffer writer).
+/// - Snapshot / clear: multiple consumer threads; see `try_lock` behavior on slots.
+/// - `Clone` is cheap (shallow `Arc` of inner state).
 #[derive(Clone)]
 pub struct LockFreeReplayBuffer {
     inner: Arc<LockFreeInner>,
@@ -158,7 +160,7 @@ impl LockFreeReplayBuffer {
     /// let config = Config::default();
     /// let buffer = LockFreeReplayBuffer::new(&config).unwrap();
     /// ```
-    pub fn new(config: &crate::config::Config) -> Result<Self> {
+    pub fn new(config: &crate::config::Config) -> BufferResult<Self> {
         let duration = Duration::from_secs(config.general.replay_duration_secs as u64 + 1);
         let effective_memory_limit_mb = config.effective_replay_memory_limit_mb();
         let max_memory_bytes = (effective_memory_limit_mb as usize).saturating_mul(1024 * 1024);
@@ -451,7 +453,7 @@ impl LockFreeReplayBuffer {
     /// # Thread Safety
     ///
     /// Safe to call from multiple consumer threads.
-    pub fn snapshot(&self) -> Result<Vec<EncodedPacket>> {
+    pub fn snapshot(&self) -> BufferResult<Vec<EncodedPacket>> {
         let inner = &self.inner;
         let write_idx = inner.write_idx.load(Ordering::Acquire);
 
@@ -581,7 +583,7 @@ impl LockFreeReplayBuffer {
     /// # Thread Safety
     ///
     /// Safe to call from multiple consumer threads.
-    pub fn snapshot_from(&self, start_pts: i64) -> Result<Vec<EncodedPacket>> {
+    pub fn snapshot_from(&self, start_pts: i64) -> BufferResult<Vec<EncodedPacket>> {
         let inner = &self.inner;
         let write_idx = inner.write_idx.load(Ordering::Acquire);
 

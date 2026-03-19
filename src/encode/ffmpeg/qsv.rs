@@ -13,11 +13,11 @@
 
 use std::ffi::CString;
 
-use anyhow::{Context, Result};
 use ffmpeg_next as ffmpeg;
 use tracing::info;
 
 use crate::config::RateControl;
+use crate::encode::{EncodeError, EncodeResult};
 
 use super::FfmpegEncoder;
 
@@ -27,10 +27,11 @@ impl FfmpegEncoder {
         gpu_frame: &crate::capture::D3d11Frame,
         width: u32,
         height: u32,
-    ) -> Result<()> {
+    ) -> EncodeResult<()> {
         let codec_name = self.config.ffmpeg_codec_name();
-        let codec = ffmpeg::encoder::find_by_name(codec_name)
-            .context(format!("Failed to find QSV encoder: {}", codec_name))?;
+        let codec = ffmpeg::encoder::find_by_name(codec_name).ok_or_else(|| {
+            EncodeError::msg(format!("Failed to find QSV encoder: {}", codec_name))
+        })?;
 
         let (out_w, out_h) = if self.config.use_native_resolution {
             (width, height)
@@ -39,16 +40,17 @@ impl FfmpegEncoder {
         };
 
         // Reuse capture device (Direct transport)
-        let d3d11_hw_context = self
-            .create_d3d11_hardware_context_from_device(&gpu_frame.device, out_w, out_h)
-            .context("Failed to create D3D11 hardware context for QSV derivation")?;
+        let d3d11_hw_context =
+            self.create_d3d11_hardware_context_from_device(&gpu_frame.device, out_w, out_h)?;
 
         unsafe {
             // Derive QSV device from D3D11 device
             let qsv_type_name = CString::new("qsv").expect("static string");
             let qsv_type = ffmpeg::ffi::av_hwdevice_find_type_by_name(qsv_type_name.as_ptr());
             if qsv_type == ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_NONE {
-                anyhow::bail!("FFmpeg QSV hardware device type is unavailable");
+                return Err(EncodeError::msg(
+                    "FFmpeg QSV hardware device type is unavailable",
+                ));
             }
 
             let mut qsv_device_ctx_ref = std::ptr::null_mut();
@@ -59,14 +61,17 @@ impl FfmpegEncoder {
                 0,
             );
             if derive_res < 0 {
-                anyhow::bail!("Failed to derive QSV device from D3D11: {}", derive_res);
+                return Err(EncodeError::msg(format!(
+                    "Failed to derive QSV device from D3D11: {}",
+                    derive_res
+                )));
             }
 
             // Derive QSV frames context from D3D11 frames context
             let mut qsv_frames_ctx_ref = ffmpeg::ffi::av_hwframe_ctx_alloc(qsv_device_ctx_ref);
             if qsv_frames_ctx_ref.is_null() {
                 ffmpeg::ffi::av_buffer_unref(&mut qsv_device_ctx_ref);
-                anyhow::bail!("Failed to allocate QSV frames context");
+                return Err(EncodeError::msg("Failed to allocate QSV frames context"));
             }
 
             let derive_frames_res = ffmpeg::ffi::av_hwframe_ctx_create_derived(
@@ -79,10 +84,10 @@ impl FfmpegEncoder {
             if derive_frames_res < 0 {
                 ffmpeg::ffi::av_buffer_unref(&mut qsv_frames_ctx_ref);
                 ffmpeg::ffi::av_buffer_unref(&mut qsv_device_ctx_ref);
-                anyhow::bail!(
+                return Err(EncodeError::msg(format!(
                     "Failed to derive QSV frames from D3D11: {}",
                     derive_frames_res
-                );
+                )));
             }
 
             // Replace D3D11 references in context with QSV ones for the encoder
@@ -90,7 +95,7 @@ impl FfmpegEncoder {
             let mut encoder = ffmpeg::codec::context::Context::new_with_codec(codec)
                 .encoder()
                 .video()
-                .context("Failed to create QSV encoder context")?;
+                .map_err(|e| EncodeError::ffmpeg(e))?;
 
             encoder.set_width(out_w);
             encoder.set_height(out_h);
@@ -117,9 +122,7 @@ impl FfmpegEncoder {
             let mut options = ffmpeg::Dictionary::new();
             self.apply_codec_specific_options(&mut options, bitrate)?;
 
-            let encoder = encoder
-                .open_with(options)
-                .context("Failed to open QSV encoder")?;
+            let encoder = encoder.open_with(options)?;
 
             self.encoder = Some(encoder);
             self.hw_context = Some(d3d11_hw_context);
@@ -162,7 +165,7 @@ impl FfmpegEncoder {
         gpu_frame: &crate::capture::D3d11Frame,
         pts: i64,
         gop: i64,
-    ) -> Result<()> {
+    ) -> EncodeResult<()> {
         let Some(ref mut encoder) = self.encoder else {
             return Ok(());
         };
@@ -172,13 +175,12 @@ impl FfmpegEncoder {
 
         unsafe {
             let d3d11_frame = hw_context.reusable_hw_frame;
-            Self::prepare_hw_frame(hw_context, d3d11_frame, gpu_frame)
-                .context("Failed to prepare D3D11 frame for QSV mapping")?;
+            Self::prepare_hw_frame(hw_context, d3d11_frame, gpu_frame)?;
 
             // Allocate a QSV surface
             let mut qsv_frame = ffmpeg::ffi::av_frame_alloc();
             if qsv_frame.is_null() {
-                anyhow::bail!("Failed to allocate QSV frame");
+                return Err(EncodeError::msg("Failed to allocate QSV frame"));
             }
 
             // Map D3D11 surface to QSV surface
@@ -190,7 +192,10 @@ impl FfmpegEncoder {
 
             if map_res < 0 {
                 ffmpeg::ffi::av_frame_free(&mut qsv_frame);
-                anyhow::bail!("Failed to map D3D11 surface to QSV: {}", map_res);
+                return Err(EncodeError::msg(format!(
+                    "Failed to map D3D11 surface to QSV: {}",
+                    map_res
+                )));
             }
 
             (*qsv_frame).pts = pts;
@@ -207,10 +212,10 @@ impl FfmpegEncoder {
             ffmpeg::ffi::av_frame_free(&mut qsv_frame);
 
             if send_result < 0 {
-                anyhow::bail!(
+                return Err(EncodeError::msg(format!(
                     "Failed to send mapped QSV frame to encoder: {}",
                     send_result
-                );
+                )));
             }
         }
 

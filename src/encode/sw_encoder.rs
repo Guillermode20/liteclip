@@ -5,8 +5,8 @@
 //! Each worker pre-allocates its RGB conversion buffer to avoid per-frame
 //! allocation overhead.
 
-use super::{EncodedPacket, Encoder, EncoderConfig};
-use anyhow::Result;
+use super::{EncodedPacket, Encoder, ResolvedEncoderConfig};
+use crate::encode::{EncodeError, EncodeResult};
 use bytes::Bytes;
 use crossbeam::channel::{bounded, Receiver, Sender, TrySendError};
 use image::{codecs::jpeg::JpegEncoder, ExtendedColorType};
@@ -27,16 +27,16 @@ fn bgra_to_jpeg_reuse(
     out_h: usize,
     quality: u8,
     rgb_buf: &mut Vec<u8>,
-) -> Result<Vec<u8>> {
+) -> EncodeResult<Vec<u8>> {
     let expected_len = src_w * src_h * 4;
     if bgra.len() != expected_len {
-        anyhow::bail!(
+        return Err(EncodeError::msg(format!(
             "Invalid BGRA size: got={}, expected={} ({}x{})",
             bgra.len(),
             expected_len,
             src_w,
             src_h
-        );
+        )));
     }
 
     let rgb_len = out_w * out_h * 3;
@@ -104,7 +104,8 @@ fn bgra_to_jpeg_reuse(
     // Encode to JPEG – pre-allocate output based on typical compression ratio
     let mut out = Vec::with_capacity(rgb_len / 6);
     let mut enc = JpegEncoder::new_with_quality(&mut out, quality);
-    enc.encode(rgb_buf, out_w as u32, out_h as u32, ExtendedColorType::Rgb8)?;
+    enc.encode(rgb_buf, out_w as u32, out_h as u32, ExtendedColorType::Rgb8)
+        .map_err(|e| EncodeError::msg(format!("JPEG encode: {}", e)))?;
     Ok(out)
 }
 
@@ -114,9 +115,11 @@ fn bgra_to_jpeg(
     output_width: u32,
     output_height: u32,
     quality: u8,
-) -> Result<Vec<u8>> {
+) -> EncodeResult<Vec<u8>> {
     if frame.d3d11.is_some() {
-        anyhow::bail!("software JPEG encoding requires CPU-readable BGRA frames");
+        return Err(EncodeError::msg(
+            "software JPEG encoding requires CPU-readable BGRA frames",
+        ));
     }
     let (sw, sh) = frame.resolution;
     let mut rgb_buf = Vec::new();
@@ -135,7 +138,7 @@ fn bgra_to_jpeg(
 
 /// Minimal encoder that converts each frame to JPEG on the caller thread.
 pub struct StubEncoder {
-    config: EncoderConfig,
+    config: ResolvedEncoderConfig,
     packet_rx: Receiver<EncodedPacket>,
     packet_tx: Sender<EncodedPacket>,
     frame_count: u64,
@@ -143,7 +146,7 @@ pub struct StubEncoder {
 }
 
 impl StubEncoder {
-    pub fn new(config: &EncoderConfig) -> Result<Self> {
+    pub fn new(config: &ResolvedEncoderConfig) -> EncodeResult<Self> {
         info!("Creating stub encoder");
         let (tx, rx) = bounded(64);
         Ok(Self {
@@ -157,14 +160,14 @@ impl StubEncoder {
 }
 
 impl Encoder for StubEncoder {
-    fn init(&mut self, config: &EncoderConfig) -> Result<()> {
+    fn init(&mut self, config: &ResolvedEncoderConfig) -> EncodeResult<()> {
         self.config = config.clone();
         self.running = true;
         info!("Stub encoder initialized");
         Ok(())
     }
 
-    fn encode_frame(&mut self, frame: &crate::capture::CapturedFrame) -> Result<()> {
+    fn encode_frame(&mut self, frame: &crate::capture::CapturedFrame) -> EncodeResult<()> {
         let is_keyframe = self.frame_count % 30 == 0;
 
         // Use native resolution if configured, otherwise use config resolution
@@ -190,7 +193,7 @@ impl Encoder for StubEncoder {
         Ok(())
     }
 
-    fn flush(&mut self) -> Result<Vec<EncodedPacket>> {
+    fn flush(&mut self) -> EncodeResult<Vec<EncodedPacket>> {
         self.running = false;
         Ok(vec![])
     }
@@ -224,7 +227,7 @@ struct WorkItem {
 /// worker threads each maintain their own pre-allocated RGB buffer and
 /// JPEG-compress frames in parallel.
 pub struct SoftwareEncoder {
-    config: EncoderConfig,
+    config: ResolvedEncoderConfig,
     packet_rx: Receiver<EncodedPacket>,
     frame_count: u64,
     running: bool,
@@ -237,7 +240,7 @@ pub struct SoftwareEncoder {
 
 impl SoftwareEncoder {
     /// Create a new software encoder backed by a thread pool.
-    pub fn new(config: &EncoderConfig) -> Result<Self> {
+    pub fn new(config: &ResolvedEncoderConfig) -> EncodeResult<Self> {
         let num_workers = thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4)
@@ -321,7 +324,7 @@ impl SoftwareEncoder {
 }
 
 impl Encoder for SoftwareEncoder {
-    fn init(&mut self, config: &EncoderConfig) -> Result<()> {
+    fn init(&mut self, config: &ResolvedEncoderConfig) -> EncodeResult<()> {
         self.config = config.clone();
         self.running = true;
         info!(
@@ -334,9 +337,11 @@ impl Encoder for SoftwareEncoder {
         Ok(())
     }
 
-    fn encode_frame(&mut self, frame: &crate::capture::CapturedFrame) -> Result<()> {
+    fn encode_frame(&mut self, frame: &crate::capture::CapturedFrame) -> EncodeResult<()> {
         if frame.d3d11.is_some() {
-            anyhow::bail!("software encoder cannot consume GPU-backed frames");
+            return Err(EncodeError::msg(
+                "software encoder cannot consume GPU-backed frames",
+            ));
         }
         let item = WorkItem {
             bgra: frame.bgra.clone(), // Bytes clone = ref-count bump, O(1)
@@ -382,7 +387,7 @@ impl Encoder for SoftwareEncoder {
         Ok(())
     }
 
-    fn flush(&mut self) -> Result<Vec<EncodedPacket>> {
+    fn flush(&mut self) -> EncodeResult<Vec<EncodedPacket>> {
         info!(
             "Flushing software encoder ({} frames dispatched)",
             self.frame_count
@@ -405,26 +410,41 @@ impl Encoder for SoftwareEncoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::encode::EncoderConfig;
+    use crate::encode::ResolvedEncoderType;
 
-    fn create_test_config() -> EncoderConfig {
-        EncoderConfig::new(20, 30, (1920, 1080), crate::config::EncoderType::Amf, 1)
+    fn create_test_resolved() -> ResolvedEncoderConfig {
+        let c = EncoderConfig::new(20, 30, (1920, 1080), crate::config::EncoderType::Amf, 1);
+        ResolvedEncoderConfig {
+            bitrate_mbps: c.bitrate_mbps,
+            framerate: c.framerate,
+            resolution: c.resolution,
+            use_native_resolution: c.use_native_resolution,
+            encoder_type: ResolvedEncoderType::Amf,
+            quality_preset: c.quality_preset,
+            rate_control: c.rate_control,
+            quality_value: c.quality_value,
+            keyframe_interval_secs: c.keyframe_interval_secs,
+            use_cpu_readback: c.use_cpu_readback,
+            output_index: c.output_index,
+        }
     }
 
     #[test]
     fn test_stub_encoder_creation() {
-        let config = create_test_config();
+        let config = create_test_resolved();
         assert!(StubEncoder::new(&config).is_ok());
     }
 
     #[test]
     fn test_software_encoder_creation() {
-        let config = create_test_config();
+        let config = create_test_resolved();
         assert!(SoftwareEncoder::new(&config).is_ok());
     }
 
     #[test]
     fn test_encoder_codec_name() {
-        let config = create_test_config();
+        let config = create_test_resolved();
         assert_eq!(config.ffmpeg_codec_name(), "hevc_amf");
     }
 }

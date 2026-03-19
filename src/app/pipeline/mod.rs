@@ -37,7 +37,7 @@
 //! let buffer = ReplayBuffer::new(&config).unwrap();
 //!
 //! // Start recording
-//! // pipeline.start(&config, &buffer).await.unwrap();
+//! // pipeline.start(&config, &buffer).unwrap();
 //! ```
 
 pub mod audio;

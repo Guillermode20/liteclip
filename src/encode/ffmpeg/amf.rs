@@ -4,7 +4,6 @@
 
 use std::ffi::CString;
 
-use anyhow::{Context, Result};
 use ffmpeg::format::Pixel;
 use ffmpeg_next as ffmpeg;
 use tracing::{info, warn};
@@ -16,6 +15,7 @@ use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 use windows_core::Interface;
 
 use crate::config::{QualityPreset, RateControl};
+use crate::encode::{EncodeError, EncodeResult};
 
 use super::context::{AvD3d11vaDeviceContext, D3d11HardwareContext};
 use super::FfmpegEncoder;
@@ -81,17 +81,17 @@ impl FfmpegEncoder {
         gpu_frame: &crate::capture::D3d11Frame,
         width: u32,
         height: u32,
-    ) -> Result<D3d11HardwareContext> {
+    ) -> EncodeResult<D3d11HardwareContext> {
         unsafe {
-            let dxgi_device: IDXGIDevice = gpu_frame
-                .device
+            let dxgi_device: IDXGIDevice = gpu_frame.device.cast().map_err(|e| {
+                EncodeError::msg(format!("Failed to get IDXGIDevice from capture D3D11 device: {}", e))
+            })?;
+            let adapter = dxgi_device.GetAdapter().map_err(|e| {
+                EncodeError::msg(format!("Failed to get DXGI adapter from capture device: {}", e))
+            })?;
+            let adapter_typed: windows::Win32::Graphics::Dxgi::IDXGIAdapter = adapter
                 .cast()
-                .context("Failed to get IDXGIDevice from capture D3D11 device")?;
-            let adapter = dxgi_device
-                .GetAdapter()
-                .context("Failed to get DXGI adapter from capture device")?;
-            let adapter_typed: windows::Win32::Graphics::Dxgi::IDXGIAdapter =
-                adapter.cast().context("Failed to cast DXGI adapter")?;
+                .map_err(|e| EncodeError::msg(format!("Failed to cast DXGI adapter: {}", e)))?;
 
             let feature_levels = [
                 windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_1,
@@ -110,22 +110,27 @@ impl FfmpegEncoder {
                 None,
                 Some(&mut encoder_context_opt),
             )
-            .ok()
-            .context("Failed to create encoder D3D11 device")?;
-            let encoder_device = encoder_device_opt.context("Encoder D3D11 device is null")?;
-            let encoder_context = encoder_context_opt.context("Encoder D3D11 context is null")?;
+            .map_err(|e| EncodeError::msg(format!("Failed to create encoder D3D11 device: {}", e)))?;
+            let encoder_device = encoder_device_opt
+                .ok_or_else(|| EncodeError::msg("Encoder D3D11 device is null"))?;
+            let encoder_context = encoder_context_opt
+                .ok_or_else(|| EncodeError::msg("Encoder D3D11 context is null"))?;
 
             info!("Encoder using separate D3D11 device (isolated from capture thread)");
 
             let device_type_name = CString::new("d3d11va").expect("static string");
             let device_type = ffmpeg::ffi::av_hwdevice_find_type_by_name(device_type_name.as_ptr());
             if device_type == ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_NONE {
-                anyhow::bail!("FFmpeg D3D11VA hardware device type is unavailable");
+                return Err(EncodeError::msg(
+                    "FFmpeg D3D11VA hardware device type is unavailable",
+                ));
             }
 
             let device_ctx_ref = ffmpeg::ffi::av_hwdevice_ctx_alloc(device_type);
             if device_ctx_ref.is_null() {
-                anyhow::bail!("Failed to allocate FFmpeg D3D11 device context");
+                return Err(EncodeError::msg(
+                    "Failed to allocate FFmpeg D3D11 device context",
+                ));
             }
 
             let hw_device_ctx = (*device_ctx_ref).data as *mut ffmpeg::ffi::AVHWDeviceContext;
@@ -140,15 +145,16 @@ impl FfmpegEncoder {
             if init_result < 0 {
                 let mut device_ctx_ref = device_ctx_ref;
                 ffmpeg::ffi::av_buffer_unref(&mut device_ctx_ref);
-                anyhow::bail!(
+                return Err(EncodeError::msg(format!(
                     "Failed to initialize FFmpeg D3D11 device context: {}",
                     init_result
-                );
+                )));
             }
 
             let pool_sizes: &[i32] = &[0, 4, 2];
             let sw_format = self.hardware_frame_sw_format();
-            let mut frames_ctx_ref_result = Err(anyhow::anyhow!("no pool sizes tried"));
+            let mut frames_ctx_ref_result: EncodeResult<*mut ffmpeg::ffi::AVBufferRef> =
+                Err(EncodeError::msg("no pool sizes tried"));
             for &pool_size in pool_sizes {
                 match Self::create_hw_frames_ctx_with_pool_size(
                     device_ctx_ref,
@@ -196,7 +202,9 @@ impl FfmpegEncoder {
                 let mut device_ctx_ref = device_ctx_ref;
                 ffmpeg::ffi::av_buffer_unref(&mut frames_ctx_ref);
                 ffmpeg::ffi::av_buffer_unref(&mut device_ctx_ref);
-                anyhow::bail!("Failed to allocate reusable FFmpeg hardware frame");
+                return Err(EncodeError::msg(
+                    "Failed to allocate reusable FFmpeg hardware frame",
+                ));
             }
 
             Ok(D3d11HardwareContext {
@@ -217,10 +225,11 @@ impl FfmpegEncoder {
         gpu_frame: &crate::capture::D3d11Frame,
         width: u32,
         height: u32,
-    ) -> Result<()> {
+    ) -> EncodeResult<()> {
         let codec_name = self.config.ffmpeg_codec_name();
-        let codec = ffmpeg::encoder::find_by_name(codec_name)
-            .context(format!("Failed to find AMF encoder: {}", codec_name))?;
+        let codec = ffmpeg::encoder::find_by_name(codec_name).ok_or_else(|| {
+            EncodeError::msg(format!("Failed to find AMF encoder: {}", codec_name))
+        })?;
 
         let (out_w, out_h) = if self.config.use_native_resolution {
             (width, height)
@@ -229,14 +238,13 @@ impl FfmpegEncoder {
         };
 
         // Reuse capture device (Optimization 4)
-        let hw_context = self
-            .create_d3d11_hardware_context_from_device(&gpu_frame.device, out_w, out_h)
-            .context("Failed to create hardware context from shared device")?;
+        let hw_context =
+            self.create_d3d11_hardware_context_from_device(&gpu_frame.device, out_w, out_h)?;
 
         let mut encoder = ffmpeg::codec::context::Context::new_with_codec(codec)
             .encoder()
             .video()
-            .context("Failed to create encoder context")?;
+            .map_err(|e| EncodeError::ffmpeg(e))?;
 
         encoder.set_width(out_w);
         encoder.set_height(out_h);
@@ -261,9 +269,7 @@ impl FfmpegEncoder {
         options.set("bf", "0");
         self.apply_codec_specific_options(&mut options, bitrate)?;
 
-        let encoder = encoder
-            .open_with(options)
-            .context("Failed to open AMF encoder")?;
+        let encoder = encoder.open_with(options)?;
 
         self.encoder = Some(encoder);
         self.hw_context = Some(hw_context);
@@ -289,7 +295,7 @@ impl FfmpegEncoder {
         gpu_frame: &crate::capture::D3d11Frame,
         pts: i64,
         gop: i64,
-    ) -> Result<()> {
+    ) -> EncodeResult<()> {
         let Some(ref mut encoder) = self.encoder else {
             return Ok(());
         };
@@ -299,8 +305,7 @@ impl FfmpegEncoder {
 
         unsafe {
             let hw_frame = hw_context.reusable_hw_frame;
-            Self::prepare_hw_frame(hw_context, hw_frame, gpu_frame)
-                .context("Failed to prepare hardware frame for AMF")?;
+            Self::prepare_hw_frame(hw_context, hw_frame, gpu_frame)?;
 
             (*hw_frame).pts = pts;
             if gop > 0 && self.frame_count % gop == 0 {
@@ -314,7 +319,10 @@ impl FfmpegEncoder {
 
             let send_result = ffmpeg::ffi::avcodec_send_frame(encoder.as_mut_ptr(), hw_frame);
             if send_result < 0 {
-                anyhow::bail!("Failed to send D3D11 frame to encoder: {}", send_result);
+                return Err(EncodeError::msg(format!(
+                    "Failed to send D3D11 frame to encoder: {}",
+                    send_result
+                )));
             }
         }
 

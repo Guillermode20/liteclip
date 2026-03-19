@@ -22,54 +22,12 @@ use windows_core::Interface;
 use crate::output::functions::ffmpeg_executable_path;
 use crate::output::VideoFileMetadata;
 
+mod frame_pool;
+
+use frame_pool::{FramePool, FRAME_POOL_SIZE};
+
 const FRAME_CHANNEL_CAPACITY: usize = 24;
 const PLAYBACK_QUEUE_DEPTH: usize = 20;
-const FRAME_POOL_SIZE: usize = 32;
-const FRAME_POOL_HARD_LIMIT: usize = 64;
-
-struct FramePool {
-    buffers: Mutex<VecDeque<Vec<u8>>>,
-    buffer_size: usize,
-    total_created: Mutex<usize>,
-}
-
-impl FramePool {
-    fn new(width: u32, height: u32, capacity: usize) -> Self {
-        let buffer_size = (width as usize) * (height as usize) * 4;
-        let buffers: VecDeque<Vec<u8>> = (0..capacity).map(|_| vec![0u8; buffer_size]).collect();
-        Self {
-            buffers: Mutex::new(buffers),
-            buffer_size,
-            total_created: Mutex::new(capacity),
-        }
-    }
-
-    fn acquire(&self) -> Option<Vec<u8>> {
-        let mut guard = self.buffers.lock().unwrap();
-        if let Some(buffer) = guard.pop_front() {
-            return Some(buffer);
-        }
-
-        let mut total = self.total_created.lock().unwrap();
-        if *total >= FRAME_POOL_HARD_LIMIT {
-            return None;
-        }
-        *total += 1;
-        Some(vec![0u8; self.buffer_size])
-    }
-
-    #[allow(dead_code)]
-    fn release(&self, buffer: Vec<u8>) {
-        let mut guard = self.buffers.lock().unwrap();
-        if guard.len() < FRAME_POOL_HARD_LIMIT {
-            guard.push_back(buffer);
-        }
-    }
-
-    fn buffer_size(&self) -> usize {
-        self.buffer_size
-    }
-}
 
 #[repr(C)]
 #[allow(dead_code)]
@@ -420,9 +378,9 @@ impl PlaybackController {
     fn request_preview_at(&mut self, time_secs: f64) {
         let clamped_time = self.clamp_time(time_secs);
         self.stop_audio();
-        *self.shared.current_time_secs.lock().unwrap() = clamped_time;
-        *self.shared.playing_since.lock().unwrap() = None;
-        self.shared.frame_queue.lock().unwrap().clear();
+        *self.shared.current_time_secs.lock().unwrap_or_else(|e| e.into_inner()) = clamped_time;
+        *self.shared.playing_since.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        self.shared.frame_queue.lock().unwrap_or_else(|e| e.into_inner()).clear();
         self.decoder.stop();
 
         let request_id = self.next_request_id();
@@ -433,15 +391,15 @@ impl PlaybackController {
             self.shared
                 .video_request_in_flight
                 .store(false, Ordering::SeqCst);
-            *self.shared.last_error.lock().unwrap() = Some(err.to_string());
+            *self.shared.last_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(err.to_string());
         }
     }
 
     pub fn play_from(&mut self, time_secs: f64) {
         let clamped_time = self.clamp_time(time_secs);
-        self.shared.frame_queue.lock().unwrap().clear();
-        *self.shared.current_time_secs.lock().unwrap() = clamped_time;
-        *self.shared.playing_since.lock().unwrap() = Some(PlaybackClock {
+        self.shared.frame_queue.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        *self.shared.current_time_secs.lock().unwrap_or_else(|e| e.into_inner()) = clamped_time;
+        *self.shared.playing_since.lock().unwrap_or_else(|e| e.into_inner()) = Some(PlaybackClock {
             start_time_secs: clamped_time,
             started_at: None, // Wait for first frame to start clock and audio
         });
@@ -453,8 +411,8 @@ impl PlaybackController {
             .store(false, Ordering::SeqCst);
         if let Err(err) = self.decoder.start_playback(request_id, clamped_time) {
             tracing::error!("play_from: failed to start playback: {}", err);
-            *self.shared.playing_since.lock().unwrap() = None;
-            *self.shared.last_error.lock().unwrap() = Some(err.to_string());
+            *self.shared.playing_since.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            *self.shared.last_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(err.to_string());
             return;
         }
         self.stop_audio();
@@ -462,9 +420,9 @@ impl PlaybackController {
 
     pub fn pause_at(&mut self, time_secs: f64) {
         let clamped_time = self.clamp_time(time_secs);
-        *self.shared.current_time_secs.lock().unwrap() = clamped_time;
-        *self.shared.playing_since.lock().unwrap() = None;
-        self.shared.frame_queue.lock().unwrap().clear();
+        *self.shared.current_time_secs.lock().unwrap_or_else(|e| e.into_inner()) = clamped_time;
+        *self.shared.playing_since.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        self.shared.frame_queue.lock().unwrap_or_else(|e| e.into_inner()).clear();
         self.shared
             .video_request_in_flight
             .store(false, Ordering::SeqCst);
@@ -474,18 +432,18 @@ impl PlaybackController {
     }
 
     pub fn playback_position_secs(&self) -> f64 {
-        let maybe_clock = self.shared.playing_since.lock().unwrap();
+        let maybe_clock = self.shared.playing_since.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(clock) = maybe_clock.as_ref() {
             if let Some(started_at) = clock.started_at {
                 return self.clamp_time(clock.start_time_secs + started_at.elapsed().as_secs_f64());
             }
             return self.clamp_time(clock.start_time_secs);
         }
-        *self.shared.current_time_secs.lock().unwrap()
+        *self.shared.current_time_secs.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     pub fn is_playing(&self) -> bool {
-        self.shared.playing_since.lock().unwrap().is_some()
+        self.shared.playing_since.lock().unwrap_or_else(|e| e.into_inner()).is_some()
     }
 
     pub fn has_pending_activity(&self) -> bool {
@@ -499,15 +457,15 @@ impl PlaybackController {
     }
 
     pub fn take_frame(&self) -> Option<PlaybackFrame> {
-        self.shared.latest_frame.lock().unwrap().take()
+        self.shared.latest_frame.lock().unwrap_or_else(|e| e.into_inner()).take()
     }
 
     pub fn take_playback_frame(&self) -> Option<RgbaImage> {
         let wall_time_secs = self.playback_position_secs();
-        let mut queue = self.shared.frame_queue.lock().unwrap();
+        let mut queue = self.shared.frame_queue.lock().unwrap_or_else(|e| e.into_inner());
 
         let is_buffering = {
-            let clock = self.shared.playing_since.lock().unwrap();
+            let clock = self.shared.playing_since.lock().unwrap_or_else(|e| e.into_inner());
             clock.as_ref().map_or(false, |c| c.started_at.is_none())
         };
 
@@ -631,7 +589,7 @@ impl PlaybackController {
     }
 
     pub fn take_error(&self) -> Option<String> {
-        self.shared.last_error.lock().unwrap().take()
+        self.shared.last_error.lock().unwrap_or_else(|e| e.into_inner()).take()
     }
 
     pub fn playback_fps(&self) -> f64 {
@@ -642,7 +600,7 @@ impl PlaybackController {
         let mut frame_count = 0;
         loop {
             {
-                let queue = self.shared.frame_queue.lock().unwrap();
+                let queue = self.shared.frame_queue.lock().unwrap_or_else(|e| e.into_inner());
                 if queue.len() >= PLAYBACK_QUEUE_DEPTH {
                     break;
                 }
@@ -660,14 +618,14 @@ impl PlaybackController {
             match frame.kind {
                 DecoderFrameKind::Preview => {
                     tracing::debug!("poll: received preview frame pts={:.3}s", frame.pts_secs);
-                    *self.shared.latest_frame.lock().unwrap() =
+                    *self.shared.latest_frame.lock().unwrap_or_else(|e| e.into_inner()) =
                         Some(PlaybackFrame { image: frame.image });
                     self.shared
                         .video_request_in_flight
                         .store(false, Ordering::SeqCst);
                 }
                 DecoderFrameKind::Playback => {
-                    let mut queue = self.shared.frame_queue.lock().unwrap();
+                    let mut queue = self.shared.frame_queue.lock().unwrap_or_else(|e| e.into_inner());
                     let pts = frame.pts_secs;
                     queue.push_back(TimedFrame {
                         pts_secs: pts,
@@ -696,7 +654,7 @@ impl PlaybackController {
             self.shared
                 .video_request_in_flight
                 .store(false, Ordering::SeqCst);
-            *self.shared.last_error.lock().unwrap() = Some(error.message);
+            *self.shared.last_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(error.message);
         }
 
         if !self.is_playing() {
@@ -706,7 +664,7 @@ impl PlaybackController {
         self.check_and_start_clock();
 
         let current_time = self.playback_position_secs();
-        *self.shared.current_time_secs.lock().unwrap() = current_time;
+        *self.shared.current_time_secs.lock().unwrap_or_else(|e| e.into_inner()) = current_time;
         if current_time >= self.metadata.duration_secs {
             self.pause_at(self.metadata.duration_secs);
         }
@@ -715,10 +673,10 @@ impl PlaybackController {
     fn check_and_start_clock(&mut self) {
         let mut clock_unlocked = false;
         {
-            let mut maybe_clock = self.shared.playing_since.lock().unwrap();
+            let mut maybe_clock = self.shared.playing_since.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(clock) = maybe_clock.as_mut() {
                 if clock.started_at.is_none() {
-                    let queue = self.shared.frame_queue.lock().unwrap();
+                    let queue = self.shared.frame_queue.lock().unwrap_or_else(|e| e.into_inner());
                     if let Some(front) = queue.front() {
                         clock.start_time_secs = front.pts_secs;
                         clock.started_at = Some(Instant::now());
@@ -733,7 +691,7 @@ impl PlaybackController {
     }
 
     pub fn cache_stats(&self) -> (usize, f64) {
-        let queue = self.shared.frame_queue.lock().unwrap();
+        let queue = self.shared.frame_queue.lock().unwrap_or_else(|e| e.into_inner());
         let count = queue.len();
         let mb =
             queue.iter().map(|f| f.image.as_raw().len()).sum::<usize>() as f64 / (1024.0 * 1024.0);
@@ -742,7 +700,7 @@ impl PlaybackController {
 
     #[allow(dead_code)]
     pub fn queue_health(&self) -> (usize, u64) {
-        let queue_len = self.shared.frame_queue.lock().unwrap().len();
+        let queue_len = self.shared.frame_queue.lock().unwrap_or_else(|e| e.into_inner()).len();
         let empty_polls = self.shared.playback_empty_polls.load(Ordering::SeqCst);
         (queue_len, empty_polls)
     }
@@ -767,10 +725,10 @@ impl PlaybackController {
             let result = decode_audio_track(&video_path);
             match result {
                 Ok(buffer) => {
-                    *shared.audio_buffer.lock().unwrap() = Some(buffer);
+                    *shared.audio_buffer.lock().unwrap_or_else(|e| e.into_inner()) = Some(buffer);
                 }
                 Err(err) => {
-                    *shared.last_error.lock().unwrap() =
+                    *shared.last_error.lock().unwrap_or_else(|e| e.into_inner()) =
                         Some(format!("Audio preload failed: {err:#}"));
                 }
             }
@@ -809,7 +767,7 @@ impl PlaybackController {
             let sink = match Sink::try_new(&handle) {
                 Ok(sink) => sink,
                 Err(err) => {
-                    *shared.last_error.lock().unwrap() =
+                    *shared.last_error.lock().unwrap_or_else(|e| e.into_inner()) =
                         Some(format!("Audio output failed: {err}"));
                     return;
                 }

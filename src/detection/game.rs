@@ -1,6 +1,5 @@
-use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
 use tracing::debug;
@@ -19,7 +18,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 /// Information about a detected application (game or other).
 ///
 /// Returned by [`GameDetector`] when querying the currently detected application.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct DetectedApp {
     /// Display name of the detected application.
     pub name: String,
@@ -86,7 +85,9 @@ impl GameDetector {
 
             while running.load(Ordering::SeqCst) {
                 if let Some(app) = detect_foreground_app() {
-                    *detected.write() = app;
+                    if let Ok(mut g) = detected.write() {
+                        *g = app;
+                    }
                 }
 
                 thread::sleep(Duration::from_millis(500));
@@ -101,7 +102,10 @@ impl GameDetector {
     }
 
     pub fn get_detected_app(&self) -> DetectedApp {
-        self.detected.read().clone()
+        self.detected
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_default()
     }
 }
 

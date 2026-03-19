@@ -18,7 +18,11 @@ use super::{
 ///
 /// # Thread Safety
 ///
-/// This type is not thread-safe and must be used from a single async context.
+/// This type is not thread-safe and must be used from one task/thread at a time.
+///
+/// `start`, `stop`, and `enforce_health` are **synchronous** and may block the current
+/// thread (e.g. joining the encoder thread on stop). Call them from `spawn_blocking` if
+/// you must not block the async runtime's thread pool.
 ///
 /// # Dependency Injection
 ///
@@ -131,7 +135,7 @@ impl RecordingPipeline {
         }
     }
 
-    pub async fn start(&mut self, config: &Config, buffer: &ReplayBuffer) -> Result<()> {
+    pub fn start(&mut self, config: &Config, buffer: &ReplayBuffer) -> Result<()> {
         if matches!(
             self.lifecycle,
             RecordingLifecycle::Starting
@@ -182,7 +186,7 @@ impl RecordingPipeline {
         Ok(())
     }
 
-    pub async fn stop(&mut self) -> Result<()> {
+    pub fn stop(&mut self) -> Result<()> {
         if matches!(self.lifecycle, RecordingLifecycle::Idle) {
             return Ok(());
         }
@@ -213,7 +217,7 @@ impl RecordingPipeline {
                 Ok(Err(e)) => {
                     error!("Encoder thread returned error: {}", e);
                     if first_error.is_none() {
-                        first_error = Some(e);
+                        first_error = Some(e.into());
                     }
                 }
                 Err(_) => {
@@ -246,7 +250,7 @@ impl RecordingPipeline {
     /// # Errors
     ///
     /// Returns an error if attempting to stop the pipeline fails after a fault detection.
-    pub async fn enforce_health(&mut self) -> Result<Option<String>> {
+    pub fn enforce_health(&mut self) -> Result<Option<String>> {
         if !matches!(self.lifecycle, RecordingLifecycle::Running) {
             return Ok(None);
         }
@@ -278,7 +282,7 @@ impl RecordingPipeline {
         if let Some(reason) = fatal_reason {
             error!("Fail-closed transition: {}", reason);
             self.lifecycle = RecordingLifecycle::Faulted;
-            self.stop().await?;
+            self.stop()?;
             return Ok(Some(reason));
         }
 

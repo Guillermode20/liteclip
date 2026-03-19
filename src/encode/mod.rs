@@ -48,7 +48,12 @@
 //! ```
 
 pub mod encoder_mod;
+pub mod error;
 pub mod ffmpeg;
 pub mod sw_encoder;
 
 pub use encoder_mod::*;
+
+pub use error::EncodeError;
+
+pub type EncodeResult<T> = std::result::Result<T, EncodeError>;

@@ -19,7 +19,9 @@
 //!
 //! # Threading Model
 //!
-//! - **Main Thread**: Async runtime with tokio, handles event loop
+//! - **Main Thread**: Tokio runtime drives the tray/hotkey event loop and config I/O.
+//!   Starting/stopping the recording pipeline runs **synchronously** on that runtime’s
+//!   worker thread and may block briefly (e.g. encoder thread join).
 //! - **Platform Thread**: Windows message loop for hotkeys and tray
 //! - **Capture Thread**: DXGI frame acquisition (spawned by pipeline)
 //! - **Encode Thread**: Video/audio encoding (spawned by pipeline)
@@ -142,7 +144,9 @@ impl Drop for TimerResolutionGuard {
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize FFmpeg
-    liteclip_replay::encode::init_ffmpeg().context("Failed to initialize FFmpeg")?;
+    liteclip_replay::encode::init_ffmpeg()
+        .map_err(anyhow::Error::from)
+        .context("Failed to initialize FFmpeg")?;
 
     // Suppress all Vulkan loader output (prints directly to stderr from C code)
     std::env::set_var("VK_LOADER_DEBUG", "none");
@@ -304,7 +308,7 @@ async fn main() -> Result<()> {
     // Initialize recording
     {
         let mut state = app_state.write().await;
-        if let Err(e) = state.start_recording().await {
+        if let Err(e) = state.start_recording() {
             error!("Failed to start recording: {}", e);
         } else {
             let _ = platform_handle.update_recording_state(true);
@@ -341,12 +345,12 @@ async fn main() -> Result<()> {
                                                 info!("Hotkey: toggle recording");
                                                 let mut state = app_state.write().await;
                                                 if state.is_recording() {
-                                                    if let Err(e) = state.stop_recording().await {
+                                                    if let Err(e) = state.stop_recording() {
                                                         error!("Failed to stop recording: {}", e);
                                                     } else {
                                                         let _ = platform_handle.update_recording_state(false);
                                                     }
-                                                } else if let Err(e) = state.start_recording().await {
+                                                } else if let Err(e) = state.start_recording() {
                                                     error!("Failed to start recording: {}", e);
                                                 } else {
                                                     let _ = platform_handle.update_recording_state(true);
@@ -440,7 +444,7 @@ async fn main() -> Result<()> {
                             Err(_) => {
                                 // Timeout tick: poll worker health and fail-closed when needed.
                                 let mut state = app_state.write().await;
-                                match state.enforce_pipeline_health().await {
+                                match state.enforce_pipeline_health() {
                                     Ok(Some(reason)) => {
                                         error!("Recording stopped due to fatal pipeline error: {}", reason);
                                         let _ = platform_handle.update_recording_state(false);
@@ -489,15 +493,9 @@ async fn main() -> Result<()> {
     {
         let mut state = app_state.write().await;
         info!("Stopping recording pipeline...");
-        match tokio::time::timeout(
-            tokio::time::Duration::from_millis(1500),
-            state.stop_recording(),
-        )
-        .await
-        {
-            Ok(Ok(())) => info!("Recording pipeline stopped"),
-            Ok(Err(e)) => warn!("Error stopping recording: {}", e),
-            Err(_) => warn!("Timed out stopping recording pipeline"),
+        match state.stop_recording() {
+            Ok(()) => info!("Recording pipeline stopped"),
+            Err(e) => warn!("Error stopping recording: {}", e),
         }
     }
 

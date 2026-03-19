@@ -4,18 +4,18 @@
 //! option keys in [`super::options`](crate::encode::ffmpeg::options).
 //!
 //! **Assumptions:** Capture supplies a D3D11 frame in the format expected for GPU transport (see
-//! [`EncoderConfig::gpu_texture_format`](crate::encode::encoder_mod::EncoderConfig::gpu_texture_format)).
+//! [`ResolvedEncoderConfig::gpu_texture_format`](crate::encode::encoder_mod::ResolvedEncoderConfig::gpu_texture_format)).
 //!
 //! **Verification:** NVIDIA GPU + driver with NVENC; FFmpeg with `hevc_nvenc` (or your codec) available.
 //! Record with encoder set to NVENC and confirm no spurious CPU fallback in logs.
 //!
 //! **Contributor checklist:** See the module-level docs on [`crate::encode::ffmpeg`].
 
-use anyhow::{Context, Result};
 use ffmpeg_next as ffmpeg;
 use tracing::info;
 
 use crate::config::RateControl;
+use crate::encode::{EncodeError, EncodeResult};
 
 use super::FfmpegEncoder;
 
@@ -25,10 +25,11 @@ impl FfmpegEncoder {
         gpu_frame: &crate::capture::D3d11Frame,
         width: u32,
         height: u32,
-    ) -> Result<()> {
+    ) -> EncodeResult<()> {
         let codec_name = self.config.ffmpeg_codec_name();
-        let codec = ffmpeg::encoder::find_by_name(codec_name)
-            .context(format!("Failed to find NVENC encoder: {}", codec_name))?;
+        let codec = ffmpeg::encoder::find_by_name(codec_name).ok_or_else(|| {
+            EncodeError::msg(format!("Failed to find NVENC encoder: {}", codec_name))
+        })?;
 
         let (out_w, out_h) = if self.config.use_native_resolution {
             (width, height)
@@ -37,14 +38,13 @@ impl FfmpegEncoder {
         };
 
         // Reuse capture device (Direct transport)
-        let hw_context = self
-            .create_d3d11_hardware_context_from_device(&gpu_frame.device, out_w, out_h)
-            .context("Failed to create hardware context from shared device")?;
+        let hw_context =
+            self.create_d3d11_hardware_context_from_device(&gpu_frame.device, out_w, out_h)?;
 
         let mut encoder = ffmpeg::codec::context::Context::new_with_codec(codec)
             .encoder()
             .video()
-            .context("Failed to create encoder context")?;
+            .map_err(|e| EncodeError::ffmpeg(e))?;
 
         encoder.set_width(out_w);
         encoder.set_height(out_h);
@@ -68,9 +68,7 @@ impl FfmpegEncoder {
         let mut options = ffmpeg::Dictionary::new();
         self.apply_codec_specific_options(&mut options, bitrate)?;
 
-        let encoder = encoder
-            .open_with(options)
-            .context("Failed to open NVENC encoder")?;
+        let encoder = encoder.open_with(options)?;
 
         self.encoder = Some(encoder);
         self.hw_context = Some(hw_context);
@@ -125,7 +123,7 @@ impl FfmpegEncoder {
         gpu_frame: &crate::capture::D3d11Frame,
         pts: i64,
         gop: i64,
-    ) -> Result<()> {
+    ) -> EncodeResult<()> {
         let Some(ref mut encoder) = self.encoder else {
             return Ok(());
         };
@@ -135,8 +133,7 @@ impl FfmpegEncoder {
 
         unsafe {
             let hw_frame = hw_context.reusable_hw_frame;
-            Self::prepare_hw_frame(hw_context, hw_frame, gpu_frame)
-                .context("Failed to prepare hardware frame for NVENC")?;
+            Self::prepare_hw_frame(hw_context, hw_frame, gpu_frame)?;
 
             (*hw_frame).pts = pts;
             if gop > 0 && self.frame_count % gop == 0 {
@@ -150,7 +147,10 @@ impl FfmpegEncoder {
 
             let send_result = ffmpeg::ffi::avcodec_send_frame(encoder.as_mut_ptr(), hw_frame);
             if send_result < 0 {
-                anyhow::bail!("Failed to send D3D11 frame to NVENC: {}", send_result);
+                return Err(EncodeError::msg(format!(
+                    "Failed to send D3D11 frame to NVENC: {}",
+                    send_result
+                )));
             }
         }
 

@@ -54,13 +54,12 @@
 //!     let state = Arc::new(RwLock::new(AppState::new(config)?));
 //!     
 //!     // Start recording
-//!     state.write().await.start_recording().await?;
+//!     state.write().await.start_recording()?;
 //!     
 //!     Ok(())
 //! }
 //! ```
 
-#[path = "app/mod.rs"]
 pub mod app;
 pub mod buffer;
 pub mod capture;

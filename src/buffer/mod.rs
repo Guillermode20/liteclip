@@ -5,16 +5,15 @@
 //!
 //! # Architecture
 //!
-//! The replay buffer uses a lock-free ring buffer design optimized for the
-//! single-producer, multi-consumer (SPMC) pattern:
+//! SPMC ring: atomic write index plus mutex-backed slots (see `ring::lockfree`).
 //!
-//! - **Producer**: Encoding pipeline pushes packets atomically
-//! - **Consumer**: Clip saver reads snapshots without blocking the producer
+//! - **Producer**: Encoding pipeline pushes packets
+//! - **Consumer**: Clip saver snapshots the ring; locking model documented in [`ring::lockfree`](crate::buffer::ring::lockfree)
 //!
 //! # Key Types
 //!
 //! - [`ReplayBuffer`] - Main buffer handle with configuration-based capacity
-//! - [`SharedReplayBuffer`] - Thread-safe wrapper around the lock-free core
+//! - [`SharedReplayBuffer`] - Handle wrapping the ring implementation
 //! - [`BufferStats`] - Statistics about buffer utilization
 //!
 //! # Memory Management
@@ -41,6 +40,8 @@
 //! println!("Buffer: {:.1}s, {} MB", stats.duration_secs, stats.total_bytes / 1024 / 1024);
 //! ```
 
+pub mod error;
 pub mod ring;
 
+pub use error::{BufferError, BufferResult};
 pub use ring::{BufferStats, ReplayBuffer, SharedReplayBuffer};

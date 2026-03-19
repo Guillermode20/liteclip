@@ -1,6 +1,5 @@
 use std::ffi::c_void;
 
-use anyhow::{Context, Result};
 use ffmpeg::format::Pixel;
 use ffmpeg_next as ffmpeg;
 use windows::Win32::Foundation::HANDLE;
@@ -8,6 +7,8 @@ use windows::Win32::Graphics::Direct3D11::{
     ID3D11Device, ID3D11DeviceContext, ID3D11Fence, ID3D11Texture2D,
 };
 use windows_core::Interface;
+
+use crate::encode::{EncodeError, EncodeResult};
 
 use super::FfmpegEncoder;
 
@@ -57,21 +58,23 @@ impl FfmpegEncoder {
         device: &ID3D11Device,
         width: u32,
         height: u32,
-    ) -> Result<D3d11HardwareContext> {
+    ) -> EncodeResult<D3d11HardwareContext> {
         unsafe {
             let mut device_ctx_ref = ffmpeg::ffi::av_hwdevice_ctx_alloc(
                 ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA,
             );
             if device_ctx_ref.is_null() {
-                anyhow::bail!("Failed to allocate FFmpeg D3D11 device context");
+                return Err(EncodeError::msg(
+                    "Failed to allocate FFmpeg D3D11 device context",
+                ));
             }
 
             let hw_device_ctx = (*device_ctx_ref).data as *mut ffmpeg::ffi::AVHWDeviceContext;
             let d3d11_ctx = (*hw_device_ctx).hwctx as *mut AvD3d11vaDeviceContext;
 
-            let context = device
-                .GetImmediateContext()
-                .context("Failed to get immediate context")?;
+            let context = device.GetImmediateContext().map_err(|e| {
+                EncodeError::msg(format!("Failed to get immediate context: {}", e))
+            })?;
 
             let ffmpeg_device = device.clone();
             let ffmpeg_context = context.clone();
@@ -85,10 +88,10 @@ impl FfmpegEncoder {
             let init_result = ffmpeg::ffi::av_hwdevice_ctx_init(device_ctx_ref);
             if init_result < 0 {
                 ffmpeg::ffi::av_buffer_unref(&mut device_ctx_ref);
-                anyhow::bail!(
+                return Err(EncodeError::msg(format!(
                     "Failed to initialize FFmpeg D3D11 hardware device context: {}",
                     init_result
-                );
+                )));
             }
 
             let mut frames_ctx_ref = Self::create_hw_frames_ctx_with_pool_size(
@@ -103,7 +106,7 @@ impl FfmpegEncoder {
             if reusable_hw_frame.is_null() {
                 ffmpeg::ffi::av_buffer_unref(&mut frames_ctx_ref);
                 ffmpeg::ffi::av_buffer_unref(&mut device_ctx_ref);
-                anyhow::bail!("Failed to allocate reusable hardware frame");
+                return Err(EncodeError::msg("Failed to allocate reusable hardware frame"));
             }
 
             Ok(D3d11HardwareContext {
@@ -125,11 +128,11 @@ impl FfmpegEncoder {
         height: u32,
         sw_format: Pixel,
         initial_pool_size: i32,
-    ) -> Result<*mut ffmpeg::ffi::AVBufferRef> {
+    ) -> EncodeResult<*mut ffmpeg::ffi::AVBufferRef> {
         unsafe {
             let frames_ctx_ref = ffmpeg::ffi::av_hwframe_ctx_alloc(device_ctx_ref);
             if frames_ctx_ref.is_null() {
-                anyhow::bail!("Failed to allocate FFmpeg D3D11 frame context");
+                return Err(EncodeError::msg("Failed to allocate FFmpeg D3D11 frame context"));
             }
 
             let frames_ctx = (*frames_ctx_ref).data as *mut ffmpeg::ffi::AVHWFramesContext;
@@ -143,11 +146,10 @@ impl FfmpegEncoder {
             if init_frames_result < 0 {
                 let mut frames_ctx_ref = frames_ctx_ref;
                 ffmpeg::ffi::av_buffer_unref(&mut frames_ctx_ref);
-                anyhow::bail!(
+                return Err(EncodeError::msg(format!(
                     "Failed to initialize FFmpeg D3D11 frame context with pool size {}: {}",
-                    initial_pool_size,
-                    init_frames_result
-                );
+                    initial_pool_size, init_frames_result
+                )));
             }
 
             Ok(frames_ctx_ref)
@@ -158,13 +160,16 @@ impl FfmpegEncoder {
         hw_context: &mut D3d11HardwareContext,
         hw_frame: *mut ffmpeg::ffi::AVFrame,
         gpu_frame: &crate::capture::D3d11Frame,
-    ) -> Result<()> {
+    ) -> EncodeResult<()> {
         ffmpeg::ffi::av_frame_unref(hw_frame);
 
         let get_buffer_res =
             ffmpeg::ffi::av_hwframe_get_buffer(hw_context.frames_ctx_ref, hw_frame, 0);
         if get_buffer_res < 0 {
-            anyhow::bail!("Failed to get hardware frame buffer: {}", get_buffer_res);
+            return Err(EncodeError::msg(format!(
+                "Failed to get hardware frame buffer: {}",
+                get_buffer_res
+            )));
         }
 
         // For shared device, use the source texture directly
@@ -191,11 +196,20 @@ impl FfmpegEncoder {
                 if let Some(ref encoder_device) = hw_context.encoder_device {
                     encoder_device
                         .OpenSharedResource(gpu_frame.shared_handle, &mut opened_opt)
-                        .context("Failed to open shared texture on encoder device")?;
+                        .map_err(|e| {
+                            EncodeError::msg(format!(
+                                "Failed to open shared texture on encoder device: {}",
+                                e
+                            ))
+                        })?;
                 } else {
-                    anyhow::bail!("No encoder device available for cross-device texture sharing");
+                    return Err(EncodeError::msg(
+                        "No encoder device available for cross-device texture sharing",
+                    ));
                 }
-                let opened = opened_opt.context("OpenSharedResource returned null")?;
+                let opened = opened_opt.ok_or_else(|| {
+                    EncodeError::msg("OpenSharedResource returned null")
+                })?;
                 hw_context
                     .cached_shared_textures
                     .push((gpu_frame.shared_handle, opened.clone()));
@@ -208,9 +222,15 @@ impl FfmpegEncoder {
                 let ctx4: windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext4 = hw_context
                     .copy_context
                     .cast()
-                    .context("Failed to get ID3D11DeviceContext4 for encoder wait")?;
-                ctx4.Wait(fence, gpu_frame.fence_value)
-                    .context("Failed to wait on shared fence in encoder")?;
+                    .map_err(|e| {
+                        EncodeError::msg(format!(
+                            "Failed to get ID3D11DeviceContext4 for encoder wait: {}",
+                            e
+                        ))
+                    })?;
+                ctx4.Wait(fence, gpu_frame.fence_value).map_err(|e| {
+                    EncodeError::msg(format!("Failed to wait on shared fence in encoder: {}", e))
+                })?;
             }
 
             hw_context.copy_context.CopySubresourceRegion(
