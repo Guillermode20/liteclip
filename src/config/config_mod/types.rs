@@ -30,10 +30,14 @@ pub enum EncoderType {
     /// Automatically select the best available encoder.
     Auto,
     /// NVIDIA NVENC (requires NVIDIA GPU).
+    ///
+    /// Encoding implementation: [`crate::encode::ffmpeg::nvenc`] (`src/encode/ffmpeg/nvenc.rs`).
     Nvenc,
     /// AMD AMF (requires AMD GPU).
     Amf,
     /// Intel Quick Sync Video (requires Intel iGPU).
+    ///
+    /// Encoding implementation: [`crate::encode::ffmpeg::qsv`] (`src/encode/ffmpeg/qsv.rs`).
     Qsv,
 }
 

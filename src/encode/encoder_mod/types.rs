@@ -156,6 +156,10 @@ impl EncoderConfig {
             output_index: 0,
         }
     }
+    // Hardware encoder registry: changing codec names or which types use GPU transport must stay
+    // aligned with `encode::ffmpeg` (see module docs there), `encoder_mod/functions.rs`
+    // (`encoder_name_for_type`, `probe_encoder_available`, `detect_hardware_encoder`),
+    // `config::EncoderType`, and `gui/settings.rs`.
     /// Get the FFmpeg HEVC encoder name based on encoder type
     pub fn ffmpeg_codec_name(&self) -> &'static str {
         match self.encoder_type {

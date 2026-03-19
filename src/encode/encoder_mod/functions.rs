@@ -136,6 +136,9 @@ fn forward_ready_packets(
     forwarded
 }
 
+// Hardware encoder registry: when changing NVENC/QSV/AMF codec strings, probe options, or auto-detect
+// order, see the contributor hub in `encode::ffmpeg` and the match arms in `EncoderConfig` methods in
+// `encoder_mod/types.rs` (`ffmpeg_codec_name`, `supports_gpu_frame_transport`, `gpu_texture_format`).
 #[cfg(feature = "ffmpeg")]
 fn encoder_name_for_type(encoder_type: crate::config::EncoderType) -> Option<&'static str> {
     match encoder_type {
@@ -195,6 +198,7 @@ fn set_encoder_thread_priority() {
     }
 }
 
+// Minimal open probe per codec; NVENC/QSV/AMF arms should stay consistent with `encode/ffmpeg/options.rs`.
 #[cfg(feature = "ffmpeg")]
 fn probe_encoder_available(encoder_name: &str) -> bool {
     let Some(codec) = ffmpeg::encoder::find_by_name(encoder_name) else {
@@ -265,6 +269,8 @@ fn probe_encoder_available(encoder_name: &str) -> bool {
 /// Detect available hardware encoder (HEVC-only)
 ///
 /// Priority order: NVENC → AMF → QSV
+///
+/// Changing this order or codec names requires updating the contributor checklist in `encode::ffmpeg`.
 #[cfg(feature = "ffmpeg")]
 pub fn detect_hardware_encoder() -> HardwareEncoder {
     debug!("Detecting hardware encoders for HEVC...");

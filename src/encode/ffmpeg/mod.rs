@@ -1,3 +1,38 @@
+//! FFmpeg-backed encoder implementation (`FfmpegEncoder`).
+//!
+//! # Contributing: hardware encoders (NVENC, QSV, AMF)
+//!
+//! Vendor-specific **encoding** lives in dedicated files. **AMF** ([`amf`](crate::encode::ffmpeg::amf))
+//! is the path most maintainers can run locally; **NVENC** ([`nvenc`](crate::encode::ffmpeg::nvenc)) and
+//! **QSV** ([`qsv`](crate::encode::ffmpeg::qsv)) need NVIDIA or Intel hardware (and matching FFmpeg) to verify.
+//!
+//! When you add or change a hardware encoder (new codec name, options, probe behavior, or GPU frame path),
+//! keep these locations consistent:
+//!
+//! - **Init + per-frame GPU path:** [`nvenc`](crate::encode::ffmpeg::nvenc), [`qsv`](crate::encode::ffmpeg::qsv), [`amf`](crate::encode::ffmpeg::amf)
+//! - **Shared FFmpeg options:** [`options`](crate::encode::ffmpeg::options)
+//! - **Dispatch:** `init_hardware_encoder` / `encode_gpu_frame` in this module
+//! - **Codec name, GPU transport flags:** [`EncoderConfig`](crate::encode::encoder_mod::EncoderConfig) in `encoder_mod/types.rs`
+//!   (`ffmpeg_codec_name`, `supports_gpu_frame_transport`, `gpu_texture_format`)
+//! - **Availability probe + auto-detect order:** `encoder_mod/functions.rs` (`encoder_name_for_type`,
+//!   `probe_encoder_available`, `detect_hardware_encoder`)
+//! - **User-facing enum + labels:** `config/config_mod/types.rs` (`EncoderType`), `gui/settings.rs` (encoder picker)
+//!
+//! **FFmpeg / runtime:** Encoders must exist in the FFmpeg build linked at runtime. NVENC requires an NVIDIA
+//! GPU and driver with NVENC support. QSV requires Intel graphics with a working oneVPL/Media Stack stack and
+//! FFmpeg built with QSV. Probe failures often mean a generic FFmpeg build without that encoder enabled.
+//!
+//! **Manual verification:** Force the encoder in settings (not Auto), record a short clip, and confirm logs
+//! show hardware/D3D11 transport (no unexpected fallback to CPU path warnings for GPU-capable configs).
+//! For PRs, include GPU model, driver/FFmpeg build notes, and relevant log lines—maintainers may not have
+//! every vendor’s hardware.
+//!
+//! **Decode / gallery:** Clip preview decode uses generic D3D11VA in `gui/gallery/decode_pipeline.rs`, not
+//! per-vendor NVENC/QSV **decode** paths. Encoding issues are unlikely to be fixed there.
+//!
+//! **CI:** Release builds use standard Windows runners; there is no GPU matrix. Vendor encoder changes rely
+//! on contributor or reviewer manual testing.
+
 pub mod amf;
 pub mod context;
 pub mod nvenc;

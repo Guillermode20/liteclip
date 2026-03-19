@@ -1,3 +1,16 @@
+//! Intel Quick Sync Video (QSV) hardware encoding: D3D11 device → derived QSV device/frames, QSV surfaces.
+//!
+//! Owns `FfmpegEncoder::{init_qsv_hardware_encoder, encode_qsv_gpu_frame}` and QSV-specific option keys
+//! in [`super::options`](crate::encode::ffmpeg::options).
+//!
+//! **Assumptions:** Same D3D11/NV12 capture path as other hardware encoders; QSV is derived from the
+//! shared D3D11 hardware context via FFmpeg’s `av_hwdevice_ctx_create_derived`.
+//!
+//! **Verification:** Intel iGPU/dGPU with working oneVPL/Media Stack; FFmpeg with QSV enabled. Record with
+//! QSV selected and confirm mapping from D3D11 to QSV succeeds (watch for derive/map errors in logs).
+//!
+//! **Contributor checklist:** See the module-level docs on [`crate::encode::ffmpeg`].
+
 use std::ffi::CString;
 
 use anyhow::{Context, Result};

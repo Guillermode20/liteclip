@@ -1,3 +1,7 @@
+//! AMD AMF hardware encoding. Primary reference implementation for the D3D11 GPU frame path alongside
+//! [`super::nvenc`](crate::encode::ffmpeg::nvenc) and [`super::qsv`](crate::encode::ffmpeg::qsv).
+//! **Contributor checklist:** See the module-level docs on [`crate::encode::ffmpeg`].
+
 use std::ffi::CString;
 
 use anyhow::{Context, Result};

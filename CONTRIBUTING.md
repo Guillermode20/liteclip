@@ -13,6 +13,7 @@ Thank you for your interest in contributing! This document provides guidelines a
 - [Pull Request Process](#pull-request-process)
 - [Commit Messages](#commit-messages)
 - [Architecture Overview](#architecture-overview)
+  - [Hardware encoders (NVENC / Intel QSV)](#hardware-encoders-nvenc--intel-qsv)
 
 ## Code of Conduct
 
@@ -325,6 +326,26 @@ resources and attempt reacquisition instead of crashing.
 | `AudioCapture` | `capture/audio/` | WASAPI audio capture |
 | `Encoder` | `encode/` | Video encoding abstraction |
 | `PlatformHandle` | `platform/` | Hotkeys, tray, notifications |
+
+### Hardware encoders (NVENC / Intel QSV)
+
+Maintainers may not have NVIDIA or Intel GPUs to exercise every path. **Pull requests** that change NVENC or QSV behavior should include **reporter verification**: GPU model, driver (or FFmpeg build) notes, and relevant `tracing` output.
+
+**Authoritative checklist** (duplicate registry sites are called out in code comments there):
+
+- Hub / overview: [`src/encode/ffmpeg/mod.rs`](src/encode/ffmpeg/mod.rs) (module-level `//!` docs)
+- NVENC implementation: [`src/encode/ffmpeg/nvenc.rs`](src/encode/ffmpeg/nvenc.rs)
+- QSV implementation: [`src/encode/ffmpeg/qsv.rs`](src/encode/ffmpeg/qsv.rs)
+- AMF (reference path many contributors can run): [`src/encode/ffmpeg/amf.rs`](src/encode/ffmpeg/amf.rs)
+- Encoder options: [`src/encode/ffmpeg/options.rs`](src/encode/ffmpeg/options.rs)
+- Codec names + GPU transport: [`src/encode/encoder_mod/types.rs`](src/encode/encoder_mod/types.rs)
+- Probe + auto-detect: [`src/encode/encoder_mod/functions.rs`](src/encode/encoder_mod/functions.rs)
+- Config enum: [`src/config/config_mod/types.rs`](src/config/config_mod/types.rs) (`EncoderType`)
+- Settings UI: [`src/gui/settings.rs`](src/gui/settings.rs)
+
+**Manual test:** set the encoder explicitly (not Auto), record a short clip, and confirm logs do not show unexpected CPU fallback for GPU-capable setups.
+
+**Gallery decode** uses generic D3D11VA in [`src/gui/gallery/decode_pipeline.rs`](src/gui/gallery/decode_pipeline.rs)—not per-vendor NVENC/QSV decode; encoding bugs usually belong under `encode/ffmpeg/`.
 
 ### Threading Model
 

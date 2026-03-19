@@ -1,3 +1,16 @@
+//! NVIDIA NVENC hardware encoding: D3D11-shared device, `Pixel::D3D11` transport, NV12 surfaces.
+//!
+//! Owns `FfmpegEncoder::{init_nvenc_hardware_encoder, encode_nvenc_gpu_frame}` and NVENC-specific
+//! option keys in [`super::options`](crate::encode::ffmpeg::options).
+//!
+//! **Assumptions:** Capture supplies a D3D11 frame in the format expected for GPU transport (see
+//! [`EncoderConfig::gpu_texture_format`](crate::encode::encoder_mod::EncoderConfig::gpu_texture_format)).
+//!
+//! **Verification:** NVIDIA GPU + driver with NVENC; FFmpeg with `hevc_nvenc` (or your codec) available.
+//! Record with encoder set to NVENC and confirm no spurious CPU fallback in logs.
+//!
+//! **Contributor checklist:** See the module-level docs on [`crate::encode::ffmpeg`].
+
 use anyhow::{Context, Result};
 use ffmpeg_next as ffmpeg;
 use tracing::info;
