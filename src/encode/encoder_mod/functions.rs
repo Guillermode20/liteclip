@@ -17,6 +17,7 @@ use windows::Win32::System::Threading::{
 use super::types::{
     EncodedPacket, EncoderConfig, EncoderHandle, EncoderHealthEvent, HardwareEncoder,
 };
+
 /// Encoder trait
 ///
 /// All encoders must be Send + 'static as they run on dedicated threads.
@@ -33,6 +34,51 @@ pub trait Encoder: Send + 'static {
     fn packet_rx(&self) -> Receiver<EncodedPacket>;
     /// Check if encoder is still running
     fn is_running(&self) -> bool;
+}
+
+/// Factory trait for spawning encoder instances.
+///
+/// This abstraction allows dependency injection for testing and
+/// supports alternative encoder backends.
+///
+/// # Thread Safety
+///
+/// Implementations must be `Send + Sync` to allow sharing across threads.
+pub trait EncoderFactory: Send + Sync + 'static {
+    /// Spawn an encoder that receives frames from the given receiver.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - Encoder configuration.
+    /// * `buffer` - Shared replay buffer to write encoded packets to.
+    /// * `frame_rx` - Channel receiver for captured frames.
+    ///
+    /// # Returns
+    ///
+    /// An `EncoderHandle` for managing the encoder thread.
+    fn spawn(
+        &self,
+        config: EncoderConfig,
+        buffer: crate::buffer::ring::SharedReplayBuffer,
+        frame_rx: Receiver<crate::capture::CapturedFrame>,
+    ) -> Result<EncoderHandle>;
+}
+
+/// Default encoder factory using FFmpeg.
+///
+/// This factory creates encoders based on the configuration,
+/// with automatic hardware detection when `Auto` is selected.
+pub struct DefaultEncoderFactory;
+
+impl EncoderFactory for DefaultEncoderFactory {
+    fn spawn(
+        &self,
+        config: EncoderConfig,
+        buffer: crate::buffer::ring::SharedReplayBuffer,
+        frame_rx: Receiver<crate::capture::CapturedFrame>,
+    ) -> Result<EncoderHandle> {
+        spawn_encoder_with_receiver(config, buffer, frame_rx)
+    }
 }
 
 fn spawn_buffer_writer(

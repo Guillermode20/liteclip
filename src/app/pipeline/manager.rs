@@ -1,6 +1,8 @@
 use crate::{
-    buffer::ReplayBuffer, capture::audio::AudioLevelMonitor, capture::dxgi::DxgiCapture,
-    config::Config, encode::EncoderHandle,
+    buffer::ReplayBuffer,
+    capture::{audio::AudioLevelMonitor, CaptureFactory, CaptureBackend},
+    config::Config,
+    encode::{EncoderFactory, EncoderHandle},
 };
 use anyhow::Result;
 use tracing::{error, info, warn};
@@ -17,11 +19,20 @@ use super::{
 /// # Thread Safety
 ///
 /// This type is not thread-safe and must be used from a single async context.
+///
+/// # Dependency Injection
+///
+/// The pipeline uses factory traits for capture and encoder creation,
+/// allowing test mocks and alternative backends to be injected.
 pub struct RecordingPipeline {
+    /// Factory for creating capture backends.
+    capture_factory: Box<dyn CaptureFactory>,
+    /// Factory for spawning encoder threads.
+    encoder_factory: Box<dyn EncoderFactory>,
     /// Handle to the encoder thread.
     encoder_handle: Option<EncoderHandle>,
-    /// DXGI capture instance.
-    capture: Option<DxgiCapture>,
+    /// Capture backend instance.
+    capture: Option<Box<dyn CaptureBackend>>,
     /// Audio capture manager.
     audio_manager: Option<crate::capture::audio::WasapiAudioManager>,
     /// Current lifecycle state.
@@ -30,22 +41,36 @@ pub struct RecordingPipeline {
     level_monitor: Option<AudioLevelMonitor>,
 }
 
-impl Default for RecordingPipeline {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl RecordingPipeline {
-    /// Creates a new RecordingPipeline in idle state.
-    pub fn new() -> Self {
+    /// Creates a new RecordingPipeline with custom factories.
+    ///
+    /// # Arguments
+    ///
+    /// * `capture_factory` - Factory for creating capture backends.
+    /// * `encoder_factory` - Factory for spawning encoder threads.
+    pub fn new(
+        capture_factory: Box<dyn CaptureFactory>,
+        encoder_factory: Box<dyn EncoderFactory>,
+    ) -> Self {
         Self {
+            capture_factory,
+            encoder_factory,
             encoder_handle: None,
             capture: None,
             audio_manager: None,
             lifecycle: RecordingLifecycle::Idle,
             level_monitor: None,
         }
+    }
+
+    /// Creates a new RecordingPipeline with default factories.
+    ///
+    /// Uses DXGI capture and FFmpeg encoder on Windows.
+    pub fn with_defaults() -> Self {
+        Self::new(
+            Box::new(crate::capture::DxgiCaptureFactory),
+            Box::new(crate::encode::DefaultEncoderFactory),
+        )
     }
 
     /// Sets the audio level monitor for this pipeline.
@@ -134,7 +159,12 @@ impl RecordingPipeline {
             }
         }
 
-        match start_video_pipeline(config, buffer) {
+        match start_video_pipeline(
+            config,
+            buffer,
+            &*self.capture_factory,
+            &*self.encoder_factory,
+        ) {
             Ok((capture, encoder_handle)) => {
                 self.capture = Some(capture);
                 self.encoder_handle = Some(encoder_handle);

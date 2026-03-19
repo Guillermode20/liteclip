@@ -41,3 +41,22 @@ pub mod dxgicapture_traits;
 pub mod texture;
 
 pub use capture::*;
+
+use crate::capture::{CaptureBackend, CaptureFactory};
+use anyhow::Result;
+
+/// Factory for creating DXGI capture instances.
+///
+/// This is the default capture factory for Windows, using DXGI Desktop Duplication.
+pub struct DxgiCaptureFactory;
+
+impl CaptureFactory for DxgiCaptureFactory {
+    fn create(&self) -> Result<Box<dyn CaptureBackend>> {
+        let capture = DxgiCapture::new()?;
+        Ok(Box::new(capture))
+    }
+
+    fn refresh_nv12_capability(&self, output_index: u32) -> bool {
+        DxgiCapture::validate_nv12_capability_for_output(output_index).unwrap_or(false)
+    }
+}

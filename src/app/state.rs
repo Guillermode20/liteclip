@@ -55,7 +55,7 @@ impl AppState {
     pub fn new(config: Config) -> Result<Self> {
         let buffer = ReplayBuffer::new(&config)?;
         let level_monitor = AudioLevelMonitor::new();
-        let mut pipeline = RecordingPipeline::new();
+        let mut pipeline = RecordingPipeline::with_defaults();
         pipeline.set_level_monitor(level_monitor.clone());
 
         Ok(Self {
@@ -98,6 +98,7 @@ impl AppState {
     /// # Returns
     ///
     /// - `Ok(Some(reason))` if pipeline has failed with the given reason
+    ///
     /// Checks the health of the recording pipeline.
     ///
     /// This method should be called periodically (e.g., in the main event loop)

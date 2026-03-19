@@ -54,7 +54,7 @@ pub mod audio;
 pub mod backpressure;
 pub mod dxgi;
 
-pub use dxgi::DxgiCapture;
+pub use dxgi::{DxgiCapture, DxgiCaptureFactory};
 
 /// Configuration for screen capture.
 ///
@@ -283,4 +283,39 @@ pub trait CaptureBackend: Send + 'static {
     ///
     /// Frames are sent to this channel as they are captured.
     fn frame_rx(&self) -> Receiver<CapturedFrame>;
+
+    /// Check if a fatal error has occurred.
+    ///
+    /// Returns the error message if a fatal error was detected.
+    fn try_recv_fatal(&self) -> Option<String> {
+        None
+    }
+
+    /// Check if capture is currently running.
+    fn is_running(&self) -> bool;
+
+    /// Check if the capture thread has finished.
+    fn is_capture_thread_finished(&self) -> bool;
+}
+
+/// Factory trait for creating capture backend instances.
+///
+/// This abstraction allows dependency injection for testing and
+/// supports alternative capture backends (e.g., Vulkan, Linux).
+///
+/// # Thread Safety
+///
+/// Implementations must be `Send + Sync` to allow sharing across threads.
+pub trait CaptureFactory: Send + Sync + 'static {
+    /// Create a new capture backend instance.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the capture backend cannot be created.
+    fn create(&self) -> Result<Box<dyn CaptureBackend>>;
+
+    /// Check if NV12 conversion is supported for the given output.
+    ///
+    /// This is used to determine GPU-side format conversion capability.
+    fn refresh_nv12_capability(&self, output_index: u32) -> bool;
 }

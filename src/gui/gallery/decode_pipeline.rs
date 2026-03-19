@@ -58,6 +58,7 @@ impl FramePool {
         Some(vec![0u8; self.buffer_size])
     }
 
+    #[allow(dead_code)]
     fn release(&self, buffer: Vec<u8>) {
         let mut guard = self.buffers.lock().unwrap();
         if guard.len() < FRAME_POOL_HARD_LIMIT {
@@ -71,6 +72,7 @@ impl FramePool {
 }
 
 #[repr(C)]
+#[allow(dead_code)]
 struct AvD3d11vaDeviceContext {
     device: *mut c_void,
     device_context: *mut c_void,
@@ -81,6 +83,7 @@ struct AvD3d11vaDeviceContext {
     lock_ctx: *mut c_void,
 }
 
+#[allow(dead_code)]
 struct HardwareDecodeContext {
     device_ctx_ref: *mut ffmpeg::ffi::AVBufferRef,
     frames_ctx_ref: *mut ffmpeg::ffi::AVBufferRef,
@@ -121,6 +124,7 @@ impl Drop for HardwareDecodeContext {
 }
 
 impl HardwareDecodeContext {
+    #[allow(dead_code)]
     fn new(output_width: u32, output_height: u32) -> Result<Self> {
         unsafe {
             let feature_levels = [
@@ -209,6 +213,7 @@ impl HardwareDecodeContext {
         }
     }
 
+    #[allow(dead_code)]
     fn transfer_frame_to_cpu(
         &mut self,
         hw_frame: &ffmpeg::util::frame::video::Video,
@@ -263,6 +268,7 @@ struct SharedPlaybackState {
     audio_buffer: Mutex<Option<AudioBuffer>>,
     audio_generation: AtomicU64,
     audio_started_generation: AtomicU64,
+    #[allow(dead_code)]
     frame_pool: Arc<FramePool>,
 }
 
@@ -734,12 +740,14 @@ impl PlaybackController {
         (count, mb)
     }
 
+    #[allow(dead_code)]
     pub fn queue_health(&self) -> (usize, u64) {
         let queue_len = self.shared.frame_queue.lock().unwrap().len();
         let empty_polls = self.shared.playback_empty_polls.load(Ordering::SeqCst);
         (queue_len, empty_polls)
     }
 
+    #[allow(dead_code)]
     pub fn needs_quality_reduction(&self) -> bool {
         let (queue_len, empty_polls) = self.queue_health();
         empty_polls > 10 && queue_len < 3
@@ -1892,6 +1900,7 @@ fn decode_audio_track(video_path: &PathBuf) -> Result<AudioBuffer> {
     })
 }
 
+#[allow(dead_code)]
 fn rgba_frame_to_image(
     frame: &ffmpeg::util::frame::video::Video,
     width: u32,

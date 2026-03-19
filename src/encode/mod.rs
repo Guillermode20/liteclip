@@ -25,6 +25,8 @@
 //! # Key Types
 //!
 //! - [`Encoder`] - Encoder abstraction trait
+//! - [`EncoderFactory`] - Factory trait for spawning encoders
+//! - [`DefaultEncoderFactory`] - Default FFmpeg-based factory
 //! - [`EncodedPacket`] - Encoded video/audio packet
 //! - [`EncodeConfig`] - Encoder configuration
 //! - [`EncodeError`] - Encoding-specific errors
@@ -50,4 +52,3 @@ pub mod ffmpeg;
 pub mod sw_encoder;
 
 pub use encoder_mod::*;
-pub use sw_encoder::*;

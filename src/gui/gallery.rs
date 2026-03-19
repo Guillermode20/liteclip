@@ -99,6 +99,7 @@ const THUMBNAIL_STRIP_WIDTH: u32 = 160;
 
 struct ThumbnailStrip {
     thumbnails: Vec<(f64, RgbaImage)>,
+    #[allow(dead_code)]
     duration_secs: f64,
 }
 

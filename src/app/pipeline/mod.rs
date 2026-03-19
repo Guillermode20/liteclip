@@ -32,7 +32,7 @@
 //! use liteclip_replay::buffer::ReplayBuffer;
 //! use liteclip_replay::config::Config;
 //!
-//! let mut pipeline = RecordingPipeline::new();
+//! let mut pipeline = RecordingPipeline::with_defaults();
 //! let config = Config::default();
 //! let buffer = ReplayBuffer::new(&config).unwrap();
 //!

@@ -52,6 +52,21 @@ impl CaptureBackend for DxgiCapture {
     fn frame_rx(&self) -> Receiver<CapturedFrame> {
         self.frame_rx.clone()
     }
+
+    fn try_recv_fatal(&self) -> Option<String> {
+        self.fatal_rx.try_recv().ok()
+    }
+
+    fn is_running(&self) -> bool {
+        self.running.load(Ordering::Relaxed)
+    }
+
+    fn is_capture_thread_finished(&self) -> bool {
+        self.capture_thread
+            .as_ref()
+            .map(|t| t.is_finished())
+            .unwrap_or(true)
+    }
 }
 
 impl Drop for DxgiCapture {
