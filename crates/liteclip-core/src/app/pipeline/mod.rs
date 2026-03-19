@@ -28,9 +28,9 @@
 //! # Example
 //!
 //! ```no_run
-//! use liteclip_replay::app::pipeline::RecordingPipeline;
-//! use liteclip_replay::buffer::ReplayBuffer;
-//! use liteclip_replay::config::Config;
+//! use liteclip_core::app::pipeline::RecordingPipeline;
+//! use liteclip_core::buffer::ReplayBuffer;
+//! use liteclip_core::config::Config;
 //!
 //! let mut pipeline = RecordingPipeline::with_defaults();
 //! let config = Config::default();

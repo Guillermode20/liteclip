@@ -42,9 +42,9 @@ impl ClipManager {
     /// # Example
     ///
     /// ```no_run
-    /// use liteclip_replay::app::ClipManager;
-    /// use liteclip_replay::config::Config;
-    /// use liteclip_replay::buffer::ReplayBuffer;
+    /// use liteclip_core::app::ClipManager;
+    /// use liteclip_core::config::Config;
+    /// use liteclip_core::buffer::ReplayBuffer;
     ///
     /// // let path = ClipManager::save_clip(&config, &buffer, Some("Valorant")).await.unwrap();
     /// ```

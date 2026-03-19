@@ -28,8 +28,8 @@
 //! # Example
 //!
 //! ```no_run
-//! use liteclip_replay::capture::dxgi::DxgiCapture;
-//! use liteclip_replay::capture::CaptureConfig;
+//! use liteclip_core::capture::dxgi::DxgiCapture;
+//! use liteclip_core::capture::CaptureConfig;
 //!
 //! let capture = DxgiCapture::new().unwrap();
 //! // capture.start(config).unwrap();

@@ -171,13 +171,17 @@ pub fn ffmpeg_executable_path() -> PathBuf {
         }
     }
 
-    candidates.push(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("ffmpeg_dev")
-            .join("sdk")
-            .join("bin")
-            .join("ffmpeg.exe"),
-    );
+    // Manifest is `crates/liteclip-core`; workspace root is two ancestors up.
+    if let Some(workspace_root) = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).ancestors().nth(2)
+    {
+        candidates.push(
+            workspace_root
+                .join("ffmpeg_dev")
+                .join("sdk")
+                .join("bin")
+                .join("ffmpeg.exe"),
+        );
+    }
 
     candidates
         .into_iter()

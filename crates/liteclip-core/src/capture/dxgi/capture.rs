@@ -838,7 +838,7 @@ impl DxgiCapture {
     /// # Example
     ///
     /// ```no_run
-    /// use liteclip_replay::capture::dxgi::DxgiCapture;
+    /// use liteclip_core::capture::dxgi::DxgiCapture;
     ///
     /// let capture = DxgiCapture::new().unwrap();
     /// ```

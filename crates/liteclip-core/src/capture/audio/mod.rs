@@ -27,8 +27,8 @@
 //! # Example
 //!
 //! ```no_run
-//! use liteclip_replay::capture::audio::WasapiAudioManager;
-//! use liteclip_replay::config::AudioConfig;
+//! use liteclip_core::capture::audio::WasapiAudioManager;
+//! use liteclip_core::config::AudioConfig;
 //!
 //! let manager = WasapiAudioManager::new();
 //! // manager.start(&audio_config).unwrap();

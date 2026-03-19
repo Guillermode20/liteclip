@@ -26,7 +26,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use liteclip_replay::output::{MuxerConfig, generate_output_path};
+//! use liteclip_core::output::{MuxerConfig, generate_output_path};
 //! use std::path::Path;
 //!
 //! // Generate output path

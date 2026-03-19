@@ -26,7 +26,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use liteclip_replay::config::Config;
+//! use liteclip_core::config::Config;
 //!
 //! // Load configuration (or use defaults)
 //! let config = Config::default();

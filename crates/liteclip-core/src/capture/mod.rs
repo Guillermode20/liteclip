@@ -32,7 +32,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use liteclip_replay::capture::CaptureConfig;
+//! use liteclip_core::capture::CaptureConfig;
 //!
 //! let mut config = CaptureConfig::default();
 //! config.target_fps = 60;
@@ -66,7 +66,7 @@ pub use error::{CaptureError, CaptureResult};
 /// # Example
 ///
 /// ```ignore
-/// use liteclip_replay::capture::CaptureConfig;
+/// use liteclip_core::capture::CaptureConfig;
 ///
 /// let mut config = CaptureConfig::default();
 /// config.target_fps = 60;

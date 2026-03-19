@@ -49,8 +49,8 @@ impl AppState {
     /// # Example
     ///
     /// ```no_run
-    /// use liteclip_replay::config::Config;
-    /// use liteclip_replay::app::AppState;
+    /// use liteclip_core::config::Config;
+    /// use liteclip_core::app::AppState;
     ///
     /// let config = Config::default();
     /// let state = AppState::new(config).unwrap();

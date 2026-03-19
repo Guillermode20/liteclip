@@ -34,8 +34,8 @@
 //! # Example
 //!
 //! ```no_run
-//! use liteclip_replay::buffer::ring::ReplayBuffer;
-//! use liteclip_replay::config::Config;
+//! use liteclip_core::buffer::ring::ReplayBuffer;
+//! use liteclip_core::config::Config;
 //!
 //! let config = Config::default();
 //! let buffer = ReplayBuffer::new(&config).unwrap();

@@ -31,8 +31,8 @@
 //! # Example
 //!
 //! ```no_run
-//! use liteclip_replay::buffer::ring::LockFreeReplayBuffer;
-//! use liteclip_replay::config::Config;
+//! use liteclip_core::buffer::ring::LockFreeReplayBuffer;
+//! use liteclip_core::config::Config;
 //!
 //! let config = Config::default();
 //! let buffer = LockFreeReplayBuffer::new(&config).unwrap();
@@ -154,8 +154,8 @@ impl LockFreeReplayBuffer {
     /// # Example
     ///
     /// ```no_run
-    /// use liteclip_replay::buffer::ring::LockFreeReplayBuffer;
-    /// use liteclip_replay::config::Config;
+    /// use liteclip_core::buffer::ring::LockFreeReplayBuffer;
+    /// use liteclip_core::config::Config;
     ///
     /// let config = Config::default();
     /// let buffer = LockFreeReplayBuffer::new(&config).unwrap();

@@ -34,8 +34,8 @@
 //! # Example
 //!
 //! ```no_run
-//! use liteclip_replay::encode::EncodedPacket;
-//! use liteclip_replay::encode::StreamType;
+//! use liteclip_core::encode::EncodedPacket;
+//! use liteclip_core::encode::StreamType;
 //! use bytes::Bytes;
 //!
 //! let packet = EncodedPacket::new(
