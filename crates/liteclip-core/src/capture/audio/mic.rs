@@ -508,6 +508,7 @@ fn soft_limit(x: f32) -> f32 {
 }
 
 #[allow(dead_code)]
+#[allow(clippy::struct_field_names)]
 struct RNNoiseProcessor {
     channels: usize,
     state: Box<DenoiseState<'static>>,
@@ -532,6 +533,7 @@ struct RNNoiseProcessor {
 }
 
 #[allow(dead_code)]
+#[allow(clippy::too_many_arguments)]
 impl RNNoiseProcessor {
     const DC_COEFF: f32 = 0.9975;
     const MIN_GAIN: f32 = 0.18;
@@ -630,6 +632,7 @@ impl RNNoiseProcessor {
     }
 
     #[inline]
+    #[allow(unused_variables)]
     fn maybe_bypass_quiet_packet(&mut self, _data: &mut [u8]) -> bool {
         false
     }
@@ -787,17 +790,20 @@ impl RNNoiseProcessor {
 mod tests {
     use super::*;
 
+    #[allow(dead_code)]
     fn test_frame_rms(frame: &[f32]) -> f32 {
         let sum_sq = frame.iter().map(|sample| sample * sample).sum::<f32>();
         (sum_sq / frame.len() as f32).sqrt()
     }
 
+    #[allow(dead_code)]
     fn test_frame_peak(frame: &[f32]) -> f32 {
         frame
             .iter()
             .fold(0.0f32, |peak, sample| peak.max(sample.abs()))
     }
 
+    #[allow(dead_code)]
     fn synth_sine_frame(amplitude: f32, frame_index: usize) -> Vec<f32> {
         (0..AUDIO_FRAME_SIZE)
             .map(|i| {
