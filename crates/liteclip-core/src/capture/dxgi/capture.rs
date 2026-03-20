@@ -1,4 +1,4 @@
-//! DXGI capture with GPU-side scaling support
+//! DXGI desktop duplication capture.
 
 use crate::capture::{
     backpressure::BackpressureState, CaptureConfig, CapturedFrame, D3d11TexturePoolItem,
@@ -13,16 +13,13 @@ use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 use windows::Win32::Foundation::{BOOL, HANDLE};
 use windows::Win32::Graphics::Direct3D11::{
-    ID3D11Buffer, ID3D11Device, ID3D11Device5, ID3D11DeviceContext, ID3D11Fence, ID3D11InputLayout,
-    ID3D11Multithread, ID3D11PixelShader, ID3D11RenderTargetView, ID3D11Resource,
-    ID3D11SamplerState, ID3D11Texture2D, ID3D11VertexShader, ID3D11VideoContext, ID3D11VideoDevice,
-    ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator, ID3D11VideoProcessorInputView,
-    D3D11_BIND_VERTEX_BUFFER, D3D11_FENCE_FLAG_SHARED, D3D11_INPUT_ELEMENT_DESC,
-    D3D11_INPUT_PER_VERTEX_DATA, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_USAGE_IMMUTABLE,
-    D3D11_VIDEO_PROCESSOR_COLOR_SPACE, D3D11_VIDEO_PROCESSOR_CONTENT_DESC,
+    ID3D11Device, ID3D11Device5, ID3D11DeviceContext, ID3D11Fence, ID3D11Multithread,
+    ID3D11Resource, ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoDevice, ID3D11VideoProcessor,
+    ID3D11VideoProcessorEnumerator, D3D11_FENCE_FLAG_SHARED, D3D11_MAPPED_SUBRESOURCE,
+    D3D11_MAP_READ, D3D11_VIDEO_PROCESSOR_COLOR_SPACE, D3D11_VIDEO_PROCESSOR_CONTENT_DESC,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_FORMAT_R32G32_FLOAT, DXGI_RATIONAL,
+    DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_RATIONAL,
 };
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIOutput1, IDXGIResource, DXGI_ERROR_ACCESS_DENIED,
@@ -32,16 +29,6 @@ use windows::Win32::Graphics::Dxgi::{
 };
 use windows::Win32::System::Performance::QueryPerformanceCounter;
 use windows_core::Interface;
-
-/// Simple vertex for fullscreen quad: position (x, y) and texcoord (u, v)
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub(super) struct Vertex {
-    x: f32,
-    y: f32,
-    u: f32,
-    v: f32,
-}
 
 pub(super) struct Nv12TexturePool {
     pub(super) available: Vec<D3d11TexturePoolItem>,
@@ -95,7 +82,7 @@ impl BgraTexturePool {
     }
 }
 
-/// DXGI capture state with GPU-side scaling support
+/// DXGI capture state (desktop resolution capture; resize to configured output is done in the encoder).
 pub(super) struct DxgiCaptureState {
     pub(super) d3d_device: ID3D11Device,
     pub(super) d3d_context: ID3D11DeviceContext,
@@ -103,15 +90,6 @@ pub(super) struct DxgiCaptureState {
     pub(super) staging_texture: Option<ID3D11Texture2D>,
     pub(super) frame_width: u32,
     pub(super) frame_height: u32,
-    pub(super) target_width: u32,
-    pub(super) target_height: u32,
-    pub(super) vertex_shader: Option<ID3D11VertexShader>,
-    pub(super) pixel_shader: Option<ID3D11PixelShader>,
-    pub(super) input_layout: Option<ID3D11InputLayout>,
-    pub(super) sampler: Option<ID3D11SamplerState>,
-    pub(super) vertex_buffer: Option<ID3D11Buffer>,
-    pub(super) rtv: Option<ID3D11RenderTargetView>,
-    pub(super) scale_texture: Option<ID3D11Texture2D>,
     pub(super) native_buffer: BytesMut,
     pub(super) bgra_pool: Option<BgraTexturePool>,
     pub(super) nv12_pool: Option<Nv12TexturePool>,
@@ -119,7 +97,6 @@ pub(super) struct DxgiCaptureState {
     pub(super) video_context: Option<ID3D11VideoContext>,
     pub(super) video_processor: Option<ID3D11VideoProcessor>,
     pub(super) video_processor_enumerator: Option<ID3D11VideoProcessorEnumerator>,
-    pub(super) scale_input_view: Option<ID3D11VideoProcessorInputView>,
     pub(super) nv12_conversion_available: bool,
     pub(super) nv12_runtime_failures: u32,
     pub(super) nv12_retry_after: Option<Instant>,
@@ -165,7 +142,7 @@ impl DxgiCaptureState {
         }
     }
 
-    /// Initialize DXGI capture state with optional GPU-side scaling
+    /// Initialize DXGI capture state (desktop resolution; encoder applies configured output size).
     pub(super) fn init_capture_with_scaling(
         output_index: u32,
         target_resolution: Option<(u32, u32)>,
@@ -265,78 +242,6 @@ impl DxgiCaptureState {
                 target_resolution.unwrap_or((frame_width, frame_height));
             let needs_scaling = target_width != frame_width || target_height != frame_height;
 
-            // Initialize GPU scaling resources if needed
-            let (
-                vertex_shader,
-                pixel_shader,
-                input_layout,
-                sampler,
-                vertex_buffer,
-                rtv,
-                scale_texture,
-            ) = if needs_scaling {
-                // First, try to initialize shader resources
-                match Self::init_gpu_scaling_resources(&d3d_device, frame_width, frame_height) {
-                    Ok((vs, ps, il, smp, vb)) => {
-                        // Shaders compiled successfully, now create the scale texture
-                        let desc = windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE2D_DESC {
-                            Width: target_width,
-                            Height: target_height,
-                            MipLevels: 1,
-                            ArraySize: 1,
-                            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                            SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC {
-                                Count: 1,
-                                Quality: 0,
-                            },
-                            Usage: windows::Win32::Graphics::Direct3D11::D3D11_USAGE_DEFAULT,
-                            BindFlags:
-                                windows::Win32::Graphics::Direct3D11::D3D11_BIND_RENDER_TARGET.0
-                                    as u32,
-                            CPUAccessFlags: 0,
-                            MiscFlags: 0,
-                        };
-                        let mut texture = None;
-                        if d3d_device
-                            .CreateTexture2D(&desc, None, Some(&mut texture))
-                            .is_ok()
-                        {
-                            // Create render target view for the scale texture
-                            let mut rtv: Option<ID3D11RenderTargetView> = None;
-                            if let Some(tex) = texture.as_ref() {
-                                if d3d_device
-                                    .CreateRenderTargetView(tex, None, Some(&mut rtv))
-                                    .is_ok()
-                                {
-                                    info!(
-                                        "GPU scaling enabled: {}x{} -> {}x{}",
-                                        frame_width, frame_height, target_width, target_height
-                                    );
-                                    (vs, ps, il, smp, vb, rtv, texture)
-                                } else {
-                                    warn!(
-                                        "Failed to create RTV for scale texture, using CPU scaling"
-                                    );
-                                    (None, None, None, None, None, None, None)
-                                }
-                            } else {
-                                warn!("Failed to create scale texture, using CPU scaling");
-                                (None, None, None, None, None, None, None)
-                            }
-                        } else {
-                            warn!("Failed to create scale texture, using CPU scaling");
-                            (None, None, None, None, None, None, None)
-                        }
-                    }
-                    Err(e) => {
-                        warn!("GPU scaling not available: {}, using CPU scaling", e);
-                        (None, None, None, None, None, None, None)
-                    }
-                }
-            } else {
-                (None, None, None, None, None, None, None)
-            };
-
             // Initialize NV12 conversion resources for hardware encoding
             let (
                 nv12_pool,
@@ -344,7 +249,6 @@ impl DxgiCaptureState {
                 video_context,
                 video_processor,
                 video_processor_enumerator,
-                scale_input_view,
                 nv12_conversion_available,
             ) = Self::init_nv12_conversion_resources(
                 &d3d_device,
@@ -358,7 +262,7 @@ impl DxgiCaptureState {
                         "NV12 conversion unavailable during capture init: {}; GPU-preferred capture will fall back to CPU readback",
                         e
                     );
-                    (None, None, None, None, None, None, false)
+                    (None, None, None, None, None, false)
                 });
 
             if nv12_conversion_available {
@@ -466,25 +370,14 @@ impl DxgiCaptureState {
                 (None, None)
             };
 
-            // Buffer size is based on target resolution (smaller if GPU scaling enabled)
-            let buffer_size = if scale_texture.is_some() {
-                (target_width * target_height * 4) as usize
-            } else {
-                // CPU scaling - read at native resolution, scale in encoder
-                (frame_width * frame_height * 4) as usize
-            };
+            // Staging / CPU readback uses full desktop resolution; encoder scales to target.
+            let buffer_size = (frame_width * frame_height * 4) as usize;
             let mut native_buffer = BytesMut::with_capacity(buffer_size);
             native_buffer.resize(buffer_size, 0);
 
-            let gpu_scaling_enabled = scale_texture.is_some();
-            if gpu_scaling_enabled {
+            if needs_scaling {
                 info!(
-                    "DXGI capture initialized with GPU scaling: {}x{} -> {}x{}",
-                    frame_width, frame_height, target_width, target_height
-                );
-            } else if needs_scaling {
-                info!(
-                    "DXGI capture initialized (CPU scaling): {}x{} -> {}x{}",
+                    "DXGI capture initialized (encoder-side scaling): {}x{} -> {}x{}",
                     frame_width, frame_height, target_width, target_height
                 );
             } else {
@@ -498,15 +391,6 @@ impl DxgiCaptureState {
                 staging_texture: None,
                 frame_width,
                 frame_height,
-                target_width,
-                target_height,
-                vertex_shader,
-                pixel_shader,
-                input_layout,
-                sampler,
-                vertex_buffer,
-                rtv,
-                scale_texture,
                 native_buffer,
                 bgra_pool: Some(bgra_pool),
                 nv12_pool,
@@ -514,7 +398,6 @@ impl DxgiCaptureState {
                 video_context,
                 video_processor,
                 video_processor_enumerator,
-                scale_input_view,
                 nv12_conversion_available,
                 nv12_runtime_failures: 0,
                 nv12_retry_after: None,
@@ -556,7 +439,6 @@ impl DxgiCaptureState {
         Option<ID3D11VideoContext>,
         Option<ID3D11VideoProcessor>,
         Option<ID3D11VideoProcessorEnumerator>,
-        Option<ID3D11VideoProcessorInputView>,
         bool,
     )> {
         unsafe {
@@ -642,154 +524,7 @@ impl DxgiCaptureState {
                 None, // video_context will be obtained from d3d_context when needed
                 Some(video_processor),
                 Some(video_processor_enumerator),
-                None,
                 true,
-            ))
-        }
-    }
-
-    /// Initialize GPU scaling resources (shaders, vertex buffer)
-    #[allow(clippy::type_complexity)]
-    #[allow(clippy::manual_c_str_literals)]
-    fn init_gpu_scaling_resources(
-        d3d_device: &ID3D11Device,
-        _src_width: u32,
-        _src_height: u32,
-    ) -> Result<(
-        Option<ID3D11VertexShader>,
-        Option<ID3D11PixelShader>,
-        Option<ID3D11InputLayout>,
-        Option<ID3D11SamplerState>,
-        Option<ID3D11Buffer>,
-    )> {
-        unsafe {
-            // Embed compiled shader bytecode at compile time so release builds do not depend on
-            // Cargo build directories being present at runtime.
-            let vs_bytecode = include_bytes!(concat!(env!("OUT_DIR"), "/vs_simple.cso"));
-            let ps_bytecode = include_bytes!(concat!(env!("OUT_DIR"), "/ps_simple.cso"));
-
-            // If shader compilation failed, disable GPU scaling
-            if vs_bytecode.is_empty() || ps_bytecode.is_empty() {
-                warn!("GPU scaling shaders not available, using CPU scaling");
-                return Ok((None, None, None, None, None));
-            }
-
-            // Create vertex shader
-            let mut vertex_shader: Option<ID3D11VertexShader> = None;
-            d3d_device
-                .CreateVertexShader(vs_bytecode, None, Some(&mut vertex_shader))
-                .ok()
-                .context("Failed to create vertex shader")?;
-
-            // Create pixel shader
-            let mut pixel_shader: Option<ID3D11PixelShader> = None;
-            d3d_device
-                .CreatePixelShader(ps_bytecode, None, Some(&mut pixel_shader))
-                .ok()
-                .context("Failed to create pixel shader")?;
-
-            // Create input layout
-            let input_element_descs = [
-                D3D11_INPUT_ELEMENT_DESC {
-                    SemanticName: windows::core::PCSTR(b"POSITION\0".as_ptr()),
-                    SemanticIndex: 0,
-                    Format: DXGI_FORMAT_R32G32_FLOAT,
-                    InputSlot: 0,
-                    AlignedByteOffset: 0,
-                    InputSlotClass: D3D11_INPUT_PER_VERTEX_DATA,
-                    InstanceDataStepRate: 0,
-                },
-                D3D11_INPUT_ELEMENT_DESC {
-                    SemanticName: windows::core::PCSTR(b"TEXCOORD\0".as_ptr()),
-                    SemanticIndex: 0,
-                    Format: DXGI_FORMAT_R32G32_FLOAT,
-                    InputSlot: 0,
-                    AlignedByteOffset: 8,
-                    InputSlotClass: D3D11_INPUT_PER_VERTEX_DATA,
-                    InstanceDataStepRate: 0,
-                },
-            ];
-            let mut input_layout: Option<ID3D11InputLayout> = None;
-            d3d_device
-                .CreateInputLayout(&input_element_descs, vs_bytecode, Some(&mut input_layout))
-                .ok()
-                .context("Failed to create input layout")?;
-
-            // Create sampler state for bilinear filtering
-            let sampler_desc = windows::Win32::Graphics::Direct3D11::D3D11_SAMPLER_DESC {
-                Filter: windows::Win32::Graphics::Direct3D11::D3D11_FILTER_MIN_MAG_MIP_LINEAR,
-                AddressU: windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE_ADDRESS_CLAMP,
-                AddressV: windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE_ADDRESS_CLAMP,
-                AddressW: windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE_ADDRESS_CLAMP,
-                MipLODBias: 0.0,
-                MaxAnisotropy: 1,
-                ComparisonFunc: windows::Win32::Graphics::Direct3D11::D3D11_COMPARISON_NEVER,
-                BorderColor: [0.0; 4],
-                MinLOD: 0.0,
-                MaxLOD: f32::MAX,
-            };
-            let mut sampler: Option<ID3D11SamplerState> = None;
-            d3d_device
-                .CreateSamplerState(&sampler_desc, Some(&mut sampler))
-                .ok()
-                .context("Failed to create sampler state")?;
-
-            // Create vertex buffer for fullscreen quad (position x,y + texcoord u,v)
-            let vertices: [Vertex; 4] = [
-                Vertex {
-                    x: -1.0,
-                    y: -1.0,
-                    u: 0.0,
-                    v: 1.0,
-                }, // Bottom-left (D3D Y is up, texture Y is down)
-                Vertex {
-                    x: -1.0,
-                    y: 1.0,
-                    u: 0.0,
-                    v: 0.0,
-                }, // Top-left
-                Vertex {
-                    x: 1.0,
-                    y: -1.0,
-                    u: 1.0,
-                    v: 1.0,
-                }, // Bottom-right
-                Vertex {
-                    x: 1.0,
-                    y: 1.0,
-                    u: 1.0,
-                    v: 0.0,
-                }, // Top-right
-            ];
-            let vertex_buffer_desc = windows::Win32::Graphics::Direct3D11::D3D11_BUFFER_DESC {
-                ByteWidth: std::mem::size_of::<Vertex>() as u32 * 4,
-                Usage: D3D11_USAGE_IMMUTABLE,
-                BindFlags: D3D11_BIND_VERTEX_BUFFER.0 as u32,
-                CPUAccessFlags: 0,
-                MiscFlags: 0,
-                StructureByteStride: 0,
-            };
-            let vertex_data = windows::Win32::Graphics::Direct3D11::D3D11_SUBRESOURCE_DATA {
-                pSysMem: vertices.as_ptr() as *const _,
-                SysMemPitch: 0,
-                SysMemSlicePitch: 0,
-            };
-            let mut vertex_buffer: Option<ID3D11Buffer> = None;
-            d3d_device
-                .CreateBuffer(
-                    &vertex_buffer_desc,
-                    Some(&vertex_data),
-                    Some(&mut vertex_buffer),
-                )
-                .ok()
-                .context("Failed to create vertex buffer")?;
-
-            Ok((
-                vertex_shader,
-                pixel_shader,
-                input_layout,
-                sampler,
-                vertex_buffer,
             ))
         }
     }
@@ -803,7 +538,7 @@ impl DxgiCaptureState {
 /// # Features
 ///
 /// - GPU-accelerated capture via DXGI
-/// - GPU-side scaling and format conversion (NV12)
+/// - D3D11 Video Processor BGRA→NV12 for hardware encoding when available
 /// - Cross-device texture sharing for zero-copy encoding
 /// - Frame queue with configurable depth
 ///
@@ -920,17 +655,6 @@ impl DxgiCapture {
                     let captured_texture: ID3D11Texture2D = resource
                         .cast()
                         .context("Failed to cast resource to texture")?;
-
-                    let needs_gpu_scale = state.scale_texture.is_some();
-                    let needs_separate_gpu_scale = needs_gpu_scale
-                        && (perform_cpu_readback
-                            || gpu_texture_format != crate::capture::GpuTextureFormat::Nv12
-                            || !state.nv12_conversion_available);
-
-                    if needs_separate_gpu_scale {
-                        Self::perform_gpu_scale(state, &captured_texture)
-                            .context("GPU scaling failed")?;
-                    }
 
                     if !perform_cpu_readback {
                         let frame = DxgiCapture::capture_gpu_frame(
@@ -1053,7 +777,7 @@ impl DxgiCapture {
     /// This function runs in a dedicated thread and performs the following:
     /// 1. Initializes DXGI and D3D11 resources for the target monitor.
     /// 2. Enters a high-frequency loop to acquire frames at the target FPS.
-    /// 3. Handles frame capture, CPU readback (if configured), and GPU scaling/format conversion.
+    /// 3. Handles frame capture, CPU readback (if configured), and NV12 conversion when available.
     /// 4. Manages errors and automatic re-initialization with exponential backoff if the session is lost.
     /// 5. Reports fatal errors via the `fatal_tx` channel.
     ///
@@ -1100,7 +824,7 @@ impl DxgiCapture {
         let mut adaptive_adjust_tick = Instant::now();
         let mut pressure_high_streak = 0u32;
         let mut pressure_low_streak = 0u32;
-        // Use GPU scaling if target resolution is provided
+        // If a non-native output size is configured, still capture at desktop resolution; encoder scales.
         let mut state = match target_resolution {
             Some(res) => match Self::init_capture_with_target(config.output_index, res) {
                 Ok(state) => state,

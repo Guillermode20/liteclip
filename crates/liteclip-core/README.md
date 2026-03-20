@@ -16,8 +16,6 @@ Rustdoc on `liteclip_core` expands on advanced modules vs the stable facade.
 
 - **OS:** Windows 10+ (`x86_64-pc-windows-msvc` is the supported target). Other targets are not supported for runtime use.
 - **FFmpeg:** `ffmpeg-next` links FFmpeg libraries at build time; some flows also invoke an `ffmpeg.exe` process. See [`liteclip_core::runtime`](https://docs.rs/liteclip-core/latest/liteclip_core/runtime/index.html) for resolution order (`LITECLIP_CORE_FFMPEG`, `set_ffmpeg_path`, bundled `ffmpeg.exe`, `PATH`, and optional `ffmpeg_dev` heuristics when `debug_assertions` or the `dev-ffmpeg-paths` feature is enabled).
-- **Build:** Optional HLSL compilation uses the Windows SDK `fxc.exe` when present. If `fxc` is missing, GPU shader scaling is disabled (see `build.rs` warnings).
-
 ## Features and defaults
 
 - **`ffmpeg` (default)** — Enables the optional `ffmpeg-next` dependency, the [`encode::ffmpeg`](https://docs.rs/liteclip-core/latest/liteclip_core/encode/ffmpeg/index.html) module, and native MP4 muxing. Without it (`--no-default-features`), you get a smaller build suitable for **config I/O and helpers only**; recording and saving clips need `ffmpeg`.

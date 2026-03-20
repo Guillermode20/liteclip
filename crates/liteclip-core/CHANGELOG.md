@@ -19,3 +19,4 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 - `ClipManager::save_clip` now takes an optional `Arc<dyn CoreHost>` argument (pass `None` if unused).
 - **`ffmpeg` feature** now toggles the optional `ffmpeg-next` dependency. Builds with `default-features = false` omit FFmpeg linking; encoding, native mux (`output::mp4`), and the `encode::ffmpeg` module require `ffmpeg`.
+- **Removed:** DXGI GPU shader downscaling (HLSL/`fxc`); resize to the configured output resolution is always done in the encoder when it differs from the desktop capture size.

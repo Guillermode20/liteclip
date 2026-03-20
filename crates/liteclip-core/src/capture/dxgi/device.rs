@@ -188,7 +188,7 @@ impl DxgiCapture {
         DxgiCaptureState::init_capture_with_scaling(output_index, None)
     }
 
-    /// Initialize D3D11 device and DXGI duplication with target resolution for GPU scaling
+    /// Initialize D3D11 device and DXGI duplication with a configured output size (encoder scales).
     pub(super) fn init_capture_with_target(
         output_index: u32,
         target_resolution: (u32, u32),

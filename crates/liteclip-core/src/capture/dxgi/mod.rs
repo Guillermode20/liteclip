@@ -5,7 +5,7 @@
 //! # Features
 //!
 //! - GPU-accelerated screen capture with minimal overhead
-//! - GPU-side scaling and format conversion (NV12)
+//! - BGRA→NV12 via D3D11 Video Processor when available
 //! - Cross-device texture sharing for zero-copy encoding
 //! - Multi-monitor support
 //!

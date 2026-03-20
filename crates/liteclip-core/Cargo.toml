@@ -13,7 +13,6 @@ homepage = "https://github.com/Guillermode20/liteclip-recorder"
 documentation = "https://docs.rs/liteclip-core"
 include = [
     "src/**/*",
-    "shaders/**/*",
     "Cargo.toml",
     "README.md",
     "CHANGELOG.md",

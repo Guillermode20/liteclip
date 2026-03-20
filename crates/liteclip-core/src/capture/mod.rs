@@ -13,8 +13,8 @@
 //!
 //! Key features:
 //! - Zero-copy GPU texture capture for hardware encoders
-//! - GPU-side scaling via Direct3D11 VideoProcessor
-//! - NV12 conversion for AMF encoder compatibility
+//! - D3D11 Video Processor BGRA→NV12 when available for hardware encoders
+//! - Encoder-side resize when configured output size differs from the desktop
 //! - CPU readback fallback for software encoding
 //!
 //! ## Audio Capture (WASAPI)

@@ -8,8 +8,7 @@ use bytes::Bytes;
 use tracing::{debug, info, warn};
 use windows::Win32::Foundation::BOOL;
 use windows::Win32::Graphics::Direct3D11::{
-    ID3D11Buffer, ID3D11Device, ID3D11DeviceContext4, ID3D11RenderTargetView, ID3D11SamplerState,
-    ID3D11ShaderResourceView, ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoDevice,
+    ID3D11Device, ID3D11DeviceContext4, ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoDevice,
     ID3D11VideoProcessorEnumerator, ID3D11VideoProcessorInputView, ID3D11VideoProcessorOutputView,
     D3D11_BIND_RENDER_TARGET, D3D11_RESOURCE_MISC_SHARED, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
     D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255, D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_16_235,
@@ -22,22 +21,17 @@ use windows_core::Interface;
 
 use crate::capture::{CapturedFrame, D3d11Frame, D3d11TexturePoolItem, GpuTextureFormat};
 
-use super::capture::{DxgiCaptureState, Vertex};
+use super::capture::DxgiCaptureState;
 use super::DxgiCapture;
 
 impl DxgiCapture {
-    /// Create or resize staging texture for frame readback
-    /// When GPU scaling is enabled, staging texture is at target resolution
+    /// Create or resize staging texture for frame readback (full desktop resolution).
     pub(super) fn ensure_staging_texture(state: &mut DxgiCaptureState) -> Result<()> {
         unsafe {
             if state.staging_texture.is_some() {
                 return Ok(());
             }
-            let (width, height) = if state.scale_texture.is_some() {
-                (state.target_width, state.target_height)
-            } else {
-                (state.frame_width, state.frame_height)
-            };
+            let (width, height) = (state.frame_width, state.frame_height);
             let desc = windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE2D_DESC {
                 Width: width,
                 Height: height,
@@ -69,26 +63,12 @@ impl DxgiCapture {
     pub(super) fn source_texture_for_frame(
         state: &DxgiCaptureState,
         captured_texture: &ID3D11Texture2D,
-        preferred_gpu_format: Option<GpuTextureFormat>,
+        _preferred_gpu_format: Option<GpuTextureFormat>,
     ) -> Result<(ID3D11Texture2D, (u32, u32))> {
-        let has_target_scaling = state.scale_texture.is_some();
-        let needs_separate_gpu_scale = has_target_scaling
-            && !matches!(preferred_gpu_format, Some(GpuTextureFormat::Nv12) if state.nv12_conversion_available);
-        let source_texture = if needs_separate_gpu_scale {
-            state
-                .scale_texture
-                .as_ref()
-                .context("Scale texture is None")?
-                .clone()
-        } else {
-            captured_texture.clone()
-        };
-        let resolution = if has_target_scaling {
-            (state.target_width, state.target_height)
-        } else {
-            (state.frame_width, state.frame_height)
-        };
-        Ok((source_texture, resolution))
+        Ok((
+            captured_texture.clone(),
+            (state.frame_width, state.frame_height),
+        ))
     }
 
     pub(super) fn create_video_processor_input_view(
@@ -324,25 +304,7 @@ impl DxgiCapture {
                 .output_view
                 .as_ref()
                 .context("NV12 pooled output view is missing")?;
-            let using_cached_scale_input = state
-                .scale_texture
-                .as_ref()
-                .is_some_and(|scale_texture| scale_texture.as_raw() == bgra_texture.as_raw());
-            let input_view = if using_cached_scale_input {
-                if state.scale_input_view.is_none() {
-                    state.scale_input_view = Some(Self::create_video_processor_input_view(
-                        state,
-                        bgra_texture,
-                    )?);
-                }
-                state
-                    .scale_input_view
-                    .as_ref()
-                    .context("Scale input view is null")?
-                    .clone()
-            } else {
-                Self::create_video_processor_input_view(state, bgra_texture)?
-            };
+            let input_view = Self::create_video_processor_input_view(state, bgra_texture)?;
 
             let stream_data = D3D11_VIDEO_PROCESSOR_STREAM {
                 Enable: BOOL(1),
@@ -500,97 +462,5 @@ impl DxgiCapture {
             state.nv12_conversion_available,
             state.nv12_retry_after.is_some()
         );
-    }
-
-    /// Perform GPU-side downscaling using pixel shader
-    /// This renders the captured texture to a smaller render target
-    pub(super) fn perform_gpu_scale(
-        state: &mut DxgiCaptureState,
-        captured_texture: &ID3D11Texture2D,
-    ) -> Result<()> {
-        unsafe {
-            let Some(ref _scale_texture) = state.scale_texture else {
-                return Ok(()); // No scaling needed
-            };
-
-            let Some(ref vertex_shader) = state.vertex_shader else {
-                bail!("GPU scaling resources not initialized");
-            };
-            let Some(ref pixel_shader) = state.pixel_shader else {
-                bail!("GPU scaling resources not initialized");
-            };
-            let Some(ref input_layout) = state.input_layout else {
-                bail!("GPU scaling resources not initialized");
-            };
-            let Some(ref sampler) = state.sampler else {
-                bail!("GPU scaling resources not initialized");
-            };
-            let Some(ref vertex_buffer) = state.vertex_buffer else {
-                bail!("GPU scaling resources not initialized");
-            };
-            let Some(ref rtv) = state.rtv else {
-                bail!("GPU scaling resources not initialized");
-            };
-
-            // Create shader resource view for the captured texture
-            let mut srv: Option<ID3D11ShaderResourceView> = None;
-            state
-                .d3d_device
-                .CreateShaderResourceView(captured_texture, None, Some(&mut srv))
-                .ok()
-                .context("Failed to create SRV for captured texture")?;
-            let srv = srv.context("SRV is null")?;
-
-            // Clear render target (optional, but good practice)
-            let clear_color = [0.0f32; 4];
-            state.d3d_context.ClearRenderTargetView(rtv, &clear_color);
-
-            // Set up the graphics pipeline for rendering
-            state.d3d_context.IASetInputLayout(Some(input_layout));
-
-            let stride = std::mem::size_of::<Vertex>() as u32;
-            let offset = 0u32;
-            let vb: Option<ID3D11Buffer> = Some(vertex_buffer.clone());
-            state
-                .d3d_context
-                .IASetVertexBuffers(0, 1, Some(&vb), Some(&stride), Some(&offset));
-            state.d3d_context.IASetPrimitiveTopology(
-                windows::Win32::Graphics::Direct3D::D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP,
-            );
-
-            state.d3d_context.VSSetShader(Some(vertex_shader), None);
-            state.d3d_context.PSSetShader(Some(pixel_shader), None);
-            state
-                .d3d_context
-                .PSSetSamplers(0, Some(&[Some::<ID3D11SamplerState>(sampler.clone())]));
-            state
-                .d3d_context
-                .PSSetShaderResources(0, Some(&[Some(srv)]));
-
-            // Set render target
-            state
-                .d3d_context
-                .OMSetRenderTargets(Some(&[Some::<ID3D11RenderTargetView>(rtv.clone())]), None);
-
-            // Set viewport for target resolution
-            let viewport = windows::Win32::Graphics::Direct3D11::D3D11_VIEWPORT {
-                TopLeftX: 0.0,
-                TopLeftY: 0.0,
-                Width: state.target_width as f32,
-                Height: state.target_height as f32,
-                MinDepth: 0.0,
-                MaxDepth: 1.0,
-            };
-            state.d3d_context.RSSetViewports(Some(&[viewport]));
-
-            // Draw fullscreen quad (4 vertices as triangle strip)
-            state.d3d_context.Draw(4, 0);
-
-            // Unbind shader resources to avoid conflicts
-            state.d3d_context.PSSetShaderResources(0, Some(&[None]));
-            state.d3d_context.OMSetRenderTargets(None, None);
-
-            Ok(())
-        }
     }
 }
