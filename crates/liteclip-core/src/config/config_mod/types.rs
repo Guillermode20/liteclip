@@ -33,13 +33,13 @@ pub enum EncoderType {
     Auto,
     /// NVIDIA NVENC (requires NVIDIA GPU).
     ///
-    /// Encoding implementation: [`crate::encode::ffmpeg::nvenc`] (`src/encode/ffmpeg/nvenc.rs`).
+    /// Encoding implementation: `src/encode/ffmpeg/nvenc.rs` (NVENC).
     Nvenc,
     /// AMD AMF (requires AMD GPU).
     Amf,
     /// Intel Quick Sync Video (requires Intel iGPU).
     ///
-    /// Encoding implementation: [`crate::encode::ffmpeg::qsv`] (`src/encode/ffmpeg/qsv.rs`).
+    /// Encoding implementation: `src/encode/ffmpeg/qsv.rs` (QSV).
     Qsv,
 }
 
@@ -168,7 +168,7 @@ impl Config {
     /// Save synchronously using explicit [`AppDirs`].
     pub fn save_sync_to_dirs(&self, dirs: &AppDirs) -> Result<()> {
         let config_path = &dirs.config_file;
-        let parent = config_path 
+        let parent = config_path
             .parent()
             .context("Config path has no parent directory")?;
         std::fs::create_dir_all(parent).context("Failed to create config directory")?;

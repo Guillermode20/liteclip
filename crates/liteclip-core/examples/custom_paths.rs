@@ -1,6 +1,8 @@
 //! Load/save config using an explicit TOML path via [`liteclip_core::paths::AppDirs::with_config_file`].
 //!
-//! Run: `cargo run -p liteclip-core --example custom_paths --features ffmpeg`
+//! This example only exercises config paths and TOML load/save (no `encode::init_ffmpeg`).
+//!
+//! Run: `cargo run -p liteclip-core --example custom_paths`
 use liteclip_core::config::Config;
 use liteclip_core::paths::AppDirs;
 
@@ -12,7 +14,10 @@ fn main() -> anyhow::Result<()> {
     let dirs = AppDirs::with_config_file(config_file.clone(), "demo-clips")?;
 
     let cfg = Config::load_sync_from_dirs(&dirs)?;
-    println!("Loaded config, save_directory = {}", cfg.general.save_directory);
+    println!(
+        "Loaded config, save_directory = {}",
+        cfg.general.save_directory
+    );
 
     let mut cfg = cfg;
     cfg.general.replay_duration_secs = cfg.general.replay_duration_secs.max(30);

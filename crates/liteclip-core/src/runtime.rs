@@ -20,8 +20,9 @@ pub const FFMPEG_ENV: &str = "LITECLIP_CORE_FFMPEG";
 
 /// Set the FFmpeg executable path for this process (first successful call wins).
 ///
-/// On failure, `Err` contains the `path` argument that was **not** stored because an
-/// override was already installed ([`std::sync::OnceLock::set`]).
+/// Returns `Ok(())` when `path` was stored, or `Err(path)` when an override was already set
+/// ([`std::sync::OnceLock::set`]). This is **not** a path-validation error; callers should check
+/// `path.exists()` themselves if needed.
 pub fn set_ffmpeg_path(path: PathBuf) -> Result<(), PathBuf> {
     FFMPEG_PATH_OVERRIDE.set(path)
 }
@@ -29,8 +30,7 @@ pub fn set_ffmpeg_path(path: PathBuf) -> Result<(), PathBuf> {
 fn push_ffmpeg_dev_candidates(start: &Path, out: &mut Vec<PathBuf>) {
     for dir in start.ancestors().take(10) {
         out.push(
-            dir
-                .join("ffmpeg_dev")
+            dir.join("ffmpeg_dev")
                 .join("sdk")
                 .join("bin")
                 .join("ffmpeg.exe"),
@@ -72,4 +72,31 @@ pub(crate) fn resolve_ffmpeg_executable() -> PathBuf {
         .into_iter()
         .find(|path| path.exists())
         .unwrap_or_else(|| PathBuf::from("ffmpeg"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Serialize tests that touch `LITECLIP_CORE_FFMPEG`.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn resolve_prefers_ffmpeg_env_when_file_exists() {
+        let _guard = ENV_LOCK.lock().expect("env test lock");
+
+        let dir = std::env::temp_dir().join(format!("lc_ffmpeg_rt_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let fake = dir.join("ffmpeg.exe");
+        std::fs::write(&fake, b"x").expect("write fake ffmpeg");
+
+        std::env::set_var(FFMPEG_ENV, fake.as_os_str());
+        let got = resolve_ffmpeg_executable();
+        std::env::remove_var(FFMPEG_ENV);
+
+        assert_eq!(got, fake);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

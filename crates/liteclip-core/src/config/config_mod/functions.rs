@@ -10,11 +10,11 @@ pub const RECOMMENDED_BUFFER_BASE_OVERHEAD_MB: u64 = 24;
 pub const ESTIMATED_SYSTEM_AUDIO_BITRATE_BPS: u64 = 192_000;
 pub const ESTIMATED_MIC_AUDIO_BITRATE_BPS: u64 = 128_000;
 
-pub fn default_true() -> bool {
+pub(crate) fn default_true() -> bool {
     true
 }
 
-pub fn default_false() -> bool {
+pub(crate) fn default_false() -> bool {
     false
 }
 
@@ -53,7 +53,7 @@ pub(super) fn default_rate_control() -> RateControl {
 pub(super) fn default_quality_value() -> Option<u8> {
     None
 }
-pub fn default_quality_value_for_preset(preset: QualityPreset) -> u8 {
+pub(crate) fn default_quality_value_for_preset(preset: QualityPreset) -> u8 {
     match preset {
         QualityPreset::Performance => 28,
         QualityPreset::Balanced => 23,
@@ -69,25 +69,25 @@ pub(super) fn default_mic_volume() -> u16 {
 pub(super) fn default_system_volume() -> u8 {
     72
 }
-pub fn default_balance() -> i8 {
+pub(crate) fn default_balance() -> i8 {
     0
 }
-pub fn default_master_volume() -> u8 {
+pub(crate) fn default_master_volume() -> u8 {
     100
 }
-pub fn default_compression_enabled() -> bool {
+pub(crate) fn default_compression_enabled() -> bool {
     true
 }
-pub fn default_compression_threshold() -> u8 {
+pub(crate) fn default_compression_threshold() -> u8 {
     58 // -16.8dB
 }
-pub fn default_compression_ratio() -> u8 {
+pub(crate) fn default_compression_ratio() -> u8 {
     3 // 3:1 ratio
 }
-pub fn default_compression_attack() -> u8 {
+pub(crate) fn default_compression_attack() -> u8 {
     8 // 8ms
 }
-pub fn default_compression_release() -> u8 {
+pub(crate) fn default_compression_release() -> u8 {
     140 // 140ms
 }
 pub(super) fn default_hotkey_save() -> String {

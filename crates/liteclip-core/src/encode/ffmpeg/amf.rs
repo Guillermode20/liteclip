@@ -84,10 +84,16 @@ impl FfmpegEncoder {
     ) -> EncodeResult<D3d11HardwareContext> {
         unsafe {
             let dxgi_device: IDXGIDevice = gpu_frame.device.cast().map_err(|e| {
-                EncodeError::msg(format!("Failed to get IDXGIDevice from capture D3D11 device: {}", e))
+                EncodeError::msg(format!(
+                    "Failed to get IDXGIDevice from capture D3D11 device: {}",
+                    e
+                ))
             })?;
             let adapter = dxgi_device.GetAdapter().map_err(|e| {
-                EncodeError::msg(format!("Failed to get DXGI adapter from capture device: {}", e))
+                EncodeError::msg(format!(
+                    "Failed to get DXGI adapter from capture device: {}",
+                    e
+                ))
             })?;
             let adapter_typed: windows::Win32::Graphics::Dxgi::IDXGIAdapter = adapter
                 .cast()
@@ -110,7 +116,9 @@ impl FfmpegEncoder {
                 None,
                 Some(&mut encoder_context_opt),
             )
-            .map_err(|e| EncodeError::msg(format!("Failed to create encoder D3D11 device: {}", e)))?;
+            .map_err(|e| {
+                EncodeError::msg(format!("Failed to create encoder D3D11 device: {}", e))
+            })?;
             let encoder_device = encoder_device_opt
                 .ok_or_else(|| EncodeError::msg("Encoder D3D11 device is null"))?;
             let encoder_context = encoder_context_opt

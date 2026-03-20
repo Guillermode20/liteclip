@@ -162,8 +162,12 @@ impl GuiManagerApp {
             TOAST_WINDOW_IDLE_SIZE
         };
         let pos = get_toast_window_pos_for_size(size);
-        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(size[0], size[1])));
-        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(pos[0], pos[1])));
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+            size[0], size[1],
+        )));
+        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
+            pos[0], pos[1],
+        )));
         ctx.request_repaint();
     }
 
@@ -187,11 +191,9 @@ impl eframe::App for GuiManagerApp {
             match msg {
                 GuiMessage::ShowSettings(tx, level_monitor) => {
                     let config = crate::config::Config::load_sync().unwrap_or_default();
-                    *self.settings.lock().unwrap_or_else(|e| e.into_inner()) = Some(crate::gui::settings::SettingsApp::new(
-                        config,
-                        tx,
-                        level_monitor,
-                    ));
+                    *self.settings.lock().unwrap_or_else(|e| e.into_inner()) = Some(
+                        crate::gui::settings::SettingsApp::new(config, tx, level_monitor),
+                    );
                 }
                 GuiMessage::ShowGallery(tx) => {
                     let config = crate::config::Config::load_sync().unwrap_or_default();
@@ -228,7 +230,10 @@ impl eframe::App for GuiManagerApp {
             .show(ctx, |_ui| {});
 
         let settings_clone = self.settings.clone();
-        let show_settings = settings_clone.lock().unwrap_or_else(|e| e.into_inner()).is_some();
+        let show_settings = settings_clone
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some();
         if show_settings {
             ctx.show_viewport_deferred(
                 egui::ViewportId::from_hash_of("settings"),
@@ -255,7 +260,10 @@ impl eframe::App for GuiManagerApp {
         }
 
         let gallery_clone = self.gallery.clone();
-        let show_gallery = gallery_clone.lock().unwrap_or_else(|e| e.into_inner()).is_some();
+        let show_gallery = gallery_clone
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some();
         if show_gallery {
             ctx.show_viewport_deferred(
                 egui::ViewportId::from_hash_of("gallery"),

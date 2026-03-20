@@ -43,9 +43,7 @@ use anyhow::Result;
 use crossbeam::channel::Receiver;
 
 #[cfg(windows)]
-pub use crate::media::{
-    CapturedFrame, D3d11Frame, D3d11TexturePoolItem, GpuTextureFormat,
-};
+pub use crate::media::{CapturedFrame, D3d11Frame, D3d11TexturePoolItem, GpuTextureFormat};
 
 #[cfg(not(windows))]
 pub use crate::media::CapturedFrame;

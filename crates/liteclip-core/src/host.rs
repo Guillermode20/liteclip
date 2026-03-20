@@ -6,6 +6,11 @@ use std::path::Path;
 ///
 /// All methods have default no-op implementations.
 ///
+/// **Recommended wiring:** Install one `Arc<dyn CoreHost>` with [`crate::ReplayEngine::set_core_host`]
+/// for [`CoreHost::on_pipeline_fatal`], and pass the same `Arc` to [`crate::ReplayEngine::save_clip`]
+/// for [`CoreHost::on_clip_saved`]. You can also use [`crate::app::AppState::set_core_host`] on
+/// [`crate::ReplayEngine::state_mut`] if you prefer.
+///
 /// **Pipeline fatals:** If you handle `Ok(Some(reason))` from
 /// [`crate::app::AppState::enforce_pipeline_health`] in your UI, you typically either
 /// implement `on_pipeline_fatal` *or* branch on the return value — not both for the same

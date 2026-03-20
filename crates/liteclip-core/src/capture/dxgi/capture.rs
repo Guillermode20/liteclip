@@ -314,7 +314,9 @@ impl DxgiCaptureState {
                                     );
                                     (vs, ps, il, smp, vb, rtv, texture)
                                 } else {
-                                    warn!("Failed to create RTV for scale texture, using CPU scaling");
+                                    warn!(
+                                        "Failed to create RTV for scale texture, using CPU scaling"
+                                    );
                                     (None, None, None, None, None, None, None)
                                 }
                             } else {

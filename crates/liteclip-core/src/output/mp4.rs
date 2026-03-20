@@ -374,7 +374,10 @@ mod tests {
     }
 
     fn packet_from_i16_samples(samples: &[i16], pts: i64, stream: StreamType) -> EncodedPacket {
-        let data: Vec<u8> = samples.iter().flat_map(|sample| sample.to_le_bytes()).collect();
+        let data: Vec<u8> = samples
+            .iter()
+            .flat_map(|sample| sample.to_le_bytes())
+            .collect();
         EncodedPacket::new(data, pts, pts, false, stream)
     }
 
@@ -399,8 +402,10 @@ mod tests {
         assert_eq!(mixed.len(), 16);
         assert_eq!(
             &mixed[..16],
-            &[1000, 1000, 1001, 1001, 1002, 1002, 1003, 1003, 2000, 2000, 2001, 2001, 2002,
-                2002, 2003, 2003]
+            &[
+                1000, 1000, 1001, 1001, 1002, 1002, 1003, 1003, 2000, 2000, 2001, 2001, 2002, 2002,
+                2003, 2003
+            ]
         );
     }
 
@@ -430,7 +435,10 @@ mod tests {
         let gap_start = 4 * AUDIO_CHANNELS as usize;
         let gap_end = second_start_frame * AUDIO_CHANNELS as usize;
         assert!(mixed[gap_start..gap_end].iter().all(|&sample| sample == 0));
-        assert_eq!(&mixed[gap_end..gap_end + 8], &[2000, 2000, 2001, 2001, 2002, 2002, 2003, 2003]);
+        assert_eq!(
+            &mixed[gap_end..gap_end + 8],
+            &[2000, 2000, 2001, 2001, 2002, 2002, 2003, 2003]
+        );
     }
 }
 
@@ -513,7 +521,10 @@ fn mix_audio_packets_to_pcm(
             stream_buffer[start_index + offset] = sample as i32;
         }
 
-        stream_next_indices.insert(stream_id, start_index.saturating_add(required_len - start_index));
+        stream_next_indices.insert(
+            stream_id,
+            start_index.saturating_add(required_len - start_index),
+        );
     }
 
     let video_required_samples = qpc_to_sample_index(video_end_qpc.saturating_sub(base_qpc))

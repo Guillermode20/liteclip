@@ -662,14 +662,13 @@ async fn spawn_save_clip_task(
     });
 
     tokio::spawn(async move {
-        let result =
-            liteclip_replay::app::ClipManager::save_clip(
-                    &config,
-                    &buffer,
-                    game_name.as_deref(),
-                    None,
-                )
-                .await;
+        let result = liteclip_replay::app::ClipManager::save_clip(
+            &config,
+            &buffer,
+            game_name.as_deref(),
+            None,
+        )
+        .await;
 
         match result {
             Ok(path) => {

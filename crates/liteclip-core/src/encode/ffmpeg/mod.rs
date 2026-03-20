@@ -127,12 +127,8 @@ impl FfmpegEncoder {
             ResolvedEncoderType::Nvenc => {
                 self.init_nvenc_hardware_encoder(gpu_frame, width, height)
             }
-            ResolvedEncoderType::Amf => {
-                self.init_amf_hardware_encoder(gpu_frame, width, height)
-            }
-            ResolvedEncoderType::Qsv => {
-                self.init_qsv_hardware_encoder(gpu_frame, width, height)
-            }
+            ResolvedEncoderType::Amf => self.init_amf_hardware_encoder(gpu_frame, width, height),
+            ResolvedEncoderType::Qsv => self.init_qsv_hardware_encoder(gpu_frame, width, height),
         }
     }
 
@@ -144,15 +140,9 @@ impl FfmpegEncoder {
         gop: i64,
     ) -> EncodeResult<()> {
         match self.config.encoder_type {
-            ResolvedEncoderType::Nvenc => {
-                self.encode_nvenc_gpu_frame(frame, gpu_frame, pts, gop)
-            }
-            ResolvedEncoderType::Amf => {
-                self.encode_amf_gpu_frame(frame, gpu_frame, pts, gop)
-            }
-            ResolvedEncoderType::Qsv => {
-                self.encode_qsv_gpu_frame(frame, gpu_frame, pts, gop)
-            }
+            ResolvedEncoderType::Nvenc => self.encode_nvenc_gpu_frame(frame, gpu_frame, pts, gop),
+            ResolvedEncoderType::Amf => self.encode_amf_gpu_frame(frame, gpu_frame, pts, gop),
+            ResolvedEncoderType::Qsv => self.encode_qsv_gpu_frame(frame, gpu_frame, pts, gop),
         }
     }
 

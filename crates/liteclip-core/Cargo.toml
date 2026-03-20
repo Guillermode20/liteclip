@@ -2,11 +2,15 @@
 name = "liteclip-core"
 version = "0.2.0"
 edition = "2021"
+rust-version = "1.74"
 description = "Windows screen capture, encoding, and replay-buffer engine (LiteClip)"
 readme = "README.md"
 keywords = ["screen-capture", "recording", "replay-buffer", "windows", "dxgi"]
 categories = ["multimedia::video", "os::windows-apis"]
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/Guillermode20/liteclip-recorder"
+homepage = "https://github.com/Guillermode20/liteclip-recorder"
+documentation = "https://docs.rs/liteclip-core"
 include = [
     "src/**/*",
     "shaders/**/*",
@@ -15,12 +19,18 @@ include = [
     "CHANGELOG.md",
     "build.rs",
     "examples/**/*",
+    "tests/**/*",
 ]
+
+[package.metadata.docs.rs]
+default-target = "x86_64-pc-windows-msvc"
 
 [features]
 default = ["ffmpeg"]
-# Enable FFmpeg pipeline code paths (no native link-time FFmpeg deps)
-ffmpeg = []
+# FFmpeg encoding/muxing via `ffmpeg-next` (linked) and runtime `ffmpeg.exe` where applicable.
+# With `--no-default-features`, `ffmpeg-next` is not linked: config/paths/helpers compile; recording
+# and clip export require this feature.
+ffmpeg = ["dep:ffmpeg-next"]
 # In release builds, also walk ancestors for `ffmpeg_dev/...` (debug builds always may).
 dev-ffmpeg-paths = []
 
@@ -38,7 +48,7 @@ windows = { version = "0.58", features = ["Win32_Media", "Win32_Graphics_Dxgi", 
 dirs = "6"
 chrono = "0.4"
 windows-core = "0.58"
-ffmpeg-next = { version = "7.1.0", default-features = false, features = ["codec", "format", "software-scaling", "software-resampling"] }
+ffmpeg-next = { version = "7.1.0", default-features = false, features = ["codec", "format", "software-scaling", "software-resampling"], optional = true }
 nnnoiseless = "0.5.2"
 
 [[example]]
@@ -47,6 +57,10 @@ required-features = ["ffmpeg"]
 
 [[example]]
 name = "custom_ffmpeg"
+required-features = ["ffmpeg"]
+
+[[example]]
+name = "engine_host"
 required-features = ["ffmpeg"]
 
 [[example]]

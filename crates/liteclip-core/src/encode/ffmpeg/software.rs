@@ -10,9 +10,8 @@ use super::{EncodedPacket, FfmpegEncoder, StreamType};
 impl FfmpegEncoder {
     pub(super) fn init_encoder(&mut self, width: u32, height: u32) -> EncodeResult<()> {
         let codec_name = self.config.ffmpeg_codec_name();
-        let codec = ffmpeg::encoder::find_by_name(codec_name).ok_or_else(|| {
-            EncodeError::msg(format!("Failed to find encoder: {}", codec_name))
-        })?;
+        let codec = ffmpeg::encoder::find_by_name(codec_name)
+            .ok_or_else(|| EncodeError::msg(format!("Failed to find encoder: {}", codec_name)))?;
 
         let encoder_ctx = ffmpeg::codec::context::Context::new_with_codec(codec);
         let mut encoder = encoder_ctx

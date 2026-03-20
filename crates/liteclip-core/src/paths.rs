@@ -24,7 +24,10 @@ impl AppDirs {
     /// Arbitrary config file location (e.g. temp dir in tests / examples).
     ///
     /// `config_file` must have a parent directory (used as `config_dir`).
-    pub fn with_config_file(config_file: PathBuf, clips_folder_name: impl Into<String>) -> Result<Self> {
+    pub fn with_config_file(
+        config_file: PathBuf,
+        clips_folder_name: impl Into<String>,
+    ) -> Result<Self> {
         let clips_folder_name = clips_folder_name.into();
         validate_slug(&clips_folder_name)?;
         let config_dir = config_file

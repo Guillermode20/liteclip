@@ -1,9 +1,6 @@
 use crate::{
-    app::RecordingPipeline,
-    buffer::ReplayBuffer,
-    capture::audio::AudioLevelMonitor,
-    config::Config,
-    host::CoreHost,
+    app::RecordingPipeline, buffer::ReplayBuffer, capture::audio::AudioLevelMonitor,
+    config::Config, host::CoreHost,
 };
 use anyhow::Result;
 use std::sync::Arc;

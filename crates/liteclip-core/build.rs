@@ -1,3 +1,10 @@
+//! Build script: link Windows graphics libs and compile optional HLSL shaders for GPU scaling.
+//!
+//! - On **Windows**, `fxc.exe` is discovered under the Windows SDK (`Windows Kits\10\bin\...\x64\fxc.exe`).
+//!   If `fxc` is missing, empty placeholder `.cso` files are written and a `cargo:warning` is emitted;
+//!   the engine falls back without GPU shader scaling (see crate docs).
+//! - Shader compilation is attempted on all hosts so `cargo check` / cross-target builds can run;
+//!   non-Windows builds skip native linking but may still produce empty CSOs when `fxc` is absent.
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;

@@ -72,9 +72,9 @@ impl FfmpegEncoder {
             let hw_device_ctx = (*device_ctx_ref).data as *mut ffmpeg::ffi::AVHWDeviceContext;
             let d3d11_ctx = (*hw_device_ctx).hwctx as *mut AvD3d11vaDeviceContext;
 
-            let context = device.GetImmediateContext().map_err(|e| {
-                EncodeError::msg(format!("Failed to get immediate context: {}", e))
-            })?;
+            let context = device
+                .GetImmediateContext()
+                .map_err(|e| EncodeError::msg(format!("Failed to get immediate context: {}", e)))?;
 
             let ffmpeg_device = device.clone();
             let ffmpeg_context = context.clone();
@@ -106,7 +106,9 @@ impl FfmpegEncoder {
             if reusable_hw_frame.is_null() {
                 ffmpeg::ffi::av_buffer_unref(&mut frames_ctx_ref);
                 ffmpeg::ffi::av_buffer_unref(&mut device_ctx_ref);
-                return Err(EncodeError::msg("Failed to allocate reusable hardware frame"));
+                return Err(EncodeError::msg(
+                    "Failed to allocate reusable hardware frame",
+                ));
             }
 
             Ok(D3d11HardwareContext {
@@ -132,7 +134,9 @@ impl FfmpegEncoder {
         unsafe {
             let frames_ctx_ref = ffmpeg::ffi::av_hwframe_ctx_alloc(device_ctx_ref);
             if frames_ctx_ref.is_null() {
-                return Err(EncodeError::msg("Failed to allocate FFmpeg D3D11 frame context"));
+                return Err(EncodeError::msg(
+                    "Failed to allocate FFmpeg D3D11 frame context",
+                ));
             }
 
             let frames_ctx = (*frames_ctx_ref).data as *mut ffmpeg::ffi::AVHWFramesContext;
@@ -207,9 +211,8 @@ impl FfmpegEncoder {
                         "No encoder device available for cross-device texture sharing",
                     ));
                 }
-                let opened = opened_opt.ok_or_else(|| {
-                    EncodeError::msg("OpenSharedResource returned null")
-                })?;
+                let opened = opened_opt
+                    .ok_or_else(|| EncodeError::msg("OpenSharedResource returned null"))?;
                 hw_context
                     .cached_shared_textures
                     .push((gpu_frame.shared_handle, opened.clone()));
@@ -219,10 +222,8 @@ impl FfmpegEncoder {
             if let (Some(ref fence), Some(_handle)) =
                 (&hw_context.encoder_fence, gpu_frame.fence_shared_handle)
             {
-                let ctx4: windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext4 = hw_context
-                    .copy_context
-                    .cast()
-                    .map_err(|e| {
+                let ctx4: windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext4 =
+                    hw_context.copy_context.cast().map_err(|e| {
                         EncodeError::msg(format!(
                             "Failed to get ID3D11DeviceContext4 for encoder wait: {}",
                             e

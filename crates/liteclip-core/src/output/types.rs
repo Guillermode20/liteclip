@@ -1,11 +1,13 @@
-use super::{
-    functions::{h264_nal_type, hevc_nal_type},
-    mp4::FfmpegMuxer,
-};
+#[cfg(feature = "ffmpeg")]
+use super::functions::{h264_nal_type, hevc_nal_type};
+#[cfg(feature = "ffmpeg")]
+use super::mp4::FfmpegMuxer;
 use crate::encode::{EncodedPacket, StreamType};
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
-use tracing::{info, trace, warn};
+#[cfg(feature = "ffmpeg")]
+use tracing::warn;
+use tracing::{info, trace};
 
 /// MP4 muxer for combining encoded packets into a video file.
 ///
@@ -24,6 +26,7 @@ pub struct Muxer {
 }
 
 impl Muxer {
+    #[cfg(feature = "ffmpeg")]
     fn detect_video_codec(video_packets: &[&EncodedPacket], fallback: &str) -> String {
         let mut saw_h264_parameter_sets = false;
         let mut saw_hevc_parameter_sets = false;
@@ -193,8 +196,18 @@ impl Muxer {
         );
         Ok(output_path.to_path_buf())
     }
+
+    #[cfg(not(feature = "ffmpeg"))]
+    pub fn mux_clip(
+        _output_path: &Path,
+        _config: &MuxerConfig,
+        _packets: &[EncodedPacket],
+    ) -> Result<PathBuf> {
+        bail!("FFmpeg feature disabled; rebuild with `--features ffmpeg`")
+    }
 }
 
+#[cfg(feature = "ffmpeg")]
 fn normalize_video_packets_for_mp4(video_packets: &[&EncodedPacket]) -> Vec<EncodedPacket> {
     let mut normalized = Vec::with_capacity(video_packets.len());
     let mut pending_param_sets: Vec<&EncodedPacket> = Vec::new();
@@ -273,6 +286,7 @@ fn normalize_video_packets_for_mp4(video_packets: &[&EncodedPacket]) -> Vec<Enco
     normalized
 }
 
+#[cfg(feature = "ffmpeg")]
 fn is_parameter_set_packet(packet: &EncodedPacket) -> bool {
     if !matches!(packet.stream, StreamType::Video) {
         return false;

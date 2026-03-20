@@ -13,8 +13,9 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 - `runtime` module: `LITECLIP_CORE_FFMPEG`, `set_ffmpeg_path`, centralized FFmpeg resolution; dev-only `ffmpeg_dev` heuristics gated behind `debug_assertions` or feature `dev-ffmpeg-paths`.
 - `CoreHost` trait and optional integration in `AppState` / `ClipManager::save_clip`.
 - `ReplayEngine` facade and `prelude` module.
-- Examples: `minimal_engine`, `custom_ffmpeg`, `custom_paths`.
+- Examples: `minimal_engine`, `custom_ffmpeg`, `custom_paths`, `engine_host` (`CoreHost` / `set_core_host`).
 
 ### Changed
 
 - `ClipManager::save_clip` now takes an optional `Arc<dyn CoreHost>` argument (pass `None` if unused).
+- **`ffmpeg` feature** now toggles the optional `ffmpeg-next` dependency. Builds with `default-features = false` omit FFmpeg linking; encoding, native mux (`output::mp4`), and the `encode::ffmpeg` module require `ffmpeg`.

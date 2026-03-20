@@ -153,6 +153,7 @@ pub fn generate_output_path(base_dir: &Path, game_name: Option<&str>) -> Result<
     Ok(output_dir.join(&filename))
 }
 
+/// Resolved FFmpeg executable path (see [`crate::runtime`] for search order and overrides).
 pub fn ffmpeg_executable_path() -> PathBuf {
     crate::runtime::resolve_ffmpeg_executable()
 }

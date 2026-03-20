@@ -4,13 +4,33 @@
 //! overlays) can depend on it to run continuous capture into a retroactive buffer and
 //! save clips on demand.
 //!
+//! # Supported embedder path
+//!
+//! For a **background clipping engine**, depend on this crate and use:
+//!
+//! - [`ReplayEngine`] — lifecycle, config-backed state, and [`ReplayEngine::save_clip`].
+//! - [`prelude`] — common imports (`ReplayEngine`, [`Config`], [`AppDirs`], [`CoreHost`], [`encode`], [`runtime`]).
+//! - [`paths::AppDirs`] — isolate config and clips from the LiteClip Replay desktop layout.
+//! - [`runtime`] — resolve or override the `ffmpeg` / `ffmpeg.exe` binary ([`runtime::FFMPEG_ENV`], [`runtime::set_ffmpeg_path`]).
+//! - [`host::CoreHost`] — optional UI hooks ([`CoreHost::on_clip_saved`], [`CoreHost::on_pipeline_fatal`]).
+//!
+//! Call [`encode::init_ffmpeg`] when the `ffmpeg` feature is enabled **before** starting the pipeline.
+//!
 //! # Requirements
 //!
-//! - **Windows** (DXGI capture, WASAPI audio, D3D11).
+//! - **Windows** (DXGI capture, WASAPI audio, D3D11). Other targets may compile in limited
+//!   configurations but are **unsupported**; file issues only for `x86_64-pc-windows-msvc`.
 //! - **FFmpeg** at runtime: the `ffmpeg-next` crate links to FFmpeg libraries; some paths also
 //!   spawn an `ffmpeg` / `ffmpeg.exe` process. See [`runtime`] for how the binary is resolved
 //!   ([`runtime::FFMPEG_ENV`], [`runtime::set_ffmpeg_path`], exe-relative search, and dev-only
 //!   `ffmpeg_dev` heuristics when `debug_assertions` or the `dev-ffmpeg-paths` feature is on).
+//!
+//! # Tokio and async clip save
+//!
+//! [`ReplayEngine::save_clip`] is `async` and schedules work on the Tokio runtime (including
+//! blocking offload). Use a multi-thread Tokio runtime (`tokio::runtime::Builder::new_multi_thread`)
+//! in the host process, or wrap the engine in `spawn_blocking` patterns consistent with
+//! [`AppState`](app::AppState) docs.
 //!
 //! # Application directories
 //!
@@ -24,9 +44,21 @@
 //! Capture → Encode → Buffer → Output (on save)
 //! ```
 //!
+//! # Advanced / low-level modules
+//!
+//! These are public for power users and internal reuse; semver may move internals more than the
+//! [`ReplayEngine`] facade:
+//!
+//! - [`app`], [`capture`], [`encode`], [`buffer`], [`output`], [`media`]
+//!
 //! # Feature flags
 //!
-//! - `ffmpeg` (default) — FFmpeg-based encoding and muxing.
+//! - `ffmpeg` (default) — Pulls in optional `ffmpeg-next` for linked FFmpeg APIs, native MP4 muxing
+//!   (`output::mp4`), and the `encode::ffmpeg` module. [`encode::init_ffmpeg`] is a no-op when this feature is off.
+//!   With `default-features = false`, the crate still compiles for config-only / tooling use; **recording
+//!   and clip export require `ffmpeg`.**
+//!   The workspace root crate disables default features on `liteclip-core` and enables `ffmpeg` explicitly;
+//!   standalone embedders typically use `default-features = true` or `features = ["ffmpeg"]`.
 //! - `dev-ffmpeg-paths` — Include repo `ffmpeg_dev\...` search heuristics in **release** builds
 //!   (debug builds already use them when `debug_assertions` are on).
 //!
@@ -83,6 +115,8 @@ mod engine;
 pub use engine::ReplayEngine;
 
 /// Commonly used items for embedders (see crate root docs).
+///
+/// For full engine control, import [`crate::app::AppState`] and submodules from [`crate`] directly.
 pub mod prelude {
     pub use crate::app::{AppState, ClipManager};
     pub use crate::buffer::ReplayBuffer;

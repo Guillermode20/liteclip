@@ -102,10 +102,7 @@ impl GameDetector {
     }
 
     pub fn get_detected_app(&self) -> DetectedApp {
-        self.detected
-            .read()
-            .map(|g| g.clone())
-            .unwrap_or_default()
+        self.detected.read().map(|g| g.clone()).unwrap_or_default()
     }
 }
 

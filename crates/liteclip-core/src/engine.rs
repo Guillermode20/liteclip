@@ -1,8 +1,11 @@
 //! Thin facade over [`AppState`](crate::app::AppState) and [`AppDirs`](crate::paths::AppDirs).
 //!
-//! **Host callbacks:** Successful clip writes can pass [`CoreHost`] to [`ReplayEngine::save_clip`].
-//! Pipeline fatals are delivered only via [`AppState::set_core_host`] on
-//! [`ReplayEngine::state_mut`] ([`CoreHost::on_pipeline_fatal`]), not through [`ReplayEngine::save_clip`].
+//! **Host callbacks:** Use the same [`Arc`] for both paths when you want one integration object:
+//! - Call [`ReplayEngine::set_core_host`] (or [`AppState::set_core_host`] via [`Self::state_mut`])
+//!   so [`CoreHost::on_pipeline_fatal`] runs when the pipeline stops with a fatal error.
+//! - Pass `Some(host)` to [`ReplayEngine::save_clip`] so [`CoreHost::on_clip_saved`] runs after a
+//!   successful export. [`save_clip`](ReplayEngine::save_clip) is `async` and uses Tokio internally;
+//!   run it from a Tokio runtime (see crate root docs).
 
 use crate::app::{AppState, ClipManager};
 use crate::config::Config;
@@ -14,8 +17,8 @@ use std::sync::Arc;
 
 /// Recording session with resolved [`AppDirs`] for configuration defaults.
 ///
-/// To receive pipeline fatal notifications, call [`AppState::set_core_host`] on
-/// [`Self::state_mut`]. The `host` argument on [`Self::save_clip`] is only for
+/// Prefer [`Self::set_core_host`] / [`Self::core_host`] for pipeline fatals, or [`Self::state_mut`]
+/// when you need full [`AppState`] access. The `host` argument on [`Self::save_clip`] is only for
 /// [`CoreHost::on_clip_saved`].
 pub struct ReplayEngine {
     dirs: AppDirs,
@@ -48,6 +51,19 @@ impl ReplayEngine {
 
     pub fn state_mut(&mut self) -> &mut AppState {
         &mut self.state
+    }
+
+    /// Set the [`CoreHost`] used for **pipeline fatals** ([`CoreHost::on_pipeline_fatal`]).
+    ///
+    /// Same as [`AppState::set_core_host`]; provided on the facade so embedders rarely need
+    /// [`Self::state_mut`] only for host wiring.
+    pub fn set_core_host(&mut self, host: Option<Arc<dyn CoreHost>>) {
+        self.state.set_core_host(host);
+    }
+
+    /// Current [`CoreHost`] for pipeline fatals, if any ([`AppState::core_host`]).
+    pub fn core_host(&self) -> Option<&Arc<dyn CoreHost>> {
+        self.state.core_host()
     }
 
     pub fn start_recording(&mut self) -> Result<()> {

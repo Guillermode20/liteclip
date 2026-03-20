@@ -1,6 +1,6 @@
 use crate::{
     buffer::ReplayBuffer,
-    capture::{audio::AudioLevelMonitor, CaptureFactory, CaptureBackend},
+    capture::{audio::AudioLevelMonitor, CaptureBackend, CaptureFactory},
     config::Config,
     encode::{EncoderFactory, EncoderHandle},
 };

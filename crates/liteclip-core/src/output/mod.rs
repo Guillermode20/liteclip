@@ -38,6 +38,7 @@
 
 pub mod error;
 pub mod functions;
+#[cfg(feature = "ffmpeg")]
 pub mod mp4;
 pub mod saver;
 pub mod types;

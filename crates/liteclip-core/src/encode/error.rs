@@ -13,9 +13,7 @@ pub enum EncodeError {
     #[error(
         "selected encoder {encoder:?} is not available in the current FFmpeg/runtime environment"
     )]
-    EncoderUnavailable {
-        encoder: crate::config::EncoderType,
-    },
+    EncoderUnavailable { encoder: crate::config::EncoderType },
 
     #[error("encoder I/O: {0}")]
     Io(#[from] std::io::Error),

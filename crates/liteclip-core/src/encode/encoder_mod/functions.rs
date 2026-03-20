@@ -3,9 +3,9 @@
 use crate::encode::{EncodeError, EncodeResult};
 use crossbeam::channel::{bounded, Receiver, Sender};
 #[cfg(feature = "ffmpeg")]
-use ffmpeg::format::Pixel;
-#[cfg(feature = "ffmpeg")]
 use ffmpeg_next as ffmpeg;
+#[cfg(feature = "ffmpeg")]
+use ffmpeg_next::format::Pixel;
 use tracing::{debug, info, warn};
 #[cfg(windows)]
 use windows::Win32::System::Threading::{
@@ -133,9 +133,7 @@ fn forward_ready_packets(
 fn ensure_requested_encoder_available(ty: ResolvedEncoderType) -> EncodeResult<()> {
     let codec_name = ty.ffmpeg_hevc_codec_name();
     if !probe_encoder_available(codec_name) {
-        return Err(EncodeError::EncoderUnavailable {
-            encoder: ty.into(),
-        });
+        return Err(EncodeError::EncoderUnavailable { encoder: ty.into() });
     }
     Ok(())
 }
@@ -183,7 +181,9 @@ fn resolve_encoder_config(config: &EncoderConfig) -> EncodeResult<ResolvedEncode
     Ok(encoder_fields_to_resolved(resolved, ty))
 }
 
-pub fn resolve_effective_encoder_config(config: &EncoderConfig) -> EncodeResult<ResolvedEncoderConfig> {
+pub fn resolve_effective_encoder_config(
+    config: &EncoderConfig,
+) -> EncodeResult<ResolvedEncoderConfig> {
     resolve_encoder_config(config)
 }
 
@@ -332,9 +332,17 @@ pub(super) fn apply_auto_encoder_selection(
 }
 
 /// Create the FFmpeg encoder for a **resolved** configuration (after `Auto` handling).
+#[cfg(feature = "ffmpeg")]
 pub fn create_encoder(config: &ResolvedEncoderConfig) -> EncodeResult<Box<dyn Encoder>> {
     info!("Creating native FFmpeg encoder: {:?}", config.encoder_type);
     Ok(Box::new(crate::encode::ffmpeg::FfmpegEncoder::new(config)?))
+}
+
+#[cfg(not(feature = "ffmpeg"))]
+pub fn create_encoder(_config: &ResolvedEncoderConfig) -> EncodeResult<Box<dyn Encoder>> {
+    Err(EncodeError::msg(
+        "FFmpeg support is disabled; rebuild with `--features ffmpeg`",
+    ))
 }
 
 /// Spawn an encoder that receives frames from an existing receiver
@@ -479,9 +487,8 @@ pub fn spawn_encoder_with_receiver(
 /// Initialize FFmpeg (call once at startup)
 #[cfg(feature = "ffmpeg")]
 pub fn init_ffmpeg() -> EncodeResult<()> {
-    ffmpeg_next::init().map_err(|e| {
-        EncodeError::msg(format!("Failed to initialize FFmpeg: {}", e))
-    })?;
+    ffmpeg_next::init()
+        .map_err(|e| EncodeError::msg(format!("Failed to initialize FFmpeg: {}", e)))?;
     info!("FFmpeg initialized successfully");
     Ok(())
 }

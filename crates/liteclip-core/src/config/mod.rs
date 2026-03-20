@@ -44,5 +44,5 @@
 
 pub mod config_mod;
 
-pub use config_mod::*;
 pub use crate::paths::AppDirs;
+pub use config_mod::*;
