@@ -63,6 +63,7 @@ impl WasapiAudioManager {
         }
 
         debug!("Starting WASAPI audio manager...");
+        const CAPTURE_BUFFER_DURATION: Duration = Duration::from_millis(20);
 
         // Create system audio capture if enabled
         if config.capture_system {
@@ -71,7 +72,7 @@ impl WasapiAudioManager {
                 sample_rate: 48000,
                 channels: 2,
                 bits_per_sample: 16,
-                buffer_duration: std::time::Duration::from_millis(100),
+                buffer_duration: CAPTURE_BUFFER_DURATION,
                 device_id: None, // Use default device
             };
 
@@ -90,7 +91,7 @@ impl WasapiAudioManager {
                 sample_rate: 48000,
                 channels: 2,
                 bits_per_sample: 16,
-                buffer_duration: std::time::Duration::from_millis(100),
+                buffer_duration: CAPTURE_BUFFER_DURATION,
                 device_id: if config.mic_device == "default" {
                     None
                 } else {
@@ -196,9 +197,12 @@ impl WasapiAudioManager {
         config_update_rx: Receiver<AudioConfig>,
         level_monitor: Option<AudioLevelMonitor>,
     ) {
+        const PACKET_PAIR_WAIT: Duration = Duration::from_millis(25);
         let mut mixer = AudioMixer::new(&config);
         let mut system_packet: Option<EncodedPacket> = None;
         let mut mic_packet: Option<EncodedPacket> = None;
+        let mut system_packet_started_at: Option<Instant> = None;
+        let mut mic_packet_started_at: Option<Instant> = None;
         let mut forwarded_total: u64 = 0;
         let mut last_peak_decay = Instant::now();
 
@@ -225,6 +229,7 @@ impl WasapiAudioManager {
                                 let (left, right) = calculate_levels_stereo(&samples);
                                 monitor.update_system_levels(left, right);
                             }
+                            system_packet_started_at.get_or_insert_with(Instant::now);
                             system_packet = Some(packet);
                         }
                         Err(TryRecvError::Empty) => {}
@@ -250,6 +255,7 @@ impl WasapiAudioManager {
                                 let (left, right) = calculate_levels_stereo(&samples);
                                 monitor.update_mic_levels(left, right);
                             }
+                            mic_packet_started_at.get_or_insert_with(Instant::now);
                             mic_packet = Some(packet);
                         }
                         Err(TryRecvError::Empty) => {}
@@ -269,9 +275,30 @@ impl WasapiAudioManager {
                 }
             }
 
-            // Mix audio packets if we have both (or at least one)
-            if system_packet.is_some() || mic_packet.is_some() {
+            let system_wait_ready = system_packet.is_some()
+                && (mic_packet.is_some()
+                    || system_disconnected
+                    || system_packet_started_at
+                        .map(|started| started.elapsed() >= PACKET_PAIR_WAIT)
+                        .unwrap_or(false));
+            let mic_wait_ready = mic_packet.is_some()
+                && (system_packet.is_some()
+                    || mic_disconnected
+                    || mic_packet_started_at
+                        .map(|started| started.elapsed() >= PACKET_PAIR_WAIT)
+                        .unwrap_or(false));
+
+            // Mix audio packets if we have both, or if one stream has waited long enough.
+            if system_wait_ready || mic_wait_ready {
+                let had_system_packet = system_packet.is_some();
+                let had_mic_packet = mic_packet.is_some();
                 let mixed_packets = mixer.mix_packets(system_packet.take(), mic_packet.take());
+                if had_system_packet {
+                    system_packet_started_at = None;
+                }
+                if had_mic_packet {
+                    mic_packet_started_at = None;
+                }
 
                 for mixed_packet in mixed_packets {
                     if packet_tx.send(mixed_packet).is_err() {

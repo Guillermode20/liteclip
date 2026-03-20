@@ -7,6 +7,8 @@ use std::sync::Arc;
 
 const DECAY_FACTOR: f32 = 0.92;
 const SMOOTH_ALPHA: f32 = 0.4;
+const METER_FLOOR_DB: f32 = -60.0;
+const METER_DB_RANGE: f32 = 60.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AudioLevels {
@@ -56,8 +58,8 @@ impl AudioLevelMonitor {
     }
 
     pub fn update_system_levels(&self, left: f32, right: f32) {
-        let combined = ((left + right) / 2.0).clamp(0.0, 1.0);
-        let level_u32 = (combined * 1000.0) as u32;
+        let combined = left.max(right).clamp(0.0, 1.0);
+        let level_u32 = Self::amplitude_to_meter_level(combined);
 
         let smoothed = self.inner.system_smoothed.load(Ordering::Relaxed);
         let new_smoothed =
@@ -79,8 +81,8 @@ impl AudioLevelMonitor {
     }
 
     pub fn update_mic_levels(&self, left: f32, right: f32) {
-        let combined = ((left + right) / 2.0).clamp(0.0, 1.0);
-        let level_u32 = (combined * 1000.0) as u32;
+        let combined = left.max(right).clamp(0.0, 1.0);
+        let level_u32 = Self::amplitude_to_meter_level(combined);
 
         let smoothed = self.inner.mic_smoothed.load(Ordering::Relaxed);
         let new_smoothed =
@@ -100,7 +102,7 @@ impl AudioLevelMonitor {
     pub fn decay_peak_levels(&self) {
         let decay = |val: &AtomicU32| {
             let current = val.load(Ordering::Relaxed);
-            let decayed = ((current as f32 * DECAY_FACTOR) as u32).max(1);
+            let decayed = (current as f32 * DECAY_FACTOR) as u32;
             val.store(decayed, Ordering::Relaxed);
         };
 
@@ -110,16 +112,27 @@ impl AudioLevelMonitor {
 
     pub fn get_system_levels(&self) -> AudioLevels {
         AudioLevels {
-            level: (self.inner.system_level.load(Ordering::Relaxed) / 10) as u8,
-            peak: (self.inner.system_peak.load(Ordering::Relaxed) / 10) as u8,
+            level: self.inner.system_level.load(Ordering::Relaxed) as u8,
+            peak: self.inner.system_peak.load(Ordering::Relaxed) as u8,
         }
     }
 
     pub fn get_mic_levels(&self) -> AudioLevels {
         AudioLevels {
-            level: (self.inner.mic_level.load(Ordering::Relaxed) / 10) as u8,
-            peak: (self.inner.mic_peak.load(Ordering::Relaxed) / 10) as u8,
+            level: self.inner.mic_level.load(Ordering::Relaxed) as u8,
+            peak: self.inner.mic_peak.load(Ordering::Relaxed) as u8,
         }
+    }
+
+    #[inline]
+    fn amplitude_to_meter_level(level: f32) -> u32 {
+        if level <= 0.0 {
+            return 0;
+        }
+
+        let db = 20.0 * level.max(0.000_01).log10();
+        let normalized = ((db - METER_FLOOR_DB) / METER_DB_RANGE).clamp(0.0, 1.0);
+        (normalized * 100.0).round() as u32
     }
 }
 
@@ -167,4 +180,32 @@ pub fn calculate_levels_mono(samples: &[i16]) -> (f32, f32) {
     let level = (rms / 32768.0).min(1.0) as f32;
 
     (level, level)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_mic_meter_shows_quiet_voice() {
+        let monitor = AudioLevelMonitor::new();
+
+        monitor.update_mic_levels(0.0, 0.01);
+
+        let levels = monitor.get_mic_levels();
+        assert!(levels.level > 10, "expected visible meter movement, got {}", levels.level);
+    }
+
+    #[test]
+    fn test_peak_decay_reaches_zero() {
+        let monitor = AudioLevelMonitor::new();
+
+        monitor.update_system_levels(0.0, 1.0);
+        for _ in 0..200 {
+            monitor.decay_peak_levels();
+        }
+
+        let levels = monitor.get_system_levels();
+        assert_eq!(levels.peak, 0);
+    }
 }

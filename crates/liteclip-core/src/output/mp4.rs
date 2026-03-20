@@ -440,6 +440,36 @@ mod tests {
             &[2000, 2000, 2001, 2001, 2002, 2002, 2003, 2003]
         );
     }
+
+    #[test]
+    fn mix_audio_packets_to_pcm_truncates_audio_past_video_end() {
+        let first = packet_from_i16_samples(
+            &[1000, 1000, 1001, 1001, 1002, 1002, 1003, 1003],
+            0,
+            StreamType::Microphone,
+        );
+        let late_pts = qpc_for_frame_index(48);
+        assert_eq!(qpc_to_sample_index(late_pts), 48);
+        let late = packet_from_i16_samples(
+            &[2000, 2000, 2001, 2001, 2002, 2002, 2003, 2003],
+            late_pts,
+            StreamType::Microphone,
+        );
+
+        let audio_packets = vec![&first, &late];
+        let mixed = mix_audio_packets_to_pcm(
+            &audio_packets,
+            0,
+            qpc_for_frame_index(16),
+        );
+
+        assert_eq!(mixed.len(), 16 * AUDIO_CHANNELS as usize);
+        assert_eq!(
+            &mixed[..8],
+            &[1000, 1000, 1001, 1001, 1002, 1002, 1003, 1003]
+        );
+        assert!(mixed[8..].iter().all(|&sample| sample == 0));
+    }
 }
 
 fn default_video_frame_qpc(video_frame_rate: i32) -> i64 {
@@ -530,14 +560,17 @@ fn mix_audio_packets_to_pcm(
     let video_required_samples = qpc_to_sample_index(video_end_qpc.saturating_sub(base_qpc))
         .saturating_mul(AUDIO_CHANNELS as usize);
 
-    let mut final_len = video_required_samples;
+    let final_len = video_required_samples.max(1);
     for buf in stream_buffers.values() {
-        final_len = final_len.max(buf.len());
+        if buf.len() > final_len {
+            // Ignore audio that extends past the video window so the clip duration
+            // stays locked to the selected video range.
+        }
     }
 
     let mut mixed = vec![0_i32; final_len];
     for buf in stream_buffers.values() {
-        for (i, &sample) in buf.iter().enumerate() {
+        for (i, &sample) in buf.iter().enumerate().take(final_len) {
             mixed[i] = mixed[i].saturating_add(sample);
         }
     }

@@ -42,7 +42,7 @@ impl Default for WasapiSystemConfig {
             sample_rate: 48000,
             channels: 2,
             bits_per_sample: 16,
-            buffer_duration: Duration::from_millis(100),
+            buffer_duration: Duration::from_millis(20),
             device_id: None,
         }
     }
@@ -187,6 +187,7 @@ impl WasapiSystemCapture {
             .context("Failed to get IAudioCaptureClient service")?;
 
         unsafe { audio_client.Start() }.context("Failed to start system audio capture")?;
+        let wait_timeout_ms = config.buffer_duration.as_millis().clamp(1, 25) as u32;
 
         let start_qpc = query_qpc()?;
         let qpc_freq = qpc_frequency() as f64;
@@ -201,7 +202,7 @@ impl WasapiSystemCapture {
                 .context("IAudioCaptureClient::GetNextPacketSize failed")?;
 
             if packet_frames == 0 {
-                match unsafe { WaitForSingleObject(capture_event.raw(), 100) }.0 {
+                match unsafe { WaitForSingleObject(capture_event.raw(), wait_timeout_ms) }.0 {
                     0 => {}
                     258 => continue,
                     status => {
@@ -376,7 +377,7 @@ mod tests {
         assert_eq!(config.sample_rate, 48000);
         assert_eq!(config.channels, 2);
         assert_eq!(config.bits_per_sample, 16);
-        assert_eq!(config.buffer_duration, Duration::from_millis(100));
+        assert_eq!(config.buffer_duration, Duration::from_millis(20));
         assert!(config.device_id.is_none());
     }
 }

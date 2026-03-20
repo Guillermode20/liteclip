@@ -45,7 +45,7 @@ impl Default for WasapiMicConfig {
             sample_rate: 48000,
             channels: 2,
             bits_per_sample: 16,
-            buffer_duration: Duration::from_millis(100),
+            buffer_duration: Duration::from_millis(20),
             device_id: None,
             noise_reduction_enabled: true,
         }
@@ -212,6 +212,7 @@ impl WasapiMicCapture {
             .context("Failed to get IAudioCaptureClient service for microphone")?;
 
         unsafe { audio_client.Start() }.context("Failed to start microphone capture")?;
+        let wait_timeout_ms = config.buffer_duration.as_millis().clamp(1, 25) as u32;
 
         // Signal that WASAPI initialization succeeded
         initialized.store(true, Ordering::SeqCst);
@@ -271,7 +272,7 @@ impl WasapiMicCapture {
             let mut packet_frames = unsafe { capture_client.GetNextPacketSize() }?;
 
             if packet_frames == 0 {
-                match unsafe { WaitForSingleObject(capture_event.raw(), 100) }.0 {
+                match unsafe { WaitForSingleObject(capture_event.raw(), wait_timeout_ms) }.0 {
                     0 => {}
                     258 => continue,
                     status => {
@@ -1118,7 +1119,7 @@ mod tests {
         assert_eq!(config.sample_rate, 48000);
         assert_eq!(config.channels, 2);
         assert_eq!(config.bits_per_sample, 16);
-        assert_eq!(config.buffer_duration, Duration::from_millis(100));
+        assert_eq!(config.buffer_duration, Duration::from_millis(20));
         assert!(config.device_id.is_none());
         assert!(config.noise_reduction_enabled);
     }

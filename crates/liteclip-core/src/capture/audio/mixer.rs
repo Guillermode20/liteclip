@@ -46,6 +46,8 @@ pub struct AudioMixer {
     mic_packets: BTreeMap<i64, EncodedPacket>,    // PTS -> Packet (sorted for fast access)
     output_buffer: BytesMut,
     compression_state: Option<CompressionState>,
+    /// Smoothed multiplier that keeps mic output aligned with the system track.
+    mic_match_gain: f32,
     /// Maximum time difference (in QPC ticks) allowed between packets to be considered matching
     sync_threshold: i64,
     /// Timeout for waiting for matching packets (in QPC ticks)
@@ -87,6 +89,7 @@ impl AudioMixer {
             mic_packets: BTreeMap::new(),
             output_buffer: BytesMut::with_capacity(4096),
             compression_state,
+            mic_match_gain: 1.0,
             sync_threshold,
             timeout,
             last_processed_pts: -1,
@@ -189,11 +192,11 @@ impl AudioMixer {
 
                         // If the gap is too large, process the earlier packet and pad
                         if later_ts - earlier_ts > self.timeout {
-                            if system_ts < mic_ts {
-                                let system_packet = self.system_packets.remove(&system_ts);
-                                return Some((system_packet, None, system_ts));
-                            } else {
-                                let mic_packet = self.mic_packets.remove(&mic_ts);
+                        if system_ts < mic_ts {
+                            let system_packet = self.system_packets.remove(&system_ts);
+                            return Some((system_packet, None, system_ts));
+                        } else {
+                            let mic_packet = self.mic_packets.remove(&mic_ts);
                                 return Some((None, mic_packet, mic_ts));
                             }
                         } else {
@@ -254,6 +257,10 @@ impl AudioMixer {
             return None;
         }
 
+        // Track the observed loudness of each stream before we apply mixing gains.
+        let system_rms = Self::normalized_rms(&self.system_decode_buf);
+        let mic_rms = Self::normalized_rms(&self.mic_decode_buf);
+
         // Resize buffers to match
         if self.system_decode_buf.len() < max_samples {
             self.system_decode_buf.resize(max_samples, 0);
@@ -266,7 +273,15 @@ impl AudioMixer {
         let system_gain = (self.config.system_volume as f32 / 100.0).clamp(0.0, 2.0);
         let mic_gain = (self.config.mic_volume as f32 / 100.0).clamp(0.0, 4.0);
         let master_gain = (self.config.master_volume as f32 / 100.0).clamp(0.0, 2.0);
-        let duck_gain = Self::system_duck_gain(&self.mic_decode_buf);
+        let mic_match_target = Self::target_mic_match_gain(
+            system_rms,
+            mic_rms,
+            system_gain,
+            mic_gain,
+        );
+        self.mic_match_gain = Self::smooth_gain(self.mic_match_gain, mic_match_target);
+        let effective_mic_gain = mic_gain * self.mic_match_gain;
+        let duck_gain = Self::system_duck_gain(&self.mic_decode_buf, effective_mic_gain);
 
         // Calculate balance (stereo only)
         let (left_balance, right_balance) = if self.config.balance < 0 {
@@ -290,7 +305,7 @@ impl AudioMixer {
 
             // Apply per-stream gains
             let system_scaled = (system_sample as f32) * system_gain * duck_gain;
-            let mic_scaled = (mic_sample as f32) * mic_gain;
+            let mic_scaled = (mic_sample as f32) * effective_mic_gain;
 
             // Mix samples
             let mixed = system_scaled + mic_scaled;
@@ -389,7 +404,7 @@ impl AudioMixer {
         sign * clipped
     }
 
-    fn system_duck_gain(mic_samples: &[i16]) -> f32 {
+    fn system_duck_gain(mic_samples: &[i16], mic_gain: f32) -> f32 {
         const DUCK_START_LEVEL: f32 = 0.025;
         const DUCK_FULL_LEVEL: f32 = 0.08;
         const MIN_SYSTEM_DUCK_GAIN: f32 = 0.72;
@@ -402,7 +417,7 @@ impl AudioMixer {
         let mut sum_squares = 0.0_f32;
 
         for &sample in mic_samples {
-            let normalized = (sample as f32).abs() / 32768.0;
+            let normalized = ((sample as f32).abs() / 32768.0) * mic_gain.max(0.0);
             peak = peak.max(normalized);
             sum_squares += normalized * normalized;
         }
@@ -420,6 +435,56 @@ impl AudioMixer {
 
         let progress = (activity - DUCK_START_LEVEL) / (DUCK_FULL_LEVEL - DUCK_START_LEVEL);
         1.0 - progress * (1.0 - MIN_SYSTEM_DUCK_GAIN)
+    }
+
+    fn smooth_gain(current: f32, target: f32) -> f32 {
+        const ATTACK_ALPHA: f32 = 0.18;
+        const RELEASE_ALPHA: f32 = 0.06;
+
+        let alpha = if target >= current {
+            ATTACK_ALPHA
+        } else {
+            RELEASE_ALPHA
+        };
+        current + alpha * (target - current)
+    }
+
+    fn normalized_rms(samples: &[i16]) -> f32 {
+        if samples.is_empty() {
+            return 0.0;
+        }
+
+        let mut sum_squares = 0.0_f32;
+        for &sample in samples {
+            let normalized = sample as f32 / 32768.0;
+            sum_squares += normalized * normalized;
+        }
+
+        (sum_squares / samples.len() as f32).sqrt()
+    }
+
+    fn target_mic_match_gain(
+        system_rms: f32,
+        mic_rms: f32,
+        system_gain: f32,
+        mic_gain: f32,
+    ) -> f32 {
+        const MIN_MATCH_LEVEL: f32 = 0.004;
+        const MIN_GAIN: f32 = 0.35;
+        const MAX_GAIN: f32 = 3.5;
+
+        if system_rms <= MIN_MATCH_LEVEL || mic_rms <= MIN_MATCH_LEVEL || mic_gain <= 0.0 {
+            return 1.0;
+        }
+
+        let system_target = system_rms * system_gain;
+        let mic_target = mic_rms * mic_gain.max(0.01);
+
+        if system_target <= MIN_MATCH_LEVEL || mic_target <= MIN_MATCH_LEVEL {
+            return 1.0;
+        }
+
+        (system_target / mic_target).clamp(MIN_GAIN, MAX_GAIN)
     }
 }
 
@@ -676,4 +741,40 @@ mod tests {
         let decoded = decode_packet(&result[0]);
         assert_eq!(decoded, vec![6880, 6880]);
     }
+
+    #[test]
+    fn test_quiet_mic_is_automatically_boosted_toward_system_level() {
+        let mut config = Config::default().audio;
+        config.compression_enabled = false;
+        config.system_volume = 100;
+        config.mic_volume = 100;
+        let mut mixer = AudioMixer::new(&config);
+
+        let mut system_data = BytesMut::with_capacity(4);
+        system_data.extend_from_slice(&18_000i16.to_le_bytes());
+        system_data.extend_from_slice(&18_000i16.to_le_bytes());
+        let system_packet = EncodedPacket::new(
+            system_data.freeze(),
+            0,
+            0,
+            false,
+            crate::encode::StreamType::SystemAudio,
+        );
+
+        let mut mic_data = BytesMut::with_capacity(4);
+        mic_data.extend_from_slice(&3_000i16.to_le_bytes());
+        mic_data.extend_from_slice(&3_000i16.to_le_bytes());
+        let mic_packet = EncodedPacket::new(
+            mic_data.freeze(),
+            0,
+            0,
+            false,
+            crate::encode::StreamType::Microphone,
+        );
+
+        let result = mixer.mix_packets(Some(system_packet), Some(mic_packet));
+        assert_eq!(result.len(), 1);
+        assert!(mixer.mic_match_gain > 1.1, "expected auto gain boost, got {}", mixer.mic_match_gain);
+    }
+
 }
