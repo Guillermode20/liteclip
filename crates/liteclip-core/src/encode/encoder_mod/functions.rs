@@ -1,7 +1,7 @@
 //! Encoder spawn, resolution, and trait definitions.
 
 use crate::encode::{EncodeError, EncodeResult};
-use crossbeam::channel::{bounded, Receiver, Sender};
+use crossbeam::channel::{bounded, Receiver};
 #[cfg(feature = "ffmpeg")]
 use ffmpeg_next as ffmpeg;
 #[cfg(feature = "ffmpeg")]
@@ -72,61 +72,6 @@ impl EncoderFactory for DefaultEncoderFactory {
     ) -> EncodeResult<EncoderHandle> {
         spawn_encoder_with_receiver(config, buffer, frame_rx)
     }
-}
-
-fn spawn_buffer_writer(
-    buffer: crate::buffer::ring::SharedReplayBuffer,
-) -> EncodeResult<(Sender<EncodedPacket>, std::thread::JoinHandle<(u64, usize)>)> {
-    let (packet_tx, packet_rx) = bounded::<EncodedPacket>(2048);
-    let thread = std::thread::Builder::new()
-        .name("encoder-buffer-writer".to_string())
-        .spawn(move || {
-            let mut total_packets = 0u64;
-            let mut flush_batches = 0usize;
-            let mut packet_batch = Vec::with_capacity(256);
-
-            while let Ok(packet) = packet_rx.recv() {
-                packet_batch.push(packet);
-                total_packets = total_packets.saturating_add(1);
-
-                while packet_batch.len() < 256 {
-                    match packet_rx.try_recv() {
-                        Ok(packet) => {
-                            packet_batch.push(packet);
-                            total_packets = total_packets.saturating_add(1);
-                        }
-                        Err(_) => break,
-                    }
-                }
-
-                buffer.push_batch(packet_batch.drain(..));
-                flush_batches = flush_batches.saturating_add(1);
-            }
-
-            if !packet_batch.is_empty() {
-                buffer.push_batch(packet_batch.drain(..));
-                flush_batches = flush_batches.saturating_add(1);
-            }
-
-            (total_packets, flush_batches)
-        })
-        .map_err(EncodeError::Io)?;
-
-    Ok((packet_tx, thread))
-}
-
-fn forward_ready_packets(
-    packet_rx: &Receiver<EncodedPacket>,
-    buffer_packet_tx: &Sender<EncodedPacket>,
-) -> u64 {
-    let mut forwarded = 0u64;
-    while let Ok(packet) = packet_rx.try_recv() {
-        if buffer_packet_tx.send(packet).is_err() {
-            break;
-        }
-        forwarded = forwarded.saturating_add(1);
-    }
-    forwarded
 }
 
 // Hardware encoder registry: when changing NVENC/QSV/AMF codec strings, probe options, or auto-detect
@@ -462,21 +407,50 @@ pub fn spawn_encoder_with_receiver(
             }
             debug!("Encoder initialized");
             let packet_rx = encoder.packet_rx();
-            let (buffer_packet_tx, buffer_writer_thread) = match spawn_buffer_writer(buffer.clone())
-            {
-                Ok(x) => x,
-                Err(e) => {
-                    let _ = health_tx.try_send(EncoderHealthEvent::Fatal(format!(
-                        "Failed to spawn buffer writer: {}",
-                        e
-                    )));
-                    return Err(e);
-                }
-            };
+            let mut packet_batch = Vec::with_capacity(256);
             let mut consecutive_encode_errors = 0u32;
             const MAX_FRAME_BURST: usize = 8;
+            let mut total_forwarded_packets = 0u64;
+            let mut flush_batches = 0usize;
+
+            fn flush_packet_batch(
+                buffer: &crate::buffer::ring::SharedReplayBuffer,
+                packet_batch: &mut Vec<EncodedPacket>,
+                flush_batches: &mut usize,
+            ) {
+                if packet_batch.is_empty() {
+                    return;
+                }
+                buffer.push_batch(packet_batch.drain(..));
+                *flush_batches += 1;
+            }
+
+            fn drain_ready_packets(
+                packet_rx: &Receiver<EncodedPacket>,
+                buffer: &crate::buffer::ring::SharedReplayBuffer,
+                packet_batch: &mut Vec<EncodedPacket>,
+                flush_batches: &mut usize,
+            ) -> u64 {
+                let mut drained = 0u64;
+                while let Ok(packet) = packet_rx.try_recv() {
+                    packet_batch.push(packet);
+                    drained = drained.saturating_add(1);
+                    if packet_batch.len() >= 256 {
+                        flush_packet_batch(buffer, packet_batch, flush_batches);
+                    }
+                }
+                drained
+            }
+
             loop {
-                let _ = forward_ready_packets(&packet_rx, &buffer_packet_tx);
+                total_forwarded_packets = total_forwarded_packets.saturating_add(
+                    drain_ready_packets(
+                        &packet_rx,
+                        &buffer,
+                        &mut packet_batch,
+                        &mut flush_batches,
+                    ),
+                );
                 match frame_rx.recv_timeout(std::time::Duration::from_millis(8)) {
                     Ok(frame) => {
                         let mut encode_one =
@@ -497,7 +471,14 @@ pub fn spawn_encoder_with_receiver(
                                 } else {
                                     consecutive_encode_errors = 0;
                                 }
-                                let _ = forward_ready_packets(&packet_rx, &buffer_packet_tx);
+                                total_forwarded_packets = total_forwarded_packets.saturating_add(
+                                    drain_ready_packets(
+                                        &packet_rx,
+                                        &buffer,
+                                        &mut packet_batch,
+                                        &mut flush_batches,
+                                    ),
+                                );
                                 Ok(())
                             };
 
@@ -511,7 +492,14 @@ pub fn spawn_encoder_with_receiver(
                         }
                     }
                     Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
-                        let _ = forward_ready_packets(&packet_rx, &buffer_packet_tx);
+                        total_forwarded_packets = total_forwarded_packets.saturating_add(
+                            drain_ready_packets(
+                                &packet_rx,
+                                &buffer,
+                                &mut packet_batch,
+                                &mut flush_batches,
+                            ),
+                        );
                     }
                     Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
                         debug!("Frame channel closed, shutting down encoder");
@@ -523,8 +511,9 @@ pub fn spawn_encoder_with_receiver(
             match encoder.flush() {
                 Ok(packets) => {
                     for packet in packets {
-                        if buffer_packet_tx.send(packet).is_err() {
-                            break;
+                        packet_batch.push(packet);
+                        if packet_batch.len() >= 256 {
+                            flush_packet_batch(&buffer, &mut packet_batch, &mut flush_batches);
                         }
                     }
                 }
@@ -532,23 +521,20 @@ pub fn spawn_encoder_with_receiver(
                     warn!("Failed to flush encoder: {}", e);
                 }
             }
-            let mut final_packets = Vec::new();
-            while let Ok(packet) = packet_rx.try_recv() {
-                if buffer_packet_tx.send(packet).is_ok() {
-                    final_packets.push(());
-                }
-            }
-            debug!(
-                "Drained {} final packets from encoder channel",
-                final_packets.len()
+            total_forwarded_packets = total_forwarded_packets.saturating_add(
+                drain_ready_packets(
+                    &packet_rx,
+                    &buffer,
+                    &mut packet_batch,
+                    &mut flush_batches,
+                ),
             );
-            drop(buffer_packet_tx);
-            if let Ok((buffered_packets, flush_batches)) = buffer_writer_thread.join() {
-                debug!(
-                    "Encoder buffer writer flushed {} packets across {} batches",
-                    buffered_packets, flush_batches
-                );
-            }
+            flush_packet_batch(&buffer, &mut packet_batch, &mut flush_batches);
+            debug!(
+                "Encoder buffer flush complete: {} packets across {} batches",
+                total_forwarded_packets,
+                flush_batches
+            );
             debug!("Encoder thread stopped");
             Ok(())
         })

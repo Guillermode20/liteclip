@@ -247,24 +247,30 @@ impl Encoder for FfmpegEncoder {
 
             src_frame.data_mut(0).copy_from_slice(&frame.bgra);
 
-            // For NVENC (scaler is None), use src_frame directly as dst_frame
-            // For other encoders, run the software scaler
+            // When no scaler is needed, send the populated source frame directly to avoid
+            // a second full-frame memcpy into `dst_frame`.
             if let Some(ref mut scaler) = self.scaler {
                 scaler.run(src_frame, dst_frame)?;
-            } else {
-                // No scaling needed - copy src to dst directly
-                dst_frame.data_mut(0).copy_from_slice(&frame.bgra);
-            }
+                Self::apply_bt709_frame_metadata(dst_frame);
+                dst_frame.set_pts(Some(encoder_pts));
+                if gop > 0 && self.frame_count % gop == 0 {
+                    dst_frame.set_kind(ffmpeg::picture::Type::I);
+                } else {
+                    dst_frame.set_kind(ffmpeg::picture::Type::None);
+                }
 
-            Self::apply_bt709_frame_metadata(dst_frame);
-            dst_frame.set_pts(Some(encoder_pts));
-            if gop > 0 && self.frame_count % gop == 0 {
-                dst_frame.set_kind(ffmpeg::picture::Type::I);
+                encoder.send_frame(dst_frame)?;
             } else {
-                dst_frame.set_kind(ffmpeg::picture::Type::None);
-            }
+                Self::apply_bt709_frame_metadata(src_frame);
+                src_frame.set_pts(Some(encoder_pts));
+                if gop > 0 && self.frame_count % gop == 0 {
+                    src_frame.set_kind(ffmpeg::picture::Type::I);
+                } else {
+                    src_frame.set_kind(ffmpeg::picture::Type::None);
+                }
 
-            encoder.send_frame(dst_frame)?;
+                encoder.send_frame(src_frame)?;
+            }
         }
 
         self.drain_encoder_packets(frame.timestamp)?;
