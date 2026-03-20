@@ -1,4 +1,5 @@
 use crate::buffer::ring::SharedReplayBuffer;
+use crate::encode::EncodedPacket;
 use anyhow::{bail, Context, Result};
 use std::path::PathBuf;
 use std::thread;
@@ -147,6 +148,8 @@ pub fn spawn_clip_saver(
             bail!("No video packets in selected clip range");
         }
 
+        let clip_span_secs = clip_pts_span_seconds(&clip_packets);
+
         let final_path = Muxer::mux_clip(&output_path, &config, &clip_packets)
             .context("Failed to finalize MP4")?;
         log_save_memory("after mux", Some(&buffer), Some(&clip_packets));
@@ -154,11 +157,11 @@ pub fn spawn_clip_saver(
         log_save_memory("after packet release", Some(&buffer), None);
 
         info!(
-            "Clip saved successfully: {:?} ({} video packets, {} audio packets, ~{} seconds)",
+            "Clip saved successfully: {:?} ({} video packets, {} audio packets, ~{:.1}s)",
             final_path,
             video_count,
             audio_count,
-            duration.as_secs()
+            clip_span_secs.unwrap_or_else(|| duration.as_secs_f64())
         );
 
         // Clean up any leftover fragmented MP4s from prior failed saves.
@@ -191,6 +194,18 @@ pub fn spawn_clip_saver(
 
         Ok(final_path)
     })
+}
+
+/// Presentation timestamps use QPC ticks at ~10 MHz (`EncodedPacket::pts`).
+const QPC_TICKS_PER_SEC: f64 = 10_000_000.0;
+
+fn clip_pts_span_seconds(packets: &[EncodedPacket]) -> Option<f64> {
+    if packets.is_empty() {
+        return None;
+    }
+    let min_pts = packets.iter().map(|p| p.pts).min()?;
+    let max_pts = packets.iter().map(|p| p.pts).max()?;
+    Some(max_pts.saturating_sub(min_pts) as f64 / QPC_TICKS_PER_SEC)
 }
 
 fn log_save_memory(
