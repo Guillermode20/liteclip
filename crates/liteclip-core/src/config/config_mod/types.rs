@@ -17,7 +17,8 @@ use super::functions::{
     default_keyframe_interval, default_master_volume, default_mic_device, default_mic_volume,
     default_quality_preset, default_quality_value, default_quality_value_for_preset,
     default_rate_control, default_replay_duration, default_resolution, default_save_directory,
-    default_system_volume, default_true, ESTIMATED_MIC_AUDIO_BITRATE_BPS,
+    default_system_volume, default_true, default_webcam_height, default_webcam_width,
+    ESTIMATED_MIC_AUDIO_BITRATE_BPS,
     ESTIMATED_SYSTEM_AUDIO_BITRATE_BPS, MAX_FRAMERATE, RECOMMENDED_BUFFER_BASE_OVERHEAD_MB,
     RECOMMENDED_BUFFER_HEADROOM_PERCENT,
 };
@@ -269,6 +270,18 @@ impl Config {
                 self.video.resolution
             );
         }
+        if self.video.webcam_width == 0 {
+            warn!("Config: webcam_width was 0, clamping to 640");
+            self.video.webcam_width = 640;
+        } else if self.video.webcam_width > 3840 {
+            self.video.webcam_width = 3840;
+        }
+        if self.video.webcam_height == 0 {
+            warn!("Config: webcam_height was 0, clamping to 360");
+            self.video.webcam_height = 360;
+        } else if self.video.webcam_height > 2160 {
+            self.video.webcam_height = 2160;
+        }
 
         // Validate audio settings
         self.audio.balance = self.audio.balance.clamp(-100, 100);
@@ -358,6 +371,10 @@ impl Config {
             || self.advanced.use_cpu_readback != other.advanced.use_cpu_readback
             || self.general.replay_duration_secs != other.general.replay_duration_secs
             || self.advanced.memory_limit_mb != other.advanced.memory_limit_mb
+            || self.video.webcam_enabled != other.video.webcam_enabled
+            || self.video.webcam_device_name != other.video.webcam_device_name
+            || self.video.webcam_width != other.video.webcam_width
+            || self.video.webcam_height != other.video.webcam_height
     }
 
     pub fn requires_hotkey_reregister(&self, other: &Config) -> bool {
@@ -445,6 +462,16 @@ pub struct VideoConfig {
     pub quality_value: Option<u8>,
     #[serde(default = "default_true")]
     pub use_native_resolution: bool,
+    /// Record webcam in parallel with desktop (second encoded stream to `.webcam-cache`).
+    #[serde(default = "default_false")]
+    pub webcam_enabled: bool,
+    /// DirectShow device name (e.g. from ffmpeg dshow list). Empty = first video device.
+    #[serde(default)]
+    pub webcam_device_name: String,
+    #[serde(default = "default_webcam_width")]
+    pub webcam_width: u32,
+    #[serde(default = "default_webcam_height")]
+    pub webcam_height: u32,
 }
 
 impl VideoConfig {

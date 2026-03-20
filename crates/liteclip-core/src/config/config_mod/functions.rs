@@ -18,6 +18,14 @@ pub(crate) fn default_false() -> bool {
     false
 }
 
+pub(super) fn default_webcam_width() -> u32 {
+    1280
+}
+
+pub(super) fn default_webcam_height() -> u32 {
+    720
+}
+
 pub(super) fn default_replay_duration() -> u32 {
     30
 }

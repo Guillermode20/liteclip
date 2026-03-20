@@ -2,7 +2,7 @@ use crate::{
     buffer::ReplayBuffer,
     config::Config,
     host::CoreHost,
-    output::{spawn_clip_saver, MuxerConfig},
+    output::{spawn_clip_saver, webcam_video_path, MuxerConfig},
 };
 use anyhow::{bail, Result};
 use std::path::PathBuf;
@@ -54,6 +54,7 @@ impl ClipManager {
     pub async fn save_clip(
         config: &Config,
         buffer: &ReplayBuffer,
+        webcam_buffer: Option<&ReplayBuffer>,
         game_name: Option<&str>,
         host: Option<Arc<dyn CoreHost>>,
     ) -> Result<PathBuf> {
@@ -103,12 +104,40 @@ impl ClipManager {
             duration,
             output_path.clone(),
             muxer_config,
-            save_directory,
+            save_directory.clone(),
         );
         let result = handle.await?;
         let final_path = result?;
 
         info!("Clip saver completed (buffer preserved for continuous replay)");
+
+        if let Some(wb) = webcam_buffer {
+            let wstats = wb.stats();
+            if wstats.packet_count > 0 && wstats.keyframe_count > 0 {
+                let webcam_path = webcam_video_path(&save_directory, &final_path);
+                if let Some(parent) = webcam_path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let w = config.video.webcam_width;
+                let h = config.video.webcam_height;
+                let muxer_webcam = MuxerConfig::new(w, h, fps, &webcam_path)
+                    .with_video_codec("hevc")
+                    .with_expect_audio(false);
+                let wb_clone = wb.clone();
+                let handle_w = spawn_clip_saver(
+                    wb_clone,
+                    duration,
+                    webcam_path,
+                    muxer_webcam,
+                    save_directory,
+                );
+                match handle_w.await {
+                    Ok(Ok(path)) => info!("Webcam companion clip saved: {:?}", path),
+                    Ok(Err(e)) => warn!("Webcam companion save failed: {:#}", e),
+                    Err(e) => warn!("Webcam companion save task failed: {}", e),
+                }
+            }
+        }
 
         if let Some(h) = host {
             h.on_clip_saved(&final_path);

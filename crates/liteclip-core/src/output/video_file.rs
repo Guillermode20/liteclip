@@ -56,6 +56,13 @@ pub enum ClipExportUpdate {
     Cancelled,
 }
 
+/// Webcam companion + layout for burned-in PiP export.
+#[derive(Debug, Clone)]
+pub struct WebcamExport {
+    pub path: PathBuf,
+    pub keyframes: Vec<super::webcam_layout::WebcamKeyframe>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ClipExportRequest {
     pub input_path: PathBuf,
@@ -64,6 +71,8 @@ pub struct ClipExportRequest {
     pub target_size_mb: u32,
     pub audio_bitrate_kbps: u32,
     pub metadata: VideoFileMetadata,
+    /// Optional second input (companion webcam MP4) and layout for overlay.
+    pub webcam: Option<WebcamExport>,
 }
 
 impl ClipExportRequest {
@@ -452,8 +461,9 @@ fn attempt_export(
     attempt_index: usize,
     attempt_count: usize,
 ) -> Result<Option<ExportAttemptResult>> {
-    let first_pass_filter = build_filter_complex(&request.keep_ranges, false);
-    let second_pass_filter = build_filter_complex(&request.keep_ranges, request.metadata.has_audio);
+    let first_pass_filter = build_filter_complex_for_request(request, false);
+    let second_pass_filter =
+        build_filter_complex_for_request(request, request.metadata.has_audio);
     let ffmpeg = ffmpeg_executable_path();
     let passlog_prefix = output_path.with_extension("passlog");
     let passlog_prefix_str = passlog_prefix.to_string_lossy().into_owned();
@@ -575,6 +585,12 @@ fn build_ffmpeg_args(
         "pipe:1".to_string(),
         "-i".to_string(),
         request.input_path.to_string_lossy().into_owned(),
+    ];
+    if let Some(w) = &request.webcam {
+        args.push("-i".to_string());
+        args.push(w.path.to_string_lossy().into_owned());
+    }
+    args.extend([
         "-filter_complex".to_string(),
         filter_complex.to_string(),
         "-map".to_string(),
@@ -595,7 +611,7 @@ fn build_ffmpeg_args(
         if first_pass { "1" } else { "2" }.to_string(),
         "-passlogfile".to_string(),
         passlog_prefix.to_string(),
-    ];
+    ]);
 
     if first_pass {
         args.extend([
@@ -747,6 +763,119 @@ fn run_ffmpeg_phase(
     });
 
     Ok(false)
+}
+
+fn build_filter_complex_for_request(request: &ClipExportRequest, has_audio: bool) -> String {
+    if let Some(webcam) = &request.webcam {
+        build_filter_with_webcam(request, webcam, has_audio)
+    } else {
+        build_filter_complex(&request.keep_ranges, has_audio)
+    }
+}
+
+fn build_filter_with_webcam(
+    request: &ClipExportRequest,
+    webcam: &WebcamExport,
+    has_audio: bool,
+) -> String {
+    use super::webcam_layout::keyframes_for_output_timeline;
+
+    let mw = request.metadata.width.max(1) as f64;
+    let mh = request.metadata.height.max(1) as f64;
+
+    let mut parts: Vec<String> = Vec::new();
+    for (index, range) in request.keep_ranges.iter().enumerate() {
+        parts.push(format!(
+            "[0:v:0]trim=start={}:end={},setpts=PTS-STARTPTS[v{index}]",
+            format_seconds_arg(range.start_secs),
+            format_seconds_arg(range.end_secs),
+        ));
+        if has_audio {
+            parts.push(format!(
+                "[0:a:0]atrim=start={}:end={},asetpts=PTS-STARTPTS[a{index}]",
+                format_seconds_arg(range.start_secs),
+                format_seconds_arg(range.end_secs),
+            ));
+        }
+    }
+    for (index, range) in request.keep_ranges.iter().enumerate() {
+        parts.push(format!(
+            "[1:v:0]trim=start={}:end={},setpts=PTS-STARTPTS[wv{index}]",
+            format_seconds_arg(range.start_secs),
+            format_seconds_arg(range.end_secs),
+        ));
+    }
+
+    let mut c0 = String::new();
+    for index in 0..request.keep_ranges.len() {
+        c0.push_str(&format!("[v{index}]"));
+        if has_audio {
+            c0.push_str(&format!("[a{index}]"));
+        }
+    }
+    let n = request.keep_ranges.len();
+    if has_audio {
+        c0.push_str(&format!(
+            "concat=n={n}:v=1:a=1[mv][outa]"
+        ));
+    } else {
+        c0.push_str(&format!("concat=n={n}:v=1:a=0[mv]"));
+    }
+    parts.push(c0);
+
+    let mut c1 = String::new();
+    for index in 0..n {
+        c1.push_str(&format!("[wv{index}]"));
+    }
+    c1.push_str(&format!("concat=n={n}:v=1:a=0[wc]"));
+    parts.push(c1);
+
+    let mut kf = keyframes_for_output_timeline(&webcam.keyframes, &request.keep_ranges);
+    if kf.is_empty() {
+        kf = keyframes_for_output_timeline(
+            &super::webcam_layout::default_webcam_keyframes(),
+            &request.keep_ranges,
+        );
+    }
+    let x_expr = piecewise_linear_expr_t(&kf.iter().map(|k| (k.t_secs, k.x)).collect::<Vec<_>>());
+    let y_expr = piecewise_linear_expr_t(&kf.iter().map(|k| (k.t_secs, k.y)).collect::<Vec<_>>());
+    let w_expr = piecewise_linear_expr_t(&kf.iter().map(|k| (k.t_secs, k.w)).collect::<Vec<_>>());
+    let h_expr = piecewise_linear_expr_t(&kf.iter().map(|k| (k.t_secs, k.h)).collect::<Vec<_>>());
+
+    let scale_w = format!("'{}*({})'", mw, w_expr);
+    let scale_h = format!("'{}*({})'", mh, h_expr);
+    let ox = format!("'W*({})'", x_expr);
+    let oy = format!("'H*({})'", y_expr);
+
+    parts.push(format!(
+        "[wc]scale=w={}:h={}:eval=frame[wsc],[mv][wsc]overlay=x={}:y={}:format=auto[outv]",
+        scale_w, scale_h, ox, oy
+    ));
+
+    parts.join(";")
+}
+
+/// Piecewise linear interpolation of `v` over `t` for ffmpeg `eval=frame` expressions.
+fn piecewise_linear_expr_t(points: &[(f64, f64)]) -> String {
+    let mut p = points.to_vec();
+    if p.is_empty() {
+        return "0".to_string();
+    }
+    p.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    if p.len() == 1 {
+        return format!("{}", p[0].1);
+    }
+    let mut expr = format!("{}", p.last().unwrap().1);
+    for i in (0..p.len() - 1).rev() {
+        let (t0, v0) = p[i];
+        let (t1, v1) = p[i + 1];
+        let span = (t1 - t0).max(1e-6);
+        let lerp = format!("{}+(t-{})/{}*({}-{})", v0, t0, span, v1, v0);
+        expr = format!("if(between(t,{0},{1}),{2},{3})", t0, t1, lerp, expr);
+    }
+    let t0 = p[0].0;
+    let v0 = p[0].1;
+    format!("if(lt(t,{t0}),{v0},{expr})")
 }
 
 fn build_filter_complex(keep_ranges: &[TimeRange], has_audio: bool) -> String {
@@ -1187,6 +1316,7 @@ mod tests {
                 target_size_mb: 2,
                 audio_bitrate_kbps: 96,
                 metadata,
+                webcam: None,
             },
             &progress_tx,
             &cancel_flag,

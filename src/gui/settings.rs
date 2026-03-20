@@ -3,6 +3,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
 
 use crate::capture::audio::AudioLevelMonitor;
+use crate::capture::list_dshow_video_devices;
 use crate::config::{config_mod::types::*, Config};
 use crate::platform::AppEvent;
 
@@ -139,6 +140,9 @@ pub struct SettingsApp {
     hotkey_errors: HotkeyValidationErrors,
     level_monitor: Option<AudioLevelMonitor>,
     current_tab: SettingsTab,
+    /// Cached from `ffmpeg -f dshow -list_devices` when user refreshes (Video tab).
+    webcam_device_list: Vec<String>,
+    webcam_device_list_error: Option<String>,
 }
 
 impl SettingsApp {
@@ -154,6 +158,8 @@ impl SettingsApp {
             hotkey_errors: HotkeyValidationErrors::default(),
             level_monitor,
             current_tab: SettingsTab::default(),
+            webcam_device_list: Vec::new(),
+            webcam_device_list_error: None,
         }
     }
 
@@ -399,6 +405,54 @@ impl SettingsApp {
             ui.add(egui::Slider::new(&mut cq_val, 1..=51).text("CQ Level"));
             self.config.video.quality_value = Some(cq_val);
         }
+
+        ui.separator();
+        ui.label(egui::RichText::new("Webcam (optional)").strong());
+        ui.checkbox(&mut self.config.video.webcam_enabled, "Record webcam with clips");
+        ui.add_enabled_ui(self.config.video.webcam_enabled, |ui| {
+            ui.horizontal(|ui| {
+                if ui.button("Refresh camera list").clicked() {
+                    match list_dshow_video_devices() {
+                        Ok(devs) => {
+                            self.webcam_device_list = devs;
+                            self.webcam_device_list_error = None;
+                        }
+                        Err(e) => {
+                            self.webcam_device_list_error = Some(e.to_string());
+                        }
+                    }
+                }
+                if let Some(ref err) = self.webcam_device_list_error {
+                    ui.colored_label(egui::Color32::RED, "⚠").on_hover_text(err);
+                }
+            });
+            if !self.webcam_device_list.is_empty() {
+                let mut pick = self.config.video.webcam_device_name.clone();
+                egui::ComboBox::from_label("Camera")
+                    .selected_text(if pick.is_empty() {
+                        "(first available)".to_string()
+                    } else {
+                        pick.clone()
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut pick, String::new(), "(first available)");
+                        for d in &self.webcam_device_list {
+                            ui.selectable_value(&mut pick, d.clone(), d);
+                        }
+                    });
+                self.config.video.webcam_device_name = pick;
+            }
+            ui.label("Or type a DirectShow device name (must match ffmpeg dshow list):");
+            ui.text_edit_singleline(&mut self.config.video.webcam_device_name);
+            ui.add(
+                egui::Slider::new(&mut self.config.video.webcam_width, 320..=1920)
+                    .text("Webcam encode width"),
+            );
+            ui.add(
+                egui::Slider::new(&mut self.config.video.webcam_height, 240..=1080)
+                    .text("Webcam encode height"),
+            );
+        });
     }
 
     fn render_audio_settings(&mut self, ui: &mut egui::Ui) {
