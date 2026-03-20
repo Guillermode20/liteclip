@@ -180,10 +180,13 @@ impl Drop for TimerResolutionGuard {
 /// Returns an error if critical initialization fails (FFmpeg, configuration, etc.).
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize FFmpeg
+    // Initialize FFmpeg (SDK backend: linked libav; validate DLLs / CLI availability)
     liteclip_replay::encode::init_ffmpeg()
         .map_err(anyhow::Error::from)
         .context("Failed to initialize FFmpeg")?;
+    liteclip_replay::ffmpeg_backend::validate_runtime()
+        .map_err(|e| anyhow::anyhow!("{}", e))
+        .context("FFmpeg runtime validation failed")?;
 
     // Suppress all Vulkan loader output (prints directly to stderr from C code)
     std::env::set_var("VK_LOADER_DEBUG", "none");

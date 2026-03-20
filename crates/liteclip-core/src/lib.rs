@@ -11,19 +11,27 @@
 //! - [`ReplayEngine`] — lifecycle, config-backed state, and [`ReplayEngine::save_clip`].
 //! - [`prelude`] — common imports (`ReplayEngine`, [`Config`], [`AppDirs`], [`CoreHost`], [`encode`], [`runtime`]).
 //! - [`paths::AppDirs`] — isolate config and clips from the LiteClip Replay desktop layout.
-//! - [`runtime`] — resolve or override the `ffmpeg` / `ffmpeg.exe` binary ([`runtime::FFMPEG_ENV`], [`runtime::set_ffmpeg_path`]).
+//! - [`runtime`] — resolve or override the `ffmpeg` / `ffmpeg.exe` binary when using the **CLI**
+//!   backend ([`runtime::FFMPEG_ENV`], [`runtime::set_ffmpeg_path`]).
+//! - [`ffmpeg_backend`] — which backend this build uses (`ffmpeg` = linked SDK, `ffmpeg-cli` = external
+//!   `ffmpeg.exe` / `ffprobe` only) and [`ffmpeg_backend::validate_runtime`].
 //! - [`host::CoreHost`] — optional UI hooks ([`CoreHost::on_clip_saved`], [`CoreHost::on_pipeline_fatal`]).
 //!
-//! Call [`encode::init_ffmpeg`] when the `ffmpeg` feature is enabled **before** starting the pipeline.
+//! Call [`encode::init_ffmpeg`] and [`ffmpeg_backend::validate_runtime`] before starting the pipeline
+//! when a recording backend feature is enabled.
 //!
 //! # Requirements
 //!
 //! - **Windows** (DXGI capture, WASAPI audio, D3D11). Other targets may compile in limited
 //!   configurations but are **unsupported**; file issues only for `x86_64-pc-windows-msvc`.
-//! - **FFmpeg** at runtime: the `ffmpeg-next` crate links to FFmpeg libraries; some paths also
-//!   spawn an `ffmpeg` / `ffmpeg.exe` process. See [`runtime`] for how the binary is resolved
-//!   ([`runtime::FFMPEG_ENV`], [`runtime::set_ffmpeg_path`], exe-relative search, and dev-only
-//!   `ffmpeg_dev` heuristics when `debug_assertions` or the `dev-ffmpeg-paths` feature is on).
+//! - **FFmpeg (mutually exclusive):** enable exactly one of **`ffmpeg`** (default) or **`ffmpeg-cli`**.
+//!   - **SDK (`ffmpeg`):** Link `ffmpeg-next` against FFmpeg **import libraries** at build time and ship
+//!     the matching **shared DLLs** next to your executable (or on `PATH`). Core recording, muxing,
+//!     thumbnails, and probing use linked libav **without** requiring `ffmpeg.exe`.
+//!   - **CLI (`ffmpeg-cli`):** No `ffmpeg-next` link. Recording uses a **software** `libx264` encoder via
+//!     `ffmpeg.exe` pipes; **enable CPU readback** in capture settings. `ffmpeg.exe` and `ffprobe` must
+//!     be on `PATH` or next to your app (see [`runtime`]). Targeted clip **export** (size-targeted
+//!     transcode) still uses an `ffmpeg` subprocess in both backends.
 //!
 //! # Tokio and async clip save
 //!
@@ -53,14 +61,14 @@
 //!
 //! # Feature flags
 //!
-//! - `ffmpeg` (default) — Pulls in optional `ffmpeg-next` for linked FFmpeg APIs, native MP4 muxing
-//!   (`output::mp4`), and the `encode::ffmpeg` module. [`encode::init_ffmpeg`] is a no-op when this feature is off.
-//!   With `default-features = false`, the crate still compiles for config-only / tooling use; **recording
-//!   and clip export require `ffmpeg`.**
-//!   The workspace root crate disables default features on `liteclip-core` and enables `ffmpeg` explicitly;
-//!   standalone embedders typically use `default-features = true` or `features = ["ffmpeg"]`.
-//! - `dev-ffmpeg-paths` — Include repo `ffmpeg_dev\...` search heuristics in **release** builds
-//!   (debug builds already use them when `debug_assertions` are on).
+//! - `ffmpeg` (default) — Linked SDK/DLL backend: `ffmpeg-next`, `encode::ffmpeg`, `output::mp4`,
+//!   `output::sdk_ffmpeg_output`. Mutually exclusive with `ffmpeg-cli`.
+//! - `ffmpeg-cli` — External `ffmpeg.exe` / `ffprobe` only (no `ffmpeg-next`). Software encoding via
+//!   CLI pipe; `ffmpeg` must **not** be enabled. Use `--no-default-features --features ffmpeg-cli`.
+//! - With neither feature, the crate compiles for config-only / tooling use (`--no-default-features`).
+//! - `dev-ffmpeg-paths` — Include repo `ffmpeg_dev\...` **exe** search heuristics in **release** builds
+//!   (debug builds already use them when `debug_assertions` are on). Applies to [`runtime`] resolution
+//!   for the CLI backend.
 //!
 //! # Versioning
 //!
@@ -79,7 +87,8 @@
 //! - [`output`] — Muxing, thumbnails, clip export helpers.
 //! - [`media`] — Shared frame types for capture and encode.
 //! - [`paths`] — [`AppDirs`] for config / default clip folder layout.
-//! - [`runtime`] — FFmpeg executable resolution and overrides.
+//! - [`runtime`] — FFmpeg executable resolution and overrides (CLI backend).
+//! - [`ffmpeg_backend`] — Backend kind and runtime validation.
 //! - [`host`] — Optional [`CoreHost`] callbacks.
 //! - [`hotkey_parse`] — Hotkey string parsing for your own global hotkey layer.
 //!
@@ -91,6 +100,7 @@
 //!
 //! fn main() -> anyhow::Result<()> {
 //!     encode::init_ffmpeg()?;
+//!     liteclip_core::ffmpeg_backend::validate_runtime()?;
 //!     let dirs = AppDirs::from_app_slug("my-app")?;
 //!     let mut engine = ReplayEngine::with_default_config(dirs)?;
 //!     engine.start_recording()?;
@@ -98,6 +108,11 @@
 //!     Ok(())
 //! }
 //! ```
+
+#[cfg(all(feature = "ffmpeg", feature = "ffmpeg-cli"))]
+compile_error!(
+    "features `ffmpeg` (SDK/DLLs) and `ffmpeg-cli` are mutually exclusive; enable exactly one."
+);
 
 pub mod app;
 pub mod buffer;
@@ -110,6 +125,7 @@ pub mod media;
 pub mod output;
 pub mod paths;
 pub mod runtime;
+pub mod ffmpeg_backend;
 
 mod engine;
 pub use engine::ReplayEngine;
@@ -124,6 +140,7 @@ pub mod prelude {
     pub use crate::encode;
     pub use crate::host::CoreHost;
     pub use crate::paths::AppDirs;
+    pub use crate::ffmpeg_backend::{self, validate_runtime, FfmpegBackendKind};
     pub use crate::runtime::{self, set_ffmpeg_path, FFMPEG_ENV};
     pub use crate::ReplayEngine;
 }

@@ -40,6 +40,8 @@ pub mod error;
 pub mod functions;
 #[cfg(feature = "ffmpeg")]
 pub mod mp4;
+#[cfg(feature = "ffmpeg")]
+pub mod sdk_ffmpeg_output;
 pub mod saver;
 pub mod types;
 pub mod video_file;

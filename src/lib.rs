@@ -6,7 +6,9 @@
 //!
 //! For embedding only the engine in another binary, depend on **`liteclip-core`** directly.
 
-pub use liteclip_core::{app, buffer, capture, config, encode, hotkey_parse, media, output};
+pub use liteclip_core::{
+    app, buffer, capture, config, encode, ffmpeg_backend, hotkey_parse, media, output,
+};
 
 pub mod detection;
 pub mod gui;

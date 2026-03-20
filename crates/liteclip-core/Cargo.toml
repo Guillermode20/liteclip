@@ -26,10 +26,13 @@ default-target = "x86_64-pc-windows-msvc"
 
 [features]
 default = ["ffmpeg"]
-# FFmpeg encoding/muxing via `ffmpeg-next` (linked) and runtime `ffmpeg.exe` where applicable.
-# With `--no-default-features`, `ffmpeg-next` is not linked: config/paths/helpers compile; recording
-# and clip export require this feature.
+# FFmpeg encoding/muxing via `ffmpeg-next` (linked SDK/DLLs). No `ffmpeg.exe` required at runtime for
+# core recording, muxing, thumbnails, and probing when this feature is enabled.
+# Mutually exclusive with `ffmpeg-cli`.
 ffmpeg = ["dep:ffmpeg-next"]
+# Recording and output via `ffmpeg.exe` / `ffprobe` subprocesses only — does not link `ffmpeg-next`.
+# Mutually exclusive with `ffmpeg`.
+ffmpeg-cli = []
 # In release builds, also walk ancestors for `ffmpeg_dev/...` (debug builds always may).
 dev-ffmpeg-paths = []
 
@@ -61,6 +64,10 @@ required-features = ["ffmpeg"]
 [[example]]
 name = "engine_host"
 required-features = ["ffmpeg"]
+
+[[example]]
+name = "minimal_engine_cli"
+required-features = ["ffmpeg-cli"]
 
 [[example]]
 name = "custom_paths"

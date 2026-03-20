@@ -93,6 +93,22 @@ const TARGET_SIZE_UNDERFILL_RATIO: f64 = 0.985;
 const MAX_VIDEO_BITRATE_KBPS: u32 = 400_000;
 
 pub fn probe_video_file(video_path: &Path) -> Result<VideoFileMetadata> {
+    #[cfg(feature = "ffmpeg")]
+    {
+        return crate::output::sdk_ffmpeg_output::probe_video_file(video_path);
+    }
+    #[cfg(all(feature = "ffmpeg-cli", not(feature = "ffmpeg")))]
+    {
+        return probe_video_file_ffprobe(video_path);
+    }
+    #[cfg(not(any(feature = "ffmpeg", feature = "ffmpeg-cli")))]
+    {
+        anyhow::bail!("no FFmpeg backend enabled; use --features ffmpeg or ffmpeg-cli");
+    }
+}
+
+#[cfg(all(feature = "ffmpeg-cli", not(feature = "ffmpeg")))]
+fn probe_video_file_ffprobe(video_path: &Path) -> Result<VideoFileMetadata> {
     let ffprobe = ffprobe_executable_path();
     let output = command_output(Command::new(&ffprobe).args([
         "-v",
@@ -161,6 +177,30 @@ pub fn probe_video_file(video_path: &Path) -> Result<VideoFileMetadata> {
 }
 
 pub fn extract_preview_frame(
+    video_path: &Path,
+    timestamp_secs: f64,
+    max_width: u32,
+) -> Result<RgbaImage> {
+    #[cfg(feature = "ffmpeg")]
+    {
+        return crate::output::sdk_ffmpeg_output::extract_preview_frame(
+            video_path,
+            timestamp_secs,
+            max_width,
+        );
+    }
+    #[cfg(all(feature = "ffmpeg-cli", not(feature = "ffmpeg")))]
+    {
+        return extract_preview_frame_cli(video_path, timestamp_secs, max_width);
+    }
+    #[cfg(not(any(feature = "ffmpeg", feature = "ffmpeg-cli")))]
+    {
+        anyhow::bail!("no FFmpeg backend enabled; use --features ffmpeg or ffmpeg-cli");
+    }
+}
+
+#[cfg(all(feature = "ffmpeg-cli", not(feature = "ffmpeg")))]
+fn extract_preview_frame_cli(
     video_path: &Path,
     timestamp_secs: f64,
     max_width: u32,
@@ -973,6 +1013,7 @@ fn phase_label(phase: ClipExportPhase) -> &'static str {
     }
 }
 
+#[cfg(all(feature = "ffmpeg-cli", not(feature = "ffmpeg")))]
 fn ffprobe_executable_path() -> PathBuf {
     let ffmpeg = ffmpeg_executable_path();
     let sibling = ffmpeg.with_file_name(if cfg!(target_os = "windows") {
@@ -988,6 +1029,7 @@ fn ffprobe_executable_path() -> PathBuf {
     }
 }
 
+#[cfg(any(test, all(feature = "ffmpeg-cli", not(feature = "ffmpeg"))))]
 fn command_output(command: &mut Command) -> Result<std::process::Output> {
     #[cfg(target_os = "windows")]
     {
@@ -1002,6 +1044,7 @@ fn format_seconds_arg(seconds: f64) -> String {
     format!("{:.3}", seconds.max(0.0))
 }
 
+#[cfg(all(feature = "ffmpeg-cli", not(feature = "ffmpeg")))]
 fn parse_rational_fps(value: &str) -> Option<f64> {
     if let Some((num, den)) = value.split_once('/') {
         let n = num.trim().parse::<f64>().ok()?;
@@ -1082,6 +1125,7 @@ mod tests {
         assert!(next_video_bitrate_kbps > 3000);
     }
 
+    #[cfg(any(feature = "ffmpeg", feature = "ffmpeg-cli"))]
     #[test]
     fn exports_trimmed_snippets_with_ffmpeg() {
         let ffmpeg = ffmpeg_executable_path();

@@ -1,13 +1,11 @@
-#[cfg(feature = "ffmpeg")]
+#[cfg(any(feature = "ffmpeg", feature = "ffmpeg-cli"))]
 use super::functions::{h264_nal_type, hevc_nal_type};
 #[cfg(feature = "ffmpeg")]
 use super::mp4::FfmpegMuxer;
 use crate::encode::{EncodedPacket, StreamType};
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
-#[cfg(feature = "ffmpeg")]
-use tracing::warn;
-use tracing::{info, trace};
+use tracing::{info, trace, warn};
 
 /// MP4 muxer for combining encoded packets into a video file.
 ///
@@ -19,14 +17,14 @@ pub struct Muxer {
     /// Muxer configuration.
     #[allow(dead_code)]
     config: MuxerConfig,
-    /// Stub mode when FFmpeg feature is disabled.
-    #[cfg(not(feature = "ffmpeg"))]
+    /// Stub mode when no FFmpeg backend is enabled.
+    #[cfg(not(any(feature = "ffmpeg", feature = "ffmpeg-cli")))]
     #[allow(dead_code)]
     stub_mode: bool,
 }
 
 impl Muxer {
-    #[cfg(feature = "ffmpeg")]
+    #[cfg(any(feature = "ffmpeg", feature = "ffmpeg-cli"))]
     fn detect_video_codec(video_packets: &[&EncodedPacket], fallback: &str) -> String {
         let mut saw_h264_parameter_sets = false;
         let mut saw_hevc_parameter_sets = false;
@@ -64,16 +62,16 @@ impl Muxer {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("Failed to create output directory: {:?}", parent))?;
         }
-        #[cfg(feature = "ffmpeg")]
+        #[cfg(any(feature = "ffmpeg", feature = "ffmpeg-cli"))]
         {
             Ok(Self {
                 output_path: path,
                 config: config.clone(),
             })
         }
-        #[cfg(not(feature = "ffmpeg"))]
+        #[cfg(not(any(feature = "ffmpeg", feature = "ffmpeg-cli")))]
         {
-            tracing::warn!("FFmpeg feature not enabled - muxer running in stub mode");
+            tracing::warn!("No FFmpeg backend enabled - muxer running in stub mode");
             Ok(Self {
                 output_path: path,
                 config: config.clone(),
@@ -87,12 +85,12 @@ impl Muxer {
             trace!("Skipping non-video packet (audio not implemented in Phase 1)");
             return Ok(());
         }
-        #[cfg(feature = "ffmpeg")]
+        #[cfg(any(feature = "ffmpeg", feature = "ffmpeg-cli"))]
         {
             let _ = packet;
             bail!("Incremental packet buffering is no longer supported; use Muxer::mux_clip")
         }
-        #[cfg(not(feature = "ffmpeg"))]
+        #[cfg(not(any(feature = "ffmpeg", feature = "ffmpeg-cli")))]
         {
             trace!(
                 "Stub: Writing video packet (keyframe={}, size={}, pts={})",
@@ -105,12 +103,12 @@ impl Muxer {
     }
 
     pub fn write_audio_packet(&mut self, packet: &EncodedPacket) -> Result<()> {
-        #[cfg(feature = "ffmpeg")]
+        #[cfg(any(feature = "ffmpeg", feature = "ffmpeg-cli"))]
         {
             let _ = packet;
             bail!("Incremental packet buffering is no longer supported; use Muxer::mux_clip")
         }
-        #[cfg(not(feature = "ffmpeg"))]
+        #[cfg(not(any(feature = "ffmpeg", feature = "ffmpeg-cli")))]
         {
             trace!(
                 "Stub: Received audio packet (size={}, pts={}, stream={:?})",
@@ -124,13 +122,13 @@ impl Muxer {
 
     pub fn finalize(self) -> Result<PathBuf> {
         info!("Finalizing MP4: {:?}", self.output_path);
-        #[cfg(feature = "ffmpeg")]
+        #[cfg(any(feature = "ffmpeg", feature = "ffmpeg-cli"))]
         {
             bail!("No packet set provided for MP4 generation")
         }
-        #[cfg(not(feature = "ffmpeg"))]
+        #[cfg(not(any(feature = "ffmpeg", feature = "ffmpeg-cli")))]
         {
-            tracing::warn!("FFmpeg feature disabled - cannot produce MP4");
+            tracing::warn!("FFmpeg backend disabled - cannot produce MP4");
             self.create_stub_mp4()
         }
     }
@@ -197,17 +195,26 @@ impl Muxer {
         Ok(output_path.to_path_buf())
     }
 
-    #[cfg(not(feature = "ffmpeg"))]
+    #[cfg(all(feature = "ffmpeg-cli", not(feature = "ffmpeg")))]
+    pub fn mux_clip(
+        output_path: &Path,
+        config: &MuxerConfig,
+        packets: &[EncodedPacket],
+    ) -> Result<PathBuf> {
+        mux_clip_via_ffmpeg_cli(output_path, config, packets)
+    }
+
+    #[cfg(not(any(feature = "ffmpeg", feature = "ffmpeg-cli")))]
     pub fn mux_clip(
         _output_path: &Path,
         _config: &MuxerConfig,
         _packets: &[EncodedPacket],
     ) -> Result<PathBuf> {
-        bail!("FFmpeg feature disabled; rebuild with `--features ffmpeg`")
+        bail!("FFmpeg backend disabled; use `--features ffmpeg` or `--features ffmpeg-cli`")
     }
 }
 
-#[cfg(feature = "ffmpeg")]
+#[cfg(any(feature = "ffmpeg", feature = "ffmpeg-cli"))]
 fn normalize_video_packets_for_mp4(video_packets: &[&EncodedPacket]) -> Vec<EncodedPacket> {
     let mut normalized = Vec::with_capacity(video_packets.len());
     let mut pending_param_sets: Vec<&EncodedPacket> = Vec::new();
@@ -286,7 +293,7 @@ fn normalize_video_packets_for_mp4(video_packets: &[&EncodedPacket]) -> Vec<Enco
     normalized
 }
 
-#[cfg(feature = "ffmpeg")]
+#[cfg(any(feature = "ffmpeg", feature = "ffmpeg-cli"))]
 fn is_parameter_set_packet(packet: &EncodedPacket) -> bool {
     if !matches!(packet.stream, StreamType::Video) {
         return false;
@@ -350,7 +357,7 @@ impl MuxerConfig {
     }
 }
 
-#[cfg(not(feature = "ffmpeg"))]
+#[cfg(not(any(feature = "ffmpeg", feature = "ffmpeg-cli")))]
 impl Muxer {
     fn create_stub_mp4(&self) -> Result<PathBuf> {
         if self.output_path.exists() {
@@ -358,6 +365,115 @@ impl Muxer {
                 format!("Failed to remove stale output file: {:?}", self.output_path)
             })?;
         }
-        bail!("Cannot create MP4: FFmpeg feature is disabled. Rebuild with `--features ffmpeg`.")
+        bail!("Cannot create MP4: no FFmpeg backend. Rebuild with `--features ffmpeg` or `--features ffmpeg-cli`.")
     }
+}
+
+#[cfg(all(feature = "ffmpeg-cli", not(feature = "ffmpeg")))]
+fn mux_clip_via_ffmpeg_cli(
+    output_path: &Path,
+    config: &MuxerConfig,
+    packets: &[EncodedPacket],
+) -> Result<PathBuf> {
+    use std::fs::File;
+    use std::io::Write;
+    use std::process::Command;
+
+    use super::functions::ffmpeg_executable_path;
+
+    #[cfg(target_os = "windows")]
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let mut raw_video_packets: Vec<&EncodedPacket> = packets
+        .iter()
+        .filter(|packet| matches!(packet.stream, StreamType::Video))
+        .collect();
+    if raw_video_packets.is_empty() {
+        bail!("No video packets available for MP4 generation");
+    }
+
+    let audio_packets: Vec<&EncodedPacket> = packets
+        .iter()
+        .filter(|packet| {
+            matches!(
+                packet.stream,
+                StreamType::SystemAudio | StreamType::Microphone
+            )
+        })
+        .collect();
+
+    if config.expect_audio && !audio_packets.is_empty() {
+        bail!(
+            "ffmpeg-cli backend: muxing audio into MP4 is not implemented; use the SDK backend (`--features ffmpeg`) or disable audio"
+        );
+    }
+
+    raw_video_packets.sort_by_key(|packet| packet.pts);
+
+    let normalized_video_storage = normalize_video_packets_for_mp4(&raw_video_packets);
+    let video_packets: Vec<&EncodedPacket> = normalized_video_storage.iter().collect();
+    if video_packets.is_empty() {
+        bail!("No muxable video packets available for MP4 generation");
+    }
+
+    let detected_video_codec = Muxer::detect_video_codec(&video_packets, &config.video_codec);
+    if detected_video_codec != config.video_codec {
+        warn!(
+            "Muxer video codec override: configured={}, detected={} from buffered packets",
+            config.video_codec, detected_video_codec
+        );
+    }
+
+    let tmp = std::env::temp_dir().join(format!(
+        "liteclip-mux-{}-{}.bin",
+        std::process::id(),
+        chrono::Utc::now().timestamp_millis()
+    ));
+    {
+        let mut f = File::create(&tmp).with_context(|| format!("Failed to create {:?}", tmp))?;
+        for p in &video_packets {
+            f.write_all(p.data.as_ref())?;
+        }
+    }
+
+    let fmt = if detected_video_codec == "h264" {
+        "h264"
+    } else {
+        "hevc"
+    };
+    let ffmpeg = ffmpeg_executable_path();
+    let mut cmd = Command::new(&ffmpeg);
+    cmd.arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-y")
+        .arg("-f")
+        .arg(fmt)
+        .arg("-i")
+        .arg(&tmp)
+        .arg("-c:v")
+        .arg("copy");
+    if config.faststart {
+        cmd.arg("-movflags").arg("+faststart");
+    }
+    cmd.arg(output_path);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let status = cmd
+        .status()
+        .with_context(|| format!("Failed to spawn ffmpeg mux via {:?}", ffmpeg))?;
+    let _ = std::fs::remove_file(&tmp);
+    if !status.success() {
+        bail!("ffmpeg mux to {:?} failed with status {:?}", output_path, status);
+    }
+    info!(
+        "MP4 finalized via ffmpeg CLI: {:?} ({} video packets)",
+        output_path,
+        video_packets.len()
+    );
+    Ok(output_path.to_path_buf())
 }

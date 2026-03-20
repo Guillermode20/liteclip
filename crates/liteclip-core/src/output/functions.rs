@@ -1,8 +1,10 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
-use tracing::{debug, info, warn};
+use tracing::debug;
+#[cfg(feature = "ffmpeg-cli")]
+use tracing::{info, warn};
 
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", feature = "ffmpeg-cli"))]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 /// Audio sample rate for encoded audio (48 kHz).
@@ -159,6 +161,30 @@ pub fn ffmpeg_executable_path() -> PathBuf {
 }
 
 pub fn remux_fragmented_mp4(input_path: &Path, output_path: &Path, faststart: bool) -> Result<()> {
+    #[cfg(feature = "ffmpeg")]
+    {
+        return crate::output::sdk_ffmpeg_output::remux_fragmented_mp4(
+            input_path,
+            output_path,
+            faststart,
+        );
+    }
+    #[cfg(all(feature = "ffmpeg-cli", not(feature = "ffmpeg")))]
+    {
+        return remux_fragmented_mp4_cli(input_path, output_path, faststart);
+    }
+    #[cfg(not(any(feature = "ffmpeg", feature = "ffmpeg-cli")))]
+    {
+        anyhow::bail!("no FFmpeg backend enabled; use --features ffmpeg or ffmpeg-cli");
+    }
+}
+
+#[cfg(all(feature = "ffmpeg-cli", not(feature = "ffmpeg")))]
+fn remux_fragmented_mp4_cli(
+    input_path: &Path,
+    output_path: &Path,
+    faststart: bool,
+) -> Result<()> {
     use std::process::Command;
 
     let ffmpeg = ffmpeg_executable_path();
@@ -237,23 +263,35 @@ pub fn remux_fragmented_mp4(input_path: &Path, output_path: &Path, faststart: bo
 /// The thumbnail is saved to `<save_directory>/.cache/<hash>.jpg` where the hash
 /// is computed from the video path, matching the gallery's thumbnail lookup scheme.
 pub fn generate_thumbnail(video_path: &Path, save_directory: &Path) -> Result<PathBuf> {
+    #[cfg(feature = "ffmpeg")]
+    {
+        return crate::output::sdk_ffmpeg_output::generate_thumbnail(video_path, save_directory);
+    }
+    #[cfg(all(feature = "ffmpeg-cli", not(feature = "ffmpeg")))]
+    {
+        return generate_thumbnail_cli(video_path, save_directory);
+    }
+    #[cfg(not(any(feature = "ffmpeg", feature = "ffmpeg-cli")))]
+    {
+        anyhow::bail!("no FFmpeg backend enabled; use --features ffmpeg or ffmpeg-cli");
+    }
+}
+
+#[cfg(all(feature = "ffmpeg-cli", not(feature = "ffmpeg")))]
+fn generate_thumbnail_cli(video_path: &Path, save_directory: &Path) -> Result<PathBuf> {
     use std::hash::{Hash, Hasher};
     use std::process::Command;
 
-    // Compute the cache directory path (same as gallery)
     let cache_dir = save_directory.join(".cache");
 
-    // Create cache directory if it doesn't exist
     std::fs::create_dir_all(&cache_dir)
         .with_context(|| format!("Failed to create cache directory: {:?}", cache_dir))?;
 
-    // Hash the video path to get the thumbnail filename (same as gallery)
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     video_path.hash(&mut hasher);
     let hash = hasher.finish();
     let thumb_path = cache_dir.join(format!("{:016x}.jpg", hash));
 
-    // Skip if thumbnail already exists
     if thumb_path.exists() {
         debug!("Thumbnail already exists: {:?}", thumb_path);
         return Ok(thumb_path);
@@ -266,7 +304,6 @@ pub fn generate_thumbnail(video_path: &Path, save_directory: &Path) -> Result<Pa
 
     let ffmpeg = ffmpeg_executable_path();
 
-    // Use FFmpeg to extract a frame at 1 second into the video
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
