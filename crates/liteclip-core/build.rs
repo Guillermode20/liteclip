@@ -54,12 +54,8 @@ fn main() {
     let ps_output = PathBuf::from(&out_dir).join("ps_simple.cso");
 
     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
-    let workspace_root = manifest_dir
-        .parent()
-        .and_then(|p| p.parent())
-        .expect("liteclip-core must live at crates/liteclip-core under workspace root");
-    let vs_hlsl = workspace_root.join("shaders/vs_simple.hlsl");
-    let ps_hlsl = workspace_root.join("shaders/ps_simple.hlsl");
+    let vs_hlsl = manifest_dir.join("shaders/vs_simple.hlsl");
+    let ps_hlsl = manifest_dir.join("shaders/ps_simple.hlsl");
 
     let fxc_path = match find_fxc_exe() {
         Some(path) => path,

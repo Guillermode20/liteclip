@@ -5,11 +5,12 @@
 //! 1. Environment variable [`FFMPEG_ENV`] if set and the path exists.
 //! 2. [`set_ffmpeg_path`] if set and the path exists.
 //! 3. `ffmpeg.exe` next to the current process executable (if present).
-//! 4. In **dev** builds (`debug_assertions`) or with feature `dev-ffmpeg-paths`: repo-style
-//!    `ffmpeg_dev\sdk\bin\ffmpeg.exe` heuristics (exe parent chain + `CARGO_MANIFEST_DIR`).
+//! 4. In **dev** builds (`debug_assertions`) or with feature `dev-ffmpeg-paths`: walk parent
+//!    directories of the executable and of `CARGO_MANIFEST_DIR`, and use the first existing
+//!    `ffmpeg_dev\sdk\bin\ffmpeg.exe` found (supports monorepo and a standalone crate repo).
 //! 5. Fall back to `ffmpeg` on `PATH`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 static FFMPEG_PATH_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
@@ -23,6 +24,18 @@ pub const FFMPEG_ENV: &str = "LITECLIP_CORE_FFMPEG";
 /// override was already installed ([`std::sync::OnceLock::set`]).
 pub fn set_ffmpeg_path(path: PathBuf) -> Result<(), PathBuf> {
     FFMPEG_PATH_OVERRIDE.set(path)
+}
+
+fn push_ffmpeg_dev_candidates(start: &Path, out: &mut Vec<PathBuf>) {
+    for dir in start.ancestors().take(10) {
+        out.push(
+            dir
+                .join("ffmpeg_dev")
+                .join("sdk")
+                .join("bin")
+                .join("ffmpeg.exe"),
+        );
+    }
 }
 
 pub(crate) fn resolve_ffmpeg_executable() -> PathBuf {
@@ -45,32 +58,14 @@ pub(crate) fn resolve_ffmpeg_executable() -> PathBuf {
         if let Some(exe_dir) = current_exe.parent() {
             candidates.push(exe_dir.join("ffmpeg.exe"));
             if cfg!(any(debug_assertions, feature = "dev-ffmpeg-paths")) {
-                if let Some(workspace_root) = exe_dir.parent().and_then(|p| p.parent()) {
-                    candidates.push(
-                        workspace_root
-                            .join("ffmpeg_dev")
-                            .join("sdk")
-                            .join("bin")
-                            .join("ffmpeg.exe"),
-                    );
-                }
+                push_ffmpeg_dev_candidates(exe_dir, &mut candidates);
             }
         }
     }
 
     #[cfg(any(debug_assertions, feature = "dev-ffmpeg-paths"))]
     {
-        if let Some(workspace_root) =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).ancestors().nth(2)
-        {
-            candidates.push(
-                workspace_root
-                    .join("ffmpeg_dev")
-                    .join("sdk")
-                    .join("bin")
-                    .join("ffmpeg.exe"),
-            );
-        }
+        push_ffmpeg_dev_candidates(Path::new(env!("CARGO_MANIFEST_DIR")), &mut candidates);
     }
 
     candidates

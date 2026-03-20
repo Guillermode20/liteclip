@@ -9,6 +9,7 @@ categories = ["multimedia::video", "os::windows-apis"]
 license = "MIT OR Apache-2.0"
 include = [
     "src/**/*",
+    "shaders/**/*",
     "Cargo.toml",
     "README.md",
     "CHANGELOG.md",
@@ -20,7 +21,7 @@ include = [
 default = ["ffmpeg"]
 # Enable FFmpeg pipeline code paths (no native link-time FFmpeg deps)
 ffmpeg = []
-# In release builds, also search workspace `ffmpeg_dev/...` (debug builds always may).
+# In release builds, also walk ancestors for `ffmpeg_dev/...` (debug builds always may).
 dev-ffmpeg-paths = []
 
 [dependencies]
