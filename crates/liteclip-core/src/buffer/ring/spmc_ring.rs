@@ -569,8 +569,10 @@ impl LockFreeReplayBuffer {
 
     /// Gets a snapshot starting from a specific PTS.
     ///
-    /// Finds the nearest keyframe at or after the given PTS and returns
-    /// all packets from that keyframe onward.
+    /// Prefers the last keyframe at or before the requested PTS so the clip
+    /// keeps the leading audio/video that would otherwise be dropped.
+    /// Falls back to the first keyframe after the requested PTS only when no
+    /// earlier keyframe is available.
     ///
     /// # Arguments
     ///
@@ -619,8 +621,8 @@ impl LockFreeReplayBuffer {
             }
         }
 
-        let start_idx = first_keyframe_at_or_after
-            .or(last_keyframe_at_or_before)
+        let start_idx = last_keyframe_at_or_before
+            .or(first_keyframe_at_or_after)
             .unwrap_or(first_idx);
 
         let video_count = packets
@@ -637,12 +639,37 @@ impl LockFreeReplayBuffer {
             start_idx
         );
 
-        let drain_start = packets
+        let video_start_pts = packets
             .iter()
-            .position(|(i, _)| *i >= start_idx)
-            .unwrap_or(packets.len());
+            .filter(|(_, p)| matches!(p.stream, StreamType::Video))
+            .find(|(i, _)| *i >= start_idx)
+            .map(|(_, p)| p.pts)
+            .unwrap_or(start_pts);
 
-        let result: Vec<EncodedPacket> = packets.drain(drain_start..).map(|(_, p)| p).collect();
+        let mut result: Vec<EncodedPacket> = packets
+            .iter()
+            .filter(|(i, p)| {
+                if *i >= start_idx {
+                    return true;
+                }
+                if matches!(p.stream, StreamType::SystemAudio | StreamType::Microphone) {
+                    return p.pts >= video_start_pts;
+                }
+                false
+            })
+            .map(|(_, p)| p.clone())
+            .collect();
+
+        result.sort_by_key(|p| {
+            (
+                p.pts,
+                match p.stream {
+                    StreamType::Video => 0,
+                    StreamType::SystemAudio => 1,
+                    StreamType::Microphone => 2,
+                },
+            )
+        });
 
         let result_video = result
             .iter()

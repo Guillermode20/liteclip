@@ -160,25 +160,34 @@ impl FfmpegMuxer {
             anyhow::bail!("No video packets to write");
         }
 
-        let base_qpc = video_packets
+        let qpc_freq = crate::buffer::ring::qpc_frequency().max(1);
+
+        let video_start_qpc = video_packets
             .iter()
+            .filter(|packet| !is_parameter_set_payload(packet.data.as_ref()))
             .map(|packet| packet.dts)
-            .chain(audio_packets.iter().map(|packet| packet.pts))
+            .min()
+            .or_else(|| video_packets.iter().map(|packet| packet.dts).min())
+            .unwrap_or(0);
+
+        let video_end_qpc = {
+            let max_video_pts = video_packets
+                .iter()
+                .map(|packet| packet.pts)
+                .max()
+                .unwrap_or(0);
+            let frame_duration = default_video_frame_qpc(self.video_frame_rate);
+            max_video_pts.saturating_add(frame_duration)
+        };
+
+        let min_audio_qpc = audio_packets.iter().map(|packet| packet.pts).min();
+
+        let base_qpc = std::iter::once(video_start_qpc)
+            .chain(min_audio_qpc.into_iter())
             .min()
             .unwrap_or(0);
 
-        // Estimate end time based on the latest presentation timestamp.
-        let max_video_pts = video_packets
-            .iter()
-            .map(|packet| packet.pts)
-            .max()
-            .unwrap_or(0);
-        let video_end_qpc =
-            max_video_pts.saturating_add(default_video_frame_qpc(self.video_frame_rate));
-
         let mut options = ffmpeg::Dictionary::new();
-        // Enable faststart if requested so the moov atom is written at the
-        // beginning of the file (useful for playback before download completes).
         if self.faststart {
             options.set("movflags", "+faststart");
         }
@@ -186,16 +195,11 @@ impl FfmpegMuxer {
             .write_header_with(options)
             .context("Failed to write MP4 header")?;
 
-        // Encode all audio to AAC BEFORE writing any video.
-        // With fragmented MP4, packets from all streams must be written in
-        // interleaved DTS order. Writing all video first then all audio creates
-        // video-only fragments and causes av_write_trailer to fail.
-        // By encoding audio up-front we can merge video + audio by time and
-        // feed them to av_write_frame in the correct order.
         let encoded_audio: Vec<EncodedAudioPacket> = if let (Some(_), Some(audio_encoder)) =
             (self.audio_stream_index, self.audio_encoder.as_mut())
         {
             let mixed_pcm = mix_audio_packets_to_pcm(audio_packets, base_qpc, video_end_qpc);
+
             if mixed_pcm.is_empty() && !self.expect_audio {
                 vec![]
             } else {
@@ -233,7 +237,6 @@ impl FfmpegMuxer {
 
         // Merge-sort video and audio by decode time (DTS) and write each packet.
         // This aligns with FFmpeg's expectations for fragmented MP4 output.
-        let qpc_freq = crate::buffer::ring::qpc_frequency().max(1);
         let mut aac_iter = encoded_audio.iter().peekable();
         let audio_stream_idx = self.audio_stream_index;
         let audio_time_base = self.audio_time_base;
@@ -344,8 +347,6 @@ fn write_borrowed_video_packet(
             raw_packet.flags |= ffmpeg::ffi::AV_PKT_FLAG_KEY;
         }
 
-        // av_interleaved_write_frame lets FFmpeg handle any remaining interleaving
-        // details (especially important for fragmented MP4 output).
         match ffmpeg::ffi::av_interleaved_write_frame(format_context.as_mut_ptr(), &mut raw_packet)
         {
             0 => Ok(()),
@@ -397,7 +398,8 @@ mod tests {
         );
 
         let audio_packets = vec![&first, &second];
-        let mixed = mix_audio_packets_to_pcm(&audio_packets, 0, qpc_for_frame_index(8));
+        let video_end = qpc_for_frame_index(8);
+        let mixed = mix_audio_packets_to_pcm(&audio_packets, 0, video_end);
 
         assert_eq!(mixed.len(), 16);
         assert_eq!(
@@ -426,11 +428,8 @@ mod tests {
         );
 
         let audio_packets = vec![&first, &second];
-        let mixed = mix_audio_packets_to_pcm(
-            &audio_packets,
-            0,
-            qpc_for_frame_index(second_start_frame + 4),
-        );
+        let video_end = qpc_for_frame_index(second_start_frame + 4);
+        let mixed = mix_audio_packets_to_pcm(&audio_packets, 0, video_end);
 
         let gap_start = 4 * AUDIO_CHANNELS as usize;
         let gap_end = second_start_frame * AUDIO_CHANNELS as usize;
@@ -457,11 +456,8 @@ mod tests {
         );
 
         let audio_packets = vec![&first, &late];
-        let mixed = mix_audio_packets_to_pcm(
-            &audio_packets,
-            0,
-            qpc_for_frame_index(16),
-        );
+        let video_end = qpc_for_frame_index(16);
+        let mixed = mix_audio_packets_to_pcm(&audio_packets, 0, video_end);
 
         assert_eq!(mixed.len(), 16 * AUDIO_CHANNELS as usize);
         assert_eq!(
@@ -469,6 +465,50 @@ mod tests {
             &[1000, 1000, 1001, 1001, 1002, 1002, 1003, 1003]
         );
         assert!(mixed[8..].iter().all(|&sample| sample == 0));
+    }
+
+    #[test]
+    fn mix_audio_packets_places_audio_relative_to_base() {
+        let audio_start_frame = 500 * 48000 / 1000;
+        let first = packet_from_i16_samples(
+            &[1000, 1000, 1001, 1001, 1002, 1002, 1003, 1003],
+            qpc_for_frame_index(audio_start_frame),
+            StreamType::Microphone,
+        );
+        let audio_packets = vec![&first];
+
+        let video_end_frames = audio_start_frame + 8;
+        let video_end = qpc_for_frame_index(video_end_frames);
+        let mixed = mix_audio_packets_to_pcm(&audio_packets, 0, video_end);
+
+        let audio_start_samples = audio_start_frame * AUDIO_CHANNELS as usize;
+        assert!(mixed[..audio_start_samples]
+            .iter()
+            .all(|&sample| sample == 0));
+        assert_eq!(
+            &mixed[audio_start_samples..audio_start_samples + 8],
+            &[1000, 1000, 1001, 1001, 1002, 1002, 1003, 1003]
+        );
+    }
+
+    #[test]
+    fn mix_audio_packets_pads_when_audio_starts_after_video() {
+        let audio_start_frame = 100;
+        let first = packet_from_i16_samples(
+            &[1000, 1000, 1001, 1001, 1002, 1002, 1003, 1003],
+            qpc_for_frame_index(audio_start_frame),
+            StreamType::Microphone,
+        );
+        let audio_packets = vec![&first];
+        let video_end = qpc_for_frame_index(audio_start_frame + 8);
+        let mixed = mix_audio_packets_to_pcm(&audio_packets, 0, video_end);
+
+        let padding_samples = audio_start_frame * AUDIO_CHANNELS as usize;
+        assert!(mixed[..padding_samples].iter().all(|&sample| sample == 0));
+        assert_eq!(
+            &mixed[padding_samples..padding_samples + 8],
+            &[1000, 1000, 1001, 1001, 1002, 1002, 1003, 1003]
+        );
     }
 }
 
@@ -491,6 +531,15 @@ fn qpc_to_sample_index(delta_qpc: i64) -> usize {
         return 0;
     }
     ((delta_qpc as i128) * (AUDIO_SAMPLE_RATE as i128) / (qpc_freq as i128)) as usize
+}
+
+fn is_parameter_set_payload(data: &[u8]) -> bool {
+    match crate::buffer::ring::hevc_nal_type(data) {
+        Some(32 | 33 | 34) => return true,
+        _ => {}
+    }
+
+    matches!(crate::buffer::ring::h264_nal_type(data), Some(7 | 8))
 }
 
 fn audio_stream_id(packet: &EncodedPacket) -> u8 {
@@ -546,8 +595,6 @@ fn mix_audio_packets_to_pcm(
         }
 
         for (offset, sample) in samples.into_iter().enumerate() {
-            // Overwrite rather than accumulate to prevent intra-stream
-            // timestamp jitter overlapping and causing huge volume spikes.
             stream_buffer[start_index + offset] = sample as i32;
         }
 
@@ -557,16 +604,11 @@ fn mix_audio_packets_to_pcm(
         );
     }
 
-    let video_required_samples = qpc_to_sample_index(video_end_qpc.saturating_sub(base_qpc))
-        .saturating_mul(AUDIO_CHANNELS as usize);
+    let video_duration_qpc = video_end_qpc.saturating_sub(base_qpc);
+    let video_required_samples =
+        qpc_to_sample_index(video_duration_qpc).saturating_mul(AUDIO_CHANNELS as usize);
 
     let final_len = video_required_samples.max(1);
-    for buf in stream_buffers.values() {
-        if buf.len() > final_len {
-            // Ignore audio that extends past the video window so the clip duration
-            // stays locked to the selected video range.
-        }
-    }
 
     let mut mixed = vec![0_i32; final_len];
     for buf in stream_buffers.values() {

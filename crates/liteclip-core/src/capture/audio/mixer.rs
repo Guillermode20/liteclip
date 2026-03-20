@@ -1,6 +1,6 @@
 // Audio Mixer
 //
-// Handles real-time audio mixing, compression, and clipping for system and microphone audio.
+// Handles real-time audio mixing for system and microphone audio.
 
 use bytes::BytesMut;
 use std::collections::BTreeMap;
@@ -8,46 +8,12 @@ use std::collections::BTreeMap;
 use crate::config::AudioConfig;
 use crate::encode::EncodedPacket;
 
-#[inline]
-fn fast_log10(x: f32) -> f32 {
-    const LOG10_2: f32 = 0.301029995663981;
-
-    let abs_x = x.abs();
-    if abs_x <= 0.0 {
-        return f32::NEG_INFINITY;
-    }
-
-    let bits = abs_x.to_bits();
-    let exponent = ((bits >> 23) & 0xFF) as i32 - 127;
-    let mantissa = f32::from_bits((bits & 0x7FFFFF) | 0x3F800000);
-
-    let log2_approx = exponent as f32 + (mantissa - 1.0) * 0.346605;
-    log2_approx * LOG10_2
-}
-
-#[inline]
-fn fast_pow10(x: f32) -> f32 {
-    const LOG2_10: f32 = 3.321928094887362;
-
-    let log2_x = x * LOG2_10;
-    let floor = log2_x.floor();
-    let frac = log2_x - floor;
-
-    let mantissa = 1.0 + frac * 0.693035 + frac * frac * 0.241764;
-
-    let exponent = (floor as i32 + 127) as u32;
-    f32::from_bits((exponent << 23) | (mantissa.to_bits() & 0x7FFFFF))
-}
-
 /// Audio mixer for combining system and microphone audio with timestamp-based synchronization
 pub struct AudioMixer {
     config: AudioConfig,
     system_packets: BTreeMap<i64, EncodedPacket>, // PTS -> Packet (sorted for fast access)
     mic_packets: BTreeMap<i64, EncodedPacket>,    // PTS -> Packet (sorted for fast access)
     output_buffer: BytesMut,
-    compression_state: Option<CompressionState>,
-    /// Smoothed multiplier that keeps mic output aligned with the system track.
-    mic_match_gain: f32,
     /// Maximum time difference (in QPC ticks) allowed between packets to be considered matching
     sync_threshold: i64,
     /// Timeout for waiting for matching packets (in QPC ticks)
@@ -64,17 +30,6 @@ pub struct AudioMixer {
 impl AudioMixer {
     /// Create a new audio mixer with synchronization capabilities
     pub fn new(config: &AudioConfig) -> Self {
-        let compression_state = if config.compression_enabled {
-            Some(CompressionState::new(
-                config.compression_threshold,
-                config.compression_ratio,
-                config.compression_attack,
-                config.compression_release,
-            ))
-        } else {
-            None
-        };
-
         // Calculate synchronization parameters (QPC ticks)
         // QPC frequency is ~10MHz (1 tick = 100ns)
         // Audio packets are 100ms duration
@@ -88,8 +43,6 @@ impl AudioMixer {
             system_packets: BTreeMap::new(),
             mic_packets: BTreeMap::new(),
             output_buffer: BytesMut::with_capacity(4096),
-            compression_state,
-            mic_match_gain: 1.0,
             sync_threshold,
             timeout,
             last_processed_pts: -1,
@@ -102,24 +55,6 @@ impl AudioMixer {
     /// Update mixer configuration
     pub fn update_config(&mut self, config: &AudioConfig) {
         self.config = config.clone();
-
-        if config.compression_enabled && self.compression_state.is_none() {
-            self.compression_state = Some(CompressionState::new(
-                config.compression_threshold,
-                config.compression_ratio,
-                config.compression_attack,
-                config.compression_release,
-            ));
-        } else if !config.compression_enabled {
-            self.compression_state = None;
-        } else if let Some(compression) = &mut self.compression_state {
-            compression.update_config(
-                config.compression_threshold,
-                config.compression_ratio,
-                config.compression_attack,
-                config.compression_release,
-            );
-        }
     }
 
     /// Mix audio packets from system and microphone with timestamp-based synchronization
@@ -192,16 +127,24 @@ impl AudioMixer {
 
                         // If the gap is too large, process the earlier packet and pad
                         if later_ts - earlier_ts > self.timeout {
-                        if system_ts < mic_ts {
-                            let system_packet = self.system_packets.remove(&system_ts);
-                            return Some((system_packet, None, system_ts));
-                        } else {
-                            let mic_packet = self.mic_packets.remove(&mic_ts);
+                            if system_ts < mic_ts {
+                                let system_packet = self.system_packets.remove(&system_ts);
+                                return Some((system_packet, None, system_ts));
+                            } else {
+                                let mic_packet = self.mic_packets.remove(&mic_ts);
                                 return Some((None, mic_packet, mic_ts));
                             }
                         } else {
-                            // Wait for matching packet
-                            return None;
+                            // Packets are not close enough for sync but not yet timed out
+                            // We MUST return the earlier packet if it's falling behind
+                            // otherwise we stall the whole pipeline.
+                            if system_ts < mic_ts {
+                                let system_packet = self.system_packets.remove(&system_ts);
+                                return Some((system_packet, None, system_ts));
+                            } else {
+                                let mic_packet = self.mic_packets.remove(&mic_ts);
+                                return Some((None, mic_packet, mic_ts));
+                            }
                         }
                     }
                 }
@@ -257,10 +200,6 @@ impl AudioMixer {
             return None;
         }
 
-        // Track the observed loudness of each stream before we apply mixing gains.
-        let system_rms = Self::normalized_rms(&self.system_decode_buf);
-        let mic_rms = Self::normalized_rms(&self.mic_decode_buf);
-
         // Resize buffers to match
         if self.system_decode_buf.len() < max_samples {
             self.system_decode_buf.resize(max_samples, 0);
@@ -271,17 +210,8 @@ impl AudioMixer {
 
         // Calculate gains
         let system_gain = (self.config.system_volume as f32 / 100.0).clamp(0.0, 2.0);
-        let mic_gain = (self.config.mic_volume as f32 / 100.0).clamp(0.0, 4.0);
+        let mic_gain = (self.config.mic_volume as f32 / 100.0).clamp(0.0, 1.0);
         let master_gain = (self.config.master_volume as f32 / 100.0).clamp(0.0, 2.0);
-        let mic_match_target = Self::target_mic_match_gain(
-            system_rms,
-            mic_rms,
-            system_gain,
-            mic_gain,
-        );
-        self.mic_match_gain = Self::smooth_gain(self.mic_match_gain, mic_match_target);
-        let effective_mic_gain = mic_gain * self.mic_match_gain;
-        let duck_gain = Self::system_duck_gain(&self.mic_decode_buf, effective_mic_gain);
 
         // Calculate balance (stereo only)
         let (left_balance, right_balance) = if self.config.balance < 0 {
@@ -304,8 +234,8 @@ impl AudioMixer {
             let mic_sample = self.mic_decode_buf[i];
 
             // Apply per-stream gains
-            let system_scaled = (system_sample as f32) * system_gain * duck_gain;
-            let mic_scaled = (mic_sample as f32) * effective_mic_gain;
+            let system_scaled = (system_sample as f32) * system_gain;
+            let mic_scaled = (mic_sample as f32) * mic_gain;
 
             // Mix samples
             let mixed = system_scaled + mic_scaled;
@@ -318,18 +248,11 @@ impl AudioMixer {
                 balanced *= right_balance;
             }
 
-            // Apply compression if enabled
-            let compressed = if let Some(compression) = &mut self.compression_state {
-                compression.process(balanced)
-            } else {
-                balanced
-            };
-
             // Apply master volume
-            let final_sample = compressed * master_gain;
+            let final_sample = balanced * master_gain;
 
-            // Apply improved soft clipping
-            let clipped = Self::improved_soft_clip(final_sample);
+            // Simple hard clipping
+            let clipped = final_sample.clamp(-32768.0, 32767.0);
 
             self.mixed_samples_buf.push(clipped.round() as i16);
         }
@@ -385,172 +308,9 @@ impl AudioMixer {
             }
         }
     }
-
-    /// Improved soft clipping algorithm using tanh
-    fn improved_soft_clip(sample: f32) -> f32 {
-        const THRESHOLD: f32 = 16384.0; // -6dB
-        const MAX: f32 = 32767.0;
-
-        if sample.abs() < THRESHOLD {
-            return sample;
-        }
-
-        let sign = sample.signum();
-        let magnitude = sample.abs();
-
-        let over = (magnitude - THRESHOLD) / (MAX - THRESHOLD);
-        let clipped = THRESHOLD + (MAX - THRESHOLD) * over.tanh();
-
-        sign * clipped
-    }
-
-    fn system_duck_gain(mic_samples: &[i16], mic_gain: f32) -> f32 {
-        const DUCK_START_LEVEL: f32 = 0.025;
-        const DUCK_FULL_LEVEL: f32 = 0.08;
-        const MIN_SYSTEM_DUCK_GAIN: f32 = 0.72;
-
-        if mic_samples.is_empty() {
-            return 1.0;
-        }
-
-        let mut peak = 0.0_f32;
-        let mut sum_squares = 0.0_f32;
-
-        for &sample in mic_samples {
-            let normalized = ((sample as f32).abs() / 32768.0) * mic_gain.max(0.0);
-            peak = peak.max(normalized);
-            sum_squares += normalized * normalized;
-        }
-
-        let rms = (sum_squares / mic_samples.len() as f32).sqrt();
-        let activity = peak.max(rms * 1.25);
-
-        if activity <= DUCK_START_LEVEL {
-            return 1.0;
-        }
-
-        if activity >= DUCK_FULL_LEVEL {
-            return MIN_SYSTEM_DUCK_GAIN;
-        }
-
-        let progress = (activity - DUCK_START_LEVEL) / (DUCK_FULL_LEVEL - DUCK_START_LEVEL);
-        1.0 - progress * (1.0 - MIN_SYSTEM_DUCK_GAIN)
-    }
-
-    fn smooth_gain(current: f32, target: f32) -> f32 {
-        const ATTACK_ALPHA: f32 = 0.18;
-        const RELEASE_ALPHA: f32 = 0.06;
-
-        let alpha = if target >= current {
-            ATTACK_ALPHA
-        } else {
-            RELEASE_ALPHA
-        };
-        current + alpha * (target - current)
-    }
-
-    fn normalized_rms(samples: &[i16]) -> f32 {
-        if samples.is_empty() {
-            return 0.0;
-        }
-
-        let mut sum_squares = 0.0_f32;
-        for &sample in samples {
-            let normalized = sample as f32 / 32768.0;
-            sum_squares += normalized * normalized;
-        }
-
-        (sum_squares / samples.len() as f32).sqrt()
-    }
-
-    fn target_mic_match_gain(
-        system_rms: f32,
-        mic_rms: f32,
-        system_gain: f32,
-        mic_gain: f32,
-    ) -> f32 {
-        const MIN_MATCH_LEVEL: f32 = 0.004;
-        const MIN_GAIN: f32 = 0.35;
-        const MAX_GAIN: f32 = 3.5;
-
-        if system_rms <= MIN_MATCH_LEVEL || mic_rms <= MIN_MATCH_LEVEL || mic_gain <= 0.0 {
-            return 1.0;
-        }
-
-        let system_target = system_rms * system_gain;
-        let mic_target = mic_rms * mic_gain.max(0.01);
-
-        if system_target <= MIN_MATCH_LEVEL || mic_target <= MIN_MATCH_LEVEL {
-            return 1.0;
-        }
-
-        (system_target / mic_target).clamp(MIN_GAIN, MAX_GAIN)
-    }
 }
 
-/// Compression state for dynamic range compression
-struct CompressionState {
-    threshold: f32, // in dB
-    ratio: f32,     // compression ratio
-    attack: f32,    // attack time in seconds
-    release: f32,   // release time in seconds
-    envelope: f32,  // current envelope value
-}
-
-impl CompressionState {
-    /// Create a new compression state
-    fn new(threshold: u8, ratio: u8, attack: u8, release: u8) -> Self {
-        // Convert threshold from 0-100 to -40dB to 0dB
-        let threshold_db = (threshold as f32 / 100.0) * 40.0 - 40.0;
-
-        Self {
-            threshold: threshold_db,
-            ratio: ratio as f32,
-            attack: attack as f32 / 1000.0,   // ms to seconds
-            release: release as f32 / 1000.0, // ms to seconds
-            envelope: 0.0,
-        }
-    }
-
-    /// Update compression configuration
-    fn update_config(&mut self, threshold: u8, ratio: u8, attack: u8, release: u8) {
-        self.threshold = (threshold as f32 / 100.0) * 40.0 - 40.0;
-        self.ratio = ratio as f32;
-        self.attack = attack as f32 / 1000.0;
-        self.release = release as f32 / 1000.0;
-    }
-
-    /// Process a single audio sample
-    fn process(&mut self, sample: f32) -> f32 {
-        let abs_sample = sample.abs();
-        if abs_sample < 0.0001 {
-            return sample;
-        }
-
-        let level_db = 20.0 * fast_log10(abs_sample / 32768.0);
-
-        let gain_db = if level_db > self.threshold {
-            (level_db - self.threshold) * (1.0 / self.ratio - 1.0)
-        } else {
-            0.0
-        };
-
-        let time_constant = if gain_db < self.envelope {
-            self.attack
-        } else {
-            self.release
-        };
-
-        const SAMPLE_RATE: f32 = 48000.0;
-        let alpha = (1.0 - (-1.0 / (time_constant * SAMPLE_RATE)).exp()).clamp(0.0, 1.0);
-        self.envelope += alpha * (gain_db - self.envelope);
-
-        let gain = fast_pow10(self.envelope / 20.0);
-        sample * gain
-    }
-}
-
-/// Decode an EncodedPacket to i16 samples into a pre-allocated buffer
+/// Decode an EncodedPacket to j16 samples into a pre-allocated buffer
 fn decode_packet_into(packet: &EncodedPacket, buffer: &mut Vec<i16>) {
     buffer.clear();
     buffer.reserve(packet.data.len() / 2);
@@ -605,34 +365,6 @@ mod tests {
 
         let result = mixer.mix_packets(Some(system_packet), Some(mic_packet));
         assert!(!result.is_empty());
-    }
-
-    #[test]
-    fn test_compression() {
-        let mut config = Config::default().audio;
-        config.compression_enabled = true;
-        config.compression_threshold = 50; // -20dB
-        config.compression_ratio = 4; // 4:1
-        let mut mixer = AudioMixer::new(&config);
-
-        // Create loud test packet
-        let mut data = BytesMut::with_capacity(4);
-        data.extend_from_slice(&30000i16.to_le_bytes()); // ~-3dB
-        data.extend_from_slice(&30000i16.to_le_bytes());
-        let packet = EncodedPacket::new(
-            data.freeze(),
-            0,
-            0,
-            false,
-            crate::encode::StreamType::SystemAudio,
-        );
-
-        let result = mixer.mix_packets(Some(packet), None);
-        assert!(!result.is_empty());
-
-        // Verify compression
-        let decoded = decode_packet(&result[0]);
-        assert!(decoded[0].abs() < 30000);
     }
 
     #[test]
@@ -704,77 +436,4 @@ mod tests {
         assert!(!mixer.system_packets.is_empty());
         assert!(!mixer.mic_packets.is_empty());
     }
-
-    #[test]
-    fn test_mic_activity_ducks_system_audio() {
-        let mut config = Config::default().audio;
-        config.compression_enabled = false;
-        config.system_volume = 100;
-        config.mic_volume = 100;
-        let mut mixer = AudioMixer::new(&config);
-
-        let mut system_data = BytesMut::with_capacity(4);
-        system_data.extend_from_slice(&4000i16.to_le_bytes());
-        system_data.extend_from_slice(&4000i16.to_le_bytes());
-        let system_packet = EncodedPacket::new(
-            system_data.freeze(),
-            0,
-            0,
-            false,
-            crate::encode::StreamType::SystemAudio,
-        );
-
-        let mut mic_data = BytesMut::with_capacity(4);
-        mic_data.extend_from_slice(&4000i16.to_le_bytes());
-        mic_data.extend_from_slice(&4000i16.to_le_bytes());
-        let mic_packet = EncodedPacket::new(
-            mic_data.freeze(),
-            0,
-            0,
-            false,
-            crate::encode::StreamType::Microphone,
-        );
-
-        let result = mixer.mix_packets(Some(system_packet), Some(mic_packet));
-        assert_eq!(result.len(), 1);
-
-        let decoded = decode_packet(&result[0]);
-        assert_eq!(decoded, vec![6880, 6880]);
-    }
-
-    #[test]
-    fn test_quiet_mic_is_automatically_boosted_toward_system_level() {
-        let mut config = Config::default().audio;
-        config.compression_enabled = false;
-        config.system_volume = 100;
-        config.mic_volume = 100;
-        let mut mixer = AudioMixer::new(&config);
-
-        let mut system_data = BytesMut::with_capacity(4);
-        system_data.extend_from_slice(&18_000i16.to_le_bytes());
-        system_data.extend_from_slice(&18_000i16.to_le_bytes());
-        let system_packet = EncodedPacket::new(
-            system_data.freeze(),
-            0,
-            0,
-            false,
-            crate::encode::StreamType::SystemAudio,
-        );
-
-        let mut mic_data = BytesMut::with_capacity(4);
-        mic_data.extend_from_slice(&3_000i16.to_le_bytes());
-        mic_data.extend_from_slice(&3_000i16.to_le_bytes());
-        let mic_packet = EncodedPacket::new(
-            mic_data.freeze(),
-            0,
-            0,
-            false,
-            crate::encode::StreamType::Microphone,
-        );
-
-        let result = mixer.mix_packets(Some(system_packet), Some(mic_packet));
-        assert_eq!(result.len(), 1);
-        assert!(mixer.mic_match_gain > 1.1, "expected auto gain boost, got {}", mixer.mic_match_gain);
-    }
-
 }

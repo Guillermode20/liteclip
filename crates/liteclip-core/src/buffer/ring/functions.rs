@@ -118,6 +118,21 @@ mod tests {
     }
 
     #[test]
+    fn test_snapshot_from_prefers_previous_keyframe() {
+        let buffer = LockFreeReplayBuffer::new(&make_config(120, 512)).unwrap();
+        for i in 0..15 {
+            let is_keyframe = i == 0 || i == 5 || i == 10;
+            let packet = create_test_packet(i * 1_000_000, is_keyframe, 1024);
+            buffer.push(packet);
+        }
+
+        let snapshot = buffer.snapshot_from(7_000_000).unwrap();
+        assert!(!snapshot.is_empty());
+        assert_eq!(snapshot[0].pts, 5_000_000);
+        assert!(snapshot[0].is_keyframe);
+    }
+
+    #[test]
     fn test_snapshot_cheap_clone() {
         let buffer = LockFreeReplayBuffer::new(&make_config(120, 512)).unwrap();
         let large_data = vec![0u8; 1_000_000];

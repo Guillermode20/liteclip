@@ -502,19 +502,12 @@ fn run_noise_thread(
     }
 }
 
+#[allow(dead_code)]
 fn soft_limit(x: f32) -> f32 {
-    const THRESHOLD: f32 = 16_384.0;
-    const MAX: f32 = 32_767.0;
-
-    if x.abs() < THRESHOLD {
-        x
-    } else {
-        let sign = x.signum();
-        let over = (x.abs() - THRESHOLD) / (MAX - THRESHOLD);
-        sign * (THRESHOLD + (MAX - THRESHOLD) * over.tanh())
-    }
+    x.clamp(-32768.0f32, 32767.0f32)
 }
 
+#[allow(dead_code)]
 struct RNNoiseProcessor {
     channels: usize,
     state: Box<DenoiseState<'static>>,
@@ -536,29 +529,9 @@ struct RNNoiseProcessor {
     presence_attack_alpha: f32,
     presence_release_alpha: f32,
     quiet_packet_streak: u8,
-    agc: AgcState,
 }
 
-struct AgcState {
-    target_level: f32,
-    peak_ceiling: f32,
-    current_gain: f32,
-    min_gain: f32,
-    max_gain: f32,
-    gain_up_alpha: f32,
-    gain_down_alpha: f32,
-    rms_alpha: f32,
-    peak_alpha: f32,
-    noise_floor_fast_alpha: f32,
-    noise_floor_slow_alpha: f32,
-    speech_attack_alpha: f32,
-    speech_release_alpha: f32,
-    smoothed_rms: f32,
-    smoothed_peak: f32,
-    noise_floor_rms: f32,
-    speech_presence: f32,
-}
-
+#[allow(dead_code)]
 impl RNNoiseProcessor {
     const DC_COEFF: f32 = 0.9975;
     const MIN_GAIN: f32 = 0.18;
@@ -588,7 +561,7 @@ impl RNNoiseProcessor {
             in_head: 0,
             out_buf,
             out_head: 0,
-            gain: Self::MIN_GAIN,
+            gain: 1.0,
             speech_presence: 0.0,
             noise_floor: 300.0,
             speech_hangover: 0,
@@ -602,7 +575,6 @@ impl RNNoiseProcessor {
             presence_attack_alpha: Self::frame_alpha_from_ms(30.0),
             presence_release_alpha: Self::frame_alpha_from_ms(220.0),
             quiet_packet_streak: 0,
-            agc: AgcState::new(),
         }
     }
 
@@ -636,16 +608,12 @@ impl RNNoiseProcessor {
     }
 
     #[inline]
-    fn compute_adaptive_target_gain(vad: f32, snr_gate: f32, speech_presence: f32) -> f32 {
-        let quiet_voice = ((vad - Self::VAD_NOISE_THRESHOLD)
-            / (Self::VAD_GATE_THRESHOLD - Self::VAD_NOISE_THRESHOLD))
-            .clamp(0.0, 1.0);
-        let floor_shape = (speech_presence * 0.75 + quiet_voice * 0.25).clamp(0.0, 1.0);
-        let adaptive_floor = Self::lerp(Self::MIN_GAIN, Self::QUIET_SPEECH_GAIN, floor_shape);
-        let openness = (vad * 0.45 + snr_gate * 0.20 + speech_presence * 0.35).clamp(0.0, 1.0);
-        let base_gain = Self::lerp(adaptive_floor, 1.0, openness);
-        let quiet_speech_makeup = (1.0 - openness) * floor_shape * Self::QUIET_SPEECH_MAKEUP_GAIN;
-        (base_gain + quiet_speech_makeup).clamp(Self::MIN_GAIN, Self::MAX_GAIN)
+    fn compute_adaptive_target_gain(vad: f32) -> f32 {
+        if vad > 0.5 {
+            1.0
+        } else {
+            0.0
+        }
     }
 
     #[inline]
@@ -662,62 +630,8 @@ impl RNNoiseProcessor {
     }
 
     #[inline]
-    fn maybe_bypass_quiet_packet(&mut self, data: &mut [u8]) -> bool {
-        if self.channels == 0 || data.len() % (self.channels * 2) != 0 {
-            return false;
-        }
-
-        let sample_count = data.len() / 2;
-        let frame_count = sample_count / self.channels;
-        if frame_count == 0 {
-            return false;
-        }
-
-        let samples =
-            unsafe { std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut i16, sample_count) };
-
-        let (sum_abs, peak_abs) = match self.channels {
-            1 => samples.iter().fold((0i64, 0i32), |(sum, peak), &sample| {
-                let abs = (sample as i32).abs();
-                (sum + abs as i64, peak.max(abs))
-            }),
-            2 => samples
-                .chunks_exact(2)
-                .fold((0i64, 0i32), |(sum, peak), frame| {
-                    let mono = ((frame[0] as i32) + (frame[1] as i32)) / 2;
-                    let abs = mono.abs();
-                    (sum + abs as i64, peak.max(abs))
-                }),
-            _ => samples
-                .chunks_exact(self.channels)
-                .fold((0i64, 0i32), |(sum, peak), frame| {
-                    let mono = frame.iter().map(|&sample| sample as i32).sum::<i32>()
-                        / self.channels as i32;
-                    let abs = mono.abs();
-                    (sum + abs as i64, peak.max(abs))
-                }),
-        };
-
-        let mean_abs = sum_abs as f32 / frame_count as f32;
-        let quiet_packet = self.speech_hangover == 0
-            && self.speech_presence <= Self::QUIET_BYPASS_MAX_SPEECH_PRESENCE
-            && mean_abs <= Self::QUIET_PACKET_MAX_MEAN_ABS
-            && peak_abs <= Self::QUIET_PACKET_MAX_PEAK;
-
-        if quiet_packet {
-            self.quiet_packet_streak = self.quiet_packet_streak.saturating_add(1);
-        } else {
-            self.quiet_packet_streak = 0;
-            return false;
-        }
-
-        if self.quiet_packet_streak < Self::QUIET_PACKET_STREAK_THRESHOLD {
-            return false;
-        }
-
-        data.fill(0);
-        self.reset_after_quiet_bypass();
-        true
+    fn maybe_bypass_quiet_packet(&mut self, _data: &mut [u8]) -> bool {
+        false
     }
 
     #[inline]
@@ -754,10 +668,6 @@ impl RNNoiseProcessor {
             return;
         }
 
-        if self.maybe_bypass_quiet_packet(data) {
-            return;
-        }
-
         let sample_count = data.len() / 2;
         let frame_count = sample_count / self.channels;
         let samples =
@@ -769,113 +679,49 @@ impl RNNoiseProcessor {
         self.in_buf.resize(write_start + frame_count, 0.0);
         match self.channels {
             1 => {
-                for (dst, &sample) in self.in_buf[write_start..].iter_mut().zip(samples.iter()) {
-                    *dst = sample as f32;
+                for i in 0..frame_count {
+                    self.in_buf[write_start + i] = samples[i] as f32;
                 }
             }
             2 => {
-                for (dst, frame) in self.in_buf[write_start..]
-                    .iter_mut()
-                    .zip(samples.chunks_exact(2))
-                {
-                    *dst = (frame[0] as f32 + frame[1] as f32) * 0.5;
+                for i in 0..frame_count {
+                    let idx = i * 2;
+                    self.in_buf[write_start + i] =
+                        (samples[idx] as f32 + samples[idx + 1] as f32) * 0.5;
                 }
             }
             _ => {
                 let channels_f = self.channels as f32;
-                for (dst, frame) in self.in_buf[write_start..]
-                    .iter_mut()
-                    .zip(samples.chunks_exact(self.channels))
-                {
+                for i in 0..frame_count {
                     let mut sum = 0.0f32;
-                    for &sample in frame {
-                        sum += sample as f32;
+                    let base = i * self.channels;
+                    for c in 0..self.channels {
+                        sum += samples[base + c] as f32;
                     }
-                    *dst = sum / channels_f;
+                    self.in_buf[write_start + i] = sum / channels_f;
                 }
             }
         }
 
-        let complete_frames = (self.in_buf.len() - self.in_head) / AUDIO_FRAME_SIZE;
-        self.out_buf
-            .reserve(complete_frames.saturating_mul(AUDIO_FRAME_SIZE));
-
         // Process complete 480-sample RNNoise frames from the mono queue.
         while (self.in_buf.len() - self.in_head) >= AUDIO_FRAME_SIZE {
-            let frame_start = self.in_head;
-            self.frame_in
-                .copy_from_slice(&self.in_buf[frame_start..frame_start + AUDIO_FRAME_SIZE]);
+            let frame_start_idx = self.in_head;
+            for i in 0..AUDIO_FRAME_SIZE {
+                self.frame_in[i] = self.in_buf[frame_start_idx + i];
+            }
 
-            let vad = self
-                .state
+            self.state
                 .process_frame(self.frame_out.as_mut_slice(), self.frame_in.as_slice());
-
-            let mut energy = 0.0f32;
-            for &sample in self.frame_out.iter() {
-                energy += sample * sample;
-            }
-            let frame_rms = (energy / AUDIO_FRAME_SIZE as f32).sqrt();
-
-            let floor_alpha = if vad < Self::VAD_NOISE_THRESHOLD {
-                Self::NOISE_FLOOR_FAST_ALPHA
-            } else {
-                Self::NOISE_FLOOR_SLOW_ALPHA
-            };
-            self.noise_floor += floor_alpha * (frame_rms - self.noise_floor);
-            self.noise_floor = self.noise_floor.max(10.0);
-
-            let snr = frame_rms / (self.noise_floor + 1.0);
-            let snr_gate =
-                ((snr - Self::SNR_MIN) / (Self::SNR_MAX - Self::SNR_MIN)).clamp(0.0, 1.0);
-
-            let instant_speech = (vad * 0.72 + snr_gate * 0.28).clamp(0.0, 1.0);
-            if vad >= Self::VAD_GATE_THRESHOLD {
-                self.speech_hangover = Self::HANGOVER_FRAMES;
-            }
-
-            let mut presence_target = instant_speech;
-            if self.speech_hangover > 0 {
-                self.speech_hangover -= 1;
-                let hold = (self.speech_hangover as f32 / Self::HANGOVER_FRAMES as f32).max(0.35);
-                presence_target = presence_target.max(hold);
-            }
-
-            let presence_alpha = if presence_target >= self.speech_presence {
-                self.presence_attack_alpha
-            } else {
-                self.presence_release_alpha
-            };
-            self.speech_presence += presence_alpha * (presence_target - self.speech_presence);
-
-            let target_gain =
-                Self::compute_adaptive_target_gain(vad, snr_gate, self.speech_presence);
-            let mut current_gain = self.gain;
 
             let out_start = self.out_buf.len();
             self.out_buf.resize(out_start + AUDIO_FRAME_SIZE, 0.0);
 
-            let gain_alpha = if target_gain >= current_gain {
-                self.attack_alpha
-            } else {
-                self.release_alpha
-            };
             for i in 0..AUDIO_FRAME_SIZE {
-                current_gain += gain_alpha * (target_gain - current_gain);
-                self.out_buf[out_start + i] = self.frame_out[i] * current_gain;
+                self.out_buf[out_start + i] = self.frame_out[i];
             }
 
-            self.gain = current_gain;
-            self.primed = true;
             self.in_head += AUDIO_FRAME_SIZE;
             Self::compact_queue(&mut self.in_buf, &mut self.in_head);
-        }
-
-        // Apply AGC to the processed output buffer
-        let agc_start = self.out_head;
-        let agc_end = self.out_buf.len().min(self.out_head + frame_count);
-        if agc_end > agc_start {
-            self.agc
-                .process_frame(&mut self.out_buf[agc_start..agc_end]);
         }
 
         // Broadcast processed mono output to all interleaved channels,
@@ -883,208 +729,56 @@ impl RNNoiseProcessor {
         let available = (self.out_buf.len() - self.out_head).min(frame_count);
         match self.channels {
             1 => {
-                for frame_idx in 0..available {
-                    let mono_sample = self.out_buf[self.out_head + frame_idx];
-                    samples[frame_idx] = soft_limit(self.dc_block_broadcast(mono_sample))
+                for i in 0..available {
+                    let mono_sample = self.out_buf[self.out_head + i];
+                    samples[i] = self
+                        .dc_block_broadcast(mono_sample)
                         .clamp(-32768.0, 32767.0) as i16;
+                }
+                // Fill remainder with silence if we don't have enough processed samples yet
+                for i in available..frame_count {
+                    samples[i] = 0;
                 }
             }
             2 => {
-                for frame_idx in 0..available {
-                    let mono_sample = self.out_buf[self.out_head + frame_idx];
-                    let limited = soft_limit(self.dc_block_broadcast(mono_sample))
+                for i in 0..available {
+                    let mono_sample = self.out_buf[self.out_head + i];
+                    let processed = self
+                        .dc_block_broadcast(mono_sample)
                         .clamp(-32768.0, 32767.0) as i16;
-                    let sample_idx = frame_idx * 2;
-                    samples[sample_idx] = limited;
-                    samples[sample_idx + 1] = limited;
+                    let idx = i * 2;
+                    samples[idx] = processed;
+                    samples[idx + 1] = processed;
+                }
+                for i in available..frame_count {
+                    let idx = i * 2;
+                    samples[idx] = 0;
+                    samples[idx + 1] = 0;
                 }
             }
             _ => {
-                for frame_idx in 0..available {
-                    let mono_sample = self.out_buf[self.out_head + frame_idx];
-                    let limited = soft_limit(self.dc_block_broadcast(mono_sample))
+                for i in 0..available {
+                    let mono_sample = self.out_buf[self.out_head + i];
+                    let processed = self
+                        .dc_block_broadcast(mono_sample)
                         .clamp(-32768.0, 32767.0) as i16;
-                    let sample_idx = frame_idx * self.channels;
-                    for channel in 0..self.channels {
-                        samples[sample_idx + channel] = limited;
+                    let base = i * self.channels;
+                    for c in 0..self.channels {
+                        samples[base + c] = processed;
+                    }
+                }
+                for i in available..frame_count {
+                    let base = i * self.channels;
+                    for c in 0..self.channels {
+                        samples[base + c] = 0;
                     }
                 }
             }
         }
 
-        self.out_head += available;
-        Self::compact_queue(&mut self.out_buf, &mut self.out_head);
-
-        // For any frames the output buffer couldn't cover, leave the original
-        // WASAPI PCM in place (no noise reduction for those samples).  Injecting
-        // zeros would create a hard discontinuity → crackling; un-reduced audio
-        // is inaudible for the brief (<1 ms) moments this can occur.
-    }
-}
-
-impl AgcState {
-    const TARGET_LEVEL_DB: f32 = -18.0;
-    const PEAK_CEILING_DB: f32 = -9.0;
-    const MIN_GAIN_DB: f32 = -6.0;
-    const MAX_GAIN_DB: f32 = 18.0;
-    const GAIN_UP_MS: f32 = 120.0;
-    const GAIN_DOWN_MS: f32 = 45.0;
-    const RMS_SMOOTHING_MS: f32 = 140.0;
-    const PEAK_SMOOTHING_MS: f32 = 45.0;
-    const NOISE_FLOOR_FAST_MS: f32 = 180.0;
-    const NOISE_FLOOR_SLOW_MS: f32 = 2400.0;
-    const SPEECH_ATTACK_MS: f32 = 70.0;
-    const SPEECH_RELEASE_MS: f32 = 260.0;
-    const MIN_ACTIVE_RMS: f32 = 120.0;
-    const MIN_NOISE_FLOOR_RMS: f32 = 48.0;
-    const SPEECH_SNR_MIN: f32 = 1.8;
-    const SPEECH_SNR_MAX: f32 = 10.0;
-
-    fn new() -> Self {
-        let target_level = 10.0f32.powf(Self::TARGET_LEVEL_DB / 20.0) * 32768.0;
-        let peak_ceiling = 10.0f32.powf(Self::PEAK_CEILING_DB / 20.0) * 32768.0;
-        let min_gain = 10.0f32.powf(Self::MIN_GAIN_DB / 20.0);
-        let max_gain = 10.0f32.powf(Self::MAX_GAIN_DB / 20.0);
-
-        Self {
-            target_level,
-            peak_ceiling,
-            current_gain: 1.0,
-            min_gain,
-            max_gain,
-            gain_up_alpha: Self::frame_alpha_from_ms(Self::GAIN_UP_MS),
-            gain_down_alpha: Self::frame_alpha_from_ms(Self::GAIN_DOWN_MS),
-            rms_alpha: Self::frame_alpha_from_ms(Self::RMS_SMOOTHING_MS),
-            peak_alpha: Self::frame_alpha_from_ms(Self::PEAK_SMOOTHING_MS),
-            noise_floor_fast_alpha: Self::frame_alpha_from_ms(Self::NOISE_FLOOR_FAST_MS),
-            noise_floor_slow_alpha: Self::frame_alpha_from_ms(Self::NOISE_FLOOR_SLOW_MS),
-            speech_attack_alpha: Self::frame_alpha_from_ms(Self::SPEECH_ATTACK_MS),
-            speech_release_alpha: Self::frame_alpha_from_ms(Self::SPEECH_RELEASE_MS),
-            smoothed_rms: 0.0,
-            smoothed_peak: 0.0,
-            noise_floor_rms: Self::MIN_NOISE_FLOOR_RMS,
-            speech_presence: 0.0,
-        }
-    }
-
-    #[inline]
-    fn frame_alpha_from_ms(ms: f32) -> f32 {
-        if ms <= 0.0 {
-            return 1.0;
-        }
-
-        let frame_rate = 100.0;
-        let tau_seconds = ms / 1000.0;
-        (1.0 - (-1.0 / (frame_rate * tau_seconds)).exp()).clamp(0.000001, 1.0)
-    }
-
-    #[inline]
-    fn frame_rms_and_peak(frame: &[f32]) -> (f32, f32) {
-        let mut sum_sq = 0.0f32;
-        let mut peak = 0.0f32;
-        for &sample in frame {
-            sum_sq += sample * sample;
-            peak = peak.max(sample.abs());
-        }
-
-        let rms = if frame.is_empty() {
-            0.0
-        } else {
-            (sum_sq / frame.len() as f32).sqrt()
-        };
-
-        (rms, peak)
-    }
-
-    #[inline]
-    fn update_speech_presence(&mut self, instant_speech: f32) {
-        let alpha = if instant_speech >= self.speech_presence {
-            self.speech_attack_alpha
-        } else {
-            self.speech_release_alpha
-        };
-        self.speech_presence += alpha * (instant_speech - self.speech_presence);
-    }
-
-    #[inline]
-    fn compute_instant_speech_factor(&self, frame_rms: f32, frame_peak: f32) -> f32 {
-        if frame_peak <= Self::MIN_ACTIVE_RMS * 0.5 || frame_rms <= Self::MIN_ACTIVE_RMS * 0.35 {
-            return 0.0;
-        }
-
-        let snr = frame_rms / (self.noise_floor_rms + 1.0);
-        let snr_factor = ((snr - Self::SPEECH_SNR_MIN)
-            / (Self::SPEECH_SNR_MAX - Self::SPEECH_SNR_MIN))
-            .clamp(0.0, 1.0);
-        let level_factor = ((frame_rms - Self::MIN_ACTIVE_RMS)
-            / (self.target_level - Self::MIN_ACTIVE_RMS))
-            .clamp(0.0, 1.0);
-        let peak_factor = ((frame_peak - Self::MIN_ACTIVE_RMS)
-            / (self.target_level * 1.35 - Self::MIN_ACTIVE_RMS))
-            .clamp(0.0, 1.0);
-        (snr_factor * 0.55 + level_factor * 0.25 + peak_factor * 0.20).clamp(0.0, 1.0)
-    }
-
-    #[inline]
-    fn compute_target_gain(&self) -> f32 {
-        if self.speech_presence <= 0.02 || self.smoothed_rms <= Self::MIN_ACTIVE_RMS {
-            return 1.0;
-        }
-
-        let rms_gain = self.target_level / self.smoothed_rms.max(Self::MIN_ACTIVE_RMS);
-        let peak_limited_gain = if self.smoothed_peak > 1.0 {
-            self.peak_ceiling / self.smoothed_peak
-        } else {
-            self.max_gain
-        };
-        let unclamped_target = rms_gain
-            .min(peak_limited_gain)
-            .clamp(self.min_gain, self.max_gain);
-        let speech_weighted_gain = if unclamped_target >= 1.0 {
-            let activation = (0.45 + self.speech_presence * 0.55).clamp(0.0, 1.0);
-            1.0 + (unclamped_target - 1.0) * activation
-        } else {
-            unclamped_target
-        };
-        speech_weighted_gain.clamp(self.min_gain, self.max_gain)
-    }
-
-    #[inline]
-    fn process_frame(&mut self, frame: &mut [f32]) {
-        let (frame_rms, frame_peak) = Self::frame_rms_and_peak(frame);
-
-        self.smoothed_rms += self.rms_alpha * (frame_rms - self.smoothed_rms);
-        self.smoothed_peak += self.peak_alpha * (frame_peak - self.smoothed_peak);
-
-        let instant_speech = self.compute_instant_speech_factor(frame_rms, frame_peak);
-        self.update_speech_presence(instant_speech);
-
-        let noise_floor_target = if instant_speech >= 0.15 || self.speech_presence >= 0.15 {
-            self.noise_floor_rms.min(frame_rms)
-        } else {
-            frame_rms
-        };
-        let noise_floor_alpha = if noise_floor_target <= self.noise_floor_rms * 1.2 {
-            self.noise_floor_fast_alpha
-        } else {
-            self.noise_floor_slow_alpha
-        };
-        self.noise_floor_rms += noise_floor_alpha * (noise_floor_target - self.noise_floor_rms);
-        self.noise_floor_rms = self.noise_floor_rms.clamp(
-            Self::MIN_NOISE_FLOOR_RMS,
-            self.target_level.max(Self::MIN_NOISE_FLOOR_RMS),
-        );
-
-        let target_gain = self.compute_target_gain();
-        let alpha = if target_gain >= self.current_gain {
-            self.gain_up_alpha
-        } else {
-            self.gain_down_alpha
-        };
-        self.current_gain += alpha * (target_gain - self.current_gain);
-
-        for sample in frame.iter_mut() {
-            *sample *= self.current_gain;
+        if available > 0 {
+            self.out_head += available;
+            Self::compact_queue(&mut self.out_buf, &mut self.out_head);
         }
     }
 }
@@ -1152,99 +846,5 @@ mod tests {
         let samples: &[i16] =
             unsafe { std::slice::from_raw_parts(data.as_ptr() as *const i16, data.len() / 2) };
         assert_eq!(samples.len(), 960);
-    }
-
-    #[test]
-    fn test_quiet_packet_bypass_zeros_after_streak() {
-        let mut processor = RNNoiseProcessor::new(2);
-        let mut data = vec![0u8; 480 * 2 * 2];
-
-        for _ in 0..RNNoiseProcessor::QUIET_PACKET_STREAK_THRESHOLD {
-            processor.process(&mut data);
-        }
-
-        let samples: &[i16] =
-            unsafe { std::slice::from_raw_parts(data.as_ptr() as *const i16, data.len() / 2) };
-        assert!(samples.iter().all(|&s| s == 0));
-    }
-
-    #[test]
-    fn test_adaptive_target_gain_preserves_quiet_speech() {
-        let noise_only = RNNoiseProcessor::compute_adaptive_target_gain(0.05, 0.0, 0.0);
-        let quiet_speech = RNNoiseProcessor::compute_adaptive_target_gain(0.32, 0.18, 0.55);
-
-        assert!(quiet_speech > noise_only + 0.60);
-        assert!(quiet_speech > 1.0);
-        assert!(quiet_speech <= RNNoiseProcessor::MAX_GAIN);
-    }
-
-    #[test]
-    fn test_adaptive_target_gain_stays_bounded() {
-        let gain = RNNoiseProcessor::compute_adaptive_target_gain(0.95, 1.0, 1.0);
-        assert!(gain >= RNNoiseProcessor::MIN_GAIN);
-        assert!(gain <= RNNoiseProcessor::MAX_GAIN);
-    }
-
-    #[test]
-    fn test_agc_boosts_quiet_speech_toward_voice_chat_level() {
-        let mut agc = AgcState::new();
-        let input_rms = test_frame_rms(&synth_sine_frame(900.0, 0));
-        let mut output_rms = input_rms;
-
-        for frame_index in 0..220 {
-            let mut frame = synth_sine_frame(900.0, frame_index);
-            agc.process_frame(&mut frame);
-            output_rms = test_frame_rms(&frame);
-        }
-
-        assert!(
-            output_rms > input_rms * 2.2,
-            "quiet speech output_rms={} input_rms={} gain={} speech_presence={}",
-            output_rms,
-            input_rms,
-            agc.current_gain,
-            agc.speech_presence
-        );
-        assert!(
-            output_rms > agc.target_level * 0.55,
-            "quiet speech output_rms={} target_level={} gain={} speech_presence={}",
-            output_rms,
-            agc.target_level,
-            agc.current_gain,
-            agc.speech_presence
-        );
-        assert!(output_rms < agc.peak_ceiling);
-        assert!(agc.current_gain > 1.8);
-    }
-
-    #[test]
-    fn test_agc_does_not_pump_noise_floor() {
-        let mut agc = AgcState::new();
-        let mut output_rms = 0.0;
-
-        for frame_index in 0..260 {
-            let mut frame = synth_sine_frame(36.0, frame_index);
-            agc.process_frame(&mut frame);
-            output_rms = test_frame_rms(&frame);
-        }
-
-        assert!(agc.current_gain < 1.15);
-        assert!(output_rms < 48.0);
-        assert!(agc.speech_presence < 0.1);
-    }
-
-    #[test]
-    fn test_agc_attenuates_loud_speech_below_peak_ceiling() {
-        let mut agc = AgcState::new();
-        let mut output_peak = 0.0;
-
-        for frame_index in 0..140 {
-            let mut frame = synth_sine_frame(22_000.0, frame_index);
-            agc.process_frame(&mut frame);
-            output_peak = test_frame_peak(&frame);
-        }
-
-        assert!(agc.current_gain < 0.85);
-        assert!(output_peak <= agc.peak_ceiling * 1.08);
     }
 }
