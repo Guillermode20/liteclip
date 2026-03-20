@@ -1,10 +1,12 @@
 use crate::{
     buffer::ReplayBuffer,
     config::Config,
+    host::CoreHost,
     output::{spawn_clip_saver, MuxerConfig},
 };
 use anyhow::{bail, Result};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, warn};
 
@@ -28,6 +30,7 @@ impl ClipManager {
     /// * `config` - Application configuration.
     /// * `buffer` - The replay buffer to save.
     /// * `game_name` - Optional game name for folder organization.
+    /// * `host` - Optional [`CoreHost`] invoked after a successful save.
     ///
     /// # Returns
     ///
@@ -46,12 +49,13 @@ impl ClipManager {
     /// use liteclip_core::config::Config;
     /// use liteclip_core::buffer::ReplayBuffer;
     ///
-    /// // let path = ClipManager::save_clip(&config, &buffer, Some("Valorant")).await.unwrap();
+    /// // let path = ClipManager::save_clip(&config, &buffer, Some("Valorant"), None).await.unwrap();
     /// ```
     pub async fn save_clip(
         config: &Config,
         buffer: &ReplayBuffer,
         game_name: Option<&str>,
+        host: Option<Arc<dyn CoreHost>>,
     ) -> Result<PathBuf> {
         info!("Clip: saving replay buffer");
 
@@ -105,6 +109,10 @@ impl ClipManager {
         let final_path = result?;
 
         info!("Clip saver completed (buffer preserved for continuous replay)");
+
+        if let Some(h) = host {
+            h.on_clip_saved(&final_path);
+        }
 
         Ok(final_path)
     }

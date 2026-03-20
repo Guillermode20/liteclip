@@ -7,6 +7,8 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+use crate::paths::AppDirs;
+
 use super::functions::{
     default_balance, default_bitrate, default_compression_attack, default_compression_enabled,
     default_compression_ratio, default_compression_release, default_compression_threshold,
@@ -102,43 +104,57 @@ pub struct Config {
 }
 
 impl Config {
-    /// Loads configuration from file or creates default.
+    /// Like [`Self::default`], but sets `general.save_directory` from [`AppDirs::default_save_directory_string`].
+    pub fn default_with_dirs(dirs: &AppDirs) -> Self {
+        let mut config = Self::default();
+        config.general.save_directory = dirs.default_save_directory_string();
+        config
+    }
+
+    /// Loads configuration from [`AppDirs::liteclip_replay`].
     ///
-    /// Configuration is loaded from `%APPDATA%\liteclip-replay\config.toml`.
-    /// If the file doesn't exist, creates a default configuration.
-    ///
-    /// # Returns
-    ///
-    /// The loaded or default configuration.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if file exists but cannot be parsed.
+    /// Configuration file: `%APPDATA%\liteclip-replay\liteclip-replay.toml`.
+    /// If the file doesn't exist, creates defaults and writes the file.
     pub async fn load() -> Result<Self> {
-        let config_path = Self::config_path()?;
+        Self::load_with_dirs(&AppDirs::liteclip_replay()?).await
+    }
+
+    /// Load using explicit application directories (embedders).
+    ///
+    /// If the config file is missing, builds [`Self::default_with_dirs`], validates, **writes**
+    /// the file to disk, then returns it. For sync loading without persisting defaults, use
+    /// [`Self::load_sync_from_dirs`].
+    pub async fn load_with_dirs(dirs: &AppDirs) -> Result<Self> {
+        let config_path = &dirs.config_file;
         if config_path.exists() {
-            let content = tokio::fs::read_to_string(&config_path)
+            let content = tokio::fs::read_to_string(config_path)
                 .await
                 .with_context(|| format!("Failed to read config from {:?}", config_path))?;
             let mut config: Config = toml::from_str(&content)?;
             config.validate();
             Ok(config)
         } else {
-            let mut config = Config::default();
+            let mut config = Self::default_with_dirs(dirs);
             config.validate();
-            config.save().await?;
+            config.save_to_dirs(dirs).await?;
             Ok(config)
         }
     }
-    /// Save configuration to file
+
+    /// Save configuration next to [`AppDirs::liteclip_replay`].
     pub async fn save(&self) -> Result<()> {
-        let config_path = Self::config_path()?;
+        self.save_to_dirs(&AppDirs::liteclip_replay()?).await
+    }
+
+    /// Save to the TOML path implied by `dirs`.
+    pub async fn save_to_dirs(&self, dirs: &AppDirs) -> Result<()> {
+        let config_path = &dirs.config_file;
         let parent = config_path
             .parent()
             .context("Config path has no parent directory")?;
         tokio::fs::create_dir_all(parent).await?;
         let content = toml::to_string_pretty(self)?;
-        tokio::fs::write(&config_path, content)
+        tokio::fs::write(config_path, content)
             .await
             .with_context(|| format!("Failed to write config to {:?}", config_path))?;
         Ok(())
@@ -146,38 +162,48 @@ impl Config {
 
     /// Save synchronously — used from the GUI thread which has no tokio runtime.
     pub fn save_sync(&self) -> Result<()> {
-        let config_path = Self::config_path()?;
-        let parent = config_path
+        self.save_sync_to_dirs(&AppDirs::liteclip_replay()?)
+    }
+
+    /// Save synchronously using explicit [`AppDirs`].
+    pub fn save_sync_to_dirs(&self, dirs: &AppDirs) -> Result<()> {
+        let config_path = &dirs.config_file;
+        let parent = config_path 
             .parent()
             .context("Config path has no parent directory")?;
         std::fs::create_dir_all(parent).context("Failed to create config directory")?;
         let content = toml::to_string_pretty(self)?;
-        std::fs::write(&config_path, &content)
+        std::fs::write(config_path, &content)
             .with_context(|| format!("Failed to write config to {:?}", config_path))?;
         Ok(())
     }
 
     /// Load synchronously — used from the GUI thread which has no tokio runtime.
     pub fn load_sync() -> Result<Self> {
-        let config_path = Self::config_path()?;
+        Self::load_sync_from_dirs(&AppDirs::liteclip_replay()?)
+    }
+
+    /// Load synchronously from explicit [`AppDirs`].
+    ///
+    /// If the file is missing, returns [`Self::default_with_dirs`] **without** writing it
+    /// (unlike [`Self::load_with_dirs`], which persists defaults when the file is absent).
+    pub fn load_sync_from_dirs(dirs: &AppDirs) -> Result<Self> {
+        let config_path = &dirs.config_file;
         if config_path.exists() {
-            let content = std::fs::read_to_string(&config_path)
+            let content = std::fs::read_to_string(config_path)
                 .with_context(|| format!("Failed to read config from {:?}", config_path))?;
             let mut config: Self = toml::from_str(&content)
                 .with_context(|| format!("Failed to parse config from {:?}", config_path))?;
             config.validate();
             Ok(config)
         } else {
-            Ok(Self::default())
+            Ok(Self::default_with_dirs(dirs))
         }
     }
 
-    /// Get the configuration file path
+    /// Configuration file path for LiteClip Replay defaults.
     pub fn config_path() -> Result<PathBuf> {
-        let app_data = dirs::data_dir().context("Failed to get data directory")?;
-        Ok(app_data
-            .join("liteclip-replay")
-            .join("liteclip-replay.toml"))
+        Ok(AppDirs::liteclip_replay()?.config_file)
     }
     /// Validate and sanitize configuration values
     ///

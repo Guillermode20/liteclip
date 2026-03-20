@@ -12,7 +12,7 @@
 //! 2. Set up logging via tracing
 //! 3. Configure Windows timer resolution for precise frame timing
 //! 4. Create a job object for child process management
-//! 5. Load configuration from `%APPDATA%\liteclip-replay\config.toml`
+//! 5. Load configuration from `%APPDATA%\liteclip-replay\liteclip-replay.toml`
 //! 6. Initialize application state and recording pipeline
 //! 7. Spawn platform thread for hotkeys and tray
 //! 8. Enter main event loop
@@ -244,7 +244,7 @@ async fn main() -> Result<()> {
     println!("LiteClip Replay v{}", version);
     info!("LiteClip Replay {} starting", version);
 
-    // Load configuration from %APPDATA%/liteclip-replay/config.toml
+    // Load configuration from %APPDATA%/liteclip-replay/liteclip-replay.toml
     let config = match Config::load().await {
         Ok(cfg) => {
             let config_path = Config::config_path()?;
@@ -663,7 +663,12 @@ async fn spawn_save_clip_task(
 
     tokio::spawn(async move {
         let result =
-            liteclip_replay::app::ClipManager::save_clip(&config, &buffer, game_name.as_deref())
+            liteclip_replay::app::ClipManager::save_clip(
+                    &config,
+                    &buffer,
+                    game_name.as_deref(),
+                    None,
+                )
                 .await;
 
         match result {

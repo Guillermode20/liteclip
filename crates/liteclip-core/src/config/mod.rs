@@ -4,7 +4,9 @@
 //!
 //! # Configuration Location
 //!
-//! Configuration is stored at `%APPDATA%\liteclip-replay\config.toml`.
+//! By default (e.g. [`Config::load`]), configuration is stored at
+//! `%APPDATA%\liteclip-replay\liteclip-replay.toml`.
+//! Use [`Config::load_with_dirs`] with [`crate::paths::AppDirs`] for a custom layout.
 //!
 //! # Configuration Sections
 //!
@@ -43,3 +45,4 @@
 pub mod config_mod;
 
 pub use config_mod::*;
+pub use crate::paths::AppDirs;

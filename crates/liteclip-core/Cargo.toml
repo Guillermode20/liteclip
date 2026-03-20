@@ -2,13 +2,26 @@
 name = "liteclip-core"
 version = "0.2.0"
 edition = "2021"
-description = "Replay buffer screen capture and encoding engine for LiteClip (Windows)"
+description = "Windows screen capture, encoding, and replay-buffer engine (LiteClip)"
+readme = "README.md"
+keywords = ["screen-capture", "recording", "replay-buffer", "windows", "dxgi"]
+categories = ["multimedia::video", "os::windows-apis"]
 license = "MIT OR Apache-2.0"
+include = [
+    "src/**/*",
+    "Cargo.toml",
+    "README.md",
+    "CHANGELOG.md",
+    "build.rs",
+    "examples/**/*",
+]
 
 [features]
 default = ["ffmpeg"]
 # Enable FFmpeg pipeline code paths (no native link-time FFmpeg deps)
 ffmpeg = []
+# In release builds, also search workspace `ffmpeg_dev/...` (debug builds always may).
+dev-ffmpeg-paths = []
 
 [dependencies]
 bytes = "1"
@@ -26,3 +39,14 @@ chrono = "0.4"
 windows-core = "0.58"
 ffmpeg-next = { version = "7.1.0", default-features = false, features = ["codec", "format", "software-scaling", "software-resampling"] }
 nnnoiseless = "0.5.2"
+
+[[example]]
+name = "minimal_engine"
+required-features = ["ffmpeg"]
+
+[[example]]
+name = "custom_ffmpeg"
+required-features = ["ffmpeg"]
+
+[[example]]
+name = "custom_paths"

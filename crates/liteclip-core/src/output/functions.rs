@@ -154,39 +154,7 @@ pub fn generate_output_path(base_dir: &Path, game_name: Option<&str>) -> Result<
 }
 
 pub fn ffmpeg_executable_path() -> PathBuf {
-    let mut candidates = Vec::new();
-
-    if let Ok(current_exe) = std::env::current_exe() {
-        if let Some(exe_dir) = current_exe.parent() {
-            candidates.push(exe_dir.join("ffmpeg.exe"));
-            if let Some(workspace_root) = exe_dir.parent().and_then(|p| p.parent()) {
-                candidates.push(
-                    workspace_root
-                        .join("ffmpeg_dev")
-                        .join("sdk")
-                        .join("bin")
-                        .join("ffmpeg.exe"),
-                );
-            }
-        }
-    }
-
-    // Manifest is `crates/liteclip-core`; workspace root is two ancestors up.
-    if let Some(workspace_root) = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).ancestors().nth(2)
-    {
-        candidates.push(
-            workspace_root
-                .join("ffmpeg_dev")
-                .join("sdk")
-                .join("bin")
-                .join("ffmpeg.exe"),
-        );
-    }
-
-    candidates
-        .into_iter()
-        .find(|path| path.exists())
-        .unwrap_or_else(|| PathBuf::from("ffmpeg"))
+    crate::runtime::resolve_ffmpeg_executable()
 }
 
 pub fn remux_fragmented_mp4(input_path: &Path, output_path: &Path, faststart: bool) -> Result<()> {

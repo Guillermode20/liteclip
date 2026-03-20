@@ -3,8 +3,10 @@ use crate::{
     buffer::ReplayBuffer,
     capture::audio::AudioLevelMonitor,
     config::Config,
+    host::CoreHost,
 };
 use anyhow::Result;
+use std::sync::Arc;
 use tracing::{error, info, warn};
 
 /// Application state manager.
@@ -30,6 +32,8 @@ pub struct AppState {
     pipeline: RecordingPipeline,
     /// Audio level monitor for GUI visualization.
     level_monitor: AudioLevelMonitor,
+    /// Optional embedder hooks ([`CoreHost`]).
+    host: Option<Arc<dyn CoreHost>>,
 }
 
 impl AppState {
@@ -66,7 +70,21 @@ impl AppState {
             buffer,
             pipeline,
             level_monitor,
+            host: None,
         })
+    }
+
+    /// Set or clear [`CoreHost`] for **pipeline fatals** ([`CoreHost::on_pipeline_fatal`]).
+    ///
+    /// Successful clip saves use the `host` argument on [`crate::app::ClipManager::save_clip`]
+    /// ([`CoreHost::on_clip_saved`]), not this field.
+    pub fn set_core_host(&mut self, host: Option<Arc<dyn CoreHost>>) {
+        self.host = host;
+    }
+
+    /// Current [`CoreHost`], if any.
+    pub fn core_host(&self) -> Option<&Arc<dyn CoreHost>> {
+        self.host.as_ref()
     }
 
     /// Starts the recording pipeline.
@@ -93,28 +111,25 @@ impl AppState {
         self.pipeline.stop()
     }
 
-    /// Enforces pipeline health by checking for errors.
+    /// Polls the recording pipeline for fatal errors (crashed threads, etc.).
     ///
-    /// Polls the pipeline for fatal errors (crashes, dead threads) and
-    /// returns the error reason if the pipeline has failed.
-    ///
-    /// # Returns
-    ///
-    /// - `Ok(Some(reason))` if pipeline has failed with the given reason
-    ///
-    /// Checks the health of the recording pipeline.
-    ///
-    /// This method should be called periodically (e.g., in the main event loop)
-    /// to ensure that the capture and encode threads are still running and haven't
-    /// encountered fatal errors.
+    /// Call periodically from your main loop while recording.
     ///
     /// # Returns
     ///
-    /// - `Ok(None)` if the pipeline is healthy or not running.
-    /// - `Ok(Some(reason))` if a fatal error was detected and the pipeline was stopped.
-    /// - `Err(...)` if the health check itself failed.
+    /// - `Ok(None)` — healthy, or not running.
+    /// - `Ok(Some(reason))` — fatal error; pipeline is stopped.
+    /// - `Err(...)` — health check failed.
+    ///
+    /// If a [`CoreHost`] is installed via [`Self::set_core_host`], a fatal also invokes
+    /// [`CoreHost::on_pipeline_fatal`]. Avoid duplicating user-visible handling if you
+    /// both match on `Ok(Some(reason))` and implement `on_pipeline_fatal`.
     pub fn enforce_pipeline_health(&mut self) -> Result<Option<String>> {
-        self.pipeline.enforce_health()
+        let r = self.pipeline.enforce_health()?;
+        if let (Some(reason), Some(host)) = (&r, &self.host) {
+            host.on_pipeline_fatal(reason);
+        }
+        Ok(r)
     }
 
     /// Gets the context needed for clip saving.
