@@ -9,11 +9,50 @@
 
 use crate::app::{AppState, ClipManager};
 use crate::config::Config;
+use crate::error::Result;
 use crate::host::CoreHost;
 use crate::paths::AppDirs;
-use anyhow::Result;
 use std::path::PathBuf;
 use std::sync::Arc;
+
+/// Builder for `ReplayEngine`.
+pub struct ReplayEngineBuilder {
+    dirs: AppDirs,
+    config: Option<Config>,
+    host: Option<Arc<dyn CoreHost>>,
+}
+
+impl ReplayEngineBuilder {
+    pub fn new(dirs: AppDirs) -> Self {
+        Self {
+            dirs,
+            config: None,
+            host: None,
+        }
+    }
+
+    pub fn with_config(mut self, config: Config) -> Self {
+        self.config = Some(config);
+        self
+    }
+
+    pub fn with_host(mut self, host: Arc<dyn CoreHost>) -> Self {
+        self.host = Some(host);
+        self
+    }
+
+    pub fn build(self) -> Result<ReplayEngine> {
+        let config = self
+            .config
+            .unwrap_or_else(|| Config::default_with_dirs(&self.dirs));
+        let mut state = AppState::new(config)?;
+        state.set_core_host(self.host);
+        Ok(ReplayEngine {
+            dirs: self.dirs,
+            state,
+        })
+    }
+}
 
 /// Recording session with resolved [`AppDirs`] for configuration defaults.
 ///
@@ -26,6 +65,11 @@ pub struct ReplayEngine {
 }
 
 impl ReplayEngine {
+    /// Start building a `ReplayEngine`.
+    pub fn builder(dirs: AppDirs) -> ReplayEngineBuilder {
+        ReplayEngineBuilder::new(dirs)
+    }
+
     /// Create engine from an existing [`Config`] and [`AppDirs`].
     pub fn new(config: Config, dirs: AppDirs) -> Result<Self> {
         Ok(Self {
@@ -67,15 +111,15 @@ impl ReplayEngine {
     }
 
     pub fn start_recording(&mut self) -> Result<()> {
-        self.state.start_recording()
+        Ok(self.state.start_recording()?)
     }
 
     pub fn stop_recording(&mut self) -> Result<()> {
-        self.state.stop_recording()
+        Ok(self.state.stop_recording()?)
     }
 
     pub fn enforce_pipeline_health(&mut self) -> Result<Option<String>> {
-        self.state.enforce_pipeline_health()
+        Ok(self.state.enforce_pipeline_health()?)
     }
 
     /// Save the replay buffer; see [`ClipManager::save_clip`].
@@ -88,6 +132,9 @@ impl ReplayEngine {
         host: Option<Arc<dyn CoreHost>>,
     ) -> Result<PathBuf> {
         let (config, buffer, webcam_buffer) = self.state.save_context();
-        ClipManager::save_clip(&config, &buffer, webcam_buffer.as_ref(), game_name, host).await
+        let path =
+            ClipManager::save_clip(&config, &buffer, webcam_buffer.as_ref(), game_name, host)
+                .await?;
+        Ok(path)
     }
 }

@@ -119,6 +119,7 @@ pub mod buffer;
 pub mod capture;
 pub mod config;
 pub mod encode;
+pub mod error;
 pub mod ffmpeg_backend;
 pub mod host;
 pub mod hotkey_parse;
@@ -138,9 +139,10 @@ pub mod prelude {
     pub use crate::buffer::ReplayBuffer;
     pub use crate::config::Config;
     pub use crate::encode;
+    pub use crate::engine::{ReplayEngine, ReplayEngineBuilder};
+    pub use crate::error::{LiteClipError, Result as LiteClipResult};
     pub use crate::ffmpeg_backend::{self, validate_runtime, FfmpegBackendKind};
     pub use crate::host::CoreHost;
     pub use crate::paths::AppDirs;
     pub use crate::runtime::{self, set_ffmpeg_path, FFMPEG_ENV};
-    pub use crate::ReplayEngine;
 }
