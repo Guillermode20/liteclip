@@ -187,6 +187,20 @@ fn handle_editor_shortcuts(
     if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
         if let Some(flag) = editor.snippet_enabled.get_mut(selected) {
             *flag = !*flag;
+
+            // Ensure playback time stays on an enabled snippet after toggling.
+            let clamped_time = crate::gui::gallery::clamp_to_enabled_playback_time(
+                editor.current_time_secs,
+                editor.duration_secs(),
+                &editor.cut_points,
+                &editor.snippet_enabled,
+            );
+            editor.current_time_secs = clamped_time;
+            editor.playback.pause_at(clamped_time);
+            if let Some(ref mut webcam_playback) = editor.webcam_playback {
+                webcam_playback.pause_at(clamped_time);
+            }
+
             outcome.preview_request = Some(editor.current_time_secs);
         }
     }

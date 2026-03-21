@@ -4,7 +4,6 @@ use image::RgbaImage;
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
@@ -12,19 +11,18 @@ use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::mpsc::Sender as TokioSender;
 use tracing::{info, warn};
 
-#[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
-
 mod browser;
 mod decode_pipeline;
 mod editor;
+mod editor_panels;
+mod utils;
 
 use decode_pipeline::PlaybackController;
 
 use crate::config::Config;
 use crate::gui::manager::{show_toast, ToastKind};
 use crate::output::{
-    default_webcam_keyframes, estimate_export_bitrates, generate_thumbnail, interpolate_norm_rect,
+    default_webcam_keyframes, generate_thumbnail, interpolate_norm_rect,
     probe_video_file, spawn_clip_export, webcam_layout_path, webcam_video_path, ClipExportRequest,
     ClipExportUpdate, TimeRange, VideoFileMetadata, WebcamExport, WebcamKeyframe, WebcamLayoutFile,
 };
@@ -42,9 +40,6 @@ const EDITOR_SIDEBAR_MIN_WIDTH: f32 = 280.0;
 const EDITOR_STACK_BREAKPOINT: f32 = 960.0;
 const EDITOR_SMALL_SEEK_SECS: f64 = 1.0;
 const EDITOR_LARGE_SEEK_SECS: f64 = 5.0;
-
-#[cfg(target_os = "windows")]
-const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 pub fn show_gallery_gui(event_tx: TokioSender<AppEvent>) {
     crate::gui::manager::send_gui_message(crate::gui::manager::GuiMessage::ShowGallery(event_tx));
@@ -104,9 +99,7 @@ struct ThumbnailStrip {
 
 impl ThumbnailStrip {
     fn new(thumbnails: Vec<(f64, RgbaImage)>, _duration_secs: f64) -> Self {
-        Self {
-            thumbnails,
-        }
+        Self { thumbnails }
     }
 
     fn nearest(&self, time_secs: f64) -> Option<&RgbaImage> {
@@ -869,162 +862,7 @@ fn collect_video_paths(
     webcam_cache_dir: &Path,
     output: &mut Vec<PathBuf>,
 ) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path == cache_dir || path == webcam_cache_dir {
-            continue;
-        }
-        if path.is_dir() {
-            collect_video_paths(&path, cache_dir, webcam_cache_dir, output);
-        } else if path
-            .extension()
-            .map(|ext| ext.eq_ignore_ascii_case("mp4"))
-            .unwrap_or(false)
-        {
-            output.push(path);
-        }
-    }
-}
-
-fn render_preview_panel(
-    ui: &mut egui::Ui,
-    editor: &mut EditorState,
-    outcome: &mut EditorUiOutcome,
-) {
-    egui::Frame::group(ui.style()).show(ui, |ui| {
-        let available_width = ui.available_width().max(220.0);
-        let aspect_ratio = (editor.video.metadata.width.max(1) as f32
-            / editor.video.metadata.height.max(1) as f32)
-            .max(1.0 / 3.0);
-        let available_height = ui.available_height().max(220.0);
-        let mut preview_height = (available_width / aspect_ratio).max(180.0);
-        let max_preview_height = (available_height - 72.0).max(180.0);
-        preview_height = preview_height.min(max_preview_height);
-        let preview_size = egui::vec2(available_width, preview_height);
-
-        editor.pip_edit_rect =
-            interpolate_norm_rect(editor.current_time_secs, &editor.webcam_layout.keyframes);
-
-        let main_img = if let Some(texture) = &editor.preview_texture {
-            Some(
-                ui.add(
-                    egui::Image::from_texture(texture)
-                        .fit_to_exact_size(preview_size)
-                        .maintain_aspect_ratio(true),
-                ),
-            )
-        } else {
-            let (rect, _) = ui.allocate_exact_size(preview_size, egui::Sense::hover());
-            ui.painter().rect_filled(
-                rect,
-                egui::CornerRadius::same(6),
-                egui::Color32::from_rgb(18, 20, 24),
-            );
-            ui.painter().text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                "Loading embedded preview...",
-                egui::FontId::proportional(18.0),
-                egui::Color32::from_rgb(160, 165, 175),
-            );
-            if !editor.preview_frame_in_flight {
-                outcome.preview_request = Some(editor.current_time_secs);
-            }
-            None
-        };
-
-        if let (Some(img), Some(wtex)) = (main_img, &editor.webcam_texture) {
-            let rect = img.rect;
-            let (x, y, w, h) = editor.pip_edit_rect;
-            let pip_rect = egui::Rect::from_min_size(
-                rect.min
-                    + egui::vec2(
-                        (x * rect.width() as f64) as f32,
-                        (y * rect.height() as f64) as f32,
-                    ),
-                egui::vec2(
-                    (w * rect.width() as f64) as f32,
-                    (h * rect.height() as f64) as f32,
-                ),
-            );
-            ui.put(
-                pip_rect,
-                egui::Image::from_texture(wtex).fit_to_exact_size(pip_rect.size()),
-            );
-            let handle = 12.0_f32;
-            let resize_rect = egui::Rect::from_min_size(
-                pip_rect.max - egui::vec2(handle, handle),
-                egui::vec2(handle, handle),
-            );
-            let resize_id = ui.id().with("webcam_pip_resize");
-            let resize = ui.interact(resize_rect, resize_id, egui::Sense::drag());
-            ui.painter().rect_stroke(
-                resize_rect,
-                egui::CornerRadius::same(2),
-                egui::Stroke::new(1.5, egui::Color32::from_white_alpha(200)),
-                egui::StrokeKind::Inside,
-            );
-            if resize.dragged() {
-                let d = resize.drag_delta();
-                let dw = d.x as f64 / rect.width() as f64;
-                let dh = d.y as f64 / rect.height() as f64;
-                let (mut px, mut py, mut pw, mut ph) = editor.pip_edit_rect;
-                pw = (pw + dw).clamp(0.05, 1.0);
-                ph = (ph + dh).clamp(0.05, 1.0);
-                px = px.clamp(0.0, 1.0 - pw);
-                py = py.clamp(0.0, 1.0 - ph);
-                editor.pip_edit_rect = (px, py, pw, ph);
-                upsert_webcam_keyframe(editor);
-            } else {
-                let pip_id = ui.id().with("webcam_pip");
-                let drag = ui.interact(pip_rect, pip_id, egui::Sense::drag());
-                if drag.dragged() {
-                    let d = drag.drag_delta();
-                    let nx = x + (d.x as f64 / rect.width() as f64);
-                    let ny = y + (d.y as f64 / rect.height() as f64);
-                    editor.pip_edit_rect.0 = nx.clamp(0.0, 1.0 - editor.pip_edit_rect.2);
-                    editor.pip_edit_rect.1 = ny.clamp(0.0, 1.0 - editor.pip_edit_rect.3);
-                    upsert_webcam_keyframe(editor);
-                }
-            }
-            ui.horizontal(|ui| {
-                if ui.button("Keyframe here").clicked() {
-                    upsert_webcam_keyframe(editor);
-                }
-                if ui.button("Save PiP layout").clicked() {
-                    let _ = editor.webcam_layout.save(&editor.webcam_layout_path);
-                    editor.webcam_layout_dirty = false;
-                }
-            });
-        }
-
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            let label = if editor.is_playing { "Pause" } else { "Play" };
-            if ui.button(label).clicked() {
-                toggle_editor_playback(editor);
-            }
-            ui.label(format!(
-                "Current: {}",
-                format_timestamp_precise(editor.current_time_secs)
-            ));
-        });
-
-        let duration = editor.duration_secs();
-        let response = ui.add(
-            egui::Slider::new(&mut editor.current_time_secs, 0.0..=duration).show_value(false),
-        );
-        if response.changed() {
-            editor.playback.pause_at(editor.current_time_secs);
-            editor.is_playing = false;
-            editor.current_time_secs = editor.current_time_secs.clamp(0.0, editor.duration_secs());
-            outcome.preview_request = Some(editor.current_time_secs);
-        }
-    });
+    utils::collect_video_paths_impl(dir, cache_dir, webcam_cache_dir, output);
 }
 
 fn upsert_webcam_keyframe(editor: &mut EditorState) {
@@ -1056,40 +894,6 @@ fn upsert_webcam_keyframe(editor: &mut EditorState) {
     editor.webcam_layout_dirty = true;
 }
 
-fn render_editor_stats(ui: &mut egui::Ui, editor: &EditorState) {
-    ui.horizontal_wrapped(|ui| {
-        ui.label(format!(
-            "Duration: {}",
-            format_compact_duration(editor.duration_secs())
-        ));
-        ui.separator();
-        ui.label(format!(
-            "Original Size: {}",
-            format_size_mb(editor.video.size_mb)
-        ));
-        ui.separator();
-        ui.label(format!(
-            "Output Duration: {}",
-            format_compact_duration(editor.kept_duration_secs())
-        ));
-        ui.separator();
-        ui.label(format!(
-            "Resolution: {}x{}",
-            editor.video.metadata.width, editor.video.metadata.height
-        ));
-        if editor.video.metadata.has_audio {
-            ui.separator();
-            ui.label("Audio: included");
-        }
-        ui.separator();
-        let (cache_entries, cache_mb) = editor.playback.cache_stats();
-        ui.label(format!(
-            "Cache: {} frames ({:.1} MB)",
-            cache_entries, cache_mb
-        ));
-    });
-}
-
 fn toggle_editor_playback(editor: &mut EditorState) {
     if editor.is_playing {
         editor.playback.pause_at(editor.current_time_secs);
@@ -1113,200 +917,7 @@ fn seek_editor(editor: &mut EditorState, outcome: &mut EditorUiOutcome, delta_se
 }
 
 fn clamp_selected_snippet_index(editor: &mut EditorState) {
-    let snippet_count = editor.snippets().len();
-    if snippet_count == 0 {
-        editor.selected_snippet_index = None;
-        return;
-    }
-
-    let current = editor.selected_snippet_index.unwrap_or(0);
-    editor.selected_snippet_index = Some(current.min(snippet_count - 1));
-}
-
-fn render_timeline_panel(
-    ui: &mut egui::Ui,
-    editor: &mut EditorState,
-    outcome: &mut EditorUiOutcome,
-) {
-    egui::Frame::group(ui.style()).show(ui, |ui| {
-        ui.label(egui::RichText::new("Timeline").strong());
-        ui.add_space(4.0);
-
-        // Controls are above the timeline so they remain visible even when the
-        // timeline is constrained vertically.
-        ui.horizontal(|ui| {
-            if ui.button("Add Cut at Playhead (A)").clicked()
-                && add_cut_point(editor, editor.current_time_secs)
-            {
-                outcome.preview_request = Some(editor.current_time_secs);
-            }
-            if ui
-                .add_enabled(
-                    editor.selected_cut_point.is_some(),
-                    egui::Button::new("Remove Selected Cut (Del)"),
-                )
-                .clicked()
-            {
-                if let Some(index) = editor.selected_cut_point {
-                    remove_cut_point(editor, index);
-                    outcome.preview_request = Some(editor.current_time_secs);
-                }
-            }
-            if ui.button("Clear All Splits").clicked() {
-                clear_cut_points(editor);
-                outcome.preview_request = Some(editor.current_time_secs);
-            }
-        });
-
-        ui.add_space(8.0);
-
-        // Make the timeline scrollable in the vertical direction so it can always
-        // be fully interacted with when the window is too short.
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .max_height(260.0)
-            .show(ui, |ui| {
-                render_timeline(ui, editor, outcome);
-            });
-    });
-}
-
-fn render_timeline(ui: &mut egui::Ui, editor: &mut EditorState, outcome: &mut EditorUiOutcome) {
-    let timeline_height = ui.available_height().clamp(92.0, 180.0);
-    let desired_size = egui::vec2(ui.available_width(), timeline_height);
-    let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::click_and_drag());
-    let track_rect = egui::Rect::from_min_max(
-        rect.min + egui::vec2(0.0, 12.0),
-        rect.max - egui::vec2(0.0, 22.0),
-    );
-    let painter = ui.painter();
-    for snippet in editor.snippets() {
-        let left = time_to_x(track_rect, snippet.start_secs, editor.duration_secs());
-        let right = time_to_x(track_rect, snippet.end_secs, editor.duration_secs()).max(left + 2.0);
-        let snippet_rect = egui::Rect::from_min_max(
-            egui::pos2(left, track_rect.top()),
-            egui::pos2(right, track_rect.bottom()),
-        );
-        let color = if snippet.enabled {
-            egui::Color32::from_rgb(48, 92, 156)
-        } else {
-            egui::Color32::from_rgb(96, 44, 44)
-        };
-        painter.rect_filled(snippet_rect, egui::CornerRadius::same(6), color);
-    }
-
-    for (index, cut_point) in editor.cut_points.iter().enumerate() {
-        let x = time_to_x(track_rect, *cut_point, editor.duration_secs());
-        let color = if editor.selected_cut_point == Some(index) {
-            egui::Color32::WHITE
-        } else {
-            egui::Color32::from_rgb(220, 220, 220)
-        };
-        painter.line_segment(
-            [
-                egui::pos2(x, track_rect.top()),
-                egui::pos2(x, track_rect.bottom()),
-            ],
-            egui::Stroke::new(2.0, color),
-        );
-    }
-
-    let playhead_x = time_to_x(track_rect, editor.current_time_secs, editor.duration_secs());
-    painter.line_segment(
-        [
-            egui::pos2(playhead_x, track_rect.top() - 4.0),
-            egui::pos2(playhead_x, track_rect.bottom() + 4.0),
-        ],
-        egui::Stroke::new(2.0, egui::Color32::from_rgb(236, 201, 75)),
-    );
-
-    for ratio in [0.0_f32, 0.25, 0.5, 0.75, 1.0] {
-        let time = editor.duration_secs() * f64::from(ratio);
-        let x = egui::lerp(track_rect.left()..=track_rect.right(), ratio);
-        painter.text(
-            egui::pos2(x, rect.bottom() - 2.0),
-            egui::Align2::CENTER_BOTTOM,
-            format_compact_duration(time),
-            egui::FontId::proportional(11.0),
-            egui::Color32::from_rgb(160, 165, 175),
-        );
-    }
-
-    if response.drag_started() {
-        editor.was_playing_before_scrub = editor.is_playing;
-        if editor.is_playing {
-            editor.is_playing = false;
-            editor.playback.pause_at(editor.current_time_secs);
-        }
-    }
-
-    if let Some(pointer) = response.interact_pointer_pos() {
-        if response.clicked() || response.dragged() {
-            if let Some(index) = hit_test_cut_point(editor, track_rect, pointer.x) {
-                editor.selected_cut_point = Some(index);
-            } else {
-                editor.selected_cut_point = None;
-                let new_time_secs = x_to_time(track_rect, pointer.x, editor.duration_secs());
-
-                // Calculate scrub speed to determine preview quality
-                let now = Instant::now();
-                let mut is_fast_scrub = false;
-                if let (Some(last_time), Some(last_pos)) =
-                    (editor.last_scrub_time, editor.last_scrub_position)
-                {
-                    let dt = last_time.elapsed().as_secs_f64();
-                    let dx = (new_time_secs - last_pos).abs();
-                    if dt >= SCRUB_SAMPLE_MIN_DT_SECS {
-                        let speed = dx / dt; // seconds of video per second of wall time
-                        is_fast_scrub = speed >= SCRUB_FAST_RATE_SECS_PER_SEC;
-                    }
-                }
-                editor.last_scrub_time = Some(now);
-                editor.last_scrub_position = Some(new_time_secs);
-                editor.current_time_secs = new_time_secs;
-
-                if response.clicked() {
-                    // Single click jump
-                    if editor.is_playing {
-                        editor.playback.play_from(editor.current_time_secs);
-                    } else {
-                        editor.playback.pause_at(editor.current_time_secs);
-                        outcome.preview_request = Some(editor.current_time_secs);
-                    }
-                } else if response.dragged() {
-                    if is_fast_scrub {
-                        if let Some(strip) = &editor.thumbnail_strip {
-                            if let Some(thumb) = strip.nearest(editor.current_time_secs).cloned() {
-                                ClipCompressApp::set_preview_texture_from_image(
-                                    editor,
-                                    ui.ctx(),
-                                    thumb,
-                                );
-                            }
-                            outcome.fast_preview_request = Some(editor.current_time_secs);
-                        } else {
-                            outcome.fast_preview_request = Some(editor.current_time_secs);
-                        }
-                    } else {
-                        outcome.preview_request = Some(editor.current_time_secs);
-                    }
-                }
-            }
-        }
-    }
-
-    if response.drag_stopped() {
-        if editor.was_playing_before_scrub {
-            editor.is_playing = true;
-            editor.was_playing_before_scrub = false;
-            editor.playback.play_from(editor.current_time_secs);
-        } else {
-            // Promote the final paused scrub position to a full preview request.
-            outcome.preview_request = Some(editor.current_time_secs);
-        }
-        editor.last_scrub_time = None;
-        editor.last_scrub_position = None;
-    }
+    editor_panels::clamp_selected_snippet_index_impl(editor);
 }
 
 fn render_editor_workspace(
@@ -1314,207 +925,7 @@ fn render_editor_workspace(
     editor: &mut EditorState,
     outcome: &mut EditorUiOutcome,
 ) {
-    let available_size = ui.available_size();
-    let stacked_layout = available_size.x < EDITOR_STACK_BREAKPOINT;
-
-    if stacked_layout {
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                render_editor_main_panel(ui, editor, outcome);
-                ui.add_space(12.0);
-                render_editor_sidebar(ui, editor, outcome, false);
-            });
-        return;
-    }
-
-    ui.horizontal_top(|ui| {
-        let sidebar_width =
-            (available_size.x * 0.32).clamp(EDITOR_SIDEBAR_MIN_WIDTH, EDITOR_SIDEBAR_WIDTH);
-        let main_width = (ui.available_width() - sidebar_width - 12.0).max(320.0);
-
-        ui.allocate_ui_with_layout(
-            egui::vec2(main_width, available_size.y.max(320.0)),
-            egui::Layout::top_down(egui::Align::Min),
-            |ui| {
-                render_editor_main_panel(ui, editor, outcome);
-            },
-        );
-
-        ui.add_space(12.0);
-
-        ui.allocate_ui_with_layout(
-            egui::vec2(sidebar_width, available_size.y.max(320.0)),
-            egui::Layout::top_down(egui::Align::Min),
-            |ui| {
-                render_editor_sidebar(ui, editor, outcome, true);
-            },
-        );
-    });
-}
-
-fn render_editor_main_panel(
-    ui: &mut egui::Ui,
-    editor: &mut EditorState,
-    outcome: &mut EditorUiOutcome,
-) {
-    render_preview_panel(ui, editor, outcome);
-    ui.add_space(10.0);
-    egui::Frame::group(ui.style()).show(ui, |ui| {
-        render_editor_stats(ui, editor);
-    });
-    ui.add_space(10.0);
-    render_timeline_panel(ui, editor, outcome);
-}
-
-fn render_editor_sidebar(
-    ui: &mut egui::Ui,
-    editor: &mut EditorState,
-    outcome: &mut EditorUiOutcome,
-    fill_height: bool,
-) {
-    let render_contents =
-        |ui: &mut egui::Ui, editor: &mut EditorState, outcome: &mut EditorUiOutcome| {
-            render_snippet_list(ui, editor, outcome);
-            ui.add_space(10.0);
-            render_size_section(ui, editor);
-            ui.add_space(10.0);
-            render_action_section(ui, editor, outcome);
-        };
-
-    if fill_height {
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                render_contents(ui, editor, outcome);
-            });
-    } else {
-        render_contents(ui, editor, outcome);
-    }
-}
-
-fn render_action_section(
-    ui: &mut egui::Ui,
-    editor: &mut EditorState,
-    _outcome: &mut EditorUiOutcome,
-) {
-    let can_export = !editor.kept_ranges().is_empty() && editor.target_size_mb > 0;
-
-    egui::Frame::group(ui.style()).show(ui, |ui| {
-        ui.label(egui::RichText::new("Actions").strong());
-        ui.add_space(6.0);
-
-        if ui
-            .add_enabled(
-                can_export,
-                egui::Button::new("Export Clip (Ctrl+E / Ctrl+S)")
-                    .min_size(egui::vec2(ui.available_width(), 32.0)),
-            )
-            .clicked()
-        {
-            start_export(editor);
-        }
-    });
-}
-
-fn hit_test_cut_point(editor: &EditorState, rect: egui::Rect, pointer_x: f32) -> Option<usize> {
-    let mut best_match = None;
-    let mut best_distance = f32::MAX;
-
-    for (index, cut_point) in editor.cut_points.iter().enumerate() {
-        let x = time_to_x(rect, *cut_point, editor.duration_secs());
-        let distance = (pointer_x - x).abs();
-        if distance < 8.0 && distance < best_distance {
-            best_distance = distance;
-            best_match = Some(index);
-        }
-    }
-
-    best_match
-}
-
-fn render_snippet_list(ui: &mut egui::Ui, editor: &mut EditorState, outcome: &mut EditorUiOutcome) {
-    clamp_selected_snippet_index(editor);
-
-    egui::Frame::group(ui.style()).show(ui, |ui| {
-        ui.label(egui::RichText::new("Snippets").strong());
-        ui.label(egui::RichText::new("Use the timeline and add cuts at the playhead to split the clip into snippets. Disabled snippets are skipped in preview/export.").weak());
-
-        let snippets = editor.snippets();
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .max_height(260.0)
-            .show(ui, |ui| {
-                for (index, snippet) in snippets.iter().copied().enumerate() {
-                    let snippet_frame = egui::Frame::group(ui.style()).inner_margin(egui::Margin::same(8));
-
-                    snippet_frame
-                        .inner_margin(egui::Margin::same(8))
-                        .show(ui, |ui| {
-                            ui.horizontal_wrapped(|ui| {
-                                let mut enabled = editor.snippet_enabled.get(index).copied().unwrap_or(true);
-                                if ui.checkbox(&mut enabled, format!("Snippet {}", index + 1)).changed() {
-                                    editor.selected_snippet_index = Some(index);
-                                    if let Some(flag) = editor.snippet_enabled.get_mut(index) {
-                                        *flag = enabled;
-                                    }
-                                    outcome.preview_request = Some(editor.current_time_secs);
-                                }
-                                ui.label(format!(
-                                    "{} to {} ({})",
-                                    format_timestamp_precise(snippet.start_secs),
-                                    format_timestamp_precise(snippet.end_secs),
-                                    format_compact_duration(snippet.duration_secs()),
-                                ));
-                                if index < editor.cut_points.len() && ui.button("Remove following cut").clicked() {
-                                    editor.selected_snippet_index = Some(index);
-                                    remove_cut_point(editor, index);
-                                    outcome.preview_request = Some(editor.current_time_secs);
-                                }
-                            });
-                        });
-                    ui.add_space(6.0);
-                }
-            });
-    });
-}
-
-fn render_size_section(ui: &mut egui::Ui, editor: &mut EditorState) {
-    let kept_duration = editor.kept_duration_secs();
-    let kept_ranges = editor.kept_ranges();
-    let (video_kbps, total_kbps) = estimate_export_bitrates_from_editor(
-        editor.target_size_mb,
-        kept_duration,
-        editor.video.metadata.has_audio,
-        kept_ranges.len(),
-    );
-    let (quality_label, bars) = quality_estimate(&editor.video.metadata, video_kbps);
-
-    egui::Frame::group(ui.style()).show(ui, |ui| {
-        ui.label(egui::RichText::new("Export Settings").strong());
-        ui.add_space(6.0);
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Target Output Size:");
-            ui.add(
-                egui::DragValue::new(&mut editor.target_size_mb)
-                    .range(1..=4096)
-                    .suffix(" MB")
-                    .speed(1),
-            );
-        });
-        ui.label(format!(
-            "Estimated Quality: [{}{}] {} (video ~{:.2} Mbps, total ~{:.2} Mbps)",
-            "#".repeat(bars),
-            "-".repeat(5 - bars),
-            quality_label,
-            video_kbps as f64 / 1000.0,
-            total_kbps as f64 / 1000.0,
-        ));
-        ui.label(format!(
-            "Kept duration after cuts: {}",
-            format_compact_duration(kept_duration)
-        ));
-    });
+    editor_panels::render_editor_workspace_impl(ui, editor, outcome);
 }
 
 fn update_playback_clock(editor: &mut EditorState, _outcome: &mut EditorUiOutcome) {
@@ -1670,175 +1081,43 @@ fn render_completion_screen(ui: &mut egui::Ui, editor: &mut EditorState) -> Edit
 }
 
 fn open_path(path: &Path) -> anyhow::Result<()> {
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        Command::new("cmd")
-            .args(["/C", "start", "", &path.to_string_lossy()])
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn()
-            .map_err(anyhow::Error::from)?;
-        Ok(())
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        Command::new("xdg-open")
-            .arg(path)
-            .spawn()
-            .map_err(anyhow::Error::from)?;
-        Ok(())
-    }
+    utils::open_path_impl(path)
 }
 
 fn build_clipped_output_path(video: &VideoEntry) -> PathBuf {
-    let game_folder = format!("Clipped-{}", video.game.replace(['\\', '/'], "-"));
-    let output_dir = video.save_root.join(game_folder);
-    let _ = std::fs::create_dir_all(&output_dir);
-
-    let stem = video
-        .path
-        .file_stem()
-        .map(|stem| stem.to_string_lossy().to_string())
-        .unwrap_or_else(|| "clip".to_string());
-
-    for attempt in 0..1000 {
-        let suffix = if attempt == 0 {
-            "_clipped".to_string()
-        } else {
-            format!("_clipped_{attempt}")
-        };
-        let candidate = output_dir.join(format!("{stem}{suffix}.mp4"));
-        if !candidate.exists() {
-            return candidate;
-        }
-    }
-
-    output_dir.join(format!(
-        "{}_clipped_{}.mp4",
-        stem,
-        chrono::Local::now().format("%Y%m%d_%H%M%S")
-    ))
+    utils::build_clipped_output_path_impl(video)
 }
 
 fn load_rgba_image_from_path(path: &Path) -> anyhow::Result<RgbaImage> {
-    Ok(image::open(path)?.into_rgba8())
+    utils::load_rgba_image_from_path_impl(path)
 }
 
 fn color_image_from_rgba(image: &RgbaImage) -> egui::ColorImage {
-    egui::ColorImage::from_rgba_unmultiplied(
-        [image.width() as usize, image.height() as usize],
-        image.as_raw(),
-    )
+    utils::color_image_from_rgba_impl(image)
 }
 
 fn format_size_mb(size_mb: f64) -> String {
-    if size_mb >= 100.0 {
-        format!("{size_mb:.0} MB")
-    } else {
-        format!("{size_mb:.1} MB")
-    }
+    utils::format_size_mb_impl(size_mb)
 }
 
 fn format_compact_duration(seconds: f64) -> String {
-    let total_seconds = seconds.max(0.0).round() as u64;
-    let hours = total_seconds / 3600;
-    let minutes = (total_seconds / 60) % 60;
-    let secs = total_seconds % 60;
-    if hours > 0 {
-        format!("{hours}:{minutes:02}:{secs:02}")
-    } else {
-        format!("{minutes}:{secs:02}")
-    }
+    utils::format_compact_duration_impl(seconds)
 }
 
 fn format_timestamp_precise(seconds: f64) -> String {
-    let total_millis = (seconds.max(0.0) * 1000.0).round() as u64;
-    let hours = total_millis / 3_600_000;
-    let minutes = (total_millis / 60_000) % 60;
-    let secs = (total_millis / 1000) % 60;
-    let millis = total_millis % 1000;
-    format!("{hours:02}:{minutes:02}:{secs:02}.{millis:03}")
-}
-
-fn normalize_cut_points(cut_points: &mut Vec<f64>, duration_secs: f64) {
-    cut_points.retain(|point| *point > MIN_RANGE_SECS && *point < duration_secs - MIN_RANGE_SECS);
-    cut_points.sort_by(|a, b| a.total_cmp(b));
-    cut_points.dedup_by(|a, b| (*a - *b).abs() < MIN_RANGE_SECS);
+    utils::format_timestamp_precise_impl(seconds)
 }
 
 fn clear_cut_points(editor: &mut EditorState) {
-    editor.cut_points.clear();
-    editor.snippet_enabled.clear();
-    editor.snippet_enabled.push(true);
-    editor.selected_cut_point = None;
+    utils::clear_cut_points_impl(editor);
 }
 
 fn add_cut_point(editor: &mut EditorState, time_secs: f64) -> bool {
-    let duration = editor.duration_secs();
-    let cut_time = time_secs.clamp(0.0, duration);
-    if cut_time <= MIN_RANGE_SECS || cut_time >= duration - MIN_RANGE_SECS {
-        editor.error_message = Some("Cuts must stay inside the clip boundaries".to_string());
-        return false;
-    }
-
-    let insert_index = match editor
-        .cut_points
-        .binary_search_by(|probe| probe.total_cmp(&cut_time))
-    {
-        Ok(_) => {
-            editor.error_message = Some("A cut already exists near that point".to_string());
-            return false;
-        }
-        Err(index) => index,
-    };
-
-    let previous_boundary = if insert_index == 0 {
-        0.0
-    } else {
-        editor.cut_points[insert_index - 1]
-    };
-    let next_boundary = editor
-        .cut_points
-        .get(insert_index)
-        .copied()
-        .unwrap_or(duration);
-    if cut_time - previous_boundary < MIN_RANGE_SECS || next_boundary - cut_time < MIN_RANGE_SECS {
-        editor.error_message = Some("Cuts must leave each snippet with some duration".to_string());
-        return false;
-    }
-
-    let inherited = editor
-        .snippet_enabled
-        .get(insert_index)
-        .copied()
-        .unwrap_or(true);
-    editor.cut_points.insert(insert_index, cut_time);
-    editor.snippet_enabled.insert(insert_index + 1, inherited);
-    normalize_cut_points(&mut editor.cut_points, duration);
-    editor.selected_cut_point = Some(insert_index);
-    editor.error_message = None;
-    true
+    utils::add_cut_point_impl(editor, time_secs)
 }
 
 fn remove_cut_point(editor: &mut EditorState, index: usize) {
-    if index >= editor.cut_points.len() {
-        return;
-    }
-
-    editor.cut_points.remove(index);
-    let right_enabled = if index + 1 < editor.snippet_enabled.len() {
-        editor.snippet_enabled.remove(index + 1)
-    } else {
-        true
-    };
-    if let Some(left_enabled) = editor.snippet_enabled.get_mut(index) {
-        *left_enabled = *left_enabled || right_enabled;
-    }
-    editor.selected_cut_point = index
-        .checked_sub(1)
-        .or(Some(index).filter(|i| *i < editor.cut_points.len()));
-    editor.error_message = None;
+    utils::remove_cut_point_impl(editor, index);
 }
 
 fn snippet_segments(
@@ -1846,25 +1125,7 @@ fn snippet_segments(
     cut_points: &[f64],
     snippet_enabled: &[bool],
 ) -> Vec<SnippetSegment> {
-    let mut segments = Vec::with_capacity(cut_points.len() + 1);
-    let mut start_secs = 0.0;
-
-    for (index, end_secs) in cut_points
-        .iter()
-        .copied()
-        .chain(std::iter::once(duration_secs))
-        .enumerate()
-    {
-        let enabled = snippet_enabled.get(index).copied().unwrap_or(true);
-        segments.push(SnippetSegment {
-            start_secs,
-            end_secs,
-            enabled,
-        });
-        start_secs = end_secs;
-    }
-
-    segments
+    utils::snippet_segments_impl(duration_secs, cut_points, snippet_enabled)
 }
 
 fn enabled_time_ranges(
@@ -1872,14 +1133,21 @@ fn enabled_time_ranges(
     cut_points: &[f64],
     snippet_enabled: &[bool],
 ) -> Vec<TimeRange> {
-    snippet_segments(duration_secs, cut_points, snippet_enabled)
-        .into_iter()
-        .filter(|segment| segment.enabled && segment.duration_secs() >= MIN_RANGE_SECS)
-        .map(|segment| TimeRange {
-            start_secs: segment.start_secs,
-            end_secs: segment.end_secs,
-        })
-        .collect()
+    utils::enabled_time_ranges_impl(duration_secs, cut_points, snippet_enabled)
+}
+
+fn clamp_to_enabled_playback_time(
+    current_time_secs: f64,
+    duration_secs: f64,
+    cut_points: &[f64],
+    snippet_enabled: &[bool],
+) -> f64 {
+    utils::clamp_to_enabled_playback_time_impl(
+        current_time_secs,
+        duration_secs,
+        cut_points,
+        snippet_enabled,
+    )
 }
 
 fn estimate_export_bitrates_from_editor(
@@ -1888,53 +1156,24 @@ fn estimate_export_bitrates_from_editor(
     has_audio: bool,
     num_segments: usize,
 ) -> (u32, u32) {
-    let estimate = estimate_export_bitrates(
+    utils::estimate_export_bitrates_from_editor_impl(
         target_size_mb,
         kept_duration_secs,
         has_audio,
-        DEFAULT_AUDIO_BITRATE_KBPS,
         num_segments,
-    );
-
-    (estimate.video_kbps, estimate.total_kbps)
+    )
 }
 
 fn quality_estimate(metadata: &VideoFileMetadata, video_kbps: u32) -> (&'static str, usize) {
-    let pixel_factor = (metadata.width as f64 * metadata.height as f64) / (1920.0 * 1080.0);
-
-    let fps_factor = (metadata.fps / 30.0).clamp(0.5, 3.0);
-
-    // Combined factor for bitrate thresholds
-    let combined_factor = pixel_factor * fps_factor;
-
-    let medium_threshold = 2000.0 * combined_factor;
-    let high_threshold = 5000.0 * combined_factor;
-    let bitrate = video_kbps as f64;
-
-    if bitrate >= high_threshold {
-        ("High", 5)
-    } else if bitrate >= medium_threshold {
-        ("Medium", 3)
-    } else {
-        ("Low", 2)
-    }
+    utils::quality_estimate_impl(metadata, video_kbps)
 }
 
 fn time_to_x(rect: egui::Rect, time_secs: f64, duration_secs: f64) -> f32 {
-    let ratio = if duration_secs <= 0.0 {
-        0.0
-    } else {
-        (time_secs / duration_secs).clamp(0.0, 1.0) as f32
-    };
-    egui::lerp(rect.left()..=rect.right(), ratio)
+    utils::time_to_x_impl(rect, time_secs, duration_secs)
 }
 
 fn x_to_time(rect: egui::Rect, x: f32, duration_secs: f64) -> f64 {
-    if rect.width() <= 0.0 || duration_secs <= 0.0 {
-        return 0.0;
-    }
-    let ratio = ((x - rect.left()) / rect.width()).clamp(0.0, 1.0);
-    duration_secs * f64::from(ratio)
+    utils::x_to_time_impl(rect, x, duration_secs)
 }
 
 fn generate_thumbnail_strip_frames(
@@ -1942,102 +1181,7 @@ fn generate_thumbnail_strip_frames(
     duration_secs: f64,
     _has_audio: bool,
 ) -> anyhow::Result<ThumbnailStrip> {
-    use crate::output::functions::ffmpeg_executable_path;
-    use std::io::Read;
-    use std::process::{Command, Stdio};
-
-    let ffmpeg = ffmpeg_executable_path();
-    let mut thumbnails = Vec::with_capacity(THUMBNAIL_STRIP_COUNT);
-
-    if duration_secs <= 0.0 {
-        return Ok(ThumbnailStrip::new(thumbnails, duration_secs));
-    }
-
-    let fps_value = (THUMBNAIL_STRIP_COUNT as f64) / duration_secs;
-    let fps_filter = format!("fps={:.6}", fps_value);
-    let scale_filter =
-        format!("scale={THUMBNAIL_STRIP_WIDTH}:-2:force_original_aspect_ratio=decrease");
-    let vf = format!("{},{}", fps_filter, scale_filter);
-
-    let mut cmd = Command::new(&ffmpeg);
-    cmd.args([
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-i",
-        &video_path.to_string_lossy(),
-        "-vf",
-        &vf,
-        "-f",
-        "image2pipe",
-        "-vcodec",
-        "mjpeg",
-        "-q:v",
-        "5",
-        "-",
-    ]);
-
-    #[cfg(target_os = "windows")]
-    cmd.creation_flags(0x08000000);
-
-    let mut child = cmd
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .context("Failed to spawn FFmpeg for thumbnail strip")?;
-
-    let stdout = child.stdout.take().context("FFmpeg stdout not available")?;
-    let mut reader = std::io::BufReader::new(stdout);
-
-    let mut jpeg_buffer = Vec::with_capacity(64 * 1024);
-    let frame_times: Vec<f64> = (1..=THUMBNAIL_STRIP_COUNT)
-        .map(|i| duration_secs * (i as f64) / (THUMBNAIL_STRIP_COUNT + 1) as f64)
-        .collect();
-    let mut frame_idx = 0;
-
-    loop {
-        let mut byte = [0u8; 1];
-        match reader.read_exact(&mut byte) {
-            Ok(()) => {
-                jpeg_buffer.push(byte[0]);
-
-                if jpeg_buffer.len() >= 2 {
-                    let len = jpeg_buffer.len();
-                    if jpeg_buffer[len - 2] == 0xFF && jpeg_buffer[len - 1] == 0xD9 {
-                        if jpeg_buffer.len() > 2 && jpeg_buffer[0] == 0xFF && jpeg_buffer[1] == 0xD8
-                        {
-                            if let Ok(img) = image::load_from_memory(&jpeg_buffer) {
-                                if frame_idx < frame_times.len() {
-                                    thumbnails.push((frame_times[frame_idx], img.into_rgba8()));
-                                    frame_idx += 1;
-                                }
-                            }
-                        }
-                        jpeg_buffer.clear();
-                        jpeg_buffer.push(0xFF);
-                        jpeg_buffer.push(0xD8);
-                    }
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-            Err(e) => {
-                warn!("Error reading FFmpeg output: {}", e);
-                break;
-            }
-        }
-    }
-
-    let _ = child.wait();
-
-    while thumbnails.len() < THUMBNAIL_STRIP_COUNT {
-        if let Some(last) = thumbnails.last() {
-            thumbnails.push(last.clone());
-        } else {
-            break;
-        }
-    }
-
-    Ok(ThumbnailStrip::new(thumbnails, duration_secs))
+    utils::generate_thumbnail_strip_frames_impl(video_path, duration_secs, _has_audio)
 }
 
 #[cfg(test)]
