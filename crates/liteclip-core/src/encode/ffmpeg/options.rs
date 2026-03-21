@@ -29,11 +29,6 @@ impl FfmpegEncoder {
         }
     }
 
-    #[allow(dead_code)]
-    pub(super) fn hardware_frame_sw_format(&self) -> Pixel {
-        self.encoder_pixel_format()
-    }
-
     pub(super) fn bitrate_bps(&self) -> usize {
         (self.config.bitrate_mbps.max(1) * 1_000_000) as usize
     }

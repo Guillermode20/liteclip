@@ -35,14 +35,6 @@ impl FramePool {
         Some(vec![0u8; self.buffer_size])
     }
 
-    #[allow(dead_code)]
-    pub(super) fn release(&self, buffer: Vec<u8>) {
-        let mut guard = self.buffers.lock().unwrap_or_else(|e| e.into_inner());
-        if guard.len() < FRAME_POOL_HARD_LIMIT {
-            guard.push_back(buffer);
-        }
-    }
-
     pub(super) fn buffer_size(&self) -> usize {
         self.buffer_size
     }

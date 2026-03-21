@@ -654,24 +654,6 @@ impl PlaybackController {
         (count, mb)
     }
 
-    #[allow(dead_code)]
-    pub fn queue_health(&self) -> (usize, u64) {
-        let queue_len = self
-            .shared
-            .frame_queue
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .len();
-        let empty_polls = self.shared.playback_empty_polls.load(Ordering::SeqCst);
-        (queue_len, empty_polls)
-    }
-
-    #[allow(dead_code)]
-    pub fn needs_quality_reduction(&self) -> bool {
-        let (queue_len, empty_polls) = self.queue_health();
-        empty_polls > 10 && queue_len < 3
-    }
-
     fn clamp_time(&self, time_secs: f64) -> f64 {
         time_secs.clamp(0.0, self.metadata.duration_secs)
     }

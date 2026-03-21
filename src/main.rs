@@ -314,7 +314,7 @@ async fn main() -> Result<()> {
     };
 
     // Start the platform message loop for hotkeys and tray
-    let hotkey_config = hotkey_config_from_config(&config);
+    let hotkey_config = HotkeyConfig::from(&config);
     info!("Spawning platform thread...");
     let (platform_handle, event_rx) =
         liteclip_replay::platform::spawn_platform_thread(hotkey_config)?;
@@ -594,42 +594,6 @@ async fn main() -> Result<()> {
     std::process::exit(0);
 }
 
-/// Extracts hotkey configuration from the application config.
-///
-/// # Arguments
-///
-/// * `config` - Reference to the application configuration.
-///
-/// # Returns
-///
-/// A [`HotkeyConfig`] struct containing hotkey strings for all actions.
-fn hotkey_config_from_config(config: &Config) -> HotkeyConfig {
-    HotkeyConfig::from(config)
-}
-
-/// Spawns an async task to save the current replay buffer to disk.
-///
-/// This function provides concurrency protection to ensure only one save
-/// operation runs at a time. If a save is already in progress, the request
-/// is ignored.
-///
-/// # Arguments
-///
-/// * `app_state` - Shared application state containing the replay buffer.
-/// * `platform_handle` - Handle to the platform layer.
-/// * `save_in_progress` - Atomic flag for concurrency control.
-/// * `game_detector` - Optional game detector for organizing clips by game.
-///
-/// # Example
-///
-/// ```ignore
-/// spawn_save_clip_task(
-///     &app_state,
-///     &platform_handle,
-///     &save_in_progress,
-///     &game_detector,
-/// ).await;
-/// ```
 async fn spawn_save_clip_task(
     app_state: &Arc<Mutex<AppState>>,
     _platform_handle: &Arc<liteclip_replay::platform::PlatformHandle>,

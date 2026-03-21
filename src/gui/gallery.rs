@@ -42,8 +42,6 @@ const EDITOR_SIDEBAR_MIN_WIDTH: f32 = 280.0;
 const EDITOR_STACK_BREAKPOINT: f32 = 960.0;
 const EDITOR_SMALL_SEEK_SECS: f64 = 1.0;
 const EDITOR_LARGE_SEEK_SECS: f64 = 5.0;
-#[allow(dead_code)]
-const BROWSER_DELETE_HOLD_SECS: f32 = 1.0;
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -102,15 +100,12 @@ const THUMBNAIL_STRIP_WIDTH: u32 = 160;
 
 struct ThumbnailStrip {
     thumbnails: Vec<(f64, RgbaImage)>,
-    #[allow(dead_code)]
-    duration_secs: f64,
 }
 
 impl ThumbnailStrip {
-    fn new(thumbnails: Vec<(f64, RgbaImage)>, duration_secs: f64) -> Self {
+    fn new(thumbnails: Vec<(f64, RgbaImage)>, _duration_secs: f64) -> Self {
         Self {
             thumbnails,
-            duration_secs,
         }
     }
 
@@ -1492,7 +1487,6 @@ fn render_size_section(ui: &mut egui::Ui, editor: &mut EditorState) {
         kept_duration,
         editor.video.metadata.has_audio,
         kept_ranges.len(),
-        editor.video.metadata.fps,
     );
     let (quality_label, bars) = quality_estimate(&editor.video.metadata, video_kbps);
 
@@ -1893,7 +1887,6 @@ fn estimate_export_bitrates_from_editor(
     kept_duration_secs: f64,
     has_audio: bool,
     num_segments: usize,
-    _fps: f64,
 ) -> (u32, u32) {
     let estimate = estimate_export_bitrates(
         target_size_mb,

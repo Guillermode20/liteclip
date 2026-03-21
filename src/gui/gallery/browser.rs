@@ -335,16 +335,3 @@ pub(super) fn render_browser_ui(app: &mut ClipCompressApp, ui: &mut egui::Ui) ->
 
     outcome
 }
-
-#[allow(dead_code)]
-fn gather_selected_entries(app: &ClipCompressApp) -> Vec<VideoEntry> {
-    let mut deleting = Vec::new();
-    for (_, videos) in &app.videos_by_game {
-        for video in videos {
-            if app.selected_videos.contains(&video.path) {
-                deleting.push(video.clone());
-            }
-        }
-    }
-    deleting
-}

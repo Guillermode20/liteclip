@@ -2,22 +2,13 @@
 //! [`super::nvenc`](crate::encode::ffmpeg::nvenc) and [`super::qsv`](crate::encode::ffmpeg::qsv).
 //! **Contributor checklist:** See the module-level docs on [`crate::encode::ffmpeg`].
 
-use std::ffi::CString;
-
 use ffmpeg::format::Pixel;
 use ffmpeg_next as ffmpeg;
-use tracing::{info, warn};
-use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-    D3D11_SDK_VERSION,
-};
-use windows::Win32::Graphics::Dxgi::IDXGIDevice;
-use windows_core::Interface;
+use tracing::info;
 
 use crate::config::{QualityPreset, RateControl};
 use crate::encode::{EncodeError, EncodeResult};
 
-use super::context::{AvD3d11vaDeviceContext, D3d11HardwareContext};
 use super::FfmpegEncoder;
 
 impl FfmpegEncoder {
@@ -72,159 +63,6 @@ impl FfmpegEncoder {
 
         if matches!(self.config.rate_control, RateControl::Cq) {
             options.set("qvbr_quality_level", &self.cq_value().to_string());
-        }
-    }
-
-    #[allow(dead_code)]
-    pub(super) fn create_d3d11_hardware_context(
-        &self,
-        gpu_frame: &crate::media::D3d11Frame,
-        width: u32,
-        height: u32,
-    ) -> EncodeResult<D3d11HardwareContext> {
-        unsafe {
-            let dxgi_device: IDXGIDevice = gpu_frame.device.cast().map_err(|e| {
-                EncodeError::msg(format!(
-                    "Failed to get IDXGIDevice from capture D3D11 device: {}",
-                    e
-                ))
-            })?;
-            let adapter = dxgi_device.GetAdapter().map_err(|e| {
-                EncodeError::msg(format!(
-                    "Failed to get DXGI adapter from capture device: {}",
-                    e
-                ))
-            })?;
-            let adapter_typed: windows::Win32::Graphics::Dxgi::IDXGIAdapter = adapter
-                .cast()
-                .map_err(|e| EncodeError::msg(format!("Failed to cast DXGI adapter: {}", e)))?;
-
-            let feature_levels = [
-                windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_1,
-                windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_0,
-            ];
-            let mut encoder_device_opt: Option<ID3D11Device> = None;
-            let mut encoder_context_opt: Option<ID3D11DeviceContext> = None;
-            D3D11CreateDevice(
-                Some(&adapter_typed),
-                windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN,
-                windows::Win32::Foundation::HMODULE::default(),
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                Some(&feature_levels),
-                D3D11_SDK_VERSION,
-                Some(&mut encoder_device_opt),
-                None,
-                Some(&mut encoder_context_opt),
-            )
-            .map_err(|e| {
-                EncodeError::msg(format!("Failed to create encoder D3D11 device: {}", e))
-            })?;
-            let encoder_device = encoder_device_opt
-                .ok_or_else(|| EncodeError::msg("Encoder D3D11 device is null"))?;
-            let encoder_context = encoder_context_opt
-                .ok_or_else(|| EncodeError::msg("Encoder D3D11 context is null"))?;
-
-            info!("Encoder using separate D3D11 device (isolated from capture thread)");
-
-            let device_type_name = CString::new("d3d11va").expect("static string");
-            let device_type = ffmpeg::ffi::av_hwdevice_find_type_by_name(device_type_name.as_ptr());
-            if device_type == ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_NONE {
-                return Err(EncodeError::msg(
-                    "FFmpeg D3D11VA hardware device type is unavailable",
-                ));
-            }
-
-            let device_ctx_ref = ffmpeg::ffi::av_hwdevice_ctx_alloc(device_type);
-            if device_ctx_ref.is_null() {
-                return Err(EncodeError::msg(
-                    "Failed to allocate FFmpeg D3D11 device context",
-                ));
-            }
-
-            let hw_device_ctx = (*device_ctx_ref).data as *mut ffmpeg::ffi::AVHWDeviceContext;
-            let d3d11_device_ctx = (*hw_device_ctx).hwctx as *mut AvD3d11vaDeviceContext;
-
-            let ffmpeg_device = encoder_device.clone();
-            let ffmpeg_context = encoder_context.clone();
-            (*d3d11_device_ctx).device = ffmpeg_device.as_raw() as *mut _;
-            (*d3d11_device_ctx).device_context = ffmpeg_context.as_raw() as *mut _;
-
-            let init_result = ffmpeg::ffi::av_hwdevice_ctx_init(device_ctx_ref);
-            if init_result < 0 {
-                let mut device_ctx_ref = device_ctx_ref;
-                ffmpeg::ffi::av_buffer_unref(&mut device_ctx_ref);
-                return Err(EncodeError::msg(format!(
-                    "Failed to initialize FFmpeg D3D11 device context: {}",
-                    init_result
-                )));
-            }
-
-            let pool_sizes: &[i32] = &[0, 4, 2];
-            let sw_format = self.hardware_frame_sw_format();
-            let mut frames_ctx_ref_result: EncodeResult<*mut ffmpeg::ffi::AVBufferRef> =
-                Err(EncodeError::msg("no pool sizes tried"));
-            for &pool_size in pool_sizes {
-                match Self::create_hw_frames_ctx_with_pool_size(
-                    device_ctx_ref,
-                    width,
-                    height,
-                    sw_format,
-                    pool_size,
-                ) {
-                    Ok(frames_ctx_ref) => {
-                        if pool_size == 0 {
-                            info!("Initialized FFmpeg D3D11 frame context with dynamic pool");
-                        } else {
-                            info!(
-                                "Initialized FFmpeg D3D11 frame pool with {} surfaces",
-                                pool_size
-                            );
-                        }
-                        frames_ctx_ref_result = Ok(frames_ctx_ref);
-                        break;
-                    }
-                    Err(error) => {
-                        if pool_size == 0 {
-                            frames_ctx_ref_result = Err(error);
-                        } else {
-                            warn!(
-                                "Failed to initialize {}-surface FFmpeg D3D11 frame pool, trying smaller: {}",
-                                pool_size, error
-                            );
-                        }
-                    }
-                }
-            }
-            let frames_ctx_ref = match frames_ctx_ref_result {
-                Ok(frames_ctx_ref) => frames_ctx_ref,
-                Err(e) => {
-                    let mut device_ctx_ref = device_ctx_ref;
-                    ffmpeg::ffi::av_buffer_unref(&mut device_ctx_ref);
-                    return Err(e);
-                }
-            };
-
-            let reusable_hw_frame = ffmpeg::ffi::av_frame_alloc();
-            if reusable_hw_frame.is_null() {
-                let mut frames_ctx_ref = frames_ctx_ref;
-                let mut device_ctx_ref = device_ctx_ref;
-                ffmpeg::ffi::av_buffer_unref(&mut frames_ctx_ref);
-                ffmpeg::ffi::av_buffer_unref(&mut device_ctx_ref);
-                return Err(EncodeError::msg(
-                    "Failed to allocate reusable FFmpeg hardware frame",
-                ));
-            }
-
-            Ok(D3d11HardwareContext {
-                device_ctx_ref,
-                frames_ctx_ref,
-                copy_context: encoder_context,
-                reusable_hw_frame,
-                encoder_device: Some(encoder_device),
-                encoder_fence: None,
-                cached_shared_textures: Vec::with_capacity(4),
-                is_shared_device: false,
-            })
         }
     }
 
