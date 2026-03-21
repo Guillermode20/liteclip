@@ -26,6 +26,9 @@ pub(super) fn render_browser_ui(app: &mut ClipCompressApp, ui: &mut egui::Ui) ->
     ui.horizontal(|ui| {
         ui.heading("Clip & Compress");
         ui.label(format!("({total_videos} videos)"));
+        if ui.button("Open Video File...").clicked() {
+            outcome.request_import_video_dialog = true;
+        }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.button("Refresh").clicked() {
                 outcome.refresh_requested = true;

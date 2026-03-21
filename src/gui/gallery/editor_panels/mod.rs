@@ -457,12 +457,32 @@ fn render_editor_sidebar(
 fn render_action_section(
     ui: &mut egui::Ui,
     editor: &mut EditorState,
-    _outcome: &mut EditorUiOutcome,
+    outcome: &mut EditorUiOutcome,
 ) {
     let can_export = !editor.kept_ranges().is_empty() && editor.target_size_mb > 0;
 
     egui::Frame::group(ui.style()).show(ui, |ui| {
         ui.label(egui::RichText::new("Actions").strong());
+        ui.add_space(6.0);
+
+        let fallback_output_path = super::build_clipped_output_path(&editor.video);
+        let output_path = editor
+            .custom_output_path
+            .clone()
+            .unwrap_or(fallback_output_path.clone());
+        ui.label(
+            egui::RichText::new(format!("Save To: {}", output_path.display()))
+                .small()
+                .weak(),
+        );
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Choose Save Location...").clicked() {
+                outcome.request_save_output_dialog = Some(output_path.clone());
+            }
+            if editor.custom_output_path.is_some() && ui.button("Use Default Path").clicked() {
+                editor.custom_output_path = None;
+            }
+        });
         ui.add_space(6.0);
 
         if ui
@@ -547,6 +567,7 @@ fn render_size_section(ui: &mut egui::Ui, editor: &mut EditorState) {
         editor.target_size_mb,
         kept_duration,
         editor.video.metadata.has_audio,
+        editor.audio_bitrate_kbps,
         kept_ranges.len(),
     );
     let (quality_label, bars) = super::quality_estimate(&editor.video.metadata, video_kbps);
@@ -563,6 +584,21 @@ fn render_size_section(ui: &mut egui::Ui, editor: &mut EditorState) {
                     .speed(1),
             );
         });
+        if editor.video.metadata.has_audio {
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Audio Bitrate:");
+                ui.add(
+                    egui::DragValue::new(&mut editor.audio_bitrate_kbps)
+                        .range(48..=320)
+                        .suffix(" kbps")
+                        .speed(1),
+                );
+            });
+        }
+        ui.checkbox(
+            &mut editor.use_hardware_acceleration,
+            "Use hardware acceleration (fallback to software if unavailable)",
+        );
         ui.label(format!(
             "Estimated Quality: [{}{}] {} (video ~{:.2} Mbps, total ~{:.2} Mbps)",
             "#".repeat(bars),

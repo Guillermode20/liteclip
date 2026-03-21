@@ -6,8 +6,8 @@ use std::process::Command;
 use tracing::warn;
 
 use super::{
-    EditorState, SnippetSegment, ThumbnailStrip, TimeRange, VideoEntry, DEFAULT_AUDIO_BITRATE_KBPS,
-    MIN_RANGE_SECS, THUMBNAIL_STRIP_COUNT, THUMBNAIL_STRIP_WIDTH,
+    EditorState, SnippetSegment, ThumbnailStrip, TimeRange, VideoEntry, MIN_RANGE_SECS,
+    THUMBNAIL_STRIP_COUNT, THUMBNAIL_STRIP_WIDTH,
 };
 use crate::output::{estimate_export_bitrates, VideoFileMetadata};
 
@@ -296,13 +296,14 @@ pub(super) fn estimate_export_bitrates_from_editor_impl(
     target_size_mb: u32,
     kept_duration_secs: f64,
     has_audio: bool,
+    requested_audio_bitrate_kbps: u32,
     num_segments: usize,
 ) -> (u32, u32) {
     let estimate = estimate_export_bitrates(
         target_size_mb,
         kept_duration_secs,
         has_audio,
-        DEFAULT_AUDIO_BITRATE_KBPS,
+        requested_audio_bitrate_kbps,
         num_segments,
     );
 

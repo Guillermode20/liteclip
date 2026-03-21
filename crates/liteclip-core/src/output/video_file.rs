@@ -1,3 +1,4 @@
+use crate::config::EncoderType;
 use anyhow::{bail, Context, Result};
 use image::RgbaImage;
 use std::io::{BufRead, BufReader, Read};
@@ -70,6 +71,8 @@ pub struct ClipExportRequest {
     pub keep_ranges: Vec<TimeRange>,
     pub target_size_mb: u32,
     pub audio_bitrate_kbps: u32,
+    pub use_hardware_acceleration: bool,
+    pub preferred_encoder: EncoderType,
     pub metadata: VideoFileMetadata,
     /// Optional second input (companion webcam MP4) and layout for overlay.
     pub webcam: Option<WebcamExport>,
@@ -97,9 +100,32 @@ pub struct ExportBitrateEstimate {
 }
 
 const MIN_VIDEO_BITRATE_KBPS: u32 = 300;
-const MAX_EXPORT_ATTEMPTS: usize = 4;
-const TARGET_SIZE_UNDERFILL_RATIO: f64 = 0.985;
+const MAX_EXPORT_ATTEMPTS: usize = 6;
+const TARGET_SIZE_UNDERFILL_RATIO: f64 = 0.992;
 const MAX_VIDEO_BITRATE_KBPS: u32 = 400_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExportVideoEncoder {
+    Libx264,
+    H264Nvenc,
+    H264Amf,
+    H264Qsv,
+}
+
+impl ExportVideoEncoder {
+    fn ffmpeg_name(self) -> &'static str {
+        match self {
+            ExportVideoEncoder::Libx264 => "libx264",
+            ExportVideoEncoder::H264Nvenc => "h264_nvenc",
+            ExportVideoEncoder::H264Amf => "h264_amf",
+            ExportVideoEncoder::H264Qsv => "h264_qsv",
+        }
+    }
+
+    fn supports_two_pass(self) -> bool {
+        matches!(self, ExportVideoEncoder::Libx264)
+    }
+}
 
 pub fn probe_video_file(video_path: &Path) -> Result<VideoFileMetadata> {
     #[cfg(feature = "ffmpeg")]
@@ -315,11 +341,13 @@ fn run_clip_export(
         request.keep_ranges.len(),
     );
     let target_size_bytes = target_size_bytes(request.target_size_mb);
-    let non_video_bytes = estimate_non_video_bytes(
+    let mut estimated_non_video_bytes = estimate_non_video_bytes(
         output_duration_secs,
         bitrate_estimate.audio_kbps,
         request.keep_ranges.len(),
     );
+    let selected_encoder = select_export_video_encoder(request)
+        .with_context(|| "Unable to resolve an export video encoder")?;
     let export_work_dir = std::env::temp_dir().join(format!(
         "liteclip-export-{}-{}",
         std::process::id(),
@@ -351,6 +379,7 @@ fn run_clip_export(
                 &output_path,
                 current_video_bitrate_kbps,
                 bitrate_estimate.audio_kbps,
+                selected_encoder,
                 progress_tx,
                 cancel_flag,
                 attempt_index,
@@ -402,6 +431,14 @@ fn run_clip_export(
                 });
             }
 
+            let measured_non_video_bytes = estimate_measured_non_video_bytes(
+                attempt_result.size_bytes,
+                current_video_bitrate_kbps,
+                output_duration_secs,
+            );
+            estimated_non_video_bytes =
+                blend_non_video_bytes_estimate(estimated_non_video_bytes, measured_non_video_bytes);
+
             if attempt_result.size_bytes <= target_size_bytes
                 && (attempt_result.size_bytes as f64)
                     >= (target_size_bytes as f64 * TARGET_SIZE_UNDERFILL_RATIO)
@@ -413,7 +450,7 @@ fn run_clip_export(
                 current_video_bitrate_kbps,
                 attempt_result.size_bytes,
                 target_size_bytes,
-                non_video_bytes,
+                estimated_non_video_bytes,
                 low_video_bitrate_kbps,
                 high_video_bitrate_kbps,
             );
@@ -432,7 +469,7 @@ fn run_clip_export(
         }
 
         let preferred_attempt =
-            select_preferred_attempt(best_under_target, best_over_target, target_size_bytes)
+            select_preferred_attempt(best_under_target, best_over_target, target_size_bytes, true)
                 .context("Clip export did not produce an output file")?;
 
         move_or_copy_file(&preferred_attempt.output_path, &request.output_path).with_context(
@@ -456,6 +493,7 @@ fn attempt_export(
     output_path: &Path,
     video_bitrate_kbps: u32,
     audio_bitrate_kbps: u32,
+    video_encoder: ExportVideoEncoder,
     progress_tx: &Sender<ClipExportUpdate>,
     cancel_flag: &Arc<AtomicBool>,
     attempt_index: usize,
@@ -467,7 +505,7 @@ fn attempt_export(
     let passlog_prefix = output_path.with_extension("passlog");
     let passlog_prefix_str = passlog_prefix.to_string_lossy().into_owned();
 
-    let preset = select_adaptive_preset(video_bitrate_kbps, &request.metadata);
+    let preset = select_adaptive_preset(video_bitrate_kbps, &request.metadata, video_encoder);
 
     let _ = progress_tx.send(ClipExportUpdate::Progress {
         phase: ClipExportPhase::Preparing,
@@ -476,86 +514,123 @@ fn attempt_export(
     });
 
     info!(
-        "Exporting clipped video {:?} -> {:?} ({} kept ranges, target={} MB, video bitrate={} kbps, preset={})",
+        "Exporting clipped video {:?} -> {:?} ({} kept ranges, target={} MB, video bitrate={} kbps, preset={}, encoder={})",
         request.input_path,
         output_path,
         request.keep_ranges.len(),
         request.target_size_mb,
         video_bitrate_kbps,
-        preset
+        preset,
+        video_encoder.ffmpeg_name()
     );
 
-    let first_pass_args = build_ffmpeg_args(
-        request,
-        &first_pass_filter,
-        &passlog_prefix_str,
-        video_bitrate_kbps,
-        audio_bitrate_kbps,
-        true,
-        &preset,
-        output_path,
-    );
-    if run_ffmpeg_phase(
-        &ffmpeg,
-        &first_pass_args,
-        request.output_duration_secs().max(0.1),
-        FFmpegProgressContext {
-            phase: ClipExportPhase::FirstPass,
-            start_fraction: 0.0,
-            span_fraction: 0.5,
-            progress_tx: progress_tx.clone(),
-            cancel_flag: cancel_flag.clone(),
-            attempt_index,
-            attempt_count,
-            last_progress_time: std::time::Instant::now(),
-        },
-    )? {
-        cleanup_passlog_files(&passlog_prefix);
-        let _ = std::fs::remove_file(output_path);
-        return Ok(None);
-    }
+    if video_encoder.supports_two_pass() {
+        let first_pass_args = build_ffmpeg_args(
+            request,
+            &first_pass_filter,
+            Some(&passlog_prefix_str),
+            video_bitrate_kbps,
+            audio_bitrate_kbps,
+            true,
+            &preset,
+            output_path,
+            video_encoder,
+        );
+        if run_ffmpeg_phase(
+            &ffmpeg,
+            &first_pass_args,
+            request.output_duration_secs().max(0.1),
+            FFmpegProgressContext {
+                phase: ClipExportPhase::FirstPass,
+                start_fraction: 0.0,
+                span_fraction: 0.5,
+                progress_tx: progress_tx.clone(),
+                cancel_flag: cancel_flag.clone(),
+                attempt_index,
+                attempt_count,
+                last_progress_time: std::time::Instant::now(),
+            },
+        )? {
+            cleanup_passlog_files(&passlog_prefix);
+            let _ = std::fs::remove_file(output_path);
+            return Ok(None);
+        }
 
-    if cancel_flag.load(Ordering::Relaxed) {
-        cleanup_passlog_files(&passlog_prefix);
-        let _ = std::fs::remove_file(output_path);
-        return Ok(None);
-    }
+        if cancel_flag.load(Ordering::Relaxed) {
+            cleanup_passlog_files(&passlog_prefix);
+            let _ = std::fs::remove_file(output_path);
+            return Ok(None);
+        }
 
-    let second_pass_args = build_ffmpeg_args(
-        request,
-        &second_pass_filter,
-        &passlog_prefix_str,
-        video_bitrate_kbps,
-        audio_bitrate_kbps,
-        false,
-        &preset,
-        output_path,
-    );
-    if run_ffmpeg_phase(
-        &ffmpeg,
-        &second_pass_args,
-        request.output_duration_secs().max(0.1),
-        FFmpegProgressContext {
-            phase: ClipExportPhase::SecondPass,
-            start_fraction: 0.5,
-            span_fraction: 0.5,
-            progress_tx: progress_tx.clone(),
-            cancel_flag: cancel_flag.clone(),
-            attempt_index,
-            attempt_count,
-            last_progress_time: std::time::Instant::now(),
-        },
-    )? {
-        cleanup_passlog_files(&passlog_prefix);
-        let _ = std::fs::remove_file(output_path);
-        return Ok(None);
+        let second_pass_args = build_ffmpeg_args(
+            request,
+            &second_pass_filter,
+            Some(&passlog_prefix_str),
+            video_bitrate_kbps,
+            audio_bitrate_kbps,
+            false,
+            &preset,
+            output_path,
+            video_encoder,
+        );
+        if run_ffmpeg_phase(
+            &ffmpeg,
+            &second_pass_args,
+            request.output_duration_secs().max(0.1),
+            FFmpegProgressContext {
+                phase: ClipExportPhase::SecondPass,
+                start_fraction: 0.5,
+                span_fraction: 0.5,
+                progress_tx: progress_tx.clone(),
+                cancel_flag: cancel_flag.clone(),
+                attempt_index,
+                attempt_count,
+                last_progress_time: std::time::Instant::now(),
+            },
+        )? {
+            cleanup_passlog_files(&passlog_prefix);
+            let _ = std::fs::remove_file(output_path);
+            return Ok(None);
+        }
+    } else {
+        let single_pass_args = build_ffmpeg_args(
+            request,
+            &second_pass_filter,
+            None,
+            video_bitrate_kbps,
+            audio_bitrate_kbps,
+            false,
+            &preset,
+            output_path,
+            video_encoder,
+        );
+        if run_ffmpeg_phase(
+            &ffmpeg,
+            &single_pass_args,
+            request.output_duration_secs().max(0.1),
+            FFmpegProgressContext {
+                phase: ClipExportPhase::SecondPass,
+                start_fraction: 0.0,
+                span_fraction: 1.0,
+                progress_tx: progress_tx.clone(),
+                cancel_flag: cancel_flag.clone(),
+                attempt_index,
+                attempt_count,
+                last_progress_time: std::time::Instant::now(),
+            },
+        )? {
+            let _ = std::fs::remove_file(output_path);
+            return Ok(None);
+        }
     }
 
     let size_bytes = std::fs::metadata(output_path)
         .with_context(|| format!("Failed to get size of export output file {:?}", output_path))?
         .len();
 
-    cleanup_passlog_files(&passlog_prefix);
+    if video_encoder.supports_two_pass() {
+        cleanup_passlog_files(&passlog_prefix);
+    }
 
     Ok(Some(ExportAttemptResult {
         output_path: output_path.to_path_buf(),
@@ -567,12 +642,13 @@ fn attempt_export(
 fn build_ffmpeg_args(
     request: &ClipExportRequest,
     filter_complex: &str,
-    passlog_prefix: &str,
+    passlog_prefix: Option<&str>,
     video_bitrate_kbps: u32,
     audio_bitrate_kbps: u32,
     first_pass: bool,
     preset: &str,
     output_path: &Path,
+    video_encoder: ExportVideoEncoder,
 ) -> Vec<String> {
     let mut args = vec![
         "-y".to_string(),
@@ -595,22 +671,40 @@ fn build_ffmpeg_args(
         "-map".to_string(),
         "[outv]".to_string(),
         "-c:v".to_string(),
-        "libx264".to_string(),
-        "-preset".to_string(),
-        preset.to_string(),
+        video_encoder.ffmpeg_name().to_string(),
         "-pix_fmt".to_string(),
         "yuv420p".to_string(),
         "-b:v".to_string(),
         format!("{video_bitrate_kbps}k"),
-        "-maxrate".to_string(),
-        format!("{video_bitrate_kbps}k"),
-        "-bufsize".to_string(),
-        format!("{}k", video_bitrate_kbps.saturating_mul(2)),
-        "-pass".to_string(),
-        if first_pass { "1" } else { "2" }.to_string(),
-        "-passlogfile".to_string(),
-        passlog_prefix.to_string(),
     ]);
+
+    match video_encoder {
+        ExportVideoEncoder::Libx264 => {
+            args.extend(["-preset".to_string(), preset.to_string()]);
+            if let Some(passlog_prefix) = passlog_prefix {
+                args.extend([
+                    "-pass".to_string(),
+                    if first_pass { "1" } else { "2" }.to_string(),
+                    "-passlogfile".to_string(),
+                    passlog_prefix.to_string(),
+                ]);
+            }
+        }
+        ExportVideoEncoder::H264Nvenc => {
+            args.extend([
+                "-rc".to_string(),
+                "vbr".to_string(),
+                "-cq".to_string(),
+                "19".to_string(),
+            ]);
+        }
+        ExportVideoEncoder::H264Amf => {
+            args.extend(["-rc".to_string(), "vbr_peak".to_string()]);
+        }
+        ExportVideoEncoder::H264Qsv => {
+            args.extend(["-look_ahead".to_string(), "1".to_string()]);
+        }
+    }
 
     if first_pass {
         args.extend([
@@ -629,7 +723,7 @@ fn build_ffmpeg_args(
             "-c:a".to_string(),
             "aac".to_string(),
             "-b:a".to_string(),
-            format!("{}k", audio_bitrate_kbps.max(64)),
+            format!("{}k", audio_bitrate_kbps.max(48)),
         ]);
     }
 
@@ -1011,14 +1105,22 @@ fn select_audio_bitrate_kbps(
         return 0;
     }
 
-    let requested_audio_bitrate_kbps = requested_audio_bitrate_kbps.max(64);
-    if total_bitrate_kbps < 900.0 {
+    let requested_audio_bitrate_kbps = requested_audio_bitrate_kbps.max(48);
+    let adaptive_cap = if total_bitrate_kbps < 700.0 {
+        48
+    } else if total_bitrate_kbps < 1100.0 {
         64
     } else if total_bitrate_kbps < 1800.0 {
-        requested_audio_bitrate_kbps.min(96)
+        80
+    } else if total_bitrate_kbps < 2600.0 {
+        96
     } else {
-        requested_audio_bitrate_kbps.min(128)
-    }
+        128
+    };
+    let share_cap = (total_bitrate_kbps * 0.2).round().clamp(48.0, 160.0) as u32;
+    requested_audio_bitrate_kbps
+        .min(adaptive_cap)
+        .min(share_cap)
 }
 
 fn next_export_video_bitrate_kbps(
@@ -1068,13 +1170,32 @@ fn next_export_video_bitrate_kbps(
     next_video_bitrate_kbps.min(MAX_VIDEO_BITRATE_KBPS)
 }
 
+fn estimate_measured_non_video_bytes(
+    actual_size_bytes: u64,
+    current_video_bitrate_kbps: u32,
+    output_duration_secs: f64,
+) -> u64 {
+    let expected_video_bytes = ((f64::from(current_video_bitrate_kbps) * 1000.0 / 8.0)
+        * output_duration_secs.max(0.0))
+    .round() as u64;
+    actual_size_bytes.saturating_sub(expected_video_bytes)
+}
+
+fn blend_non_video_bytes_estimate(previous_estimate: u64, measured_estimate: u64) -> u64 {
+    ((previous_estimate as f64 * 0.6) + (measured_estimate as f64 * 0.4)).round() as u64
+}
+
 fn select_preferred_attempt(
     best_under_target: Option<ExportAttemptResult>,
     best_over_target: Option<ExportAttemptResult>,
     target_size_bytes: u64,
+    strict_under_target: bool,
 ) -> Option<ExportAttemptResult> {
     match (best_under_target, best_over_target) {
         (Some(under_target), Some(over_target)) => {
+            if strict_under_target {
+                return Some(under_target);
+            }
             let under_delta = target_size_bytes.saturating_sub(under_target.size_bytes);
             let over_delta = over_target.size_bytes.saturating_sub(target_size_bytes);
             if over_delta < under_delta {
@@ -1087,6 +1208,61 @@ fn select_preferred_attempt(
         (None, Some(over_target)) => Some(over_target),
         (None, None) => None,
     }
+}
+
+fn select_export_video_encoder(request: &ClipExportRequest) -> Result<ExportVideoEncoder> {
+    if !request.use_hardware_acceleration {
+        return Ok(ExportVideoEncoder::Libx264);
+    }
+
+    let ffmpeg = ffmpeg_executable_path();
+    let available_encoders = query_ffmpeg_encoders(&ffmpeg)?;
+
+    let requested_order: &[ExportVideoEncoder] = match request.preferred_encoder {
+        EncoderType::Nvenc => &[ExportVideoEncoder::H264Nvenc],
+        EncoderType::Amf => &[ExportVideoEncoder::H264Amf],
+        EncoderType::Qsv => &[ExportVideoEncoder::H264Qsv],
+        EncoderType::Auto => &[
+            ExportVideoEncoder::H264Nvenc,
+            ExportVideoEncoder::H264Amf,
+            ExportVideoEncoder::H264Qsv,
+        ],
+    };
+
+    for encoder in requested_order {
+        if available_encoders.contains(encoder.ffmpeg_name()) {
+            return Ok(*encoder);
+        }
+    }
+
+    for encoder in [
+        ExportVideoEncoder::H264Nvenc,
+        ExportVideoEncoder::H264Amf,
+        ExportVideoEncoder::H264Qsv,
+    ] {
+        if available_encoders.contains(encoder.ffmpeg_name()) {
+            return Ok(encoder);
+        }
+    }
+
+    Ok(ExportVideoEncoder::Libx264)
+}
+
+fn query_ffmpeg_encoders(ffmpeg: &Path) -> Result<String> {
+    let output = command_output(
+        Command::new(ffmpeg)
+            .args(["-hide_banner", "-encoders"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .with_context(|| format!("Failed to query ffmpeg encoders via {:?}", ffmpeg))?;
+
+    if !output.status.success() {
+        bail!("ffmpeg encoder query failed via {:?}", ffmpeg);
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 fn move_or_copy_file(source_path: &Path, destination_path: &Path) -> Result<()> {
@@ -1106,7 +1282,11 @@ fn move_or_copy_file(source_path: &Path, destination_path: &Path) -> Result<()> 
     }
 }
 
-fn select_adaptive_preset(video_bitrate_kbps: u32, metadata: &VideoFileMetadata) -> &'static str {
+fn select_adaptive_preset(
+    video_bitrate_kbps: u32,
+    metadata: &VideoFileMetadata,
+    encoder: ExportVideoEncoder,
+) -> &'static str {
     // Adaptive preset selection: use slower presets at lower bitrates
     // for better compression efficiency, and faster presets at high bitrates
     let pixels_per_frame = f64::from(metadata.width.max(1)) * f64::from(metadata.height.max(1));
@@ -1114,20 +1294,39 @@ fn select_adaptive_preset(video_bitrate_kbps: u32, metadata: &VideoFileMetadata)
         (f64::from(video_bitrate_kbps) * 1000.0) / (pixels_per_frame * metadata.fps.max(1.0));
     let high_throughput_source = pixels_per_frame * metadata.fps.max(1.0) >= 2560.0 * 1440.0 * 60.0;
 
-    if bits_per_pixel_frame < 0.05 {
-        "veryslow"
-    } else if bits_per_pixel_frame < 0.09 {
-        if high_throughput_source {
-            "slower"
-        } else {
-            "veryslow"
+    match encoder {
+        ExportVideoEncoder::Libx264 => {
+            if bits_per_pixel_frame < 0.05 {
+                "veryslow"
+            } else if bits_per_pixel_frame < 0.09 {
+                if high_throughput_source {
+                    "slower"
+                } else {
+                    "veryslow"
+                }
+            } else if bits_per_pixel_frame < 0.16 {
+                "slower"
+            } else if high_throughput_source {
+                "slow"
+            } else {
+                "slower"
+            }
         }
-    } else if bits_per_pixel_frame < 0.16 {
-        "slower"
-    } else if high_throughput_source {
-        "slow"
-    } else {
-        "slower"
+        ExportVideoEncoder::H264Nvenc => {
+            if bits_per_pixel_frame < 0.1 {
+                "p7"
+            } else {
+                "p6"
+            }
+        }
+        ExportVideoEncoder::H264Amf => "quality",
+        ExportVideoEncoder::H264Qsv => {
+            if high_throughput_source {
+                "slow"
+            } else {
+                "slower"
+            }
+        }
     }
 }
 
@@ -1155,7 +1354,6 @@ fn ffprobe_executable_path() -> PathBuf {
     }
 }
 
-#[cfg(any(test, all(feature = "ffmpeg-cli", not(feature = "ffmpeg"))))]
 fn command_output(command: &mut Command) -> Result<std::process::Output> {
     #[cfg(target_os = "windows")]
     {
@@ -1312,6 +1510,8 @@ mod tests {
                 ],
                 target_size_mb: 2,
                 audio_bitrate_kbps: 96,
+                use_hardware_acceleration: false,
+                preferred_encoder: EncoderType::Auto,
                 metadata,
                 webcam: None,
             },

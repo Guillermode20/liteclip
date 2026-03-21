@@ -19,12 +19,12 @@ mod utils;
 
 use decode_pipeline::PlaybackController;
 
-use crate::config::Config;
+use crate::config::{Config, EncoderType};
 use crate::gui::manager::{show_toast, ToastKind};
 use crate::output::{
-    default_webcam_keyframes, generate_thumbnail, interpolate_norm_rect,
-    probe_video_file, spawn_clip_export, webcam_layout_path, webcam_video_path, ClipExportRequest,
-    ClipExportUpdate, TimeRange, VideoFileMetadata, WebcamExport, WebcamKeyframe, WebcamLayoutFile,
+    default_webcam_keyframes, generate_thumbnail, interpolate_norm_rect, probe_video_file,
+    spawn_clip_export, webcam_layout_path, webcam_video_path, ClipExportRequest, ClipExportUpdate,
+    TimeRange, VideoFileMetadata, WebcamExport, WebcamKeyframe, WebcamLayoutFile,
 };
 use crate::platform::AppEvent;
 
@@ -68,6 +68,11 @@ struct ThumbnailStripResult {
     video_path: PathBuf,
     strip: Option<ThumbnailStrip>,
     error: Option<String>,
+}
+
+enum DialogResult {
+    ImportVideo(Option<PathBuf>),
+    SaveOutputPath(Option<PathBuf>),
 }
 
 #[derive(Clone, Copy)]
@@ -125,6 +130,9 @@ struct EditorState {
     snippet_enabled: Vec<bool>,
     selected_cut_point: Option<usize>,
     target_size_mb: u32,
+    audio_bitrate_kbps: u32,
+    use_hardware_acceleration: bool,
+    preferred_encoder: EncoderType,
     preview_texture: Option<egui::TextureHandle>,
     preview_frame_in_flight: bool,
     pending_preview_request: Option<f64>,
@@ -133,6 +141,7 @@ struct EditorState {
     error_message: Option<String>,
     export_state: Option<ExportState>,
     export_output: Option<PathBuf>,
+    custom_output_path: Option<PathBuf>,
     playback: PlaybackController,
     was_playing_before_scrub: bool,
     last_scrub_time: Option<Instant>,
@@ -150,7 +159,7 @@ struct EditorState {
 }
 
 impl EditorState {
-    fn new(video: VideoEntry) -> Self {
+    fn new(video: VideoEntry, preferred_encoder: EncoderType) -> Self {
         let target_size_mb = DEFAULT_TARGET_SIZE_MB
             .max(video.size_mb.round() as u32 / 2)
             .min(video.size_mb.ceil().max(1.0) as u32);
@@ -179,6 +188,9 @@ impl EditorState {
             snippet_enabled: vec![true],
             selected_cut_point: None,
             target_size_mb,
+            audio_bitrate_kbps: DEFAULT_AUDIO_BITRATE_KBPS,
+            use_hardware_acceleration: true,
+            preferred_encoder,
             preview_texture: None,
             preview_frame_in_flight: false,
             pending_preview_request: None,
@@ -187,6 +199,7 @@ impl EditorState {
             error_message: None,
             export_state: None,
             export_output: None,
+            custom_output_path: None,
             playback,
             was_playing_before_scrub: false,
             last_scrub_time: None,
@@ -248,6 +261,10 @@ pub struct ClipCompressApp {
     thumbnail_rx: Receiver<ThumbnailResult>,
     thumbnail_strip_tx: Sender<ThumbnailStripResult>,
     thumbnail_strip_rx: Receiver<ThumbnailStripResult>,
+    dialog_tx: Sender<DialogResult>,
+    dialog_rx: Receiver<DialogResult>,
+    import_dialog_pending: bool,
+    save_dialog_pending: bool,
     editor: Option<EditorState>,
     pub selection_mode: bool,
     pub selected_videos: HashSet<PathBuf>,
@@ -255,6 +272,7 @@ pub struct ClipCompressApp {
     keyboard_selected_video: Option<PathBuf>,
     delete_hold_started_at: Option<Instant>,
     focus_filter_requested: bool,
+    preferred_export_encoder: EncoderType,
 }
 
 pub type GalleryApp = ClipCompressApp;
@@ -265,6 +283,7 @@ impl ClipCompressApp {
         let cache_directory = save_directory.join(".cache");
         let (thumbnail_tx, thumbnail_rx) = mpsc::channel();
         let (thumbnail_strip_tx, thumbnail_strip_rx) = mpsc::channel();
+        let (dialog_tx, dialog_rx) = mpsc::channel();
 
         Self {
             save_directory,
@@ -279,6 +298,10 @@ impl ClipCompressApp {
             thumbnail_rx,
             thumbnail_strip_tx,
             thumbnail_strip_rx,
+            dialog_tx,
+            dialog_rx,
+            import_dialog_pending: false,
+            save_dialog_pending: false,
             editor: None,
             selection_mode: false,
             selected_videos: HashSet::new(),
@@ -286,6 +309,7 @@ impl ClipCompressApp {
             keyboard_selected_video: None,
             delete_hold_started_at: None,
             focus_filter_requested: false,
+            preferred_export_encoder: config.video.encoder,
         }
     }
 
@@ -397,6 +421,29 @@ impl ClipCompressApp {
             modified: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
             metadata: video_metadata,
             webcam_path,
+        })
+    }
+
+    fn build_external_video_entry(path: &Path, save_root: &Path) -> anyhow::Result<VideoEntry> {
+        let metadata = std::fs::metadata(path)
+            .map_err(anyhow::Error::from)
+            .with_context(|| format!("Failed to read metadata for external video {:?}", path))?;
+        let video_metadata = probe_video_file(path)
+            .with_context(|| format!("Failed to probe external video file {:?}", path))?;
+        let filename = path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| "video.mp4".to_string());
+
+        Ok(VideoEntry {
+            path: path.to_path_buf(),
+            save_root: save_root.to_path_buf(),
+            game: "External Files".to_string(),
+            filename,
+            size_mb: metadata.len() as f64 / (1024.0 * 1024.0),
+            modified: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+            metadata: video_metadata,
+            webcam_path: None,
         })
     }
 
@@ -515,6 +562,74 @@ impl ClipCompressApp {
             };
             let _ = tx.send(message);
         });
+    }
+
+    fn request_import_video_dialog(&mut self) {
+        if self.import_dialog_pending {
+            return;
+        }
+        self.import_dialog_pending = true;
+        let tx = self.dialog_tx.clone();
+        std::thread::spawn(move || {
+            let picked = rfd::FileDialog::new()
+                .add_filter("Video", &["mp4", "mov", "mkv", "webm", "avi", "m4v"])
+                .pick_file();
+            let _ = tx.send(DialogResult::ImportVideo(picked));
+        });
+    }
+
+    fn request_save_output_dialog(&mut self, output_path: PathBuf) {
+        if self.save_dialog_pending {
+            return;
+        }
+        self.save_dialog_pending = true;
+        let tx = self.dialog_tx.clone();
+        std::thread::spawn(move || {
+            let suggested_name = output_path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "clip.mp4".to_string());
+            let picked = rfd::FileDialog::new()
+                .add_filter("MP4", &["mp4"])
+                .set_file_name(&suggested_name)
+                .set_directory(
+                    output_path
+                        .parent()
+                        .unwrap_or_else(|| std::path::Path::new(".")),
+                )
+                .save_file();
+            let _ = tx.send(DialogResult::SaveOutputPath(picked));
+        });
+    }
+
+    fn apply_dialog_results(&mut self, requested_preview: &mut Option<f64>) {
+        while let Ok(dialog_result) = self.dialog_rx.try_recv() {
+            match dialog_result {
+                DialogResult::ImportVideo(path) => {
+                    self.import_dialog_pending = false;
+                    if let Some(import_path) = path {
+                        match Self::build_external_video_entry(&import_path, &self.save_directory) {
+                            Ok(video) => {
+                                self.open_editor(video);
+                                *requested_preview = Some(0.0);
+                            }
+                            Err(err) => {
+                                self.scan_error = Some(format!(
+                                    "Failed to open video {:?}: {err:#}",
+                                    import_path
+                                ));
+                            }
+                        }
+                    }
+                }
+                DialogResult::SaveOutputPath(path) => {
+                    self.save_dialog_pending = false;
+                    if let (Some(editor), Some(output_path)) = (self.editor.as_mut(), path) {
+                        editor.custom_output_path = Some(output_path);
+                    }
+                }
+            }
+        }
     }
 
     fn queue_preview_request(&mut self, timestamp_secs: f64) {
@@ -713,6 +828,7 @@ impl ClipCompressApp {
 
     pub fn update(&mut self, ctx: &egui::Context, _is_open: &mut bool) {
         let mut requested_preview = self.poll_background_work(ctx);
+        self.apply_dialog_results(&mut requested_preview);
 
         if !self.loaded {
             self.scan_videos(ctx);
@@ -735,6 +851,14 @@ impl ClipCompressApp {
 
         if browser_outcome.refresh_requested || editor_outcome.refresh_browser {
             self.refresh();
+        }
+
+        if browser_outcome.request_import_video_dialog {
+            self.request_import_video_dialog();
+        }
+
+        if let Some(output_path) = editor_outcome.request_save_output_dialog {
+            self.request_save_output_dialog(output_path);
         }
 
         if let Some(video) = browser_outcome.selected_video {
@@ -815,7 +939,7 @@ impl ClipCompressApp {
 
     fn open_editor(&mut self, video: VideoEntry) {
         info!("Opening Clip & Compress editor for {:?}", video.path);
-        self.editor = Some(EditorState::new(video));
+        self.editor = Some(EditorState::new(video, self.preferred_export_encoder));
         self.generate_thumbnail_strip();
     }
 
@@ -845,6 +969,7 @@ struct BrowserUiOutcome {
     selected_video: Option<VideoEntry>,
     videos_to_delete: Vec<VideoEntry>,
     video_to_open: Option<VideoEntry>,
+    request_import_video_dialog: bool,
     refresh_requested: bool,
 }
 
@@ -852,6 +977,7 @@ struct BrowserUiOutcome {
 struct EditorUiOutcome {
     preview_request: Option<f64>,
     fast_preview_request: Option<f64>,
+    request_save_output_dialog: Option<PathBuf>,
     back_to_browser: bool,
     refresh_browser: bool,
 }
@@ -955,7 +1081,10 @@ fn start_export(editor: &mut EditorState) {
         editor.webcam_layout_dirty = false;
     }
 
-    let output_path = build_clipped_output_path(&editor.video);
+    let output_path = editor
+        .custom_output_path
+        .clone()
+        .unwrap_or_else(|| build_clipped_output_path(&editor.video));
     let (progress_tx, progress_rx) = mpsc::channel();
     let cancel_flag = Arc::new(AtomicBool::new(false));
 
@@ -969,7 +1098,9 @@ fn start_export(editor: &mut EditorState) {
             output_path,
             keep_ranges: kept_ranges,
             target_size_mb: editor.target_size_mb,
-            audio_bitrate_kbps: DEFAULT_AUDIO_BITRATE_KBPS,
+            audio_bitrate_kbps: editor.audio_bitrate_kbps,
+            use_hardware_acceleration: editor.use_hardware_acceleration,
+            preferred_encoder: editor.preferred_encoder,
             metadata: editor.video.metadata.clone(),
             webcam,
         },
@@ -1154,12 +1285,14 @@ fn estimate_export_bitrates_from_editor(
     target_size_mb: u32,
     kept_duration_secs: f64,
     has_audio: bool,
+    requested_audio_bitrate_kbps: u32,
     num_segments: usize,
 ) -> (u32, u32) {
     utils::estimate_export_bitrates_from_editor_impl(
         target_size_mb,
         kept_duration_secs,
         has_audio,
+        requested_audio_bitrate_kbps,
         num_segments,
     )
 }
