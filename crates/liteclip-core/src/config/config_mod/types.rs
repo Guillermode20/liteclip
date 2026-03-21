@@ -399,7 +399,7 @@ pub struct AudioConfig {
     pub balance: i8, // -100 (left) to 100 (right)
     #[serde(default = "default_master_volume")]
     pub master_volume: u8,
-    #[serde(default = "default_false")]
+    #[serde(default = "default_true")]
     pub mic_noise_reduction: bool,
 }
 /// Global hotkey bindings
