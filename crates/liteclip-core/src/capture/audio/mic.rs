@@ -505,8 +505,8 @@ fn run_noise_thread(
 
 struct RNNoiseProcessor {
     channels: usize,
+    /// Single RNNoise pass — chaining two passes doubles CPU cost without quality gain.
     state: Box<DenoiseState<'static>>,
-    state2: Box<DenoiseState<'static>>,
     in_buf: Vec<f32>,
     in_head: usize,
     out_buf: Vec<f32>,
@@ -516,12 +516,12 @@ struct RNNoiseProcessor {
     gate_gain: f32,
     dc_x: Vec<f32>,
     dc_y: Vec<f32>,
-    /// High-pass filter state: previous input and output per channel (mono only needs 1)
+    /// High-pass filter state (single-pole, ~80 Hz at 48 kHz)
     hp_x_prev: f32,
     hp_y_prev: f32,
+    /// Pre-sized to max expected frame count to avoid per-packet resize
     packet_mono: Vec<f32>,
     frame_in: Box<[f32; AUDIO_FRAME_SIZE]>,
-    mid_frame: Box<[f32; AUDIO_FRAME_SIZE]>,
     frame_out: Box<[f32; AUDIO_FRAME_SIZE]>,
 }
 
@@ -537,13 +537,16 @@ impl RNNoiseProcessor {
     const HP_COEFF: f32 = 0.9895;
 
     fn new(channels: usize) -> Self {
-        let mut in_buf = Vec::with_capacity(AUDIO_FRAME_SIZE * 16);
-        in_buf.resize(AUDIO_FRAME_SIZE, 0.0);
+        // Pre-size in_buf to one frame so the queue is never empty on first push,
+        // but start with head=0 and let discard_warmup_frame handle the priming.
+        let in_buf = Vec::with_capacity(AUDIO_FRAME_SIZE * 16);
         let out_buf = Vec::with_capacity(AUDIO_FRAME_SIZE * 16);
+        // Pre-size packet_mono to the largest typical frame (100ms @ 48kHz = 4800 frames)
+        // to avoid per-packet resize allocations.
+        let packet_mono = Vec::with_capacity(4800);
         Self {
             channels,
             state: DenoiseState::new(),
-            state2: DenoiseState::new(),
             in_buf,
             in_head: 0,
             out_buf,
@@ -555,9 +558,8 @@ impl RNNoiseProcessor {
             dc_y: vec![0.0; channels],
             hp_x_prev: 0.0,
             hp_y_prev: 0.0,
-            packet_mono: Vec::with_capacity(AUDIO_FRAME_SIZE * 2),
+            packet_mono,
             frame_in: Box::new([0.0; AUDIO_FRAME_SIZE]),
-            mid_frame: Box::new([0.0; AUDIO_FRAME_SIZE]),
             frame_out: Box::new([0.0; AUDIO_FRAME_SIZE]),
         }
     }
@@ -608,10 +610,13 @@ impl RNNoiseProcessor {
 
     #[inline]
     fn clamp_i16(sample: f32) -> i16 {
-        sample.clamp(-32768.0, 32767.0) as i16
+        // round() avoids the consistent -0.5 LSB truncation bias at low signal levels
+        sample.clamp(-32768.0, 32767.0).round() as i16
     }
 
     fn prepare_packet_mono(&mut self, samples: &[i16], frame_count: usize) {
+        // Reuse allocation — capacity was pre-sized in new(), so this is a no-op
+        // for the common case where frame_count stays constant.
         self.packet_mono.resize(frame_count, 0.0);
         match self.channels {
             1 => {
@@ -637,51 +642,74 @@ impl RNNoiseProcessor {
                 }
             }
         }
-        // Apply high-pass filter inline to avoid borrow conflicts
-        for sample in self.packet_mono.iter_mut() {
-            let y = Self::HP_COEFF * (self.hp_y_prev + *sample - self.hp_x_prev);
-            self.hp_x_prev = *sample;
-            self.hp_y_prev = y;
-            *sample = y;
+        // Apply high-pass filter via the shared method — no borrow conflict since
+        // hp_filter only touches hp_x_prev/hp_y_prev, not packet_mono.
+        for i in 0..self.packet_mono.len() {
+            self.packet_mono[i] = self.hp_filter(self.packet_mono[i]);
         }
     }
 
-    fn write_sample_with_delta(
-        &mut self,
-        samples: &mut [i16],
-        frame_index: usize,
-        delta: f32,
-        apply_delta: bool,
-    ) {
+    /// Apply the noise-reduction delta to the `available` frames that have wet output,
+    /// then dc-block all channels. Separate from the passthrough loop to eliminate
+    /// the per-sample `apply_delta` branch.
+    #[inline]
+    fn apply_wet_frames(&mut self, samples: &mut [i16], available: usize, out_head: usize) {
         match self.channels {
             1 => {
-                let sample = if apply_delta {
-                    samples[frame_index] as f32 + delta
-                } else {
-                    samples[frame_index] as f32
-                };
-                samples[frame_index] = Self::clamp_i16(self.dc_block(0, sample));
+                for i in 0..available {
+                    let delta = self.out_buf[out_head + i] - self.packet_mono[i];
+                    let s = Self::clamp_i16(self.dc_block(0, samples[i] as f32 + delta));
+                    samples[i] = s;
+                }
             }
             2 => {
-                let base = frame_index * 2;
-                for channel in 0..2 {
-                    let sample = if apply_delta {
-                        samples[base + channel] as f32 + delta
-                    } else {
-                        samples[base + channel] as f32
-                    };
-                    samples[base + channel] = Self::clamp_i16(self.dc_block(channel, sample));
+                for i in 0..available {
+                    let delta = self.out_buf[out_head + i] - self.packet_mono[i];
+                    let base = i * 2;
+                    for ch in 0..2 {
+                        let s = Self::clamp_i16(self.dc_block(ch, samples[base + ch] as f32 + delta));
+                        samples[base + ch] = s;
+                    }
                 }
             }
             _ => {
-                let base = frame_index * self.channels;
-                for channel in 0..self.channels {
-                    let sample = if apply_delta {
-                        samples[base + channel] as f32 + delta
-                    } else {
-                        samples[base + channel] as f32
-                    };
-                    samples[base + channel] = Self::clamp_i16(self.dc_block(channel, sample));
+                for i in 0..available {
+                    let delta = self.out_buf[out_head + i] - self.packet_mono[i];
+                    let base = i * self.channels;
+                    for ch in 0..self.channels {
+                        let s = Self::clamp_i16(self.dc_block(ch, samples[base + ch] as f32 + delta));
+                        samples[base + ch] = s;
+                    }
+                }
+            }
+        }
+    }
+
+    /// DC-block passthrough frames (no wet output available yet).
+    #[inline]
+    fn apply_passthrough_frames(&mut self, samples: &mut [i16], start: usize, end: usize) {
+        match self.channels {
+            1 => {
+                for i in start..end {
+                    samples[i] = Self::clamp_i16(self.dc_block(0, samples[i] as f32));
+                }
+            }
+            2 => {
+                for i in start..end {
+                    let base = i * 2;
+                    for ch in 0..2 {
+                        let s = Self::clamp_i16(self.dc_block(ch, samples[base + ch] as f32));
+                        samples[base + ch] = s;
+                    }
+                }
+            }
+            _ => {
+                for i in start..end {
+                    let base = i * self.channels;
+                    for ch in 0..self.channels {
+                        let s = Self::clamp_i16(self.dc_block(ch, samples[base + ch] as f32));
+                        samples[base + ch] = s;
+                    }
                 }
             }
         }
@@ -699,31 +727,32 @@ impl RNNoiseProcessor {
             unsafe { std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut i16, sample_count) };
 
         self.prepare_packet_mono(samples, frame_count);
-
-        self.in_buf.extend_from_slice(&self.packet_mono);
+        self.in_buf.extend_from_slice(&self.packet_mono[..frame_count]);
 
         while (self.in_buf.len() - self.in_head) >= AUDIO_FRAME_SIZE {
             let frame_start_idx = self.in_head;
             self.frame_in
                 .copy_from_slice(&self.in_buf[frame_start_idx..frame_start_idx + AUDIO_FRAME_SIZE]);
 
-            self.state
-                .process_frame(self.mid_frame.as_mut_slice(), self.frame_in.as_slice());
+            // Single RNNoise pass — two passes double CPU cost without quality gain.
             let speech_prob = self
-                .state2
-                .process_frame(self.frame_out.as_mut_slice(), self.mid_frame.as_slice());
+                .state
+                .process_frame(self.frame_out.as_mut_slice(), self.frame_in.as_slice());
 
             let target_gain = if speech_prob > Self::GATE_OPEN_THRESHOLD {
                 1.0_f32
             } else {
                 Self::GATE_FLOOR
             };
-            let coeff = if target_gain > self.gate_gain {
-                Self::GATE_ATTACK
-            } else {
-                Self::GATE_RELEASE
-            };
-            self.gate_gain += (target_gain - self.gate_gain) * coeff;
+            // Fast path: skip smoothing math when gate is already fully open and staying open
+            if !(self.gate_gain > 0.999 && target_gain > Self::GATE_OPEN_THRESHOLD) {
+                let coeff = if target_gain > self.gate_gain {
+                    Self::GATE_ATTACK
+                } else {
+                    Self::GATE_RELEASE
+                };
+                self.gate_gain += (target_gain - self.gate_gain) * coeff;
+            }
 
             if self.discard_warmup_frame {
                 self.discard_warmup_frame = false;
@@ -738,26 +767,23 @@ impl RNNoiseProcessor {
             }
 
             self.in_head += AUDIO_FRAME_SIZE;
-            Self::compact_queue(&mut self.in_buf, &mut self.in_head);
         }
+        // Compact once after the loop instead of every iteration
+        Self::compact_queue(&mut self.in_buf, &mut self.in_head);
 
         self.skip_pending_wet_output();
         let available = (self.out_buf.len() - self.out_head).min(frame_count);
+        let out_head = self.out_head;
 
-        for i in 0..available {
-            let wet_mono = self.out_buf[self.out_head + i];
-            let dry_mono = self.packet_mono[i];
-            self.write_sample_with_delta(samples, i, wet_mono - dry_mono, true);
-        }
+        // Two separate loops — no per-sample branch on apply_delta
+        self.apply_wet_frames(samples, available, out_head);
 
         if available > 0 {
             self.out_head += available;
             Self::compact_queue(&mut self.out_buf, &mut self.out_head);
         }
 
-        for i in available..frame_count {
-            self.write_sample_with_delta(samples, i, 0.0, false);
-        }
+        self.apply_passthrough_frames(samples, available, frame_count);
 
         self.pending_wet_drop = self.pending_wet_drop.saturating_add(frame_count - available);
     }
