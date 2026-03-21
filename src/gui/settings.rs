@@ -408,7 +408,10 @@ impl SettingsApp {
 
         ui.separator();
         ui.label(egui::RichText::new("Webcam (optional)").strong());
-        ui.checkbox(&mut self.config.video.webcam_enabled, "Record webcam with clips");
+        ui.checkbox(
+            &mut self.config.video.webcam_enabled,
+            "Record webcam with clips",
+        );
         ui.add_enabled_ui(self.config.video.webcam_enabled, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("Refresh camera list").clicked() {

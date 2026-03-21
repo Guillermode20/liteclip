@@ -1,6 +1,6 @@
-use crate::config::Config;
 use crate::buffer::ReplayBuffer;
 use crate::capture::WebcamCapture;
+use crate::config::Config;
 use crate::encode::{
     resolve_effective_encoder_config, EncoderConfig, EncoderFactory, EncoderHandle,
 };

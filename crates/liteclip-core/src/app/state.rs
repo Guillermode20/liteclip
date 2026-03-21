@@ -205,9 +205,9 @@ impl AppState {
                 None
             };
 
-            if let Err(e) = self
-                .pipeline
-                .start(&self.config, &self.buffer, self.webcam_buffer.as_ref())
+            if let Err(e) =
+                self.pipeline
+                    .start(&self.config, &self.buffer, self.webcam_buffer.as_ref())
             {
                 error!("Failed to start pipeline with new config: {}", e);
                 error!("Rolling back to previous configuration...");
@@ -220,11 +220,10 @@ impl AppState {
                     None
                 };
 
-                match self.pipeline.start(
-                    &self.config,
-                    &self.buffer,
-                    self.webcam_buffer.as_ref(),
-                ) {
+                match self
+                    .pipeline
+                    .start(&self.config, &self.buffer, self.webcam_buffer.as_ref())
+                {
                     Ok(()) => {
                         warn!("Rollback successful - using previous configuration");
                     }

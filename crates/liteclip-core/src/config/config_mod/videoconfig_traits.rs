@@ -9,7 +9,7 @@
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
 use super::functions::{
-    default_bitrate, default_encoder, default_framerate, default_false, default_quality_preset,
+    default_bitrate, default_encoder, default_false, default_framerate, default_quality_preset,
     default_quality_value, default_rate_control, default_resolution, default_true,
     default_webcam_height, default_webcam_width,
 };

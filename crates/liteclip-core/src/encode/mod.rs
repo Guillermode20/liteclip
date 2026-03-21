@@ -47,12 +47,12 @@
 //! );
 //! ```
 
+#[cfg(feature = "ffmpeg-cli")]
+pub mod cli_pipe;
 pub mod encoder_mod;
 pub mod error;
 #[cfg(feature = "ffmpeg")]
 pub mod ffmpeg;
-#[cfg(feature = "ffmpeg-cli")]
-pub mod cli_pipe;
 pub mod sw_encoder;
 
 pub use encoder_mod::*;

@@ -3,8 +3,8 @@ use eframe::egui;
 use super::{
     add_cut_point, clamp_selected_snippet_index, poll_editor_export_updates, remove_cut_point,
     render_completion_screen, render_editor_workspace, seek_editor, start_export,
-    toggle_editor_playback, update_playback_clock, ClipCompressApp, EditorFocusZone,
-    EditorUiOutcome, EDITOR_LARGE_SEEK_SECS, EDITOR_SMALL_SEEK_SECS,
+    toggle_editor_playback, update_playback_clock, ClipCompressApp, EditorUiOutcome,
+    EDITOR_LARGE_SEEK_SECS, EDITOR_SMALL_SEEK_SECS,
 };
 
 pub(super) fn render_editor_ui(app: &mut ClipCompressApp, ui: &mut egui::Ui) -> EditorUiOutcome {
@@ -32,10 +32,6 @@ pub(super) fn render_editor_ui(app: &mut ClipCompressApp, ui: &mut egui::Ui) -> 
         }
         ui.heading(format!("Editing: {}", editor.video.filename));
         ui.separator();
-        ui.label(match editor.focus_zone {
-            EditorFocusZone::MainPanel => "Keyboard Focus: Main Panel",
-            EditorFocusZone::Sidebar => "Keyboard Focus: Sidebar",
-        });
         ui.label(egui::RichText::new(
             "Hotkeys: Space=Play/Pause · ←/→=Seek · Home/End=Jump · A=Add cut · Del=Remove cut · Esc=Back · Ctrl+E/S=Export · Ctrl+Z=Undo",
         )
@@ -114,58 +110,53 @@ fn handle_editor_shortcuts(
         }
     }
 
-    if editor.focus_zone == EditorFocusZone::MainPanel {
-        if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
-            toggle_editor_playback(editor);
-        }
+    if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
+        toggle_editor_playback(editor);
+    }
 
-        if ctx.input(|i| i.key_pressed(egui::Key::A))
-            && add_cut_point(editor, editor.current_time_secs)
-        {
+    if ctx.input(|i| i.key_pressed(egui::Key::A)) && add_cut_point(editor, editor.current_time_secs)
+    {
+        outcome.preview_request = Some(editor.current_time_secs);
+    }
+
+    if ctx.input(|i| i.key_pressed(egui::Key::Delete)) {
+        if let Some(index) = editor.selected_cut_point {
+            remove_cut_point(editor, index);
             outcome.preview_request = Some(editor.current_time_secs);
         }
+    }
 
-        if ctx.input(|i| i.key_pressed(egui::Key::Delete)) {
-            if let Some(index) = editor.selected_cut_point {
-                remove_cut_point(editor, index);
-                outcome.preview_request = Some(editor.current_time_secs);
-            }
-        }
+    if ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft)) {
+        let step = if ctx.input(|i| i.modifiers.shift) {
+            -EDITOR_LARGE_SEEK_SECS
+        } else {
+            -EDITOR_SMALL_SEEK_SECS
+        };
+        seek_editor(editor, outcome, step);
+    }
 
-        if ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft)) {
-            let step = if ctx.input(|i| i.modifiers.shift) {
-                -EDITOR_LARGE_SEEK_SECS
-            } else {
-                -EDITOR_SMALL_SEEK_SECS
-            };
-            seek_editor(editor, outcome, step);
-        }
+    if ctx.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
+        let step = if ctx.input(|i| i.modifiers.shift) {
+            EDITOR_LARGE_SEEK_SECS
+        } else {
+            EDITOR_SMALL_SEEK_SECS
+        };
+        seek_editor(editor, outcome, step);
+    }
 
-        if ctx.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
-            let step = if ctx.input(|i| i.modifiers.shift) {
-                EDITOR_LARGE_SEEK_SECS
-            } else {
-                EDITOR_SMALL_SEEK_SECS
-            };
-            seek_editor(editor, outcome, step);
-        }
+    if ctx.input(|i| i.key_pressed(egui::Key::Home)) {
+        editor.playback.pause_at(0.0);
+        editor.is_playing = false;
+        editor.current_time_secs = 0.0;
+        outcome.preview_request = Some(0.0);
+    }
 
-        if ctx.input(|i| i.key_pressed(egui::Key::Home)) {
-            editor.playback.pause_at(0.0);
-            editor.is_playing = false;
-            editor.current_time_secs = 0.0;
-            outcome.preview_request = Some(0.0);
-        }
-
-        if ctx.input(|i| i.key_pressed(egui::Key::End)) {
-            let end_time = editor.duration_secs();
-            editor.playback.pause_at(end_time);
-            editor.is_playing = false;
-            editor.current_time_secs = end_time;
-            outcome.preview_request = Some(end_time);
-        }
-
-        return;
+    if ctx.input(|i| i.key_pressed(egui::Key::End)) {
+        let end_time = editor.duration_secs();
+        editor.playback.pause_at(end_time);
+        editor.is_playing = false;
+        editor.current_time_secs = end_time;
+        outcome.preview_request = Some(end_time);
     }
 
     clamp_selected_snippet_index(editor);

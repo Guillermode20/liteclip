@@ -40,10 +40,10 @@ const MIN_RANGE_SECS: f64 = 0.1;
 const EDITOR_SIDEBAR_WIDTH: f32 = 340.0;
 const EDITOR_SIDEBAR_MIN_WIDTH: f32 = 280.0;
 const EDITOR_STACK_BREAKPOINT: f32 = 960.0;
-#[allow(dead_code)]
-const BROWSER_DELETE_HOLD_SECS: f32 = 1.0;
 const EDITOR_SMALL_SEEK_SECS: f64 = 1.0;
 const EDITOR_LARGE_SEEK_SECS: f64 = 5.0;
+#[allow(dead_code)]
+const BROWSER_DELETE_HOLD_SECS: f32 = 1.0;
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -128,13 +128,6 @@ impl ThumbnailStrip {
     }
 }
 
-#[allow(dead_code)]
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum EditorFocusZone {
-    MainPanel,
-    Sidebar,
-}
-
 struct EditorState {
     video: VideoEntry,
     current_time_secs: f64,
@@ -156,7 +149,6 @@ struct EditorState {
     was_playing_before_scrub: bool,
     last_scrub_time: Option<Instant>,
     last_scrub_position: Option<f64>,
-    focus_zone: EditorFocusZone,
     selected_snippet_index: Option<usize>,
     thumbnail_strip: Option<ThumbnailStrip>,
     thumbnail_strip_loading: bool,
@@ -180,11 +172,10 @@ impl EditorState {
             PREVIEW_FRAME_WIDTH,
         );
         let webcam_layout_path = webcam_layout_path(&video.save_root, &video.path);
-        let webcam_layout = WebcamLayoutFile::load(&webcam_layout_path).unwrap_or_else(|_| {
-            WebcamLayoutFile {
+        let webcam_layout =
+            WebcamLayoutFile::load(&webcam_layout_path).unwrap_or_else(|_| WebcamLayoutFile {
                 keyframes: default_webcam_keyframes(),
-            }
-        });
+            });
         let webcam_playback = video.webcam_path.as_ref().and_then(|p| {
             probe_video_file(p)
                 .ok()
@@ -212,7 +203,6 @@ impl EditorState {
             was_playing_before_scrub: false,
             last_scrub_time: None,
             last_scrub_position: None,
-            focus_zone: EditorFocusZone::MainPanel,
             selected_snippet_index: Some(0),
             thumbnail_strip: None,
             thumbnail_strip_loading: false,
@@ -408,9 +398,7 @@ impl ClipCompressApp {
             .unwrap_or_else(|| "Desktop".to_string());
 
         let webcam_candidate = webcam_video_path(base_dir, &path);
-        let webcam_path = webcam_candidate
-            .exists()
-            .then_some(webcam_candidate);
+        let webcam_path = webcam_candidate.exists().then_some(webcam_candidate);
 
         Ok(VideoEntry {
             path,
@@ -880,7 +868,12 @@ struct EditorUiOutcome {
     refresh_browser: bool,
 }
 
-fn collect_video_paths(dir: &Path, cache_dir: &Path, webcam_cache_dir: &Path, output: &mut Vec<PathBuf>) {
+fn collect_video_paths(
+    dir: &Path,
+    cache_dir: &Path,
+    webcam_cache_dir: &Path,
+    output: &mut Vec<PathBuf>,
+) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -1122,16 +1115,6 @@ fn seek_editor(editor: &mut EditorState, outcome: &mut EditorUiOutcome, delta_se
     editor.current_time_secs =
         (editor.current_time_secs + delta_secs).clamp(0.0, editor.duration_secs());
     outcome.preview_request = Some(editor.current_time_secs);
-}
-
-#[allow(dead_code)]
-fn cycle_editor_focus_zone(editor: &mut EditorState, backwards: bool) {
-    editor.focus_zone = match (editor.focus_zone, backwards) {
-        (EditorFocusZone::MainPanel, false) => EditorFocusZone::Sidebar,
-        (EditorFocusZone::Sidebar, false) => EditorFocusZone::MainPanel,
-        (EditorFocusZone::MainPanel, true) => EditorFocusZone::Sidebar,
-        (EditorFocusZone::Sidebar, true) => EditorFocusZone::MainPanel,
-    };
 }
 
 fn clamp_selected_snippet_index(editor: &mut EditorState) {
@@ -1504,7 +1487,7 @@ fn render_snippet_list(ui: &mut egui::Ui, editor: &mut EditorState, outcome: &mu
 fn render_size_section(ui: &mut egui::Ui, editor: &mut EditorState) {
     let kept_duration = editor.kept_duration_secs();
     let kept_ranges = editor.kept_ranges();
-    let (video_kbps, total_kbps) = estimate_bitrate_kbps(
+    let (video_kbps, total_kbps) = estimate_export_bitrates_from_editor(
         editor.target_size_mb,
         kept_duration,
         editor.video.metadata.has_audio,
@@ -1571,14 +1554,10 @@ fn start_export(editor: &mut EditorState) {
     let (progress_tx, progress_rx) = mpsc::channel();
     let cancel_flag = Arc::new(AtomicBool::new(false));
 
-    let webcam = editor
-        .video
-        .webcam_path
-        .clone()
-        .map(|path| WebcamExport {
-            path,
-            keyframes: editor.webcam_layout.keyframes.clone(),
-        });
+    let webcam = editor.video.webcam_path.clone().map(|path| WebcamExport {
+        path,
+        keyframes: editor.webcam_layout.keyframes.clone(),
+    });
     spawn_clip_export(
         ClipExportRequest {
             input_path: editor.video.path.clone(),
@@ -1909,33 +1888,7 @@ fn enabled_time_ranges(
         .collect()
 }
 
-#[allow(dead_code)]
-fn clamp_to_enabled_playback_time(
-    time_secs: f64,
-    duration_secs: f64,
-    cut_points: &[f64],
-    snippet_enabled: &[bool],
-) -> f64 {
-    let mut next_enabled_start = duration_secs;
-
-    for snippet in snippet_segments(duration_secs, cut_points, snippet_enabled) {
-        if snippet.enabled {
-            if time_secs < snippet.start_secs {
-                return snippet.start_secs;
-            }
-            if time_secs >= snippet.start_secs && time_secs < snippet.end_secs {
-                return time_secs;
-            }
-            next_enabled_start = duration_secs;
-        } else if time_secs >= snippet.start_secs && time_secs < snippet.end_secs {
-            next_enabled_start = snippet.end_secs;
-        }
-    }
-
-    next_enabled_start.min(duration_secs)
-}
-
-fn estimate_bitrate_kbps(
+fn estimate_export_bitrates_from_editor(
     target_size_mb: u32,
     kept_duration_secs: f64,
     has_audio: bool,

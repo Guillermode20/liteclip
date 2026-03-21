@@ -322,7 +322,8 @@ impl WasapiMicCapture {
 
                 if flags & (AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY.0 as u32) != 0 {
                     capture_discontinuities = capture_discontinuities.saturating_add(1);
-                    if capture_discontinuities == 1 || capture_discontinuities % 100 == 0 {
+                    // Skip warning for first discontinuity (common at startup)
+                    if capture_discontinuities > 1 && capture_discontinuities % 100 == 0 {
                         warn!(
                             "Microphone capture discontinuity detected (count={})",
                             capture_discontinuities
@@ -480,7 +481,7 @@ fn run_noise_thread(
                 }
                 packets += 1;
                 if last_log.elapsed() >= Duration::from_secs(2) {
-                    tracing::info!("RNNoise: processed {} packets in 2s", packets);
+                    tracing::debug!("RNNoise: processed {} packets in 2s", packets);
                     packets = 0;
                     last_log = std::time::Instant::now();
                 }
@@ -502,13 +503,6 @@ fn run_noise_thread(
     }
 }
 
-#[allow(dead_code)]
-fn soft_limit(x: f32) -> f32 {
-    x.clamp(-32768.0f32, 32767.0f32)
-}
-
-#[allow(dead_code)]
-#[allow(clippy::struct_field_names)]
 struct RNNoiseProcessor {
     channels: usize,
     state: Box<DenoiseState<'static>>,
@@ -516,41 +510,14 @@ struct RNNoiseProcessor {
     in_head: usize,
     out_buf: Vec<f32>,
     out_head: usize,
-    gain: f32,
-    speech_presence: f32,
-    noise_floor: f32,
-    speech_hangover: u8,
     dc_x: Vec<f32>,
     dc_y: Vec<f32>,
     frame_in: Box<[f32; AUDIO_FRAME_SIZE]>,
     frame_out: Box<[f32; AUDIO_FRAME_SIZE]>,
-    primed: bool,
-    attack_alpha: f32,
-    release_alpha: f32,
-    presence_attack_alpha: f32,
-    presence_release_alpha: f32,
-    quiet_packet_streak: u8,
 }
 
-#[allow(dead_code)]
-#[allow(clippy::too_many_arguments)]
 impl RNNoiseProcessor {
     const DC_COEFF: f32 = 0.9975;
-    const MIN_GAIN: f32 = 0.18;
-    const QUIET_SPEECH_GAIN: f32 = 0.90;
-    const MAX_GAIN: f32 = 4.00;
-    const QUIET_SPEECH_MAKEUP_GAIN: f32 = 1.10;
-    const VAD_NOISE_THRESHOLD: f32 = 0.22;
-    const VAD_GATE_THRESHOLD: f32 = 0.52;
-    const SNR_MIN: f32 = 1.15;
-    const SNR_MAX: f32 = 5.5;
-    const HANGOVER_FRAMES: u8 = 24;
-    const NOISE_FLOOR_FAST_ALPHA: f32 = 0.10;
-    const NOISE_FLOOR_SLOW_ALPHA: f32 = 0.01;
-    const QUIET_PACKET_STREAK_THRESHOLD: u8 = 4;
-    const QUIET_PACKET_MAX_MEAN_ABS: f32 = 48.0;
-    const QUIET_PACKET_MAX_PEAK: i32 = 900;
-    const QUIET_BYPASS_MAX_SPEECH_PRESENCE: f32 = 0.08;
 
     fn new(channels: usize) -> Self {
         let mut in_buf = Vec::with_capacity(AUDIO_FRAME_SIZE * 16);
@@ -563,78 +530,11 @@ impl RNNoiseProcessor {
             in_head: 0,
             out_buf,
             out_head: 0,
-            gain: 1.0,
-            speech_presence: 0.0,
-            noise_floor: 300.0,
-            speech_hangover: 0,
             dc_x: vec![0.0; channels],
             dc_y: vec![0.0; channels],
             frame_in: Box::new([0.0; AUDIO_FRAME_SIZE]),
             frame_out: Box::new([0.0; AUDIO_FRAME_SIZE]),
-            primed: false,
-            attack_alpha: Self::alpha_from_ms(1.5),
-            release_alpha: Self::alpha_from_ms(80.0),
-            presence_attack_alpha: Self::frame_alpha_from_ms(30.0),
-            presence_release_alpha: Self::frame_alpha_from_ms(220.0),
-            quiet_packet_streak: 0,
         }
-    }
-
-    #[inline]
-    fn alpha_from_ms(ms: f32) -> f32 {
-        if ms <= 0.0 {
-            return 1.0;
-        }
-
-        let sample_rate = 48_000.0;
-        let tau_seconds = ms / 1000.0;
-        let alpha = 1.0 - (-1.0 / (sample_rate * tau_seconds)).exp();
-        alpha.clamp(0.000001, 1.0)
-    }
-
-    #[inline]
-    fn frame_alpha_from_ms(ms: f32) -> f32 {
-        if ms <= 0.0 {
-            return 1.0;
-        }
-
-        let frame_rate = 100.0;
-        let tau_seconds = ms / 1000.0;
-        let alpha = 1.0 - (-1.0 / (frame_rate * tau_seconds)).exp();
-        alpha.clamp(0.000001, 1.0)
-    }
-
-    #[inline]
-    fn lerp(a: f32, b: f32, t: f32) -> f32 {
-        a + (b - a) * t.clamp(0.0, 1.0)
-    }
-
-    #[inline]
-    fn compute_adaptive_target_gain(vad: f32) -> f32 {
-        if vad > 0.5 {
-            1.0
-        } else {
-            0.0
-        }
-    }
-
-    #[inline]
-    fn reset_after_quiet_bypass(&mut self) {
-        self.in_buf.clear();
-        self.in_buf.resize(AUDIO_FRAME_SIZE, 0.0);
-        self.in_head = 0;
-        self.out_buf.clear();
-        self.out_head = 0;
-        self.gain = Self::MIN_GAIN;
-        self.speech_presence = 0.0;
-        self.speech_hangover = 0;
-        self.primed = false;
-    }
-
-    #[inline]
-    #[allow(unused_variables)]
-    fn maybe_bypass_quiet_packet(&mut self, _data: &mut [u8]) -> bool {
-        false
     }
 
     #[inline]
@@ -789,29 +689,6 @@ impl RNNoiseProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[allow(dead_code)]
-    fn test_frame_rms(frame: &[f32]) -> f32 {
-        let sum_sq = frame.iter().map(|sample| sample * sample).sum::<f32>();
-        (sum_sq / frame.len() as f32).sqrt()
-    }
-
-    #[allow(dead_code)]
-    fn test_frame_peak(frame: &[f32]) -> f32 {
-        frame
-            .iter()
-            .fold(0.0f32, |peak, sample| peak.max(sample.abs()))
-    }
-
-    #[allow(dead_code)]
-    fn synth_sine_frame(amplitude: f32, frame_index: usize) -> Vec<f32> {
-        (0..AUDIO_FRAME_SIZE)
-            .map(|i| {
-                let phase = frame_index as f32 * 0.37 + i as f32 * 0.11;
-                phase.sin() * amplitude
-            })
-            .collect()
-    }
 
     #[test]
     fn test_wasapi_mic_config_default() {

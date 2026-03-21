@@ -88,13 +88,6 @@ impl ReplayEngine {
         host: Option<Arc<dyn CoreHost>>,
     ) -> Result<PathBuf> {
         let (config, buffer, webcam_buffer) = self.state.save_context();
-        ClipManager::save_clip(
-            &config,
-            &buffer,
-            webcam_buffer.as_ref(),
-            game_name,
-            host,
-        )
-        .await
+        ClipManager::save_clip(&config, &buffer, webcam_buffer.as_ref(), game_name, host).await
     }
 }

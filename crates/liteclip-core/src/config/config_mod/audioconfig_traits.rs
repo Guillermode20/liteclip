@@ -9,9 +9,8 @@
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
 use super::functions::{
-    default_balance,
-    default_master_volume, default_mic_device, default_mic_volume, default_system_volume,
-    default_true,
+    default_balance, default_master_volume, default_mic_device, default_mic_volume,
+    default_system_volume, default_true,
 };
 use super::types::AudioConfig;
 

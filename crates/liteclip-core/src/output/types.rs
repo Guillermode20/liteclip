@@ -468,7 +468,11 @@ fn mux_clip_via_ffmpeg_cli(
         .with_context(|| format!("Failed to spawn ffmpeg mux via {:?}", ffmpeg))?;
     let _ = std::fs::remove_file(&tmp);
     if !status.success() {
-        bail!("ffmpeg mux to {:?} failed with status {:?}", output_path, status);
+        bail!(
+            "ffmpeg mux to {:?} failed with status {:?}",
+            output_path,
+            status
+        );
     }
     info!(
         "MP4 finalized via ffmpeg CLI: {:?} ({} video packets)",

@@ -462,8 +462,7 @@ fn attempt_export(
     attempt_count: usize,
 ) -> Result<Option<ExportAttemptResult>> {
     let first_pass_filter = build_filter_complex_for_request(request, false);
-    let second_pass_filter =
-        build_filter_complex_for_request(request, request.metadata.has_audio);
+    let second_pass_filter = build_filter_complex_for_request(request, request.metadata.has_audio);
     let ffmpeg = ffmpeg_executable_path();
     let passlog_prefix = output_path.with_extension("passlog");
     let passlog_prefix_str = passlog_prefix.to_string_lossy().into_owned();
@@ -815,9 +814,7 @@ fn build_filter_with_webcam(
     }
     let n = request.keep_ranges.len();
     if has_audio {
-        c0.push_str(&format!(
-            "concat=n={n}:v=1:a=1[mv][outa]"
-        ));
+        c0.push_str(&format!("concat=n={n}:v=1:a=1[mv][outa]"));
     } else {
         c0.push_str(&format!("concat=n={n}:v=1:a=0[mv]"));
     }

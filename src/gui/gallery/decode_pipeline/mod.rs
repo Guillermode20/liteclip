@@ -5,7 +5,6 @@ use ffmpeg_next::packet::Mut;
 use image::RgbaImage;
 use rodio::{Sink, Source};
 use std::collections::VecDeque;
-use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -13,11 +12,6 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
-use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-    D3D11_SDK_VERSION,
-};
-use windows_core::Interface;
 
 use crate::output::functions::ffmpeg_executable_path;
 use crate::output::VideoFileMetadata;
@@ -28,27 +22,6 @@ use frame_pool::{FramePool, FRAME_POOL_SIZE};
 
 const FRAME_CHANNEL_CAPACITY: usize = 24;
 const PLAYBACK_QUEUE_DEPTH: usize = 20;
-
-#[repr(C)]
-#[allow(dead_code)]
-struct AvD3d11vaDeviceContext {
-    device: *mut c_void,
-    device_context: *mut c_void,
-    video_device: *mut c_void,
-    video_context: *mut c_void,
-    lock: Option<unsafe extern "C" fn(*mut c_void)>,
-    unlock: Option<unsafe extern "C" fn(*mut c_void)>,
-    lock_ctx: *mut c_void,
-}
-
-#[allow(dead_code)]
-struct HardwareDecodeContext {
-    device_ctx_ref: *mut ffmpeg::ffi::AVBufferRef,
-    frames_ctx_ref: *mut ffmpeg::ffi::AVBufferRef,
-    _device: ID3D11Device,
-    _context: ID3D11DeviceContext,
-    sw_frame: ffmpeg::util::frame::video::Video,
-}
 
 struct DecoderHardwareContext {
     device_ctx_ref: *mut ffmpeg::ffi::AVBufferRef,
@@ -62,135 +35,6 @@ impl Drop for DecoderHardwareContext {
             if !self.device_ctx_ref.is_null() {
                 ffmpeg::ffi::av_buffer_unref(&mut self.device_ctx_ref);
             }
-        }
-    }
-}
-
-unsafe impl Send for HardwareDecodeContext {}
-
-impl Drop for HardwareDecodeContext {
-    fn drop(&mut self) {
-        unsafe {
-            if !self.frames_ctx_ref.is_null() {
-                ffmpeg::ffi::av_buffer_unref(&mut self.frames_ctx_ref);
-            }
-            if !self.device_ctx_ref.is_null() {
-                ffmpeg::ffi::av_buffer_unref(&mut self.device_ctx_ref);
-            }
-        }
-    }
-}
-
-impl HardwareDecodeContext {
-    #[allow(dead_code)]
-    fn new(output_width: u32, output_height: u32) -> Result<Self> {
-        unsafe {
-            let feature_levels = [
-                windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_1,
-                windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_0,
-            ];
-            let mut device_opt: Option<ID3D11Device> = None;
-            let mut context_opt: Option<ID3D11DeviceContext> = None;
-
-            D3D11CreateDevice(
-                None,
-                windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE,
-                windows::Win32::Foundation::HMODULE::default(),
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                Some(&feature_levels),
-                D3D11_SDK_VERSION,
-                Some(&mut device_opt),
-                None,
-                Some(&mut context_opt),
-            )
-            .context("Failed to create D3D11 device for hardware decoding")?;
-
-            let device = device_opt.context("D3D11 device is null")?;
-            let context = context_opt.context("D3D11 context is null")?;
-
-            let mut device_ctx_ref = ffmpeg::ffi::av_hwdevice_ctx_alloc(
-                ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA,
-            );
-            if device_ctx_ref.is_null() {
-                bail!("Failed to allocate D3D11VA device context");
-            }
-
-            let hw_device_ctx = (*device_ctx_ref).data as *mut ffmpeg::ffi::AVHWDeviceContext;
-            let d3d11_ctx = (*hw_device_ctx).hwctx as *mut AvD3d11vaDeviceContext;
-
-            (*d3d11_ctx).device = device.as_raw() as *mut _;
-            (*d3d11_ctx).device_context = context.as_raw() as *mut _;
-
-            let init_result = ffmpeg::ffi::av_hwdevice_ctx_init(device_ctx_ref);
-            if init_result < 0 {
-                ffmpeg::ffi::av_buffer_unref(&mut device_ctx_ref);
-                bail!(
-                    "Failed to initialize D3D11VA device context: {}",
-                    init_result
-                );
-            }
-
-            let mut frames_ctx_ref = ffmpeg::ffi::av_hwframe_ctx_alloc(device_ctx_ref);
-            if frames_ctx_ref.is_null() {
-                ffmpeg::ffi::av_buffer_unref(&mut device_ctx_ref);
-                bail!("Failed to allocate D3D11VA frames context");
-            }
-
-            let frames_ctx = (*frames_ctx_ref).data as *mut ffmpeg::ffi::AVHWFramesContext;
-            (*frames_ctx).format = ffmpeg::format::Pixel::D3D11.into();
-            (*frames_ctx).sw_format = ffmpeg::format::Pixel::NV12.into();
-            (*frames_ctx).width = output_width as i32;
-            (*frames_ctx).height = output_height as i32;
-            (*frames_ctx).initial_pool_size = 6;
-
-            let init_frames_result = ffmpeg::ffi::av_hwframe_ctx_init(frames_ctx_ref);
-            if init_frames_result < 0 {
-                ffmpeg::ffi::av_buffer_unref(&mut frames_ctx_ref);
-                ffmpeg::ffi::av_buffer_unref(&mut device_ctx_ref);
-                bail!(
-                    "Failed to initialize D3D11VA frames context: {}",
-                    init_frames_result
-                );
-            }
-
-            let sw_frame = ffmpeg::util::frame::video::Video::new(
-                ffmpeg::format::Pixel::NV12,
-                output_width,
-                output_height,
-            );
-
-            tracing::info!("Created hardware decode context (D3D11VA)");
-
-            Ok(Self {
-                device_ctx_ref,
-                frames_ctx_ref,
-                _device: device,
-                _context: context,
-                sw_frame,
-            })
-        }
-    }
-
-    #[allow(dead_code)]
-    fn transfer_frame_to_cpu(
-        &mut self,
-        hw_frame: &ffmpeg::util::frame::video::Video,
-    ) -> Result<ffmpeg::util::frame::video::Video> {
-        unsafe {
-            let mut sw_frame = ffmpeg::util::frame::video::Video::new(
-                ffmpeg::format::Pixel::NV12,
-                hw_frame.width() as u32,
-                hw_frame.height() as u32,
-            );
-
-            let result =
-                ffmpeg::ffi::av_hwframe_transfer_data(sw_frame.as_mut_ptr(), hw_frame.as_ptr(), 0);
-
-            if result < 0 {
-                bail!("Failed to transfer hardware frame to CPU: {}", result);
-            }
-
-            Ok(sw_frame)
         }
     }
 }
@@ -1976,27 +1820,6 @@ fn decode_audio_track(video_path: &PathBuf) -> Result<AudioBuffer> {
         channels: 2,
         samples: Arc::new(samples),
     })
-}
-
-#[allow(dead_code)]
-fn rgba_frame_to_image(
-    frame: &ffmpeg::util::frame::video::Video,
-    width: u32,
-    height: u32,
-) -> Result<RgbaImage> {
-    let stride = frame.stride(0);
-    let data = frame.data(0);
-    let row_bytes = width as usize * 4;
-    let mut rgba = vec![0_u8; row_bytes * height as usize];
-
-    for y in 0..height as usize {
-        let src_offset = y * stride;
-        let dst_offset = y * row_bytes;
-        rgba[dst_offset..dst_offset + row_bytes]
-            .copy_from_slice(&data[src_offset..src_offset + row_bytes]);
-    }
-
-    RgbaImage::from_raw(width, height, rgba).context("Failed to create RGBA image from frame")
 }
 
 fn rgba_frame_to_image_pooled(

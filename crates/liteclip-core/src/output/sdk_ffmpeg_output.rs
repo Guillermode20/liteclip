@@ -50,17 +50,9 @@ fn frame_time_seconds(
 }
 
 /// Remux MP4/MOV streams without re-encoding (copy), optionally moving the moov atom for web.
-pub fn remux_fragmented_mp4(
-    input_path: &Path,
-    output_path: &Path,
-    faststart: bool,
-) -> Result<()> {
-    let mut ictx = ffmpeg::format::input(input_path).with_context(|| {
-        format!(
-            "failed to open input for remux: {:?}",
-            input_path.display()
-        )
-    })?;
+pub fn remux_fragmented_mp4(input_path: &Path, output_path: &Path, faststart: bool) -> Result<()> {
+    let mut ictx = ffmpeg::format::input(input_path)
+        .with_context(|| format!("failed to open input for remux: {:?}", input_path.display()))?;
     let mut octx = ffmpeg::format::output(output_path).with_context(|| {
         format!(
             "failed to create output for remux: {:?}",
@@ -125,8 +117,7 @@ pub fn remux_fragmented_mp4(
         .with_context(|| "failed to finalize remux output")?;
     info!(
         "Remuxed {:?} -> {:?} (linked libav)",
-        input_path,
-        output_path
+        input_path, output_path
     );
     Ok(())
 }
@@ -152,10 +143,7 @@ pub fn probe_video_file(path: &Path) -> Result<VideoFileMetadata> {
     } else {
         30.0
     };
-    let has_audio = ictx
-        .streams()
-        .best(ffmpeg::media::Type::Audio)
-        .is_some();
+    let has_audio = ictx.streams().best(ffmpeg::media::Type::Audio).is_some();
 
     Ok(VideoFileMetadata {
         duration_secs,
@@ -247,10 +235,7 @@ pub fn extract_preview_frame(
             match t_src {
                 Some(t) if t + 0.12 >= timestamp_secs => Ok(Some(rgb)),
                 Some(t) => {
-                    if best_after_seek
-                        .as_ref()
-                        .map_or(true, |(bt, _)| t > *bt)
-                    {
+                    if best_after_seek.as_ref().map_or(true, |(bt, _)| t > *bt) {
                         best_after_seek = Some((t, rgb));
                     }
                     Ok(None)

@@ -193,7 +193,11 @@ mod tests {
         monitor.update_mic_levels(0.0, 0.01);
 
         let levels = monitor.get_mic_levels();
-        assert!(levels.level > 10, "expected visible meter movement, got {}", levels.level);
+        assert!(
+            levels.level > 10,
+            "expected visible meter movement, got {}",
+            levels.level
+        );
     }
 
     #[test]

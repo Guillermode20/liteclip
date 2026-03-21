@@ -119,13 +119,13 @@ pub mod buffer;
 pub mod capture;
 pub mod config;
 pub mod encode;
+pub mod ffmpeg_backend;
 pub mod host;
 pub mod hotkey_parse;
 pub mod media;
 pub mod output;
 pub mod paths;
 pub mod runtime;
-pub mod ffmpeg_backend;
 
 mod engine;
 pub use engine::ReplayEngine;
@@ -138,9 +138,9 @@ pub mod prelude {
     pub use crate::buffer::ReplayBuffer;
     pub use crate::config::Config;
     pub use crate::encode;
+    pub use crate::ffmpeg_backend::{self, validate_runtime, FfmpegBackendKind};
     pub use crate::host::CoreHost;
     pub use crate::paths::AppDirs;
-    pub use crate::ffmpeg_backend::{self, validate_runtime, FfmpegBackendKind};
     pub use crate::runtime::{self, set_ffmpeg_path, FFMPEG_ENV};
     pub use crate::ReplayEngine;
 }

@@ -180,11 +180,7 @@ pub fn remux_fragmented_mp4(input_path: &Path, output_path: &Path, faststart: bo
 }
 
 #[cfg(all(feature = "ffmpeg-cli", not(feature = "ffmpeg")))]
-fn remux_fragmented_mp4_cli(
-    input_path: &Path,
-    output_path: &Path,
-    faststart: bool,
-) -> Result<()> {
+fn remux_fragmented_mp4_cli(input_path: &Path, output_path: &Path, faststart: bool) -> Result<()> {
     use std::process::Command;
 
     let ffmpeg = ffmpeg_executable_path();

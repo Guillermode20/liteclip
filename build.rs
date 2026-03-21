@@ -28,9 +28,8 @@ fn copy_runtime_dlls() {
         return;
     };
 
-    let manifest_dir = PathBuf::from(
-        std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string()),
-    );
+    let manifest_dir =
+        PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string()));
     let ffmpeg_bin_dir = if let Ok(dir) = std::env::var("FFMPEG_DIR") {
         PathBuf::from(dir).join("bin")
     } else {
@@ -71,7 +70,10 @@ STATUS_DLL_NOT_FOUND (0xc0000135).",
 
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()).map(|e| e.eq_ignore_ascii_case("dll"))
+        if path
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|e| e.eq_ignore_ascii_case("dll"))
             != Some(true)
         {
             continue;

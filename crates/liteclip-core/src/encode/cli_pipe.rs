@@ -96,12 +96,14 @@ impl CliPipeEncoder {
             .spawn()
             .map_err(|e| EncodeError::msg(format!("failed to spawn ffmpeg encoder: {e}")))?;
 
-        let stdin = child.stdin.take().ok_or_else(|| {
-            EncodeError::msg("ffmpeg stdin pipe unavailable for CLI encoder")
-        })?;
-        let stdout = child.stdout.take().ok_or_else(|| {
-            EncodeError::msg("ffmpeg stdout pipe unavailable for CLI encoder")
-        })?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| EncodeError::msg("ffmpeg stdin pipe unavailable for CLI encoder"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| EncodeError::msg("ffmpeg stdout pipe unavailable for CLI encoder"))?;
         let stderr = child.stderr.take();
 
         if let Some(mut err) = stderr {
@@ -161,11 +163,7 @@ fn reader_loop(
     }
 }
 
-fn emit_au(
-    au: Vec<u8>,
-    packet_tx: &Sender<EncodedPacket>,
-    pts_queue: &Arc<Mutex<VecDeque<i64>>>,
-) {
+fn emit_au(au: Vec<u8>, packet_tx: &Sender<EncodedPacket>, pts_queue: &Arc<Mutex<VecDeque<i64>>>) {
     let pts = pts_queue
         .lock()
         .ok()

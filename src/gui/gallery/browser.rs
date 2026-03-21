@@ -1,9 +1,8 @@
 use eframe::egui;
-use std::time::Instant;
 
 use super::{
     format_compact_duration, format_size_mb, BrowserUiOutcome, ClipCompressApp, VideoEntry,
-    ALL_GAMES_FILTER, BROWSER_DELETE_HOLD_SECS,
+    ALL_GAMES_FILTER,
 };
 
 pub(super) fn render_browser_ui(app: &mut ClipCompressApp, ui: &mut egui::Ui) -> BrowserUiOutcome {
@@ -92,8 +91,6 @@ pub(super) fn render_browser_ui(app: &mut ClipCompressApp, ui: &mut egui::Ui) ->
     let columns_count = ((ui.available_width() + tile_spacing) / (tile_width + tile_spacing))
         .floor()
         .max(1.0) as usize;
-
-    // handle_browser_shortcuts(app, ui.ctx(), &flat_visible_videos, columns, &mut outcome);
 
     if app.selection_mode && !app.selected_videos.is_empty() {
         egui::TopBottomPanel::bottom("delete_panel")
@@ -350,117 +347,4 @@ fn gather_selected_entries(app: &ClipCompressApp) -> Vec<VideoEntry> {
         }
     }
     deleting
-}
-
-#[allow(dead_code)]
-fn move_keyboard_selection(app: &mut ClipCompressApp, videos: &[VideoEntry], delta: isize) {
-    if videos.is_empty() {
-        app.keyboard_selected_video = None;
-        return;
-    }
-
-    let current_index = app
-        .keyboard_selected_video
-        .as_ref()
-        .and_then(|path| videos.iter().position(|video| &video.path == path))
-        .unwrap_or(0);
-    let next_index = (current_index as isize + delta).clamp(0, videos.len() as isize - 1) as usize;
-    app.keyboard_selected_video = Some(videos[next_index].path.clone());
-}
-
-#[allow(dead_code)]
-fn handle_browser_shortcuts(
-    app: &mut ClipCompressApp,
-    ctx: &egui::Context,
-    visible_videos: &[VideoEntry],
-    columns: usize,
-    outcome: &mut BrowserUiOutcome,
-) {
-    if visible_videos.is_empty() {
-        app.keyboard_selected_video = None;
-        app.delete_hold_started_at = None;
-        app.delete_slider_progress = 0.0;
-        return;
-    }
-
-    let has_active_selection = app
-        .keyboard_selected_video
-        .as_ref()
-        .is_some_and(|path| visible_videos.iter().any(|video| video.path == *path));
-    if !has_active_selection {
-        app.keyboard_selected_video = Some(visible_videos[0].path.clone());
-    }
-
-    if ctx.wants_keyboard_input() {
-        app.delete_hold_started_at = None;
-        return;
-    }
-
-    if ctx.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
-        move_keyboard_selection(app, visible_videos, 1);
-    }
-    if ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft)) {
-        move_keyboard_selection(app, visible_videos, -1);
-    }
-    if ctx.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
-        move_keyboard_selection(app, visible_videos, columns as isize);
-    }
-    if ctx.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
-        move_keyboard_selection(app, visible_videos, -(columns as isize));
-    }
-
-    if ctx.input(|i| i.key_pressed(egui::Key::R)) {
-        outcome.refresh_requested = true;
-    }
-
-    if ctx.input(|i| i.key_pressed(egui::Key::F)) {
-        app.focus_filter_requested = true;
-    }
-
-    if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
-        if let Some(selected) = app
-            .keyboard_selected_video
-            .as_ref()
-            .and_then(|path| visible_videos.iter().find(|video| video.path == *path))
-        {
-            outcome.selected_video = Some(selected.clone());
-        }
-    }
-
-    if !app.selection_mode && ctx.input(|i| i.key_pressed(egui::Key::Delete)) {
-        app.selection_mode = true;
-        if let Some(path) = app.keyboard_selected_video.as_ref() {
-            app.selected_videos.insert(path.clone());
-        }
-    }
-
-    if app.selection_mode && ctx.input(|i| i.key_pressed(egui::Key::Space)) {
-        if let Some(path) = app.keyboard_selected_video.as_ref() {
-            if app.selected_videos.contains(path) {
-                app.selected_videos.remove(path);
-            } else {
-                app.selected_videos.insert(path.clone());
-            }
-        }
-    }
-
-    if !app.selection_mode || app.selected_videos.is_empty() {
-        app.delete_hold_started_at = None;
-        app.delete_slider_progress = 0.0;
-        return;
-    }
-
-    if ctx.input(|i| i.key_down(egui::Key::Delete)) {
-        let started = app.delete_hold_started_at.get_or_insert_with(Instant::now);
-        let elapsed = started.elapsed().as_secs_f32();
-        app.delete_slider_progress = (elapsed / BROWSER_DELETE_HOLD_SECS).clamp(0.0, 1.0);
-        if app.delete_slider_progress >= 0.99 {
-            outcome.videos_to_delete = gather_selected_entries(app);
-            app.delete_hold_started_at = None;
-            app.delete_slider_progress = 0.0;
-        }
-    } else {
-        app.delete_hold_started_at = None;
-        app.delete_slider_progress = 0.0;
-    }
 }

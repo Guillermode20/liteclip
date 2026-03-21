@@ -359,7 +359,9 @@ pub fn create_encoder(config: &ResolvedEncoderConfig) -> EncodeResult<Box<dyn En
 #[cfg(all(feature = "ffmpeg-cli", not(feature = "ffmpeg")))]
 pub fn create_encoder(config: &ResolvedEncoderConfig) -> EncodeResult<Box<dyn Encoder>> {
     info!("Creating CLI pipe encoder (libx264)");
-    Ok(Box::new(crate::encode::cli_pipe::CliPipeEncoder::new(config)?))
+    Ok(Box::new(crate::encode::cli_pipe::CliPipeEncoder::new(
+        config,
+    )?))
 }
 
 #[cfg(not(any(feature = "ffmpeg", feature = "ffmpeg-cli")))]
@@ -444,12 +446,7 @@ pub fn spawn_encoder_with_receiver(
 
             loop {
                 total_forwarded_packets = total_forwarded_packets.saturating_add(
-                    drain_ready_packets(
-                        &packet_rx,
-                        &buffer,
-                        &mut packet_batch,
-                        &mut flush_batches,
-                    ),
+                    drain_ready_packets(&packet_rx, &buffer, &mut packet_batch, &mut flush_batches),
                 );
                 match frame_rx.recv_timeout(std::time::Duration::from_millis(8)) {
                     Ok(frame) => {
@@ -471,14 +468,13 @@ pub fn spawn_encoder_with_receiver(
                                 } else {
                                     consecutive_encode_errors = 0;
                                 }
-                                total_forwarded_packets = total_forwarded_packets.saturating_add(
-                                    drain_ready_packets(
+                                total_forwarded_packets =
+                                    total_forwarded_packets.saturating_add(drain_ready_packets(
                                         &packet_rx,
                                         &buffer,
                                         &mut packet_batch,
                                         &mut flush_batches,
-                                    ),
-                                );
+                                    ));
                                 Ok(())
                             };
 
@@ -492,14 +488,13 @@ pub fn spawn_encoder_with_receiver(
                         }
                     }
                     Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
-                        total_forwarded_packets = total_forwarded_packets.saturating_add(
-                            drain_ready_packets(
+                        total_forwarded_packets =
+                            total_forwarded_packets.saturating_add(drain_ready_packets(
                                 &packet_rx,
                                 &buffer,
                                 &mut packet_batch,
                                 &mut flush_batches,
-                            ),
-                        );
+                            ));
                     }
                     Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
                         debug!("Frame channel closed, shutting down encoder");
@@ -521,19 +516,16 @@ pub fn spawn_encoder_with_receiver(
                     warn!("Failed to flush encoder: {}", e);
                 }
             }
-            total_forwarded_packets = total_forwarded_packets.saturating_add(
-                drain_ready_packets(
-                    &packet_rx,
-                    &buffer,
-                    &mut packet_batch,
-                    &mut flush_batches,
-                ),
-            );
+            total_forwarded_packets = total_forwarded_packets.saturating_add(drain_ready_packets(
+                &packet_rx,
+                &buffer,
+                &mut packet_batch,
+                &mut flush_batches,
+            ));
             flush_packet_batch(&buffer, &mut packet_batch, &mut flush_batches);
             debug!(
                 "Encoder buffer flush complete: {} packets across {} batches",
-                total_forwarded_packets,
-                flush_batches
+                total_forwarded_packets, flush_batches
             );
             debug!("Encoder thread stopped");
             Ok(())

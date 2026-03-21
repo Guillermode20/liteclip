@@ -19,9 +19,8 @@ fn resolve_ffmpeg_bin_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("FFMPEG_DIR") {
         return PathBuf::from(dir).join("bin");
     }
-    let manifest = PathBuf::from(
-        std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string()),
-    );
+    let manifest =
+        PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string()));
     manifest.join("../../ffmpeg_dev/sdk/bin")
 }
 
@@ -50,7 +49,10 @@ fn copy_ffmpeg_runtime_dlls() {
 
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()).map(|e| e.eq_ignore_ascii_case("dll"))
+        if path
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|e| e.eq_ignore_ascii_case("dll"))
             != Some(true)
         {
             continue;

@@ -7,11 +7,11 @@ mod imp {
     use anyhow::{bail, Context, Result};
     use bytes::Bytes;
     use crossbeam::channel::Sender;
-    use ffmpeg_next as ffmpeg;
     use ffmpeg::format::{context::Input, Pixel};
     use ffmpeg::media::Type;
-    use ffmpeg::software::scaling::{Context as ScalingContext, flag::Flags};
+    use ffmpeg::software::scaling::{flag::Flags, Context as ScalingContext};
     use ffmpeg::util::frame::video::Video;
+    use ffmpeg_next as ffmpeg;
     use std::ffi::CString;
     use std::path::Path;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -265,11 +265,11 @@ pub use imp::{list_dshow_video_devices, WebcamCapture};
 
 #[cfg(not(all(feature = "ffmpeg", windows)))]
 pub mod stub {
+    use crate::media::CapturedFrame;
     use anyhow::{bail, Result};
     use crossbeam::channel::Sender;
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
-    use crate::media::CapturedFrame;
 
     pub struct WebcamCapture;
 

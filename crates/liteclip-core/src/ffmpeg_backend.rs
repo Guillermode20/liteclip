@@ -89,18 +89,19 @@ fn ffmpeg_looks_callable(path: &std::path::Path) -> bool {
 
 #[cfg(feature = "ffmpeg-cli")]
 fn ffprobe_path(ffmpeg: &std::path::Path) -> PathBuf {
-    ffmpeg
-        .with_file_name(if cfg!(windows) {
-            "ffprobe.exe"
-        } else {
-            "ffprobe"
-        })
+    ffmpeg.with_file_name(if cfg!(windows) {
+        "ffprobe.exe"
+    } else {
+        "ffprobe"
+    })
 }
 
 #[cfg(feature = "ffmpeg-cli")]
 fn smoke_test_ffmpeg(ffmpeg: &std::path::Path) -> Result<(), FfmpegRuntimeError> {
     let mut cmd = Command::new(ffmpeg);
-    cmd.arg("-hide_banner").arg("-version").stdin(std::process::Stdio::null());
+    cmd.arg("-hide_banner")
+        .arg("-version")
+        .stdin(std::process::Stdio::null());
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
@@ -180,13 +181,19 @@ mod tests {
         let ffprobe = FfmpegRuntimeError::FfprobeMissing {
             path: PathBuf::from(r"C:\bin\ffprobe.exe"),
         };
-        assert!(ffprobe.to_string().to_lowercase().contains("ffprobe"), "{ffprobe}");
+        assert!(
+            ffprobe.to_string().to_lowercase().contains("ffprobe"),
+            "{ffprobe}"
+        );
 
         let spawn = FfmpegRuntimeError::FfmpegSpawn {
             path: PathBuf::from("ffmpeg"),
             source: std::io::Error::new(std::io::ErrorKind::NotFound, "not found"),
         };
-        assert!(spawn.to_string().contains("failed to run ffmpeg"), "{spawn}");
+        assert!(
+            spawn.to_string().contains("failed to run ffmpeg"),
+            "{spawn}"
+        );
 
         let ver = FfmpegRuntimeError::FfmpegVersionCheckFailed {
             path: PathBuf::from("ffmpeg"),
