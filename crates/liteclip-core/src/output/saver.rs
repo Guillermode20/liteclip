@@ -11,6 +11,9 @@ use super::{
     calculate_clip_start_pts, generate_thumbnail, h264_nal_type, hevc_nal_type, Muxer, MuxerConfig,
 };
 
+ const CLIP_VIDEO_CATCH_UP_RETRY_LIMIT: usize = 8;
+ const CLIP_VIDEO_CATCH_UP_SLEEP: Duration = Duration::from_millis(125);
+
 /// Spawns a background task to extract packets from the replay buffer and save them to an MP4 file.
 ///
 /// This function coordinates the following:
@@ -45,12 +48,12 @@ pub fn spawn_clip_saver(
             output_path
         );
 
-        let newest_pts = buffer
+        let mut newest_pts = buffer
             .newest_pts()
             .context("No packets in buffer to save")?;
-        let oldest_pts = buffer.oldest_pts();
+        let mut oldest_pts = buffer.oldest_pts();
 
-        let start_pts = calculate_clip_start_pts(newest_pts, duration, oldest_pts);
+        let mut start_pts = calculate_clip_start_pts(newest_pts, duration, oldest_pts);
 
         debug!(
             "Clip window: {} to {} (duration: {}s)",
@@ -105,6 +108,33 @@ pub fn spawn_clip_saver(
                 false
             })
         };
+
+        let max_video_tail_lag_qpc = (crate::buffer::ring::qpc_frequency().max(1) / 2).max(1);
+
+        for attempt in 1..=CLIP_VIDEO_CATCH_UP_RETRY_LIMIT {
+            let Some(video_tail_lag_qpc) = clip_video_tail_lag_qpc(&clip_packets) else {
+                break;
+            };
+
+            if video_tail_lag_qpc <= max_video_tail_lag_qpc {
+                break;
+            }
+
+            warn!(
+                "Clip snapshot video tail is behind newest buffered packet by {}ms; retrying catch-up {}/{}",
+                video_tail_lag_qpc.saturating_mul(1000) / crate::buffer::ring::qpc_frequency().max(1),
+                attempt,
+                CLIP_VIDEO_CATCH_UP_RETRY_LIMIT
+            );
+
+            thread::sleep(CLIP_VIDEO_CATCH_UP_SLEEP);
+            newest_pts = buffer.newest_pts().unwrap_or(newest_pts);
+            oldest_pts = buffer.oldest_pts().or(oldest_pts);
+            start_pts = calculate_clip_start_pts(newest_pts, duration, oldest_pts);
+            clip_packets = buffer
+                .snapshot_from(start_pts)
+                .context("Failed to refresh packets from buffer during video catch-up")?;
+        }
 
         if !has_decodable_video_frame(&clip_packets) {
             warn!("Clip snapshot does not yet contain a decodable video frame; retrying briefly");
@@ -198,6 +228,16 @@ pub fn spawn_clip_saver(
 
 /// Presentation timestamps use QPC ticks at ~10 MHz (`EncodedPacket::pts`).
 const QPC_TICKS_PER_SEC: f64 = 10_000_000.0;
+
+fn clip_video_tail_lag_qpc(packets: &[EncodedPacket]) -> Option<i64> {
+    let newest_packet_pts = packets.iter().map(|p| p.pts).max()?;
+    let newest_video_pts = packets
+        .iter()
+        .filter(|p| matches!(p.stream, crate::encode::StreamType::Video))
+        .map(|p| p.pts)
+        .max()?;
+    Some(newest_packet_pts.saturating_sub(newest_video_pts))
+}
 
 fn clip_pts_span_seconds(packets: &[EncodedPacket]) -> Option<f64> {
     if packets.is_empty() {

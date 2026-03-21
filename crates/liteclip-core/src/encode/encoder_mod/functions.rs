@@ -8,6 +8,7 @@ use ffmpeg_next as ffmpeg;
 use ffmpeg_next::format::Pixel;
 #[cfg(feature = "ffmpeg-cli")]
 use std::process::Command;
+use std::time::Instant;
 use tracing::{debug, info, warn};
 #[cfg(windows)]
 use windows::Win32::System::Threading::{
@@ -412,19 +413,24 @@ pub fn spawn_encoder_with_receiver(
             let mut packet_batch = Vec::with_capacity(256);
             let mut consecutive_encode_errors = 0u32;
             const MAX_FRAME_BURST: usize = 8;
+            const MAX_PACKET_BATCH_LEN: usize = 32;
+            const MAX_PACKET_BATCH_AGE_MS: u128 = 75;
             let mut total_forwarded_packets = 0u64;
             let mut flush_batches = 0usize;
+            let mut last_packet_flush = Instant::now();
 
             fn flush_packet_batch(
                 buffer: &crate::buffer::ring::SharedReplayBuffer,
                 packet_batch: &mut Vec<EncodedPacket>,
                 flush_batches: &mut usize,
+                last_packet_flush: &mut Instant,
             ) {
                 if packet_batch.is_empty() {
                     return;
                 }
                 buffer.push_batch(packet_batch.drain(..));
                 *flush_batches += 1;
+                *last_packet_flush = Instant::now();
             }
 
             fn drain_ready_packets(
@@ -432,21 +438,38 @@ pub fn spawn_encoder_with_receiver(
                 buffer: &crate::buffer::ring::SharedReplayBuffer,
                 packet_batch: &mut Vec<EncodedPacket>,
                 flush_batches: &mut usize,
+                last_packet_flush: &mut Instant,
             ) -> u64 {
                 let mut drained = 0u64;
                 while let Ok(packet) = packet_rx.try_recv() {
                     packet_batch.push(packet);
                     drained = drained.saturating_add(1);
-                    if packet_batch.len() >= 256 {
-                        flush_packet_batch(buffer, packet_batch, flush_batches);
+                    if packet_batch.len() >= MAX_PACKET_BATCH_LEN {
+                        flush_packet_batch(
+                            buffer,
+                            packet_batch,
+                            flush_batches,
+                            last_packet_flush,
+                        );
                     }
+                }
+                if !packet_batch.is_empty()
+                    && last_packet_flush.elapsed().as_millis() >= MAX_PACKET_BATCH_AGE_MS
+                {
+                    flush_packet_batch(buffer, packet_batch, flush_batches, last_packet_flush);
                 }
                 drained
             }
 
             loop {
                 total_forwarded_packets = total_forwarded_packets.saturating_add(
-                    drain_ready_packets(&packet_rx, &buffer, &mut packet_batch, &mut flush_batches),
+                    drain_ready_packets(
+                        &packet_rx,
+                        &buffer,
+                        &mut packet_batch,
+                        &mut flush_batches,
+                        &mut last_packet_flush,
+                    ),
                 );
                 match frame_rx.recv_timeout(std::time::Duration::from_millis(8)) {
                     Ok(frame) => {
@@ -474,6 +497,7 @@ pub fn spawn_encoder_with_receiver(
                                         &buffer,
                                         &mut packet_batch,
                                         &mut flush_batches,
+                                        &mut last_packet_flush,
                                     ));
                                 Ok(())
                             };
@@ -494,7 +518,14 @@ pub fn spawn_encoder_with_receiver(
                                 &buffer,
                                 &mut packet_batch,
                                 &mut flush_batches,
+                                &mut last_packet_flush,
                             ));
+                        flush_packet_batch(
+                            &buffer,
+                            &mut packet_batch,
+                            &mut flush_batches,
+                            &mut last_packet_flush,
+                        );
                     }
                     Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
                         debug!("Frame channel closed, shutting down encoder");
@@ -507,8 +538,13 @@ pub fn spawn_encoder_with_receiver(
                 Ok(packets) => {
                     for packet in packets {
                         packet_batch.push(packet);
-                        if packet_batch.len() >= 256 {
-                            flush_packet_batch(&buffer, &mut packet_batch, &mut flush_batches);
+                        if packet_batch.len() >= MAX_PACKET_BATCH_LEN {
+                            flush_packet_batch(
+                                &buffer,
+                                &mut packet_batch,
+                                &mut flush_batches,
+                                &mut last_packet_flush,
+                            );
                         }
                     }
                 }
@@ -521,8 +557,14 @@ pub fn spawn_encoder_with_receiver(
                 &buffer,
                 &mut packet_batch,
                 &mut flush_batches,
+                &mut last_packet_flush,
             ));
-            flush_packet_batch(&buffer, &mut packet_batch, &mut flush_batches);
+            flush_packet_batch(
+                &buffer,
+                &mut packet_batch,
+                &mut flush_batches,
+                &mut last_packet_flush,
+            );
             debug!(
                 "Encoder buffer flush complete: {} packets across {} batches",
                 total_forwarded_packets, flush_batches
