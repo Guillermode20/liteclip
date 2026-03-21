@@ -506,18 +506,35 @@ fn run_noise_thread(
 struct RNNoiseProcessor {
     channels: usize,
     state: Box<DenoiseState<'static>>,
+    state2: Box<DenoiseState<'static>>,
     in_buf: Vec<f32>,
     in_head: usize,
     out_buf: Vec<f32>,
     out_head: usize,
+    pending_wet_drop: usize,
+    discard_warmup_frame: bool,
+    gate_gain: f32,
     dc_x: Vec<f32>,
     dc_y: Vec<f32>,
+    /// High-pass filter state: previous input and output per channel (mono only needs 1)
+    hp_x_prev: f32,
+    hp_y_prev: f32,
+    packet_mono: Vec<f32>,
     frame_in: Box<[f32; AUDIO_FRAME_SIZE]>,
+    mid_frame: Box<[f32; AUDIO_FRAME_SIZE]>,
     frame_out: Box<[f32; AUDIO_FRAME_SIZE]>,
 }
 
 impl RNNoiseProcessor {
     const DC_COEFF: f32 = 0.9975;
+    const GATE_OPEN_THRESHOLD: f32 = 0.60;
+    const GATE_ATTACK: f32 = 0.90;
+    const GATE_RELEASE: f32 = 0.035;
+    const GATE_FLOOR: f32 = 0.001;
+    /// High-pass filter coefficient for ~80 Hz at 48 kHz.
+    /// Computed as: RC / (RC + dt) where RC = 1/(2*pi*f), dt = 1/48000
+    /// Removes low-frequency hum and hiss before RNNoise processing.
+    const HP_COEFF: f32 = 0.9895;
 
     fn new(channels: usize) -> Self {
         let mut in_buf = Vec::with_capacity(AUDIO_FRAME_SIZE * 16);
@@ -526,13 +543,21 @@ impl RNNoiseProcessor {
         Self {
             channels,
             state: DenoiseState::new(),
+            state2: DenoiseState::new(),
             in_buf,
             in_head: 0,
             out_buf,
             out_head: 0,
+            pending_wet_drop: 0,
+            discard_warmup_frame: true,
+            gate_gain: Self::GATE_FLOOR,
             dc_x: vec![0.0; channels],
             dc_y: vec![0.0; channels],
+            hp_x_prev: 0.0,
+            hp_y_prev: 0.0,
+            packet_mono: Vec::with_capacity(AUDIO_FRAME_SIZE * 2),
             frame_in: Box::new([0.0; AUDIO_FRAME_SIZE]),
+            mid_frame: Box::new([0.0; AUDIO_FRAME_SIZE]),
             frame_out: Box::new([0.0; AUDIO_FRAME_SIZE]),
         }
     }
@@ -543,6 +568,16 @@ impl RNNoiseProcessor {
         self.dc_x[channel] = sample;
         self.dc_y[channel] = filtered;
         filtered
+    }
+
+    /// Single-pole high-pass filter applied to the mono mix before RNNoise.
+    /// Removes sub-80 Hz hum and hiss without touching speech frequencies.
+    #[inline]
+    fn hp_filter(&mut self, sample: f32) -> f32 {
+        let y = Self::HP_COEFF * (self.hp_y_prev + sample - self.hp_x_prev);
+        self.hp_x_prev = sample;
+        self.hp_y_prev = y;
+        y
     }
 
     #[inline]
@@ -556,13 +591,100 @@ impl RNNoiseProcessor {
     }
 
     #[inline]
-    fn dc_block_broadcast(&mut self, sample: f32) -> f32 {
-        let filtered = self.dc_block(0, sample);
-        for channel in 1..self.channels {
-            self.dc_x[channel] = sample;
-            self.dc_y[channel] = filtered;
+    fn skip_pending_wet_output(&mut self) {
+        if self.pending_wet_drop == 0 {
+            return;
         }
-        filtered
+
+        let available = self.out_buf.len().saturating_sub(self.out_head);
+        let skipped = available.min(self.pending_wet_drop);
+        self.out_head += skipped;
+        self.pending_wet_drop -= skipped;
+
+        if skipped > 0 {
+            Self::compact_queue(&mut self.out_buf, &mut self.out_head);
+        }
+    }
+
+    #[inline]
+    fn clamp_i16(sample: f32) -> i16 {
+        sample.clamp(-32768.0, 32767.0) as i16
+    }
+
+    fn prepare_packet_mono(&mut self, samples: &[i16], frame_count: usize) {
+        self.packet_mono.resize(frame_count, 0.0);
+        match self.channels {
+            1 => {
+                for (dst, &sample) in self.packet_mono.iter_mut().zip(samples.iter().take(frame_count)) {
+                    *dst = sample as f32;
+                }
+            }
+            2 => {
+                for i in 0..frame_count {
+                    let idx = i * 2;
+                    self.packet_mono[i] = (samples[idx] as f32 + samples[idx + 1] as f32) * 0.5;
+                }
+            }
+            _ => {
+                let channels_f = self.channels as f32;
+                for i in 0..frame_count {
+                    let base = i * self.channels;
+                    let mut sum = 0.0f32;
+                    for c in 0..self.channels {
+                        sum += samples[base + c] as f32;
+                    }
+                    self.packet_mono[i] = sum / channels_f;
+                }
+            }
+        }
+        // Apply high-pass filter inline to avoid borrow conflicts
+        for sample in self.packet_mono.iter_mut() {
+            let y = Self::HP_COEFF * (self.hp_y_prev + *sample - self.hp_x_prev);
+            self.hp_x_prev = *sample;
+            self.hp_y_prev = y;
+            *sample = y;
+        }
+    }
+
+    fn write_sample_with_delta(
+        &mut self,
+        samples: &mut [i16],
+        frame_index: usize,
+        delta: f32,
+        apply_delta: bool,
+    ) {
+        match self.channels {
+            1 => {
+                let sample = if apply_delta {
+                    samples[frame_index] as f32 + delta
+                } else {
+                    samples[frame_index] as f32
+                };
+                samples[frame_index] = Self::clamp_i16(self.dc_block(0, sample));
+            }
+            2 => {
+                let base = frame_index * 2;
+                for channel in 0..2 {
+                    let sample = if apply_delta {
+                        samples[base + channel] as f32 + delta
+                    } else {
+                        samples[base + channel] as f32
+                    };
+                    samples[base + channel] = Self::clamp_i16(self.dc_block(channel, sample));
+                }
+            }
+            _ => {
+                let base = frame_index * self.channels;
+                for channel in 0..self.channels {
+                    let sample = if apply_delta {
+                        samples[base + channel] as f32 + delta
+                    } else {
+                        samples[base + channel] as f32
+                    };
+                    samples[base + channel] = Self::clamp_i16(self.dc_block(channel, sample));
+                }
+            }
+        }
     }
 
     #[allow(clippy::needless_range_loop)]
@@ -576,113 +698,68 @@ impl RNNoiseProcessor {
         let samples =
             unsafe { std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut i16, sample_count) };
 
-        // Mix interleaved input down to mono.  For a typical single-capsule
-        // mic L == R, so this is lossless; it also halves RNNoise call count.
-        let write_start = self.in_buf.len();
-        self.in_buf.resize(write_start + frame_count, 0.0);
-        match self.channels {
-            1 => {
-                for i in 0..frame_count {
-                    self.in_buf[write_start + i] = samples[i] as f32;
-                }
-            }
-            2 => {
-                for i in 0..frame_count {
-                    let idx = i * 2;
-                    self.in_buf[write_start + i] =
-                        (samples[idx] as f32 + samples[idx + 1] as f32) * 0.5;
-                }
-            }
-            _ => {
-                let channels_f = self.channels as f32;
-                for i in 0..frame_count {
-                    let mut sum = 0.0f32;
-                    let base = i * self.channels;
-                    for c in 0..self.channels {
-                        sum += samples[base + c] as f32;
-                    }
-                    self.in_buf[write_start + i] = sum / channels_f;
-                }
-            }
-        }
+        self.prepare_packet_mono(samples, frame_count);
 
-        // Process complete 480-sample RNNoise frames from the mono queue.
+        self.in_buf.extend_from_slice(&self.packet_mono);
+
         while (self.in_buf.len() - self.in_head) >= AUDIO_FRAME_SIZE {
             let frame_start_idx = self.in_head;
-            for i in 0..AUDIO_FRAME_SIZE {
-                self.frame_in[i] = self.in_buf[frame_start_idx + i];
-            }
+            self.frame_in
+                .copy_from_slice(&self.in_buf[frame_start_idx..frame_start_idx + AUDIO_FRAME_SIZE]);
 
             self.state
-                .process_frame(self.frame_out.as_mut_slice(), self.frame_in.as_slice());
+                .process_frame(self.mid_frame.as_mut_slice(), self.frame_in.as_slice());
+            let speech_prob = self
+                .state2
+                .process_frame(self.frame_out.as_mut_slice(), self.mid_frame.as_slice());
 
-            let out_start = self.out_buf.len();
-            self.out_buf.resize(out_start + AUDIO_FRAME_SIZE, 0.0);
+            let target_gain = if speech_prob > Self::GATE_OPEN_THRESHOLD {
+                1.0_f32
+            } else {
+                Self::GATE_FLOOR
+            };
+            let coeff = if target_gain > self.gate_gain {
+                Self::GATE_ATTACK
+            } else {
+                Self::GATE_RELEASE
+            };
+            self.gate_gain += (target_gain - self.gate_gain) * coeff;
 
-            for i in 0..AUDIO_FRAME_SIZE {
-                self.out_buf[out_start + i] = self.frame_out[i];
+            if self.discard_warmup_frame {
+                self.discard_warmup_frame = false;
+            } else {
+                if self.gate_gain < 0.999 {
+                    let g = self.gate_gain;
+                    for s in self.frame_out.iter_mut() {
+                        *s *= g;
+                    }
+                }
+                self.out_buf.extend_from_slice(self.frame_out.as_slice());
             }
 
             self.in_head += AUDIO_FRAME_SIZE;
             Self::compact_queue(&mut self.in_buf, &mut self.in_head);
         }
 
-        // Broadcast processed mono output to all interleaved channels,
-        // with per-channel DC blocking and soft limiting.
+        self.skip_pending_wet_output();
         let available = (self.out_buf.len() - self.out_head).min(frame_count);
-        match self.channels {
-            1 => {
-                for i in 0..available {
-                    let mono_sample = self.out_buf[self.out_head + i];
-                    samples[i] = self
-                        .dc_block_broadcast(mono_sample)
-                        .clamp(-32768.0, 32767.0) as i16;
-                }
-                // Fill remainder with silence if we don't have enough processed samples yet
-                for i in available..frame_count {
-                    samples[i] = 0;
-                }
-            }
-            2 => {
-                for i in 0..available {
-                    let mono_sample = self.out_buf[self.out_head + i];
-                    let processed = self
-                        .dc_block_broadcast(mono_sample)
-                        .clamp(-32768.0, 32767.0) as i16;
-                    let idx = i * 2;
-                    samples[idx] = processed;
-                    samples[idx + 1] = processed;
-                }
-                for i in available..frame_count {
-                    let idx = i * 2;
-                    samples[idx] = 0;
-                    samples[idx + 1] = 0;
-                }
-            }
-            _ => {
-                for i in 0..available {
-                    let mono_sample = self.out_buf[self.out_head + i];
-                    let processed = self
-                        .dc_block_broadcast(mono_sample)
-                        .clamp(-32768.0, 32767.0) as i16;
-                    let base = i * self.channels;
-                    for c in 0..self.channels {
-                        samples[base + c] = processed;
-                    }
-                }
-                for i in available..frame_count {
-                    let base = i * self.channels;
-                    for c in 0..self.channels {
-                        samples[base + c] = 0;
-                    }
-                }
-            }
+
+        for i in 0..available {
+            let wet_mono = self.out_buf[self.out_head + i];
+            let dry_mono = self.packet_mono[i];
+            self.write_sample_with_delta(samples, i, wet_mono - dry_mono, true);
         }
 
         if available > 0 {
             self.out_head += available;
             Self::compact_queue(&mut self.out_buf, &mut self.out_head);
         }
+
+        for i in available..frame_count {
+            self.write_sample_with_delta(samples, i, 0.0, false);
+        }
+
+        self.pending_wet_drop = self.pending_wet_drop.saturating_add(frame_count - available);
     }
 }
 
@@ -729,5 +806,48 @@ mod tests {
         let samples: &[i16] =
             unsafe { std::slice::from_raw_parts(data.as_ptr() as *const i16, data.len() / 2) };
         assert_eq!(samples.len(), 960);
+    }
+
+    #[test]
+    fn test_rnnoise_partial_frame_passthrough_is_not_silenced() {
+        let mut processor = RNNoiseProcessor::new(1);
+
+        let mut data: Vec<u8> = (0..200)
+            .map(|i| (((i as f32) * 0.2).sin() * 12000.0) as i16)
+            .flat_map(|s| s.to_ne_bytes())
+            .collect();
+        let original = data.clone();
+
+        processor.process(&mut data);
+
+        let samples: &[i16] =
+            unsafe { std::slice::from_raw_parts(data.as_ptr() as *const i16, data.len() / 2) };
+        let original_samples: &[i16] = unsafe {
+            std::slice::from_raw_parts(original.as_ptr() as *const i16, original.len() / 2)
+        };
+        assert!(samples.iter().any(|&s| s != 0));
+        assert!(samples
+            .iter()
+            .zip(original_samples.iter())
+            .any(|(&processed, &dry)| processed != 0 && dry != 0));
+    }
+
+    #[test]
+    fn test_rnnoise_stereo_preserves_channel_difference() {
+        let mut processor = RNNoiseProcessor::new(2);
+
+        let mut data: Vec<u8> = Vec::with_capacity(960 * 2 * 2);
+        for _ in 0..960 {
+            data.extend_from_slice(&1000i16.to_ne_bytes());
+            data.extend_from_slice(&3000i16.to_ne_bytes());
+        }
+
+        processor.process(&mut data);
+
+        let samples: &[i16] =
+            unsafe { std::slice::from_raw_parts(data.as_ptr() as *const i16, data.len() / 2) };
+        assert!(samples[960..]
+            .chunks_exact(2)
+            .any(|pair| pair[0] != pair[1]));
     }
 }
