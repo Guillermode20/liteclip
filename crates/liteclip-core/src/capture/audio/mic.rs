@@ -524,20 +524,14 @@ struct RNNoiseProcessor {
     speech_presence: f32,
     /// Hold time counter (RNNoise frames, each 10ms)
     hold_counter: u32,
-    dc_x: Vec<f32>,
-    dc_y: Vec<f32>,
     /// High-pass filter state (single-pole, ~80 Hz at 48 kHz)
     hp_x_prev: f32,
     hp_y_prev: f32,
-    /// Pre-sized to max expected frame count to avoid per-packet resize
-    packet_mono: Vec<f32>,
     frame_in: Box<[f32; AUDIO_FRAME_SIZE]>,
     frame_out: Box<[f32; AUDIO_FRAME_SIZE]>,
 }
 
 impl RNNoiseProcessor {
-    const DC_COEFF: f32 = 0.9975;
-
     // ── Discord-style adaptive noise gate parameters ──
     //
     // Hysteresis: higher threshold to open, lower to close (prevents chattering)
@@ -552,7 +546,7 @@ impl RNNoiseProcessor {
     const SPEECH_CONFIDENCE_THRESHOLD: f32 = 0.70;
 
     /// Attack: how fast gate opens  (higher = faster, 1.0 = instant)
-    const GATE_ATTACK: f32 = 0.15;
+    const GATE_ATTACK: f32 = 0.35;
     /// Release: normal close speed when in "maybe" zone
     const GATE_RELEASE: f32 = 0.065;
     /// Faster release when smoothed presence is clearly below close threshold
@@ -569,7 +563,7 @@ impl RNNoiseProcessor {
     const HOLD_FRAMES_EXTENDED: u32 = 20; // ~200 ms
 
     /// Smoothing coefficient for speech_presence tracker
-    const SPEECH_PRESENCE_SMOOTH: f32 = 0.08;
+    const SPEECH_PRESENCE_SMOOTH: f32 = 0.18;
 
     /// High-pass filter coefficient for ~80 Hz at 48 kHz.
     const HP_COEFF: f32 = 0.9895;
@@ -577,7 +571,6 @@ impl RNNoiseProcessor {
     fn new(channels: usize) -> Self {
         let in_buf = Vec::with_capacity(AUDIO_FRAME_SIZE * 16);
         let out_buf = Vec::with_capacity(AUDIO_FRAME_SIZE * 16);
-        let packet_mono = Vec::with_capacity(4800);
         Self {
             channels,
             state: DenoiseState::new(),
@@ -589,32 +582,11 @@ impl RNNoiseProcessor {
             gate_gain: Self::GATE_FLOOR,
             speech_presence: 0.0,
             hold_counter: 0,
-            dc_x: vec![0.0; channels],
-            dc_y: vec![0.0; channels],
             hp_x_prev: 0.0,
             hp_y_prev: 0.0,
-            packet_mono,
             frame_in: Box::new([0.0; AUDIO_FRAME_SIZE]),
             frame_out: Box::new([0.0; AUDIO_FRAME_SIZE]),
         }
-    }
-
-    #[inline]
-    fn dc_block(&mut self, channel: usize, sample: f32) -> f32 {
-        let filtered = sample - self.dc_x[channel] + Self::DC_COEFF * self.dc_y[channel];
-        self.dc_x[channel] = sample;
-        self.dc_y[channel] = filtered;
-        filtered
-    }
-
-    /// Single-pole high-pass filter applied to the mono mix before RNNoise.
-    /// Removes sub-80 Hz hum and hiss without touching speech frequencies.
-    #[inline]
-    fn hp_filter(&mut self, sample: f32) -> f32 {
-        let y = Self::HP_COEFF * (self.hp_y_prev + sample - self.hp_x_prev);
-        self.hp_x_prev = sample;
-        self.hp_y_prev = y;
-        y
     }
 
     #[inline]
@@ -629,99 +601,41 @@ impl RNNoiseProcessor {
 
     #[inline]
     fn clamp_i16(sample: f32) -> i16 {
-        // round() avoids the consistent -0.5 LSB truncation bias at low signal levels
         sample.clamp(-32768.0, 32767.0).round() as i16
     }
 
-    fn prepare_packet_mono(&mut self, samples: &[i16], frame_count: usize) {
-        // Reuse allocation — capacity was pre-sized in new(), so this is a no-op
-        // for the common case where frame_count stays constant.
-        self.packet_mono.resize(frame_count, 0.0);
-        match self.channels {
-            1 => {
-                for (dst, &sample) in self.packet_mono.iter_mut().zip(samples.iter().take(frame_count)) {
-                    *dst = sample as f32;
-                }
-            }
-            2 => {
-                for i in 0..frame_count {
-                    let idx = i * 2;
-                    self.packet_mono[i] = (samples[idx] as f32 + samples[idx + 1] as f32) * 0.5;
-                }
-            }
-            _ => {
-                let channels_f = self.channels as f32;
-                for i in 0..frame_count {
-                    let base = i * self.channels;
-                    let mut sum = 0.0f32;
-                    for c in 0..self.channels {
-                        sum += samples[base + c] as f32;
-                    }
-                    self.packet_mono[i] = sum / channels_f;
-                }
-            }
-        }
-        // Apply high-pass filter via the shared method — no borrow conflict since
-        // hp_filter only touches hp_x_prev/hp_y_prev, not packet_mono.
-        for i in 0..self.packet_mono.len() {
-            self.packet_mono[i] = self.hp_filter(self.packet_mono[i]);
-        }
-    }
-
-    /// Write denoised+gated mono output directly to all channels with DC blocking.
-    /// Mic audio is effectively mono — broadcasting preserves quality without the
-    /// alignment bugs that plagued the previous delta approach.
+    /// Write denoised+gated mono output directly to all channels.
+    /// Mic audio is effectively mono — broadcasting preserves quality.
     #[inline]
     fn write_denoised_output(&mut self, samples: &mut [i16], available: usize) {
         let oh = self.out_head;
-        match self.channels {
-            1 => {
-                for i in 0..available {
-                    samples[i] = Self::clamp_i16(self.dc_block(0, self.out_buf[oh + i]));
-                }
-            }
-            2 => {
-                for i in 0..available {
-                    let v = self.out_buf[oh + i];
-                    let base = i * 2;
-                    samples[base] = Self::clamp_i16(self.dc_block(0, v));
-                    samples[base + 1] = Self::clamp_i16(self.dc_block(1, v));
-                }
-            }
-            _ => {
-                for i in 0..available {
-                    let v = self.out_buf[oh + i];
-                    let base = i * self.channels;
-                    for ch in 0..self.channels {
-                        samples[base + ch] = Self::clamp_i16(self.dc_block(ch, v));
-                    }
-                }
-            }
-        }
-    }
+        let out_slice = &self.out_buf[oh..oh + available];
 
-    /// DC-block passthrough frames where no denoised output is ready yet.
-    #[inline]
-    fn write_passthrough(&mut self, samples: &mut [i16], start: usize, end: usize) {
+        // Fast path: if gate is fully closed, just zero out the samples
+        if self.gate_gain <= Self::GATE_FLOOR + 0.0001 {
+            let total_samples = available * self.channels;
+            samples[..total_samples].fill(0);
+            return;
+        }
+
         match self.channels {
             1 => {
-                for i in start..end {
-                    samples[i] = Self::clamp_i16(self.dc_block(0, samples[i] as f32));
+                for (s, &v) in samples.iter_mut().zip(out_slice) {
+                    *s = Self::clamp_i16(v);
                 }
             }
             2 => {
-                for i in start..end {
-                    let base = i * 2;
-                    samples[base] = Self::clamp_i16(self.dc_block(0, samples[base] as f32));
-                    samples[base + 1] = Self::clamp_i16(self.dc_block(1, samples[base + 1] as f32));
+                for (chunk, &v) in samples.chunks_exact_mut(2).zip(out_slice) {
+                    let s = Self::clamp_i16(v);
+                    chunk[0] = s;
+                    chunk[1] = s;
                 }
             }
             _ => {
-                for i in start..end {
-                    let base = i * self.channels;
-                    for ch in 0..self.channels {
-                        samples[base + ch] =
-                            Self::clamp_i16(self.dc_block(ch, samples[base + ch] as f32));
+                for (chunk, &v) in samples.chunks_exact_mut(self.channels).zip(out_slice) {
+                    let s = Self::clamp_i16(v);
+                    for ch in chunk {
+                        *ch = s;
                     }
                 }
             }
@@ -739,16 +653,57 @@ impl RNNoiseProcessor {
         let samples =
             unsafe { std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut i16, sample_count) };
 
-        // Convert interleaved input to mono, apply HP filter, queue for RNNoise
-        self.prepare_packet_mono(samples, frame_count);
-        self.in_buf
-            .extend_from_slice(&self.packet_mono[..frame_count]);
+        // Convert interleaved input to mono and apply HP filter directly into in_buf
+        let start_idx = self.in_buf.len();
+        self.in_buf.resize(start_idx + frame_count, 0.0);
+        let dest = &mut self.in_buf[start_idx..];
+
+        let mut hp_x = self.hp_x_prev;
+        let mut hp_y = self.hp_y_prev;
+
+        match self.channels {
+            1 => {
+                for (d, &s) in dest.iter_mut().zip(samples.iter()) {
+                    let mono = s as f32;
+                    let y = Self::HP_COEFF * (hp_y + mono - hp_x);
+                    hp_x = mono;
+                    hp_y = y;
+                    *d = y;
+                }
+            }
+            2 => {
+                for (d, chunk) in dest.iter_mut().zip(samples.chunks_exact(2)) {
+                    let mono = (chunk[0] as f32 + chunk[1] as f32) * 0.5;
+                    let y = Self::HP_COEFF * (hp_y + mono - hp_x);
+                    hp_x = mono;
+                    hp_y = y;
+                    *d = y;
+                }
+            }
+            _ => {
+                let channels_f = self.channels as f32;
+                for (d, chunk) in dest.iter_mut().zip(samples.chunks_exact(self.channels)) {
+                    let mut sum = 0.0f32;
+                    for &s in chunk {
+                        sum += s as f32;
+                    }
+                    let mono = sum / channels_f;
+                    let y = Self::HP_COEFF * (hp_y + mono - hp_x);
+                    hp_x = mono;
+                    hp_y = y;
+                    *d = y;
+                }
+            }
+        }
+        self.hp_x_prev = hp_x;
+        self.hp_y_prev = hp_y;
 
         // Process complete RNNoise frames (480 samples = 10 ms each)
         while (self.in_buf.len() - self.in_head) >= AUDIO_FRAME_SIZE {
             let start = self.in_head;
-            self.frame_in
-                .copy_from_slice(&self.in_buf[start..start + AUDIO_FRAME_SIZE]);
+            // nnnoiseless process_frame expects exactly 480 samples.
+            // We use frame_in and frame_out to ensure memory alignment and contiguous slices.
+            self.frame_in.copy_from_slice(&self.in_buf[start..start + AUDIO_FRAME_SIZE]);
 
             let speech_prob = self
                 .state
@@ -757,8 +712,6 @@ impl RNNoiseProcessor {
             self.update_adaptive_gate(speech_prob);
 
             if self.discard_warmup_frame {
-                // First RNNoise frame output is unreliable — discard it.
-                // This costs exactly one frame (10 ms) of latency, which is inaudible.
                 self.discard_warmup_frame = false;
             } else {
                 // Apply adaptive gate gain to denoised output
@@ -776,11 +729,7 @@ impl RNNoiseProcessor {
         Self::compact_queue(&mut self.in_buf, &mut self.in_head);
 
         // Write denoised mono directly to all output channels.
-        // Previous code used a delta approach (out - in + original) that had a fatal
-        // alignment bug: pending_wet_drop created an infinite cycle that discarded
-        // ALL denoised output, and the delta indices were mismatched after warmup.
         let available = (self.out_buf.len() - self.out_head).min(frame_count);
-
         self.write_denoised_output(samples, available);
 
         if available > 0 {
@@ -788,8 +737,9 @@ impl RNNoiseProcessor {
             Self::compact_queue(&mut self.out_buf, &mut self.out_head);
         }
 
-        // Remaining frames with no denoised output yet — just DC-block the original
-        self.write_passthrough(samples, available, frame_count);
+        // For remaining frames with no denoised output yet, we leave original as is.
+        // HP filter is already applied to input but only for RNNoise queue.
+        // Passthrough is only at the start of the stream (warmup).
     }
 
     /// Discord-style adaptive noise gate.
@@ -803,9 +753,9 @@ impl RNNoiseProcessor {
         self.speech_presence +=
             (speech_prob - self.speech_presence) * Self::SPEECH_PRESENCE_SMOOTH;
 
-        let is_speech = self.speech_presence > Self::GATE_OPEN_THRESHOLD;
-        let is_definitely_not_speech = self.speech_presence < Self::GATE_CLOSE_THRESHOLD;
         let is_high_confidence = speech_prob > Self::SPEECH_CONFIDENCE_THRESHOLD;
+        let is_speech = self.speech_presence > Self::GATE_OPEN_THRESHOLD || is_high_confidence;
+        let is_definitely_not_speech = self.speech_presence < Self::GATE_CLOSE_THRESHOLD;
 
         // Hold counter: keep gate open briefly after speech ends
         if is_speech {
@@ -828,9 +778,9 @@ impl RNNoiseProcessor {
 
         // Adaptive smoothing coefficient
         let coeff = if target_gain > self.gate_gain {
-            // Opening — slightly gentler for high-confidence speech
+            // Opening — snap open faster if high confidence
             if is_high_confidence {
-                Self::GATE_ATTACK * 0.8
+                0.65 // Very snappy
             } else {
                 Self::GATE_ATTACK
             }
