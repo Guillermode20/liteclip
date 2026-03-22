@@ -106,6 +106,12 @@ const MAX_EXPORT_ATTEMPTS: usize = 6;
 const AMF_MAX_EXPORT_ATTEMPTS: usize = 2;
 const AMF_TARGET_FILL_RATIO_MIN: f64 = 0.90;
 const AMF_TARGET_FILL_RATIO_IDEAL: f64 = 0.925;
+// AMF vbr_peak with quality preset has a non-linear overshoot ratio: it over-produces by
+// a larger percentage at the (higher) calibration bitrate than at the (lower) final bitrate.
+// Observed correction factor ~1.056× (1.576 at 376 kbps vs 1.492 at 287 kbps). We target
+// a proportionally higher fill ratio in the calibration formula to compensate, so the first
+// full encode attempt lands in the acceptable 90-100% window without a retry.
+const AMF_CALIBRATION_FILL_RATIO: f64 = 0.990;
 const TARGET_SIZE_UNDERFILL_RATIO: f64 = 0.992;
 const MAX_VIDEO_BITRATE_KBPS: u32 = 400_000;
 
@@ -474,7 +480,10 @@ fn run_clip_export(
                 calibration_bitrate_kbps,
                 calibration_result.size_bytes,
                 calibration_request.output_duration_secs().max(0.1),
+                calibration_request.keep_ranges.len(),
                 output_duration_secs,
+                request.keep_ranges.len(),
+                bitrate_estimate.audio_kbps,
                 target_size_bytes,
             );
             info!(
@@ -1602,22 +1611,39 @@ fn calibrate_amf_video_bitrate(
     current_video_bitrate_kbps: u32,
     sample_size_bytes: u64,
     sample_duration_secs: f64,
+    sample_num_segments: usize,
     full_duration_secs: f64,
+    full_num_segments: usize,
+    audio_bitrate_kbps: u32,
     target_size_bytes: u64,
 ) -> u32 {
     let sample_duration_secs = sample_duration_secs.max(0.1);
     let full_duration_secs = full_duration_secs.max(sample_duration_secs);
-    let desired_full_size_bytes =
-        desired_output_size_bytes(ExportVideoEncoder::HevcAmf, target_size_bytes) as f64;
-    let estimated_full_size_at_sample_bitrate =
-        (sample_size_bytes as f64) * (full_duration_secs / sample_duration_secs);
 
-    if estimated_full_size_at_sample_bitrate <= 1.0 {
+    // Strip audio + container overhead before extrapolating. Overhead is NOT
+    // proportional to duration: calibration uses multiple short segments (higher
+    // per-second container overhead) while the full encode uses fewer segments.
+    // Using total bytes causes a systematic undershoot, worst at low bitrates
+    // where overhead is a larger fraction of the total.
+    let sample_non_video =
+        estimate_non_video_bytes(sample_duration_secs, audio_bitrate_kbps, sample_num_segments);
+    let sample_video_bytes = sample_size_bytes.saturating_sub(sample_non_video).max(1);
+
+    let full_non_video =
+        estimate_non_video_bytes(full_duration_secs, audio_bitrate_kbps, full_num_segments);
+    let desired_full_total =
+        (target_size_bytes as f64 * AMF_CALIBRATION_FILL_RATIO).round() as u64;
+    let desired_video_bytes = desired_full_total.saturating_sub(full_non_video).max(1);
+
+    let extrapolated_full_video =
+        (sample_video_bytes as f64) * (full_duration_secs / sample_duration_secs);
+    if extrapolated_full_video <= 1.0 {
         return current_video_bitrate_kbps;
     }
 
-    let calibrated = (f64::from(current_video_bitrate_kbps) * desired_full_size_bytes
-        / estimated_full_size_at_sample_bitrate)
+    let calibrated = (f64::from(current_video_bitrate_kbps)
+        * (desired_video_bytes as f64)
+        / extrapolated_full_video)
         .round()
         .clamp(100.0, MAX_VIDEO_BITRATE_KBPS as f64) as u32;
     calibrated.max(MIN_AUTO_VIDEO_BITRATE_KBPS)
@@ -2037,9 +2063,13 @@ mod tests {
 
     #[test]
     fn calibration_bitrate_scales_from_the_sample_size() {
-        let calibrated = calibrate_amf_video_bitrate(300, 600_000, 4.0, 20.0, target_size_bytes(3));
-
-        assert!((285..=295).contains(&calibrated));
+        // 3 calibration segments, 1 full segment, 48 kbps audio.
+        // Video-only extrapolation with AMF_CALIBRATION_FILL_RATIO=0.990 pushes the
+        // calibrated bitrate higher than the old total-bytes formula to compensate
+        // for AMF's non-linear overshoot and per-segment container overhead bias.
+        let calibrated =
+            calibrate_amf_video_bitrate(300, 600_000, 4.0, 3, 20.0, 1, 48, target_size_bytes(3));
+        assert!((315..=345).contains(&calibrated));
     }
 
     #[test]
