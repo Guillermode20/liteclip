@@ -1124,13 +1124,19 @@ fn start_export(editor: &mut EditorState) {
     editor.is_playing = false;
 }
 
-fn poll_editor_export_updates(editor: &mut EditorState, outcome: &mut EditorUiOutcome) {
+fn poll_editor_export_updates(
+    editor: &mut EditorState,
+    outcome: &mut EditorUiOutcome,
+    ctx: &egui::Context,
+) -> bool {
     let mut finished_path = None;
     let mut failed_message = None;
     let mut cancelled = false;
+    let mut received_update = false;
 
     if let Some(export) = editor.export_state.as_mut() {
         while let Ok(update) = export.progress_rx.try_recv() {
+            received_update = true;
             match update {
                 ClipExportUpdate::Progress {
                     phase: _,
@@ -1170,6 +1176,13 @@ fn poll_editor_export_updates(editor: &mut EditorState, outcome: &mut EditorUiOu
         editor.status_message = Some("Export cancelled".to_string());
         show_toast(ToastKind::Warning, "Clip export cancelled");
     }
+
+    // Request immediate repaint if we received any progress update
+    if received_update && editor.has_active_export() {
+        ctx.request_repaint();
+    }
+
+    received_update
 }
 
 fn render_completion_screen(ui: &mut egui::Ui, editor: &mut EditorState) -> EditorUiOutcome {
