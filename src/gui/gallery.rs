@@ -9,7 +9,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::mpsc::Sender as TokioSender;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 mod browser;
 mod decode_pipeline;
@@ -49,6 +49,7 @@ pub fn show_gallery_gui(event_tx: TokioSender<AppEvent>) {
 struct VideoEntry {
     path: PathBuf,
     save_root: PathBuf,
+    is_external: bool,
     game: String,
     filename: String,
     size_mb: f64,
@@ -415,6 +416,7 @@ impl ClipCompressApp {
         Ok(VideoEntry {
             path,
             save_root: base_dir.to_path_buf(),
+            is_external: false,
             game,
             filename,
             size_mb: metadata.len() as f64 / (1024.0 * 1024.0),
@@ -438,6 +440,7 @@ impl ClipCompressApp {
         Ok(VideoEntry {
             path: path.to_path_buf(),
             save_root: save_root.to_path_buf(),
+            is_external: true,
             game: "External Files".to_string(),
             filename,
             size_mb: metadata.len() as f64 / (1024.0 * 1024.0),
@@ -1158,6 +1161,7 @@ fn poll_editor_export_updates(editor: &mut EditorState, outcome: &mut EditorUiOu
         outcome.refresh_browser = true;
         show_toast(ToastKind::Success, "Clip export completed");
     } else if let Some(message) = failed_message {
+        error!("Clip export failed (UI): {message}");
         editor.export_state = None;
         editor.error_message = Some(message);
         show_toast(ToastKind::Error, "Clip export failed");

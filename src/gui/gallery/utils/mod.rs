@@ -66,15 +66,42 @@ pub(super) fn open_path_impl(path: &Path) -> anyhow::Result<()> {
 }
 
 pub(super) fn build_clipped_output_path_impl(video: &VideoEntry) -> PathBuf {
-    let game_folder = format!("Clipped-{}", video.game.replace(['\\', '/'], "-"));
-    let output_dir = video.save_root.join(game_folder);
-    let _ = std::fs::create_dir_all(&output_dir);
-
     let stem = video
         .path
         .file_stem()
         .map(|stem| stem.to_string_lossy().to_string())
         .unwrap_or_else(|| "clip".to_string());
+
+    if video.is_external {
+        let output_dir = video
+            .path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| video.save_root.clone());
+        let _ = std::fs::create_dir_all(&output_dir);
+
+        for attempt in 0..1000 {
+            let suffix = if attempt == 0 {
+                "_clipped".to_string()
+            } else {
+                format!("_clipped_{attempt}")
+            };
+            let candidate = output_dir.join(format!("{stem}{suffix}.mp4"));
+            if !candidate.exists() {
+                return candidate;
+            }
+        }
+
+        return output_dir.join(format!(
+            "{}_clipped_{}.mp4",
+            stem,
+            chrono::Local::now().format("%Y%m%d_%H%M%S")
+        ));
+    }
+
+    let game_folder = format!("Clipped-{}", video.game.replace(['\\', '/'], "-"));
+    let output_dir = video.save_root.join(game_folder);
+    let _ = std::fs::create_dir_all(&output_dir);
 
     for attempt in 0..1000 {
         let suffix = if attempt == 0 {

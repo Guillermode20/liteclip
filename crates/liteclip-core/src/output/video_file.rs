@@ -10,7 +10,7 @@ use std::sync::{
     Arc,
 };
 use std::thread;
-use tracing::info;
+use tracing::{error, info, warn};
 
 use super::functions::ffmpeg_executable_path;
 
@@ -106,24 +106,24 @@ const MAX_VIDEO_BITRATE_KBPS: u32 = 400_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExportVideoEncoder {
-    Libx264,
-    H264Nvenc,
-    H264Amf,
-    H264Qsv,
+    SoftwareHevc,
+    HevcNvenc,
+    HevcAmf,
+    HevcQsv,
 }
 
 impl ExportVideoEncoder {
     fn ffmpeg_name(self) -> &'static str {
         match self {
-            ExportVideoEncoder::Libx264 => "libx264",
-            ExportVideoEncoder::H264Nvenc => "h264_nvenc",
-            ExportVideoEncoder::H264Amf => "h264_amf",
-            ExportVideoEncoder::H264Qsv => "h264_qsv",
+            ExportVideoEncoder::SoftwareHevc => "libx265",
+            ExportVideoEncoder::HevcNvenc => "hevc_nvenc",
+            ExportVideoEncoder::HevcAmf => "hevc_amf",
+            ExportVideoEncoder::HevcQsv => "hevc_qsv",
         }
     }
 
     fn supports_two_pass(self) -> bool {
-        matches!(self, ExportVideoEncoder::Libx264)
+        matches!(self, ExportVideoEncoder::SoftwareHevc)
     }
 }
 
@@ -304,6 +304,12 @@ pub fn spawn_clip_export(
                 let _ = progress_tx.send(ClipExportUpdate::Cancelled);
             }
             Err(err) => {
+                error!(
+                    input_path = ?request.input_path,
+                    output_path = ?request.output_path,
+                    target_size_mb = request.target_size_mb,
+                    "Clip export failed: {err:#}"
+                );
                 let _ = progress_tx.send(ClipExportUpdate::Failed(format!("{err:#}")));
             }
         }
@@ -346,7 +352,7 @@ fn run_clip_export(
         bitrate_estimate.audio_kbps,
         request.keep_ranges.len(),
     );
-    let selected_encoder = select_export_video_encoder(request)
+    let mut selected_encoder = select_export_video_encoder(request)
         .with_context(|| "Unable to resolve an export video encoder")?;
     let export_work_dir = std::env::temp_dir().join(format!(
         "liteclip-export-{}-{}",
@@ -384,9 +390,21 @@ fn run_clip_export(
                 cancel_flag,
                 attempt_index,
                 MAX_EXPORT_ATTEMPTS,
-            )? {
-                Some(attempt_result) => attempt_result,
-                None => return Ok(ExportOutcome::Cancelled),
+            ) {
+                Ok(Some(attempt_result)) => attempt_result,
+                Ok(None) => return Ok(ExportOutcome::Cancelled),
+                Err(err)
+                    if selected_encoder != ExportVideoEncoder::SoftwareHevc
+                        && should_fallback_to_software_encoder(&err) =>
+                {
+                    warn!(
+                        encoder = selected_encoder.ffmpeg_name(),
+                        "Hardware export encoder failed at runtime, falling back to libx265: {err:#}"
+                    );
+                    selected_encoder = ExportVideoEncoder::SoftwareHevc;
+                    continue;
+                }
+                Err(err) => return Err(err),
             };
 
             info!(
@@ -439,13 +457,6 @@ fn run_clip_export(
             estimated_non_video_bytes =
                 blend_non_video_bytes_estimate(estimated_non_video_bytes, measured_non_video_bytes);
 
-            if attempt_result.size_bytes <= target_size_bytes
-                && (attempt_result.size_bytes as f64)
-                    >= (target_size_bytes as f64 * TARGET_SIZE_UNDERFILL_RATIO)
-            {
-                break;
-            }
-
             let next_video_bitrate_kbps = next_export_video_bitrate_kbps(
                 current_video_bitrate_kbps,
                 attempt_result.size_bytes,
@@ -455,12 +466,26 @@ fn run_clip_export(
                 high_video_bitrate_kbps,
             );
 
-            if next_video_bitrate_kbps == current_video_bitrate_kbps {
+            if attempt_result.size_bytes <= target_size_bytes
+                && (attempt_result.size_bytes as f64)
+                    >= (target_size_bytes as f64 * TARGET_SIZE_UNDERFILL_RATIO)
+            {
+                break;
+            }
+
+            // Always try to adjust bitrate if over target, even if calculation returns same value
+            // The actual output was wrong, so we should retry with adjusted parameters
+            if next_video_bitrate_kbps == current_video_bitrate_kbps
+                && attempt_result.size_bytes < target_size_bytes
+            {
                 break;
             }
 
             if let Some(high_bitrate) = high_video_bitrate_kbps {
-                if high_bitrate <= low_video_bitrate_kbps.saturating_add(24) {
+                // Only exit early if we're under target and converging, not if we're over target
+                if attempt_result.size_bytes <= target_size_bytes
+                    && high_bitrate <= low_video_bitrate_kbps.saturating_add(24)
+                {
                     break;
                 }
             }
@@ -676,10 +701,14 @@ fn build_ffmpeg_args(
         "yuv420p".to_string(),
         "-b:v".to_string(),
         format!("{video_bitrate_kbps}k"),
+        "-maxrate".to_string(),
+        format!("{video_bitrate_kbps}k"),
+        "-bufsize".to_string(),
+        format!("{}k", video_bitrate_kbps.saturating_mul(2)),
     ]);
 
     match video_encoder {
-        ExportVideoEncoder::Libx264 => {
+        ExportVideoEncoder::SoftwareHevc => {
             args.extend(["-preset".to_string(), preset.to_string()]);
             if let Some(passlog_prefix) = passlog_prefix {
                 args.extend([
@@ -690,19 +719,36 @@ fn build_ffmpeg_args(
                 ]);
             }
         }
-        ExportVideoEncoder::H264Nvenc => {
+        ExportVideoEncoder::HevcNvenc => {
             args.extend([
+                "-preset".to_string(),
+                preset.to_string(),
                 "-rc".to_string(),
                 "vbr".to_string(),
-                "-cq".to_string(),
-                "19".to_string(),
             ]);
         }
-        ExportVideoEncoder::H264Amf => {
-            args.extend(["-rc".to_string(), "vbr_peak".to_string()]);
+        ExportVideoEncoder::HevcAmf => {
+            // Use VBR peak mode for export - recommended by AMD for recording use cases
+            // vbr_latency is for low-latency streaming and doesn't respect bitrate targets well
+            // vbr_peak allows encoder to vary bitrate up to maxrate for quality
+            args.extend([
+                "-quality".to_string(),
+                preset.to_string(),
+                "-rc".to_string(),
+                "vbr_peak".to_string(),
+                "-vbaq".to_string(),
+                "true".to_string(),
+                "-preencode".to_string(),
+                "true".to_string(),
+            ]);
         }
-        ExportVideoEncoder::H264Qsv => {
-            args.extend(["-look_ahead".to_string(), "1".to_string()]);
+        ExportVideoEncoder::HevcQsv => {
+            args.extend([
+                "-preset".to_string(),
+                preset.to_string(),
+                "-look_ahead".to_string(),
+                "1".to_string(),
+            ]);
         }
     }
 
@@ -878,8 +924,9 @@ fn build_filter_with_webcam(
 
     let mut parts: Vec<String> = Vec::new();
     for (index, range) in request.keep_ranges.iter().enumerate() {
+        // Add fps filter after trim+setpts to restore proper frame timing for hardware encoders
         parts.push(format!(
-            "[0:v:0]trim=start={}:end={},setpts=PTS-STARTPTS[v{index}]",
+            "[0:v:0]trim=start={}:end={},setpts=PTS-STARTPTS,fps[v{index}]",
             format_seconds_arg(range.start_secs),
             format_seconds_arg(range.end_secs),
         ));
@@ -892,8 +939,9 @@ fn build_filter_with_webcam(
         }
     }
     for (index, range) in request.keep_ranges.iter().enumerate() {
+        // Add fps filter for webcam stream as well
         parts.push(format!(
-            "[1:v:0]trim=start={}:end={},setpts=PTS-STARTPTS[wv{index}]",
+            "[1:v:0]trim=start={}:end={},setpts=PTS-STARTPTS,fps[wv{index}]",
             format_seconds_arg(range.start_secs),
             format_seconds_arg(range.end_secs),
         ));
@@ -973,8 +1021,10 @@ fn build_filter_complex(keep_ranges: &[TimeRange], has_audio: bool) -> String {
     let mut filters = Vec::new();
 
     for (index, range) in keep_ranges.iter().enumerate() {
+        // Add fps filter after trim+setpts to restore proper frame timing for hardware encoders
+        // The trim filter alone breaks frame rate metadata that AMF/NVENC use for rate control
         filters.push(format!(
-            "[0:v:0]trim=start={}:end={},setpts=PTS-STARTPTS[v{index}]",
+            "[0:v:0]trim=start={}:end={},setpts=PTS-STARTPTS,fps[v{index}]",
             format_seconds_arg(range.start_secs),
             format_seconds_arg(range.end_secs),
         ));
@@ -1141,9 +1191,11 @@ fn next_export_video_bitrate_kbps(
         * (target_video_bytes as f64)
         / (current_video_bytes as f64))
         * if actual_size_bytes > target_size_bytes {
-            0.985
+            // Aggressively reduce when over target to ensure we go below
+            0.90
         } else {
-            1.01
+            // Slightly increase when under target to get closer
+            1.02
         })
     .round() as u32;
 
@@ -1212,22 +1264,31 @@ fn select_preferred_attempt(
 
 fn select_export_video_encoder(request: &ClipExportRequest) -> Result<ExportVideoEncoder> {
     if !request.use_hardware_acceleration {
-        return Ok(ExportVideoEncoder::Libx264);
+        return Ok(ExportVideoEncoder::SoftwareHevc);
     }
 
     let ffmpeg = ffmpeg_executable_path();
     let available_encoders = query_ffmpeg_encoders(&ffmpeg)?;
+    let detected_hevc_hardware: Vec<&str> = [
+        ExportVideoEncoder::HevcNvenc,
+        ExportVideoEncoder::HevcAmf,
+        ExportVideoEncoder::HevcQsv,
+    ]
+    .into_iter()
+    .filter(|encoder| available_encoders.contains(encoder.ffmpeg_name()))
+    .map(|encoder| encoder.ffmpeg_name())
+    .collect();
 
-    let requested_order: &[ExportVideoEncoder] = match request.preferred_encoder {
-        EncoderType::Nvenc => &[ExportVideoEncoder::H264Nvenc],
-        EncoderType::Amf => &[ExportVideoEncoder::H264Amf],
-        EncoderType::Qsv => &[ExportVideoEncoder::H264Qsv],
-        EncoderType::Auto => &[
-            ExportVideoEncoder::H264Nvenc,
-            ExportVideoEncoder::H264Amf,
-            ExportVideoEncoder::H264Qsv,
-        ],
-    };
+    info!(
+        hardware_encoders = %detected_hevc_hardware.join(","),
+        "Detected HEVC hardware encoders from FFmpeg"
+    );
+
+    let requested_order: &[ExportVideoEncoder] = &[
+        ExportVideoEncoder::HevcAmf,
+        ExportVideoEncoder::HevcNvenc,
+        ExportVideoEncoder::HevcQsv,
+    ];
 
     for encoder in requested_order {
         if available_encoders.contains(encoder.ffmpeg_name()) {
@@ -1236,16 +1297,34 @@ fn select_export_video_encoder(request: &ClipExportRequest) -> Result<ExportVide
     }
 
     for encoder in [
-        ExportVideoEncoder::H264Nvenc,
-        ExportVideoEncoder::H264Amf,
-        ExportVideoEncoder::H264Qsv,
+        ExportVideoEncoder::HevcAmf,
+        ExportVideoEncoder::HevcNvenc,
+        ExportVideoEncoder::HevcQsv,
     ] {
         if available_encoders.contains(encoder.ffmpeg_name()) {
             return Ok(encoder);
         }
     }
 
-    Ok(ExportVideoEncoder::Libx264)
+    Ok(ExportVideoEncoder::SoftwareHevc)
+}
+
+fn should_fallback_to_software_encoder(err: &anyhow::Error) -> bool {
+    let message = format!("{err:#}").to_lowercase();
+    [
+        "cannot load nvcuda.dll",
+        "no capable devices found",
+        "device not available",
+        "driver does not support required nvenc",
+        "hevc_nvenc",
+        "hevc_amf",
+        "hevc_qsv",
+        "error while opening encoder",
+        "initializing an internal mfx session failed",
+        "amf initialization",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
 }
 
 fn query_ffmpeg_encoders(ffmpeg: &Path) -> Result<String> {
@@ -1295,7 +1374,7 @@ fn select_adaptive_preset(
     let high_throughput_source = pixels_per_frame * metadata.fps.max(1.0) >= 2560.0 * 1440.0 * 60.0;
 
     match encoder {
-        ExportVideoEncoder::Libx264 => {
+        ExportVideoEncoder::SoftwareHevc => {
             if bits_per_pixel_frame < 0.05 {
                 "veryslow"
             } else if bits_per_pixel_frame < 0.09 {
@@ -1312,15 +1391,15 @@ fn select_adaptive_preset(
                 "slower"
             }
         }
-        ExportVideoEncoder::H264Nvenc => {
+        ExportVideoEncoder::HevcNvenc => {
             if bits_per_pixel_frame < 0.1 {
                 "p7"
             } else {
                 "p6"
             }
         }
-        ExportVideoEncoder::H264Amf => "quality",
-        ExportVideoEncoder::H264Qsv => {
+        ExportVideoEncoder::HevcAmf => "quality",
+        ExportVideoEncoder::HevcQsv => {
             if high_throughput_source {
                 "slow"
             } else {
@@ -1480,7 +1559,7 @@ mod tests {
             "-t",
             "2",
             "-c:v",
-            "libx264",
+            "libx265",
             "-pix_fmt",
             "yuv420p",
             "-c:a",
