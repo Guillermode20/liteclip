@@ -325,6 +325,7 @@ pub(super) fn estimate_export_bitrates_from_editor_impl(
     has_audio: bool,
     requested_audio_bitrate_kbps: u32,
     num_segments: usize,
+    use_hardware_acceleration: bool,
 ) -> (u32, u32) {
     let estimate = estimate_export_bitrates(
         target_size_mb,
@@ -332,6 +333,7 @@ pub(super) fn estimate_export_bitrates_from_editor_impl(
         has_audio,
         requested_audio_bitrate_kbps,
         num_segments,
+        use_hardware_acceleration,
     );
 
     (estimate.video_kbps, estimate.total_kbps)

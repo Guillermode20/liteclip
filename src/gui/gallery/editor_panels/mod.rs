@@ -569,6 +569,7 @@ fn render_size_section(ui: &mut egui::Ui, editor: &mut EditorState) {
         editor.video.metadata.has_audio,
         editor.audio_bitrate_kbps,
         kept_ranges.len(),
+        editor.use_hardware_acceleration,
     );
     let (quality_label, bars) = super::quality_estimate(&editor.video.metadata, video_kbps);
 

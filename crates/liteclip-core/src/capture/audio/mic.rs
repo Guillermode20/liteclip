@@ -558,7 +558,7 @@ impl RNNoiseProcessor {
     const GATE_FLOOR: f32 = 0.001;
 
     /// Hold time after speech drops below open threshold (RNNoise frames, 10ms each)
-    const HOLD_FRAMES: u32 = 12;      // ~120 ms
+    const HOLD_FRAMES: u32 = 12; // ~120 ms
     /// Extended hold after high-confidence speech (prevents cutting breaths)
     const HOLD_FRAMES_EXTENDED: u32 = 20; // ~200 ms
 
@@ -703,7 +703,8 @@ impl RNNoiseProcessor {
             let start = self.in_head;
             // nnnoiseless process_frame expects exactly 480 samples.
             // We use frame_in and frame_out to ensure memory alignment and contiguous slices.
-            self.frame_in.copy_from_slice(&self.in_buf[start..start + AUDIO_FRAME_SIZE]);
+            self.frame_in
+                .copy_from_slice(&self.in_buf[start..start + AUDIO_FRAME_SIZE]);
 
             let speech_prob = self
                 .state
@@ -750,8 +751,7 @@ impl RNNoiseProcessor {
     #[inline]
     fn update_adaptive_gate(&mut self, speech_prob: f32) {
         // Smooth speech probability for stable gating decisions
-        self.speech_presence +=
-            (speech_prob - self.speech_presence) * Self::SPEECH_PRESENCE_SMOOTH;
+        self.speech_presence += (speech_prob - self.speech_presence) * Self::SPEECH_PRESENCE_SMOOTH;
 
         let is_high_confidence = speech_prob > Self::SPEECH_CONFIDENCE_THRESHOLD;
         let is_speech = self.speech_presence > Self::GATE_OPEN_THRESHOLD || is_high_confidence;
@@ -892,7 +892,10 @@ mod tests {
             unsafe { std::slice::from_raw_parts(data.as_ptr() as *const i16, data.len() / 2) };
         // Check the second half (past warmup)
         for pair in samples[960..].chunks_exact(2) {
-            assert_eq!(pair[0], pair[1], "L/R should be identical after mono broadcast");
+            assert_eq!(
+                pair[0], pair[1],
+                "L/R should be identical after mono broadcast"
+            );
         }
     }
 

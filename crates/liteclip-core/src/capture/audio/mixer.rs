@@ -326,8 +326,8 @@ fn decode_packet_into(packet: &EncodedPacket, buffer: &mut Vec<i16>) {
 mod tests {
     use super::*;
     use crate::config::config_mod::Config;
-    use bytes::BytesMut;
     use crate::encode::EncodedPacket;
+    use bytes::BytesMut;
 
     #[test]
     fn test_mixer_basic() {

@@ -1291,6 +1291,7 @@ fn estimate_export_bitrates_from_editor(
     has_audio: bool,
     requested_audio_bitrate_kbps: u32,
     num_segments: usize,
+    use_hardware_acceleration: bool,
 ) -> (u32, u32) {
     utils::estimate_export_bitrates_from_editor_impl(
         target_size_mb,
@@ -1298,6 +1299,7 @@ fn estimate_export_bitrates_from_editor(
         has_audio,
         requested_audio_bitrate_kbps,
         num_segments,
+        use_hardware_acceleration,
     )
 }
 

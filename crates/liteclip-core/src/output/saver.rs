@@ -11,8 +11,8 @@ use super::{
     calculate_clip_start_pts, generate_thumbnail, h264_nal_type, hevc_nal_type, Muxer, MuxerConfig,
 };
 
- const CLIP_VIDEO_CATCH_UP_RETRY_LIMIT: usize = 8;
- const CLIP_VIDEO_CATCH_UP_SLEEP: Duration = Duration::from_millis(125);
+const CLIP_VIDEO_CATCH_UP_RETRY_LIMIT: usize = 8;
+const CLIP_VIDEO_CATCH_UP_SLEEP: Duration = Duration::from_millis(125);
 
 /// Spawns a background task to extract packets from the replay buffer and save them to an MP4 file.
 ///

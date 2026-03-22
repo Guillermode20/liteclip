@@ -445,12 +445,7 @@ pub fn spawn_encoder_with_receiver(
                     packet_batch.push(packet);
                     drained = drained.saturating_add(1);
                     if packet_batch.len() >= MAX_PACKET_BATCH_LEN {
-                        flush_packet_batch(
-                            buffer,
-                            packet_batch,
-                            flush_batches,
-                            last_packet_flush,
-                        );
+                        flush_packet_batch(buffer, packet_batch, flush_batches, last_packet_flush);
                     }
                 }
                 if !packet_batch.is_empty()
@@ -462,15 +457,14 @@ pub fn spawn_encoder_with_receiver(
             }
 
             loop {
-                total_forwarded_packets = total_forwarded_packets.saturating_add(
-                    drain_ready_packets(
+                total_forwarded_packets =
+                    total_forwarded_packets.saturating_add(drain_ready_packets(
                         &packet_rx,
                         &buffer,
                         &mut packet_batch,
                         &mut flush_batches,
                         &mut last_packet_flush,
-                    ),
-                );
+                    ));
                 match frame_rx.recv_timeout(std::time::Duration::from_millis(8)) {
                     Ok(frame) => {
                         let mut encode_one =
