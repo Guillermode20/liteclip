@@ -429,6 +429,7 @@ fn run_clip_export(
                 if replace_best_under {
                     best_under_target = Some(attempt_result.clone());
                 }
+                // Under target: we can try higher bitrates, raise low bound
                 low_video_bitrate_kbps = low_video_bitrate_kbps.max(current_video_bitrate_kbps);
             } else {
                 let replace_best_over = match best_over_target.as_ref() {
@@ -443,10 +444,16 @@ fn run_clip_export(
                 if replace_best_over {
                     best_over_target = Some(attempt_result.clone());
                 }
+                // Over target: need to try lower bitrates, lower the high bound and reduce low bound
                 high_video_bitrate_kbps = Some(match high_video_bitrate_kbps {
                     Some(high_bitrate) => high_bitrate.min(current_video_bitrate_kbps),
                     None => current_video_bitrate_kbps,
                 });
+                // Also reduce low_video_bitrate_kbps to allow going lower on next attempt
+                // Don't let it go below absolute minimum of 100 kbps
+                low_video_bitrate_kbps = low_video_bitrate_kbps
+                    .min(current_video_bitrate_kbps.saturating_sub(10))
+                    .max(100);
             }
 
             let measured_non_video_bytes = estimate_measured_non_video_bytes(
@@ -1187,39 +1194,57 @@ fn next_export_video_bitrate_kbps(
     let target_video_bytes = target_size_bytes
         .saturating_sub(estimated_non_video_bytes)
         .max(1);
-    let scaled_video_bitrate_kbps = ((f64::from(current_video_bitrate_kbps)
-        * (target_video_bytes as f64)
-        / (current_video_bytes as f64))
-        * if actual_size_bytes > target_size_bytes {
-            // Aggressively reduce when over target to ensure we go below
-            0.90
+
+    // Calculate the exact ratio needed to hit target
+    let byte_ratio = (target_video_bytes as f64) / (current_video_bytes as f64);
+    let overshoot_ratio = (actual_size_bytes as f64) / (target_size_bytes as f64);
+
+    // When over target, calculate the exact bitrate needed and aim for 95% of target
+    // to ensure we land just under. When under, be conservative to avoid overshooting.
+    let target_ratio = if actual_size_bytes > target_size_bytes {
+        // Aim for 95% of target to ensure we're safely under without over-correcting
+        byte_ratio * 0.95
+    } else {
+        // Slightly increase when under target to get closer without overshooting
+        byte_ratio.min(1.05)
+    };
+
+    // Calculate target bitrate directly from ratio
+    let calculated_bitrate = (f64::from(current_video_bitrate_kbps) * target_ratio)
+        .round()
+        .clamp(100.0, MAX_VIDEO_BITRATE_KBPS as f64) as u32;
+
+    // Binary search bounds handling
+    let mut next_video_bitrate_kbps = calculated_bitrate;
+
+    if let Some(high_bound) = high_video_bitrate_kbps {
+        let low_bound = low_video_bitrate_kbps;
+
+        // If significantly over target (>10%), prioritize the calculated ratio
+        // over binary search bounds to converge faster
+        if overshoot_ratio > 1.10 {
+            // Allow calculated bitrate even if below low_bound, but don't exceed high_bound
+            next_video_bitrate_kbps = calculated_bitrate.min(high_bound).max(100);
+        } else if high_bound <= low_bound.saturating_add(100) {
+            // Bounds are close, use binary search midpoint for fine tuning
+            next_video_bitrate_kbps = low_bound.saturating_add(high_bound.saturating_sub(low_bound) / 2);
         } else {
-            // Slightly increase when under target to get closer
-            1.02
-        })
-    .round() as u32;
+            // Clamp to binary search bounds
+            next_video_bitrate_kbps = calculated_bitrate.clamp(low_bound, high_bound);
 
-    let growth_limited_video_bitrate_kbps = scaled_video_bitrate_kbps.min(
-        current_video_bitrate_kbps
-            .saturating_mul(4)
-            .max(MIN_VIDEO_BITRATE_KBPS),
-    );
-    let mut next_video_bitrate_kbps =
-        growth_limited_video_bitrate_kbps.max(low_video_bitrate_kbps.max(MIN_VIDEO_BITRATE_KBPS));
-
-    if let Some(high_video_bitrate_kbps) = high_video_bitrate_kbps {
-        if high_video_bitrate_kbps <= low_video_bitrate_kbps.saturating_add(24) {
-            return low_video_bitrate_kbps.max(MIN_VIDEO_BITRATE_KBPS);
-        }
-
-        next_video_bitrate_kbps = next_video_bitrate_kbps.min(high_video_bitrate_kbps);
-        if next_video_bitrate_kbps == current_video_bitrate_kbps {
-            let span = high_video_bitrate_kbps.saturating_sub(low_video_bitrate_kbps);
-            next_video_bitrate_kbps = low_video_bitrate_kbps.saturating_add((span + 1) / 2);
+            // Force movement if stuck at same value
+            if next_video_bitrate_kbps == current_video_bitrate_kbps {
+                let step = ((high_bound.saturating_sub(low_bound)) / 4).max(50);
+                if actual_size_bytes > target_size_bytes {
+                    next_video_bitrate_kbps = current_video_bitrate_kbps.saturating_sub(step).max(low_bound).max(100);
+                } else {
+                    next_video_bitrate_kbps = current_video_bitrate_kbps.saturating_add(step).min(high_bound);
+                }
+            }
         }
     }
 
-    next_video_bitrate_kbps.min(MAX_VIDEO_BITRATE_KBPS)
+    next_video_bitrate_kbps.min(MAX_VIDEO_BITRATE_KBPS).max(100)
 }
 
 fn estimate_measured_non_video_bytes(
