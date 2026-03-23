@@ -78,6 +78,14 @@ pub struct ClipExportRequest {
     pub metadata: VideoFileMetadata,
     /// Optional second input (companion webcam MP4) and layout for overlay.
     pub webcam: Option<WebcamExport>,
+    /// If true, use stream copy (no re-encoding) for fastest export preserving original quality.
+    /// Used when user hasn't manually adjusted the target size.
+    pub stream_copy: bool,
+    /// Output resolution. None means auto (based on target size) or original if stream_copy.
+    pub output_width: Option<u32>,
+    pub output_height: Option<u32>,
+    /// Output frame rate. None means use original.
+    pub output_fps: Option<f64>,
 }
 
 impl ClipExportRequest {
@@ -393,6 +401,12 @@ fn run_clip_export(
         )
     })?;
 
+    // Stream copy mode: fast export without re-encoding
+    #[cfg(not(feature = "ffmpeg"))]
+    if request.stream_copy {
+        return run_stream_copy_export(request, progress_tx, cancel_flag);
+    }
+
     let output_duration_secs = request.output_duration_secs().max(0.1);
     let mut selected_encoder = select_export_video_encoder(request)
         .with_context(|| "Unable to resolve an export video encoder")?;
@@ -681,6 +695,137 @@ fn run_clip_export(
 
     cleanup_export_work_dir(&export_work_dir);
     export_result
+}
+
+/// Fast stream copy export - trims and concatenates without re-encoding.
+/// Used when user hasn't manually adjusted the target size.
+#[cfg(not(feature = "ffmpeg"))]
+fn run_stream_copy_export(
+    request: &ClipExportRequest,
+    progress_tx: &Sender<ClipExportUpdate>,
+    cancel_flag: &Arc<AtomicBool>,
+) -> Result<ExportOutcome> {
+    let ffmpeg = ffmpeg_executable_path();
+    
+    let _ = progress_tx.send(ClipExportUpdate::Progress {
+        phase: ClipExportPhase::Preparing,
+        fraction: 0.0,
+        message: "Stream copy export (no re-encoding)".to_string(),
+    });
+
+    info!(
+        "Stream copy export {:?} -> {:?} ({} kept ranges)",
+        request.input_path,
+        request.output_path,
+        request.keep_ranges.len()
+    );
+
+    // Build filter for trimming and concatenation
+    let filter = build_stream_copy_filter(&request.keep_ranges, request.metadata.has_audio);
+    
+    let mut args = vec![
+        "-y".to_string(),
+        "-hide_banner".to_string(),
+        "-loglevel".to_string(),
+        "error".to_string(),
+        "-nostats".to_string(),
+        "-progress".to_string(),
+        "pipe:1".to_string(),
+        "-i".to_string(),
+        request.input_path.to_string_lossy().into_owned(),
+        "-filter_complex".to_string(),
+        filter,
+    ];
+
+    // Stream copy for video
+    args.extend([
+        "-map".to_string(),
+        "[outv]".to_string(),
+        "-c:v".to_string(),
+        "copy".to_string(),
+    ]);
+
+    // Stream copy for audio if present
+    if request.metadata.has_audio {
+        args.extend([
+            "-map".to_string(),
+            "[outa]".to_string(),
+            "-c:a".to_string(),
+            "copy".to_string(),
+        ]);
+    }
+
+    args.extend([
+        "-movflags".to_string(),
+        "+faststart".to_string(),
+        request.output_path.to_string_lossy().into_owned(),
+    ]);
+
+    let total_duration_secs = request.output_duration_secs().max(0.1);
+    
+    let progress_ctx = FFmpegProgressContext {
+        phase: ClipExportPhase::Preparing,
+        start_fraction: 0.0,
+        span_fraction: 1.0,
+        progress_tx: progress_tx.clone(),
+        cancel_flag: cancel_flag.clone(),
+        attempt_index: 0,
+        attempt_count: 1,
+        last_progress_time: std::time::Instant::now(),
+    };
+
+    if run_ffmpeg_phase(&ffmpeg, &args, total_duration_secs, progress_ctx)? {
+        return Ok(ExportOutcome::Cancelled);
+    }
+
+    if cancel_flag.load(Ordering::Relaxed) {
+        return Ok(ExportOutcome::Cancelled);
+    }
+
+    Ok(ExportOutcome::Finished(request.output_path.clone()))
+}
+
+/// Build filter complex for stream copy mode - only trim and concat, no encoding filters
+fn build_stream_copy_filter(keep_ranges: &[TimeRange], has_audio: bool) -> String {
+    let mut filters = Vec::new();
+
+    for (index, range) in keep_ranges.iter().enumerate() {
+        // Trim without fps filter - stream copy doesn't need frame timing adjustment
+        filters.push(format!(
+            "[0:v:0]trim=start={}:end={},setpts=PTS-STARTPTS[v{index}]",
+            format_seconds_arg(range.start_secs),
+            format_seconds_arg(range.end_secs),
+        ));
+        if has_audio {
+            filters.push(format!(
+                "[0:a:0]atrim=start={}:end={},asetpts=PTS-STARTPTS[a{index}]",
+                format_seconds_arg(range.start_secs),
+                format_seconds_arg(range.end_secs),
+            ));
+        }
+    }
+
+    let mut concat_inputs = String::new();
+    for index in 0..keep_ranges.len() {
+        concat_inputs.push_str(&format!("[v{index}]"));
+        if has_audio {
+            concat_inputs.push_str(&format!("[a{index}]"));
+        }
+    }
+
+    concat_inputs.push_str(&format!(
+        "concat=n={}:v=1:a={}",
+        keep_ranges.len(),
+        if has_audio { 1 } else { 0 }
+    ));
+    if has_audio {
+        concat_inputs.push_str("[outv][outa]");
+    } else {
+        concat_inputs.push_str("[outv]");
+    }
+
+    filters.push(concat_inputs);
+    filters.join(";")
 }
 
 #[cfg(not(feature = "ffmpeg"))]
@@ -1080,7 +1225,13 @@ fn build_filter_complex_for_request(request: &ClipExportRequest, has_audio: bool
     if let Some(webcam) = &request.webcam {
         build_filter_with_webcam(request, webcam, has_audio)
     } else {
-        build_filter_complex(&request.keep_ranges, has_audio, request.metadata.fps)
+        let fps = request.output_fps.unwrap_or(request.metadata.fps);
+        let (out_w, out_h) = if let (Some(w), Some(h)) = (request.output_width, request.output_height) {
+            (w, h)
+        } else {
+            (request.metadata.width, request.metadata.height)
+        };
+        build_filter_complex(&request.keep_ranges, has_audio, fps, out_w, out_h)
     }
 }
 
@@ -1091,16 +1242,32 @@ fn build_filter_with_webcam(
 ) -> String {
     use super::webcam_layout::keyframes_for_output_timeline;
 
+    let fps = request.output_fps.unwrap_or(request.metadata.fps);
+    let (out_w, out_h) = if let (Some(w), Some(h)) = (request.output_width, request.output_height) {
+        (w, h)
+    } else {
+        (request.metadata.width, request.metadata.height)
+    };
+
     let mw = request.metadata.width.max(1) as f64;
     let mh = request.metadata.height.max(1) as f64;
 
     let mut parts: Vec<String> = Vec::new();
     for (index, range) in request.keep_ranges.iter().enumerate() {
-        // Add fps filter after trim+setpts to restore proper frame timing for hardware encoders
+        // Add fps filter and optional scale after trim+setpts
+        let scale_filter = if out_w != 0 && out_h != 0 {
+            format!(",scale={}:{}:force_original_aspect_ratio=decrease:force_divisible_by=2",
+                out_w, out_h
+            )
+        } else {
+            String::new()
+        };
         parts.push(format!(
-            "[0:v:0]trim=start={}:end={},setpts=PTS-STARTPTS,fps[v{index}]",
+            "[0:v:0]trim=start={}:end={},setpts=PTS-STARTPTS,fps={}{}[v{index}]",
             format_seconds_arg(range.start_secs),
             format_seconds_arg(range.end_secs),
+            fps,
+            scale_filter,
         ));
         if has_audio {
             parts.push(format!(
@@ -1111,11 +1278,20 @@ fn build_filter_with_webcam(
         }
     }
     for (index, range) in request.keep_ranges.iter().enumerate() {
-        // Add fps filter for webcam stream as well
+        // Add fps filter and optional scale for webcam stream as well
+        let scale_filter = if out_w != 0 && out_h != 0 {
+            format!(",scale={}:{}:force_original_aspect_ratio=decrease:force_divisible_by=2",
+                out_w, out_h
+            )
+        } else {
+            String::new()
+        };
         parts.push(format!(
-            "[1:v:0]trim=start={}:end={},setpts=PTS-STARTPTS,fps[wv{index}]",
+            "[1:v:0]trim=start={}:end={},setpts=PTS-STARTPTS,fps={}{}[wv{index}]",
             format_seconds_arg(range.start_secs),
             format_seconds_arg(range.end_secs),
+            fps,
+            scale_filter,
         ));
     }
 
@@ -1189,19 +1365,30 @@ fn piecewise_linear_expr_t(points: &[(f64, f64)]) -> String {
     format!("if(lt(t,{t0}),{v0},{expr})")
 }
 
-fn build_filter_complex(keep_ranges: &[TimeRange], has_audio: bool, fps: f64) -> String {
+fn build_filter_complex(
+    keep_ranges: &[TimeRange],
+    has_audio: bool,
+    fps: f64,
+    out_width: u32,
+    out_height: u32,
+) -> String {
     let mut filters = Vec::new();
 
     for (index, range) in keep_ranges.iter().enumerate() {
-        // Use fps filter with explicit rate to ensure proper frame timing after trim.
-        // Without explicit fps, the filter may drop/duplicate frames at segment boundaries,
-        // causing duration mismatches and A/V sync issues.
-        // The fps filter also ensures keyframe-aware trimming by outputting at constant rate.
+        // Use fps filter with explicit rate and optional scale
+        let scale_filter = if out_width != 0 && out_height != 0 {
+            format!(",scale={}:{}:force_original_aspect_ratio=decrease:force_divisible_by=2",
+                out_width, out_height
+            )
+        } else {
+            String::new()
+        };
         filters.push(format!(
-            "[0:v:0]trim=start={}:end={},setpts=PTS-STARTPTS,fps={}[v{index}]",
+            "[0:v:0]trim=start={}:end={},setpts=PTS-STARTPTS,fps={}{}[v{index}]",
             format_seconds_arg(range.start_secs),
             format_seconds_arg(range.end_secs),
             fps,
+            scale_filter,
         ));
         if has_audio {
             filters.push(format!(
@@ -2423,6 +2610,7 @@ mod tests {
                 preferred_encoder: EncoderType::Auto,
                 metadata,
                 webcam: None,
+                stream_copy: false,
             },
             &progress_tx,
             &cancel_flag,

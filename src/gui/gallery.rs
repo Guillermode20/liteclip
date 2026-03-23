@@ -131,9 +131,19 @@ struct EditorState {
     snippet_enabled: Vec<bool>,
     selected_cut_point: Option<usize>,
     target_size_mb: u32,
+    /// Whether target_size_mb was manually changed by the user.
+    /// If false, export will use stream copy (no re-encoding).
+    target_size_manually_adjusted: bool,
     audio_bitrate_kbps: u32,
     use_hardware_acceleration: bool,
     preferred_encoder: EncoderType,
+    /// Output resolution. None means auto (based on target size).
+    output_width: Option<u32>,
+    output_height: Option<u32>,
+    /// If true, resolution is automatically calculated based on target size.
+    use_auto_resolution: bool,
+    /// Output frame rate. None means use original.
+    output_fps: Option<f64>,
     preview_texture: Option<egui::TextureHandle>,
     preview_frame_in_flight: bool,
     pending_preview_request: Option<f64>,
@@ -189,9 +199,14 @@ impl EditorState {
             snippet_enabled: vec![true],
             selected_cut_point: None,
             target_size_mb,
+            target_size_manually_adjusted: false,
             audio_bitrate_kbps: DEFAULT_AUDIO_BITRATE_KBPS,
             use_hardware_acceleration: true,
             preferred_encoder,
+            output_width: None,
+            output_height: None,
+            use_auto_resolution: true,
+            output_fps: None,
             preview_texture: None,
             preview_frame_in_flight: false,
             pending_preview_request: None,
@@ -236,6 +251,19 @@ impl EditorState {
             .sum()
     }
 
+    /// Maximum output size in MB based on proportion of enabled segments.
+    /// If half the video is disabled, max output is half the original size.
+    fn max_output_size_mb(&self) -> u32 {
+        let total_duration = self.duration_secs();
+        if total_duration <= 0.0 {
+            return 1;
+        }
+        let kept_duration = self.kept_duration_secs();
+        let proportion = kept_duration / total_duration;
+        let max_size = (self.video.size_mb * proportion).ceil().max(1.0);
+        max_size as u32
+    }
+
     fn snippets(&self) -> Vec<SnippetSegment> {
         snippet_segments(
             self.duration_secs(),
@@ -246,6 +274,51 @@ impl EditorState {
 
     fn has_active_export(&self) -> bool {
         self.export_state.is_some()
+    }
+
+    /// Compute effective output resolution.
+    /// If use_auto_resolution is true, calculates based on target size vs original.
+    /// Otherwise returns manually set resolution or original if not set.
+    fn effective_output_resolution(&self) -> (u32, u32) {
+        let orig_w = self.video.metadata.width;
+        let orig_h = self.video.metadata.height;
+
+        if self.use_auto_resolution {
+            // Calculate resolution scale based on target size vs original size
+            let kept_duration = self.kept_duration_secs();
+            let total_duration = self.duration_secs();
+            let kept_ratio = if total_duration > 0.0 {
+                (kept_duration / total_duration).clamp(0.1, 1.0)
+            } else {
+                1.0
+            };
+
+            // Effective "original" size for kept portion
+            let effective_orig_mb = self.video.size_mb * kept_ratio;
+            let target_mb = self.target_size_mb as f64;
+
+            // Scale factor: if target is smaller, reduce resolution
+            // Use square root since video compression is roughly proportional to pixel count
+            let scale = if effective_orig_mb > 0.0 && target_mb < effective_orig_mb {
+                (target_mb / effective_orig_mb).sqrt().clamp(0.5, 1.0)
+            } else {
+                1.0
+            };
+
+            // Apply scale and round to nearest multiple of 2 (required for many codecs)
+            let new_w = ((orig_w as f64 * scale) as u32 / 2 * 2).max(640);
+            let new_h = ((orig_h as f64 * scale) as u32 / 2 * 2).max(360);
+            (new_w, new_h)
+        } else if let (Some(w), Some(h)) = (self.output_width, self.output_height) {
+            (w, h)
+        } else {
+            (orig_w, orig_h)
+        }
+    }
+
+    /// Get effective output FPS. Returns manual setting or original.
+    fn effective_output_fps(&self) -> f64 {
+        self.output_fps.unwrap_or(self.video.metadata.fps)
     }
 }
 
@@ -1106,6 +1179,20 @@ fn start_export(editor: &mut EditorState) {
             preferred_encoder: editor.preferred_encoder,
             metadata: editor.video.metadata.clone(),
             webcam,
+            stream_copy: !editor.target_size_manually_adjusted,
+            output_width: if editor.use_auto_resolution {
+                let (w, _h) = editor.effective_output_resolution();
+                Some(w)
+            } else {
+                editor.output_width
+            },
+            output_height: if editor.use_auto_resolution {
+                let (_w, h) = editor.effective_output_resolution();
+                Some(h)
+            } else {
+                editor.output_height
+            },
+            output_fps: Some(editor.effective_output_fps()),
         },
         progress_tx,
         cancel_flag.clone(),

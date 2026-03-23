@@ -5,7 +5,7 @@ use super::{
     format_timestamp_precise, remove_cut_point, start_export, toggle_editor_playback,
     upsert_webcam_keyframe, x_to_time, ClipCompressApp, EditorState, EditorUiOutcome,
     EDITOR_SIDEBAR_MIN_WIDTH, EDITOR_SIDEBAR_WIDTH, EDITOR_STACK_BREAKPOINT,
-    SCRUB_FAST_RATE_SECS_PER_SEC, SCRUB_SAMPLE_MIN_DT_SECS,
+    SCRUB_FAST_RATE_SECS_PER_SEC, SCRUB_SAMPLE_MIN_DT_SECS, DEFAULT_TARGET_SIZE_MB,
 };
 
 pub(super) fn render_preview_panel_impl(
@@ -563,6 +563,22 @@ fn render_snippet_list(ui: &mut egui::Ui, editor: &mut EditorState, outcome: &mu
 fn render_size_section(ui: &mut egui::Ui, editor: &mut EditorState) {
     let kept_duration = editor.kept_duration_secs();
     let kept_ranges = editor.kept_ranges();
+    let max_output_size_mb = editor.max_output_size_mb();
+    let total_duration = editor.duration_secs();
+
+    // Compute the effective auto target size based on kept proportion
+    let kept_proportion = if total_duration > 0.0 {
+        (kept_duration / total_duration).clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    let auto_target_size_mb = (editor.video.size_mb * kept_proportion).ceil().max(1.0) as u32;
+    
+    // Clamp target size to max allowed based on enabled segments
+    if editor.target_size_mb > max_output_size_mb {
+        editor.target_size_mb = max_output_size_mb;
+    }
+    
     let (video_kbps, total_kbps) = estimate_export_bitrates_from_editor(
         editor.target_size_mb,
         kept_duration,
@@ -576,38 +592,129 @@ fn render_size_section(ui: &mut egui::Ui, editor: &mut EditorState) {
     egui::Frame::group(ui.style()).show(ui, |ui| {
         ui.label(egui::RichText::new("Export Settings").strong());
         ui.add_space(6.0);
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Target Output Size:");
-            ui.add(
-                egui::DragValue::new(&mut editor.target_size_mb)
-                    .range(1..=4096)
-                    .suffix(" MB")
-                    .speed(1),
-            );
-        });
-        if editor.video.metadata.has_audio {
+        
+        // Show stream copy mode when size hasn't been manually adjusted
+        if !editor.target_size_manually_adjusted {
             ui.horizontal_wrapped(|ui| {
-                ui.label("Audio Bitrate:");
+                ui.label("Output Size:");
+                ui.label(egui::RichText::new(format!("{} MB (auto)", auto_target_size_mb))
+                    .strong());
+            });
+            ui.label(egui::RichText::new(
+                "Stream copy mode: no re-encoding (fastest, preserves quality)"
+            ).color(egui::Color32::from_rgb(100, 200, 100)));
+            if ui.button("Adjust size to enable compression").clicked() {
+                editor.target_size_manually_adjusted = true;
+            }
+        } else {
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Target Output Size:");
+                let prev_size = editor.target_size_mb;
                 ui.add(
-                    egui::DragValue::new(&mut editor.audio_bitrate_kbps)
-                        .range(48..=320)
-                        .suffix(" kbps")
+                    egui::DragValue::new(&mut editor.target_size_mb)
+                        .range(1..=max_output_size_mb)
+                        .suffix(" MB")
                         .speed(1),
                 );
+                // Mark as manually adjusted if the value changed
+                if editor.target_size_mb != prev_size {
+                    editor.target_size_manually_adjusted = true;
+                }
             });
+            ui.label(egui::RichText::new(format!(
+                "Max size for kept segments: {} MB",
+                max_output_size_mb
+            )).small().weak());
+            
+            // Button to revert to stream copy mode
+            if ui.button("Use stream copy (no compression)").clicked() {
+                editor.target_size_manually_adjusted = false;
+                // Reset to auto-calculated size
+                editor.target_size_mb = DEFAULT_TARGET_SIZE_MB
+                    .max(editor.video.size_mb.round() as u32 / 2)
+                    .min(editor.video.size_mb.ceil().max(1.0) as u32)
+                    .min(max_output_size_mb);
+            }
+            
+            if editor.video.metadata.has_audio {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Audio Bitrate:");
+                    ui.add(
+                        egui::DragValue::new(&mut editor.audio_bitrate_kbps)
+                            .range(48..=320)
+                            .suffix(" kbps")
+                            .speed(1),
+                    );
+                });
+            }
+            ui.checkbox(
+                &mut editor.use_hardware_acceleration,
+                "Use hardware acceleration (fallback to software if unavailable)",
+            );
+            
+            ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(4.0);
+            
+            // Resolution settings
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut editor.use_auto_resolution, "Auto resolution");
+                if editor.use_auto_resolution {
+                    let (auto_w, auto_h) = editor.effective_output_resolution();
+                    ui.label(egui::RichText::new(format!("-> {}x{}", auto_w, auto_h))
+                        .small());
+                }
+            });
+            
+            if !editor.use_auto_resolution {
+                ui.horizontal(|ui| {
+                    ui.label("Resolution:");
+                    let mut w = editor.output_width.unwrap_or(editor.video.metadata.width);
+                    let mut h = editor.output_height.unwrap_or(editor.video.metadata.height);
+                    ui.add(
+                        egui::DragValue::new(&mut w)
+                            .range(320..=3840)
+                            .suffix("px")
+                            .speed(2),
+                    );
+                    ui.label("×");
+                    ui.add(
+                        egui::DragValue::new(&mut h)
+                            .range(240..=2160)
+                            .suffix("px")
+                            .speed(2),
+                    );
+                    editor.output_width = Some(w);
+                    editor.output_height = Some(h);
+                });
+            }
+            
+            // FPS settings
+            ui.horizontal(|ui| {
+                ui.label("Frame Rate:");
+                let mut fps = editor.output_fps.unwrap_or(editor.video.metadata.fps);
+                ui.add(
+                    egui::DragValue::new(&mut fps)
+                        .range(15.0..=120.0)
+                        .suffix(" fps")
+                        .speed(1),
+                );
+                if ui.button("Original").clicked() {
+                    fps = editor.video.metadata.fps;
+                }
+                editor.output_fps = Some(fps);
+            });
+            
+            ui.label(format!(
+                "Estimated Quality: [{}{}] {} (video ~{:.2} Mbps, total ~{:.2} Mbps)",
+                "#".repeat(bars),
+                "-".repeat(5 - bars),
+                quality_label,
+                video_kbps as f64 / 1000.0,
+                total_kbps as f64 / 1000.0,
+            ));
         }
-        ui.checkbox(
-            &mut editor.use_hardware_acceleration,
-            "Use hardware acceleration (fallback to software if unavailable)",
-        );
-        ui.label(format!(
-            "Estimated Quality: [{}{}] {} (video ~{:.2} Mbps, total ~{:.2} Mbps)",
-            "#".repeat(bars),
-            "-".repeat(5 - bars),
-            quality_label,
-            video_kbps as f64 / 1000.0,
-            total_kbps as f64 / 1000.0,
-        ));
+        
         ui.label(format!(
             "Kept duration after cuts: {}",
             format_compact_duration(kept_duration)
