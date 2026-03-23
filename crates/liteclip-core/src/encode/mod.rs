@@ -47,8 +47,6 @@
 //! );
 //! ```
 
-#[cfg(feature = "ffmpeg-cli")]
-pub mod cli_pipe;
 pub mod encoder_mod;
 pub mod error;
 #[cfg(feature = "ffmpeg")]

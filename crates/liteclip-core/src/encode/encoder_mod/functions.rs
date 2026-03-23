@@ -6,8 +6,6 @@ use crossbeam::channel::{bounded, Receiver};
 use ffmpeg_next as ffmpeg;
 #[cfg(feature = "ffmpeg")]
 use ffmpeg_next::format::Pixel;
-#[cfg(feature = "ffmpeg-cli")]
-use std::process::Command;
 use std::time::Instant;
 use tracing::{debug, info, warn};
 #[cfg(windows)]
@@ -86,17 +84,7 @@ fn ensure_requested_encoder_available(ty: ResolvedEncoderType) -> EncodeResult<(
     Ok(())
 }
 
-#[cfg(feature = "ffmpeg-cli")]
-fn ensure_requested_encoder_available(_ty: ResolvedEncoderType) -> EncodeResult<()> {
-    if !probe_libx264_cli_available() {
-        return Err(EncodeError::msg(
-            "ffmpeg CLI build does not expose libx264; install a full FFmpeg build",
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(not(any(feature = "ffmpeg", feature = "ffmpeg-cli")))]
+#[cfg(not(feature = "ffmpeg"))]
 fn ensure_requested_encoder_available(_ty: ResolvedEncoderType) -> EncodeResult<()> {
     Ok(())
 }
@@ -118,53 +106,23 @@ fn encoder_fields_to_resolved(c: EncoderConfig, ty: ResolvedEncoderType) -> Reso
 }
 
 fn resolve_encoder_config(config: &EncoderConfig) -> EncodeResult<ResolvedEncoderConfig> {
-    #[cfg(feature = "ffmpeg-cli")]
-    {
-        return resolve_encoder_config_cli(config);
-    }
-    #[cfg(all(feature = "ffmpeg", not(feature = "ffmpeg-cli")))]
-    {
-        let mut resolved = config.clone();
-        if resolved.encoder_type == crate::config::EncoderType::Auto {
-            let detected_encoder = detect_hardware_encoder();
-            if matches!(detected_encoder, HardwareEncoder::None) {
-                return Err(EncodeError::NoHardwareForAuto);
-            }
-            apply_auto_encoder_selection(&mut resolved, detected_encoder);
-            info!("Auto-detected encoder: {:?}", resolved.encoder_type);
-        }
-
-        let ty = match resolved.encoder_type {
-            crate::config::EncoderType::Nvenc => ResolvedEncoderType::Nvenc,
-            crate::config::EncoderType::Amf => ResolvedEncoderType::Amf,
-            crate::config::EncoderType::Qsv => ResolvedEncoderType::Qsv,
-            crate::config::EncoderType::Auto => return Err(EncodeError::NoHardwareForAuto),
-        };
-
-        ensure_requested_encoder_available(ty)?;
-        Ok(encoder_fields_to_resolved(resolved, ty))
-    }
-    #[cfg(not(any(feature = "ffmpeg", feature = "ffmpeg-cli")))]
-    {
-        let _ = config;
-        Err(EncodeError::msg(
-            "no FFmpeg backend enabled; use --features ffmpeg or --features ffmpeg-cli",
-        ))
-    }
-}
-
-#[cfg(feature = "ffmpeg-cli")]
-fn resolve_encoder_config_cli(config: &EncoderConfig) -> EncodeResult<ResolvedEncoderConfig> {
     let mut resolved = config.clone();
     if resolved.encoder_type == crate::config::EncoderType::Auto {
-        info!("ffmpeg-cli backend: auto-select uses libx264 (software)");
-    } else {
-        warn!(
-            "ffmpeg-cli backend ignores hardware encoder selection; using libx264 via ffmpeg.exe"
-        );
+        let detected_encoder = detect_hardware_encoder();
+        if matches!(detected_encoder, HardwareEncoder::None) {
+            return Err(EncodeError::NoHardwareForAuto);
+        }
+        apply_auto_encoder_selection(&mut resolved, detected_encoder);
+        info!("Auto-detected encoder: {:?}", resolved.encoder_type);
     }
-    resolved.encoder_type = crate::config::EncoderType::Amf;
-    let ty = ResolvedEncoderType::Amf;
+
+    let ty = match resolved.encoder_type {
+        crate::config::EncoderType::Nvenc => ResolvedEncoderType::Nvenc,
+        crate::config::EncoderType::Amf => ResolvedEncoderType::Amf,
+        crate::config::EncoderType::Qsv => ResolvedEncoderType::Qsv,
+        crate::config::EncoderType::Auto => return Err(EncodeError::NoHardwareForAuto),
+    };
+
     ensure_requested_encoder_available(ty)?;
     Ok(encoder_fields_to_resolved(resolved, ty))
 }
@@ -254,28 +212,6 @@ fn probe_encoder_available(encoder_name: &str) -> bool {
     }
 }
 
-#[cfg(feature = "ffmpeg-cli")]
-fn probe_libx264_cli_available() -> bool {
-    use std::process::Stdio;
-    let ffmpeg = crate::runtime::resolve_ffmpeg_executable();
-    let mut cmd = Command::new(&ffmpeg);
-    cmd.args(["-hide_banner", "-encoders"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000);
-    }
-    let Ok(out) = cmd.output() else {
-        return false;
-    };
-    if !out.status.success() {
-        return false;
-    }
-    String::from_utf8_lossy(&out.stdout).contains("libx264")
-}
 
 /// Detect available hardware encoder (HEVC-only)
 ///
@@ -309,15 +245,8 @@ pub fn detect_hardware_encoder() -> HardwareEncoder {
 /// Detect available hardware encoder (non-FFmpeg fallback)
 #[cfg(not(feature = "ffmpeg"))]
 pub fn detect_hardware_encoder() -> HardwareEncoder {
-    #[cfg(feature = "ffmpeg-cli")]
-    {
-        HardwareEncoder::None
-    }
-    #[cfg(not(any(feature = "ffmpeg", feature = "ffmpeg-cli")))]
-    {
-        warn!("FFmpeg not compiled in, no hardware encoder available");
-        HardwareEncoder::None
-    }
+    warn!("FFmpeg not compiled in, no hardware encoder available");
+    HardwareEncoder::None
 }
 
 #[cfg(feature = "ffmpeg")]
@@ -357,18 +286,10 @@ pub fn create_encoder(config: &ResolvedEncoderConfig) -> EncodeResult<Box<dyn En
     Ok(Box::new(crate::encode::ffmpeg::FfmpegEncoder::new(config)?))
 }
 
-#[cfg(all(feature = "ffmpeg-cli", not(feature = "ffmpeg")))]
-pub fn create_encoder(config: &ResolvedEncoderConfig) -> EncodeResult<Box<dyn Encoder>> {
-    info!("Creating CLI pipe encoder (libx264)");
-    Ok(Box::new(crate::encode::cli_pipe::CliPipeEncoder::new(
-        config,
-    )?))
-}
-
-#[cfg(not(any(feature = "ffmpeg", feature = "ffmpeg-cli")))]
+#[cfg(not(feature = "ffmpeg"))]
 pub fn create_encoder(_config: &ResolvedEncoderConfig) -> EncodeResult<Box<dyn Encoder>> {
     Err(EncodeError::msg(
-        "FFmpeg support is disabled; rebuild with `--features ffmpeg` or `--features ffmpeg-cli`",
+        "FFmpeg support is disabled; rebuild with `--features ffmpeg`",
     ))
 }
 
@@ -587,14 +508,7 @@ pub fn init_ffmpeg() -> EncodeResult<()> {
 }
 
 /// Initialize FFmpeg (call once at startup)
-#[cfg(all(feature = "ffmpeg-cli", not(feature = "ffmpeg")))]
-pub fn init_ffmpeg() -> EncodeResult<()> {
-    info!("ffmpeg-cli backend: skipping linked libav init (using ffmpeg.exe only)");
-    Ok(())
-}
-
-/// Initialize FFmpeg (call once at startup)
-#[cfg(not(any(feature = "ffmpeg", feature = "ffmpeg-cli")))]
+#[cfg(not(feature = "ffmpeg"))]
 pub fn init_ffmpeg() -> EncodeResult<()> {
     info!("FFmpeg initialization skipped (not compiled in)");
     Ok(())

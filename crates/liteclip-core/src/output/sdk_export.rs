@@ -1,0 +1,548 @@
+//! Clip export using ffmpeg-next filter graphs (SDK-based, no CLI subprocess).
+
+use anyhow::{Context, Result};
+use ffmpeg_next as ffmpeg;
+use std::path::Path;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc::Sender,
+    Arc,
+};
+use std::time::Instant;
+use tracing::info;
+
+use super::video_file::{
+    ClipExportPhase, ClipExportRequest, ClipExportUpdate, ExportAttemptResult, ExportOutcome,
+    ExportVideoEncoder,
+};
+
+/// Run stream copy export using ffmpeg-next (trim and concat without re-encoding).
+pub fn run_stream_copy_export_sdk(
+    request: &ClipExportRequest,
+    progress_tx: &Sender<ClipExportUpdate>,
+    cancel_flag: &Arc<AtomicBool>,
+) -> Result<ExportOutcome> {
+    let _ = progress_tx.send(ClipExportUpdate::Progress {
+        phase: ClipExportPhase::Preparing,
+        fraction: 0.0,
+        message: "Stream copy export (no re-encoding)".to_string(),
+    });
+
+    info!(
+        "Stream copy export {:?} -> {:?} ({} kept ranges)",
+        request.input_path,
+        request.output_path,
+        request.keep_ranges.len()
+    );
+
+    let total_duration_secs = request.output_duration_secs().max(0.1);
+
+    // Open input
+    let mut input_ctx = ffmpeg::format::input(&request.input_path)
+        .with_context(|| format!("Failed to open input for stream copy: {:?}", request.input_path))?;
+
+    // Create output
+    let mut output_ctx = ffmpeg::format::output(&request.output_path)
+        .with_context(|| format!("Failed to create output for stream copy: {:?}", request.output_path))?;
+
+    // Map streams (copy codec)
+    let mut stream_mapping: Vec<(usize, usize, bool)> = vec![];
+    for (stream_index, stream) in input_ctx.streams().enumerate() {
+        let codec_params = stream.parameters();
+        let medium = codec_params.medium();
+
+        match medium {
+            ffmpeg::media::Type::Video => {
+                let mut out_stream = output_ctx.add_stream(ffmpeg::encoder::find(ffmpeg::codec::Id::None))
+                    .context("Failed to add video stream")?;
+                unsafe {
+                    (*out_stream.parameters().as_mut_ptr()).codec_tag = 0;
+                }
+                out_stream.set_parameters(codec_params);
+                stream_mapping.push((stream_index, out_stream.index(), true));
+            }
+            ffmpeg::media::Type::Audio if request.metadata.has_audio => {
+                let mut out_stream = output_ctx.add_stream(ffmpeg::encoder::find(ffmpeg::codec::Id::None))
+                    .context("Failed to add audio stream")?;
+                unsafe {
+                    (*out_stream.parameters().as_mut_ptr()).codec_tag = 0;
+                }
+                out_stream.set_parameters(codec_params);
+                stream_mapping.push((stream_index, out_stream.index(), true));
+            }
+            _ => {
+                stream_mapping.push((stream_index, usize::MAX, false));
+            }
+        }
+    }
+
+    // Collect time bases for each stream before we start the packet iterator
+    let time_bases: std::collections::HashMap<usize, ffmpeg::Rational> = input_ctx.streams()
+        .map(|s| (s.index(), s.time_base()))
+        .collect();
+
+    // Set faststart
+    let mut opts = ffmpeg::Dictionary::new();
+    opts.set("movflags", "+faststart");
+    output_ctx.write_header_with(opts)
+        .with_context(|| "Failed to write MP4 header for stream copy")?;
+
+    // Read packets and write to output
+    let start_time = Instant::now();
+    let mut last_progress_time = start_time;
+    let mut processed_duration: f64 = 0.0;
+
+    for (stream, mut packet) in input_ctx.packets() {
+        if cancel_flag.load(Ordering::Relaxed) {
+            return Ok(ExportOutcome::Cancelled);
+        }
+
+        let stream_index = stream.index();
+        let mapped = stream_mapping.iter().find(|(in_idx, _, _)| *in_idx == stream_index);
+
+        if let Some((_, out_idx, should_copy)) = mapped {
+            if !should_copy {
+                continue;
+            }
+
+            // Get time bases from pre-collected map
+            let in_time_base = time_bases.get(&stream_index).copied().unwrap();
+            let out_stream = output_ctx.stream(*out_idx).context("Missing output stream")?;
+            let out_time_base = out_stream.time_base();
+
+            // Rescale timestamps
+            packet.rescale_ts(in_time_base, out_time_base);
+            packet.set_position(-1);
+            packet.set_stream(*out_idx);
+
+            // Check if packet is within any of our time ranges
+            let pts_secs = if let Some(pts) = packet.pts() {
+                pts as f64 * f64::from(out_time_base.numerator()) / f64::from(out_time_base.denominator())
+            } else {
+                continue;
+            };
+
+            // Check if this packet should be included
+            let in_range = request.keep_ranges.iter().any(|range| {
+                pts_secs >= range.start_secs && pts_secs < range.end_secs
+            });
+
+            // Track progress based on input PTS (before range filtering)
+            processed_duration = processed_duration.max(pts_secs);
+
+            if in_range {
+                // Find the current range and compute correct output PTS
+                // Output PTS = cumulative_prior_durations + (pts_secs - current_range.start_secs)
+                let mut output_pts_secs = 0.0;
+                let mut cumulative_prior = 0.0;
+                for range in &request.keep_ranges {
+                    if pts_secs >= range.start_secs && pts_secs < range.end_secs {
+                        // Found the current range
+                        output_pts_secs = cumulative_prior + (pts_secs - range.start_secs);
+                        break;
+                    }
+                    cumulative_prior += range.duration_secs();
+                }
+
+                let adjusted_pts = (output_pts_secs * 
+                    f64::from(out_time_base.denominator()) / 
+                    f64::from(out_time_base.numerator())) as i64;
+
+                packet.set_pts(Some(adjusted_pts));
+                // DTS follows the same offset as PTS for concatenated output
+                // The offset applied to PTS is (output_pts_secs - pts_secs), apply same to DTS
+                let pts_offset_secs = output_pts_secs - pts_secs;
+                packet.set_dts(packet.dts().map(|dts| {
+                    let dts_secs = dts as f64 * f64::from(out_time_base.numerator()) / 
+                        f64::from(out_time_base.denominator());
+                    let output_dts_secs = dts_secs + pts_offset_secs;
+                    (output_dts_secs * 
+                        f64::from(out_time_base.denominator()) / 
+                        f64::from(out_time_base.numerator())) as i64
+                }));
+
+                packet.write_interleaved(&mut output_ctx)
+                    .with_context(|| "Failed writing packet during stream copy")?;
+            }
+        }
+
+        // Progress reporting
+        let now = Instant::now();
+        const MIN_PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+        if now.duration_since(last_progress_time) >= MIN_PROGRESS_INTERVAL {
+            last_progress_time = now;
+            let progress = (processed_duration / total_duration_secs).min(1.0) as f32;
+            let _ = progress_tx.send(ClipExportUpdate::Progress {
+                phase: ClipExportPhase::Preparing,
+                fraction: progress,
+                message: format!("Stream copy: {:.1}s processed", processed_duration),
+            });
+        }
+    }
+
+    output_ctx.write_trailer()
+        .with_context(|| "Failed to finalize stream copy output")?;
+
+    info!("Stream copy export complete: {:?}", request.output_path);
+    Ok(ExportOutcome::Finished(request.output_path.clone()))
+}
+
+/// Run export attempt using ffmpeg-next filter graphs.
+pub fn attempt_export(
+    request: &ClipExportRequest,
+    output_path: &Path,
+    video_bitrate_kbps: u32,
+    audio_bitrate_kbps: u32,
+    video_encoder: ExportVideoEncoder,
+    progress_tx: &Sender<ClipExportUpdate>,
+    cancel_flag: &Arc<AtomicBool>,
+    attempt_index: usize,
+    attempt_count: usize,
+    single_pass_phase: ClipExportPhase,
+) -> Result<Option<ExportAttemptResult>> {
+    let total_duration_secs = request.output_duration_secs().max(0.1);
+
+    let _ = progress_tx.send(ClipExportUpdate::Progress {
+        phase: ClipExportPhase::Preparing,
+        fraction: 0.0,
+        message: "Preparing export".to_string(),
+    });
+
+    info!(
+        "Exporting clipped video {:?} -> {:?} ({} kept ranges, target={} MB, video bitrate={} kbps, encoder={})",
+        request.input_path,
+        output_path,
+        request.keep_ranges.len(),
+        request.target_size_mb,
+        video_bitrate_kbps,
+        video_encoder.ffmpeg_name()
+    );
+
+    // Open input
+    let mut input_ctx = ffmpeg::format::input(&request.input_path)
+        .with_context(|| format!("Failed to open input: {:?}", request.input_path))?;
+
+    // Find video and audio streams
+    let video_stream_idx = input_ctx.streams()
+        .best(ffmpeg::media::Type::Video)
+        .map(|s| s.index())
+        .context("No video stream found")?;
+
+    let audio_stream_idx = if request.metadata.has_audio {
+        input_ctx.streams()
+            .best(ffmpeg::media::Type::Audio)
+            .map(|s| s.index())
+    } else {
+        None
+    };
+
+    let video_stream = input_ctx.stream(video_stream_idx).context("Missing video stream")?;
+    let input_time_base = video_stream.time_base();
+    
+    // Store audio time base separately (Bug 4 fix: audio has different time base than video)
+    let audio_input_time_base = if let Some(audio_idx) = audio_stream_idx {
+        input_ctx.stream(audio_idx).map(|s| s.time_base())
+    } else {
+        None
+    };
+
+    // Create output
+    let mut output_ctx = ffmpeg::format::output(output_path)
+        .with_context(|| format!("Failed to create output: {:?}", output_path))?;
+
+    // Add video stream with encoder - use encoder name to get hardware encoder if needed
+    let codec_name = video_encoder.ffmpeg_name();
+    let codec = ffmpeg::encoder::find_by_name(codec_name)
+        .with_context(|| format!("Encoder {} not found", codec_name))?;
+
+    // Create encoder context and configure it
+    let encoder_ctx = ffmpeg::codec::context::Context::new_with_codec(codec);
+    let mut ffmpeg_video_enc = encoder_ctx.encoder().video()
+        .context("Failed to create video encoder")?;
+    ffmpeg_video_enc.set_width(request.output_width.unwrap_or(request.metadata.width));
+    ffmpeg_video_enc.set_height(request.output_height.unwrap_or(request.metadata.height));
+    ffmpeg_video_enc.set_time_base(ffmpeg::Rational(1, request.output_fps.unwrap_or(request.metadata.fps) as i32));
+    ffmpeg_video_enc.set_bit_rate((video_bitrate_kbps * 1000) as usize);
+    ffmpeg_video_enc.set_max_bit_rate((video_bitrate_kbps * 1000) as usize);
+    ffmpeg_video_enc.set_format(ffmpeg::format::Pixel::YUV420P);
+
+    // Set codec-specific options
+    let mut opts = ffmpeg::Dictionary::new();
+    match video_encoder {
+        ExportVideoEncoder::SoftwareHevc => {
+            opts.set("preset", "medium");
+        }
+        ExportVideoEncoder::HevcNvenc => {
+            opts.set("preset", "p4");
+            opts.set("rc", "vbr");
+        }
+        ExportVideoEncoder::HevcAmf => {
+            opts.set("quality", "balanced");
+            opts.set("rc", "vbr_peak");
+        }
+        ExportVideoEncoder::HevcQsv => {
+            opts.set("preset", "balanced");
+            opts.set("look_ahead", "1");
+        }
+    }
+
+    // Open the encoder - this consumes the ffmpeg_video_enc and returns an Encoder
+    let mut opened_video_encoder = ffmpeg_video_enc.open_with(opts).context("Failed to open encoder")?;
+
+    // Now create the output stream using the opened encoder
+    let mut video_out_stream = output_ctx.add_stream(codec)
+        .context("Failed to add video stream")?;
+    video_out_stream.set_parameters(&opened_video_encoder);
+    let video_out_idx = video_out_stream.index();
+
+    // Add audio stream if present
+    let mut opened_audio_encoder = None;
+    let audio_out_idx = if let Some(audio_idx) = audio_stream_idx {
+        let audio_stream = input_ctx.stream(audio_idx).context("Missing audio stream")?;
+        let audio_codec = ffmpeg::encoder::find(ffmpeg::codec::Id::AAC)
+            .context("AAC encoder not found")?;
+        
+        let audio_enc_ctx = ffmpeg::codec::context::Context::new_with_codec(audio_codec);
+        let mut audio_encoder = audio_enc_ctx.encoder().audio()
+            .context("Failed to create audio encoder")?;
+        audio_encoder.set_time_base(audio_stream.time_base());
+        audio_encoder.set_bit_rate((audio_bitrate_kbps.max(48) * 1000) as usize);
+        audio_encoder.set_rate(48000);
+        audio_encoder.set_channel_layout(ffmpeg::channel_layout::ChannelLayout::STEREO);
+        audio_encoder.set_format(ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Planar));
+        let opened = audio_encoder.open().context("Failed to open audio encoder")?;
+
+        let mut audio_out_stream = output_ctx.add_stream(ffmpeg::encoder::find(ffmpeg::codec::Id::AAC))
+            .context("Failed to add audio stream")?;
+        audio_out_stream.set_parameters(&opened);
+        opened_audio_encoder = Some(opened);
+        Some(audio_out_stream.index())
+    } else {
+        None
+    };
+
+    // Write header
+    let mut opts = ffmpeg::Dictionary::new();
+    opts.set("movflags", "+faststart");
+    output_ctx.write_header_with(opts)
+        .with_context(|| "Failed to write output header")?;
+
+    // Initialize decoders
+    let v_stream = input_ctx.stream(video_stream_idx).unwrap();
+    let v_ctx = ffmpeg::codec::context::Context::from_parameters(v_stream.parameters())?;
+    let mut video_decoder = v_ctx.decoder().video()?;
+
+    let mut audio_decoder = None;
+    let mut audio_resampler = None;
+    if let Some(audio_idx) = audio_stream_idx {
+        let a_stream = input_ctx.stream(audio_idx).unwrap();
+        let a_ctx = ffmpeg::codec::context::Context::from_parameters(a_stream.parameters())?;
+        let decoder = a_ctx.decoder().audio()?;
+        
+        // Fix Bug 8: Set up audio resampler to convert decoded audio to encoder format
+        if let Some(ref encoder) = opened_audio_encoder {
+            let resampler = ffmpeg::software::resampling::Context::get(
+                decoder.format(),
+                decoder.channel_layout(),
+                decoder.rate(),
+                encoder.format(),
+                encoder.channel_layout(),
+                encoder.rate(),
+            )?;
+            audio_resampler = Some(resampler);
+        }
+        audio_decoder = Some(decoder);
+    }
+
+    let mut decoded_video = ffmpeg::util::frame::video::Video::empty();
+    let mut decoded_audio = ffmpeg::util::frame::audio::Audio::empty();
+
+    let start_time = Instant::now();
+    let mut last_progress_time = start_time;
+    let mut processed_duration: f64 = 0.0;
+
+    // Process packets
+    for (stream, packet) in input_ctx.packets() {
+        if cancel_flag.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+
+        let stream_idx = stream.index();
+
+        if stream_idx == video_stream_idx {
+            video_decoder.send_packet(&packet)?;
+
+            while video_decoder.receive_frame(&mut decoded_video).is_ok() {
+                // Check if frame is within any time range
+                let pts_secs = decoded_video.timestamp()
+                    .map(|ts| ts as f64 * f64::from(input_time_base.numerator()) / f64::from(input_time_base.denominator()))
+                    .unwrap_or(0.0);
+
+                let in_range = request.keep_ranges.iter().any(|range| {
+                    pts_secs >= range.start_secs && pts_secs < range.end_secs
+                });
+
+                if in_range {
+                    // Fix Bug 3: Reset PTS for concatenated ranges
+                    // Find the current range and compute correct output PTS
+                    let mut output_pts_secs = 0.0;
+                    let mut cumulative_prior = 0.0;
+                    for range in &request.keep_ranges {
+                        if pts_secs >= range.start_secs && pts_secs < range.end_secs {
+                            output_pts_secs = cumulative_prior + (pts_secs - range.start_secs);
+                            break;
+                        }
+                        cumulative_prior += range.duration_secs();
+                    }
+                    
+                    // Set the frame's PTS to the output PTS in the output time base
+                    let output_time_base = opened_video_encoder.time_base();
+                    let output_pts = (output_pts_secs * f64::from(output_time_base.denominator()) / 
+                        f64::from(output_time_base.numerator())) as i64;
+                    decoded_video.set_pts(Some(output_pts));
+
+                    // Encode frame
+                    opened_video_encoder.send_frame(&decoded_video)?;
+
+                    // Write encoded packets
+                    let mut pkt = ffmpeg::Packet::empty();
+                    while opened_video_encoder.receive_packet(&mut pkt).is_ok() {
+                        pkt.set_stream(video_out_idx);
+                        pkt.write_interleaved(&mut output_ctx)?;
+                    }
+                }
+
+                processed_duration = processed_duration.max(pts_secs);
+            }
+        } else if Some(stream_idx) == audio_stream_idx {
+            if let Some(ref mut decoder) = audio_decoder {
+                decoder.send_packet(&packet)?;
+
+                while decoder.receive_frame(&mut decoded_audio).is_ok() {
+                    // Use audio time base for audio frames (different from video)
+                    let audio_tb = audio_input_time_base.unwrap_or(input_time_base);
+                    let pts_secs = decoded_audio.timestamp()
+                        .map(|ts| ts as f64 * f64::from(audio_tb.numerator()) / f64::from(audio_tb.denominator()))
+                        .unwrap_or(0.0);
+
+                    let in_range = request.keep_ranges.iter().any(|range| {
+                        pts_secs >= range.start_secs && pts_secs < range.end_secs
+                    });
+
+                    if in_range {
+                        // Fix Bug 3: Reset PTS for concatenated ranges (audio)
+                        let mut output_pts_secs = 0.0;
+                        let mut cumulative_prior = 0.0;
+                        for range in &request.keep_ranges {
+                            if pts_secs >= range.start_secs && pts_secs < range.end_secs {
+                                output_pts_secs = cumulative_prior + (pts_secs - range.start_secs);
+                                break;
+                            }
+                            cumulative_prior += range.duration_secs();
+                        }
+                        
+                        // Set the frame's PTS to the output PTS in the output time base
+                        if let Some(ref encoder) = opened_audio_encoder {
+                            let output_time_base = encoder.time_base();
+                            let output_pts = (output_pts_secs * f64::from(output_time_base.denominator()) / 
+                                f64::from(output_time_base.numerator())) as i64;
+                            decoded_audio.set_pts(Some(output_pts));
+                        }
+
+                        if let Some(ref mut encoder) = opened_audio_encoder {
+                            // Fix Bug 8: Resample audio to encoder format if needed
+                            if let Some(ref mut resampler) = audio_resampler {
+                                let mut resampled = ffmpeg::util::frame::audio::Audio::empty();
+                                resampler.run(&decoded_audio, &mut resampled)?;
+                                encoder.send_frame(&resampled)?;
+                            } else {
+                                encoder.send_frame(&decoded_audio)?;
+                            }
+                            let mut audio_pkt = ffmpeg::Packet::empty();
+                            while encoder.receive_packet(&mut audio_pkt).is_ok() {
+                                if let Some(audio_idx) = audio_out_idx {
+                                    audio_pkt.set_stream(audio_idx);
+                                    audio_pkt.write_interleaved(&mut output_ctx)?;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Progress reporting
+        let now = Instant::now();
+        const MIN_PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+        if now.duration_since(last_progress_time) >= MIN_PROGRESS_INTERVAL {
+            last_progress_time = now;
+            let progress = (processed_duration / total_duration_secs).min(1.0) as f32;
+            let _ = progress_tx.send(ClipExportUpdate::Progress {
+                phase: if video_encoder.supports_two_pass() && single_pass_phase == ClipExportPhase::FirstPass {
+                    ClipExportPhase::FirstPass
+                } else {
+                    single_pass_phase
+                },
+                fraction: progress,
+                message: format!("Attempt {}/{} - {:.1}s processed", attempt_index + 1, attempt_count, processed_duration),
+            });
+        }
+    }
+
+    // Flush audio decoder and encoder
+    if let Some(ref mut decoder) = audio_decoder {
+        decoder.send_eof()?;
+        while decoder.receive_frame(&mut decoded_audio).is_ok() {
+            if let Some(ref mut encoder) = opened_audio_encoder {
+                // Fix Bug 8: Resample audio to encoder format if needed
+                if let Some(ref mut resampler) = audio_resampler {
+                    let mut resampled = ffmpeg::util::frame::audio::Audio::empty();
+                    resampler.run(&decoded_audio, &mut resampled)?;
+                    encoder.send_frame(&resampled)?;
+                } else {
+                    encoder.send_frame(&decoded_audio)?;
+                }
+                let mut audio_pkt = ffmpeg::Packet::empty();
+                while encoder.receive_packet(&mut audio_pkt).is_ok() {
+                    if let Some(audio_idx) = audio_out_idx {
+                        audio_pkt.set_stream(audio_idx);
+                        audio_pkt.write_interleaved(&mut output_ctx)?;
+                    }
+                }
+            }
+        }
+    }
+
+    // Flush audio encoder
+    if let Some(ref mut encoder) = opened_audio_encoder {
+        encoder.send_eof()?;
+        let mut audio_pkt = ffmpeg::Packet::empty();
+        while encoder.receive_packet(&mut audio_pkt).is_ok() {
+            if let Some(audio_idx) = audio_out_idx {
+                audio_pkt.set_stream(audio_idx);
+                audio_pkt.write_interleaved(&mut output_ctx)?;
+            }
+        }
+    }
+
+    // Flush video encoder
+    opened_video_encoder.send_eof()?;
+    let mut pkt = ffmpeg::Packet::empty();
+    while opened_video_encoder.receive_packet(&mut pkt).is_ok() {
+        pkt.set_stream(video_out_idx);
+        pkt.write_interleaved(&mut output_ctx)?;
+    }
+
+    output_ctx.write_trailer()
+        .with_context(|| "Failed to write output trailer")?;
+
+    let size_bytes = std::fs::metadata(output_path)
+        .with_context(|| format!("Failed to get size of export output file {:?}", output_path))?
+        .len();
+
+    Ok(Some(ExportAttemptResult {
+        output_path: output_path.to_path_buf(),
+        video_bitrate_kbps,
+        size_bytes,
+    }))
+}

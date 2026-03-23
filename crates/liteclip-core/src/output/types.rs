@@ -1,6 +1,5 @@
-#[cfg(any(feature = "ffmpeg", feature = "ffmpeg-cli"))]
-use super::functions::{h264_nal_type, hevc_nal_type};
 #[cfg(feature = "ffmpeg")]
+use super::functions::{h264_nal_type, hevc_nal_type};
 use super::mp4::FfmpegMuxer;
 use crate::encode::{EncodedPacket, StreamType};
 use anyhow::{bail, Result};
@@ -10,7 +9,7 @@ use tracing::{info, warn};
 pub struct Muxer;
 
 impl Muxer {
-    #[cfg(any(feature = "ffmpeg", feature = "ffmpeg-cli"))]
+    #[cfg(feature = "ffmpeg")]
     fn detect_video_codec(video_packets: &[&EncodedPacket], fallback: &str) -> String {
         let mut saw_h264_parameter_sets = false;
         let mut saw_hevc_parameter_sets = false;
@@ -104,7 +103,7 @@ impl Muxer {
     }
 }
 
-#[cfg(any(feature = "ffmpeg", feature = "ffmpeg-cli"))]
+#[cfg(feature = "ffmpeg")]
 fn normalize_video_packets_for_mp4(video_packets: &[&EncodedPacket]) -> Vec<EncodedPacket> {
     let mut normalized = Vec::with_capacity(video_packets.len());
     let mut pending_param_sets: Vec<&EncodedPacket> = Vec::new();
@@ -183,7 +182,7 @@ fn normalize_video_packets_for_mp4(video_packets: &[&EncodedPacket]) -> Vec<Enco
     normalized
 }
 
-#[cfg(any(feature = "ffmpeg", feature = "ffmpeg-cli"))]
+#[cfg(feature = "ffmpeg")]
 fn is_parameter_set_packet(packet: &EncodedPacket) -> bool {
     if !matches!(packet.stream, StreamType::Video) {
         return false;

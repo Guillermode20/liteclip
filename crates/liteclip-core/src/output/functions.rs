@@ -1,11 +1,6 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use tracing::debug;
-#[cfg(feature = "ffmpeg-cli")]
-use tracing::{info, warn};
-
-#[cfg(all(target_os = "windows", feature = "ffmpeg-cli"))]
-const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 /// Audio sample rate for encoded audio (48 kHz).
 #[cfg(feature = "ffmpeg")]
@@ -161,97 +156,11 @@ pub fn ffmpeg_executable_path() -> PathBuf {
 }
 
 pub fn remux_fragmented_mp4(input_path: &Path, output_path: &Path, faststart: bool) -> Result<()> {
-    #[cfg(feature = "ffmpeg")]
-    {
-        return crate::output::sdk_ffmpeg_output::remux_fragmented_mp4(
-            input_path,
-            output_path,
-            faststart,
-        );
-    }
-    #[cfg(all(feature = "ffmpeg-cli", not(feature = "ffmpeg")))]
-    {
-        return remux_fragmented_mp4_cli(input_path, output_path, faststart);
-    }
-    #[cfg(not(any(feature = "ffmpeg", feature = "ffmpeg-cli")))]
-    {
-        anyhow::bail!("no FFmpeg backend enabled; use --features ffmpeg or ffmpeg-cli");
-    }
-}
-
-#[cfg(all(feature = "ffmpeg-cli", not(feature = "ffmpeg")))]
-fn remux_fragmented_mp4_cli(input_path: &Path, output_path: &Path, faststart: bool) -> Result<()> {
-    use std::process::Command;
-
-    let ffmpeg = ffmpeg_executable_path();
-    let mut args = vec![
-        "-y".to_string(),
-        "-i".to_string(),
-        input_path.to_string_lossy().into_owned(),
-        "-map".to_string(),
-        "0".to_string(),
-        "-c".to_string(),
-        "copy".to_string(),
-    ];
-
-    if faststart {
-        args.push("-movflags".to_string());
-        args.push("+faststart".to_string());
-    }
-
-    args.push(output_path.to_string_lossy().into_owned());
-
-    debug!(
-        "Remuxing fragmented MP4 {:?} -> {:?} via {:?}",
-        input_path, output_path, ffmpeg
-    );
-
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-
-        let output = Command::new(&ffmpeg)
-            .args(args.iter().map(|s| s.as_str()))
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-            .with_context(|| format!("Failed to spawn ffmpeg remux process via {:?}", ffmpeg))?;
-
-        if output.status.success() {
-            info!("Remuxed fragmented MP4 to regular MP4: {:?}", output_path);
-            return Ok(());
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!(
-            "FFmpeg remux failed with status {:?}\n--- ffmpeg stdout ---\n{}\n--- ffmpeg stderr ---\n{}",
-            output.status,
-            stdout,
-            stderr
-        );
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        let output = Command::new(&ffmpeg)
-            .args(args.iter().map(|s| s.as_str()))
-            .output()
-            .with_context(|| format!("Failed to spawn ffmpeg remux process via {:?}", ffmpeg))?;
-
-        if output.status.success() {
-            info!("Remuxed fragmented MP4 to regular MP4: {:?}", output_path);
-            return Ok(());
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!(
-            "FFmpeg remux failed with status {:?}\n--- ffmpeg stdout ---\n{}\n--- ffmpeg stderr ---\n{}",
-            output.status,
-            stdout,
-            stderr
-        );
-    }
+    crate::output::sdk_ffmpeg_output::remux_fragmented_mp4(
+        input_path,
+        output_path,
+        faststart,
+    )
 }
 
 /// Generates a thumbnail for a video file using FFmpeg.
@@ -259,119 +168,5 @@ fn remux_fragmented_mp4_cli(input_path: &Path, output_path: &Path, faststart: bo
 /// The thumbnail is saved to `<save_directory>/.cache/<hash>.jpg` where the hash
 /// is computed from the video path, matching the gallery's thumbnail lookup scheme.
 pub fn generate_thumbnail(video_path: &Path, save_directory: &Path) -> Result<PathBuf> {
-    #[cfg(feature = "ffmpeg")]
-    {
-        return crate::output::sdk_ffmpeg_output::generate_thumbnail(video_path, save_directory);
-    }
-    #[cfg(all(feature = "ffmpeg-cli", not(feature = "ffmpeg")))]
-    {
-        return generate_thumbnail_cli(video_path, save_directory);
-    }
-    #[cfg(not(any(feature = "ffmpeg", feature = "ffmpeg-cli")))]
-    {
-        anyhow::bail!("no FFmpeg backend enabled; use --features ffmpeg or ffmpeg-cli");
-    }
-}
-
-#[cfg(all(feature = "ffmpeg-cli", not(feature = "ffmpeg")))]
-fn generate_thumbnail_cli(video_path: &Path, save_directory: &Path) -> Result<PathBuf> {
-    use std::hash::{Hash, Hasher};
-    use std::process::Command;
-
-    let cache_dir = save_directory.join(".cache");
-
-    std::fs::create_dir_all(&cache_dir)
-        .with_context(|| format!("Failed to create cache directory: {:?}", cache_dir))?;
-
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    video_path.hash(&mut hasher);
-    let hash = hasher.finish();
-    let thumb_path = cache_dir.join(format!("{:016x}.jpg", hash));
-
-    if thumb_path.exists() {
-        debug!("Thumbnail already exists: {:?}", thumb_path);
-        return Ok(thumb_path);
-    }
-
-    debug!(
-        "Generating thumbnail for {:?} -> {:?}",
-        video_path, thumb_path
-    );
-
-    let ffmpeg = ffmpeg_executable_path();
-
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-
-        let status = Command::new(&ffmpeg)
-            .args([
-                "-y",
-                "-i",
-                &video_path.to_string_lossy(),
-                "-ss",
-                "00:00:01",
-                "-vframes",
-                "1",
-                "-vf",
-                "scale=320:-1",
-                "-q:v",
-                "5",
-                &thumb_path.to_string_lossy(),
-            ])
-            .creation_flags(CREATE_NO_WINDOW)
-            .status()
-            .with_context(|| {
-                format!(
-                    "Failed to spawn ffmpeg for thumbnail generation via {:?}",
-                    ffmpeg
-                )
-            })?;
-
-        if status.success() {
-            info!("Generated thumbnail: {:?}", thumb_path);
-        } else {
-            warn!(
-                "FFmpeg thumbnail extraction failed with status: {:?}",
-                status
-            );
-        }
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        let status = Command::new(&ffmpeg)
-            .args([
-                "-y",
-                "-i",
-                &video_path.to_string_lossy(),
-                "-ss",
-                "00:00:01",
-                "-vframes",
-                "1",
-                "-vf",
-                "scale=320:-1",
-                "-q:v",
-                "5",
-                &thumb_path.to_string_lossy(),
-            ])
-            .status()
-            .with_context(|| {
-                format!(
-                    "Failed to spawn ffmpeg for thumbnail generation via {:?}",
-                    ffmpeg
-                )
-            })?;
-
-        if status.success() {
-            info!("Generated thumbnail: {:?}", thumb_path);
-        } else {
-            warn!(
-                "FFmpeg thumbnail extraction failed with status: {:?}",
-                status
-            );
-        }
-    }
-
-    Ok(thumb_path)
+    crate::output::sdk_ffmpeg_output::generate_thumbnail(video_path, save_directory)
 }

@@ -1,7 +1,6 @@
 use crate::config::EncoderType;
 use anyhow::{bail, Context, Result};
 use image::RgbaImage;
-use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -10,13 +9,6 @@ use std::sync::{
 };
 use std::thread;
 use tracing::{error, info, warn};
-
-use std::process::{Command, Stdio};
-
-use super::functions::ffmpeg_executable_path;
-
-#[cfg(target_os = "windows")]
-const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 #[derive(Debug, Clone)]
 pub struct VideoFileMetadata {
@@ -97,12 +89,19 @@ impl ClipExportRequest {
     }
 }
 
-enum ExportOutcome {
+pub enum ExportOutcome {
     Finished(PathBuf),
     Cancelled,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
+pub struct ExportAttemptResult {
+    pub output_path: PathBuf,
+    pub video_bitrate_kbps: u32,
+    pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone)]
 pub struct ExportBitrateEstimate {
     pub video_kbps: u32,
     pub audio_kbps: u32,
@@ -125,7 +124,7 @@ const TARGET_SIZE_UNDERFILL_RATIO: f64 = 0.992;
 const MAX_VIDEO_BITRATE_KBPS: u32 = 400_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ExportVideoEncoder {
+pub(crate) enum ExportVideoEncoder {
     SoftwareHevc,
     HevcNvenc,
     HevcAmf,
@@ -133,7 +132,7 @@ enum ExportVideoEncoder {
 }
 
 impl ExportVideoEncoder {
-    fn ffmpeg_name(self) -> &'static str {
+    pub fn ffmpeg_name(self) -> &'static str {
         match self {
             ExportVideoEncoder::SoftwareHevc => "libx265",
             ExportVideoEncoder::HevcNvenc => "hevc_nvenc",
@@ -142,8 +141,10 @@ impl ExportVideoEncoder {
         }
     }
 
-    fn supports_two_pass(self) -> bool {
-        matches!(self, ExportVideoEncoder::SoftwareHevc)
+    pub fn supports_two_pass(self) -> bool {
+        // SDK export path does not implement two-pass encoding
+        // Size accuracy is handled via iterative bitrate adjustment instead
+        false
     }
 
     fn initial_target_fill_ratio(self) -> f64 {
@@ -195,83 +196,10 @@ pub fn probe_video_file(video_path: &Path) -> Result<VideoFileMetadata> {
     {
         return crate::output::sdk_ffmpeg_output::probe_video_file(video_path);
     }
-    #[cfg(all(feature = "ffmpeg-cli", not(feature = "ffmpeg")))]
+    #[cfg(not(feature = "ffmpeg"))]
     {
-        return probe_video_file_ffprobe(video_path);
+        anyhow::bail!("ffmpeg feature is required for video file probing");
     }
-    #[cfg(not(any(feature = "ffmpeg", feature = "ffmpeg-cli")))]
-    {
-        anyhow::bail!("no FFmpeg backend enabled; use --features ffmpeg or ffmpeg-cli");
-    }
-}
-
-#[cfg(all(feature = "ffmpeg-cli", not(feature = "ffmpeg")))]
-fn probe_video_file_ffprobe(video_path: &Path) -> Result<VideoFileMetadata> {
-    let ffprobe = ffprobe_executable_path();
-    let output = command_output(Command::new(&ffprobe).args([
-        "-v",
-        "error",
-        "-show_entries",
-        "format=duration:stream=codec_type,width,height,r_frame_rate",
-        "-of",
-        "default=noprint_wrappers=1:nokey=0",
-        &video_path.to_string_lossy(),
-    ]))
-    .with_context(|| format!("Failed to probe video metadata via {:?}", ffprobe))?;
-
-    if !output.status.success() {
-        bail!(
-            "ffprobe failed for {:?}: {}",
-            video_path,
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut current_stream = String::new();
-    let mut duration_secs = None;
-    let mut width = None;
-    let mut height = None;
-    let mut has_audio = false;
-    let mut fps = None;
-
-    for line in stdout.lines() {
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-
-        match key.trim() {
-            "codec_type" => {
-                current_stream = value.trim().to_string();
-                has_audio |= current_stream == "audio";
-            }
-            "width" if current_stream == "video" && width.is_none() => {
-                width = value.trim().parse::<u32>().ok();
-            }
-            "height" if current_stream == "video" && height.is_none() => {
-                height = value.trim().parse::<u32>().ok();
-            }
-            "r_frame_rate" if current_stream == "video" && fps.is_none() => {
-                fps = parse_rational_fps(value.trim());
-            }
-            "duration" if duration_secs.is_none() => {
-                duration_secs = value.trim().parse::<f64>().ok();
-            }
-            _ => {}
-        }
-    }
-
-    let duration_secs = duration_secs.context("Video duration was missing from ffprobe output")?;
-    let width = width.context("Video width was missing from ffprobe output")?;
-    let height = height.context("Video height was missing from ffprobe output")?;
-
-    Ok(VideoFileMetadata {
-        duration_secs,
-        width,
-        height,
-        has_audio,
-        fps: fps.unwrap_or(30.0),
-    })
 }
 
 pub fn extract_preview_frame(
@@ -287,69 +215,10 @@ pub fn extract_preview_frame(
             max_width,
         );
     }
-    #[cfg(all(feature = "ffmpeg-cli", not(feature = "ffmpeg")))]
+    #[cfg(not(feature = "ffmpeg"))]
     {
-        return extract_preview_frame_cli(video_path, timestamp_secs, max_width);
+        anyhow::bail!("ffmpeg feature is required for preview frame extraction");
     }
-    #[cfg(not(any(feature = "ffmpeg", feature = "ffmpeg-cli")))]
-    {
-        anyhow::bail!("no FFmpeg backend enabled; use --features ffmpeg or ffmpeg-cli");
-    }
-}
-
-#[cfg(all(feature = "ffmpeg-cli", not(feature = "ffmpeg")))]
-fn extract_preview_frame_cli(
-    video_path: &Path,
-    timestamp_secs: f64,
-    max_width: u32,
-) -> Result<RgbaImage> {
-    let ffmpeg = ffmpeg_executable_path();
-    let timestamp = format_seconds_arg(timestamp_secs);
-    let scale = format!("scale={max_width}:-2:force_original_aspect_ratio=decrease");
-
-    let output = command_output(
-        Command::new(&ffmpeg)
-            .args([
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-i",
-                &video_path.to_string_lossy(),
-                "-ss",
-                &timestamp,
-                "-frames:v",
-                "1",
-                "-vf",
-                &scale,
-                "-f",
-                "image2pipe",
-                "-vcodec",
-                "mjpeg",
-                "-",
-            ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped()),
-    )
-    .with_context(|| format!("Failed to extract preview frame via {:?}", ffmpeg))?;
-
-    if !output.status.success() {
-        bail!(
-            "ffmpeg frame extraction failed for {:?}: {}",
-            video_path,
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-
-    if output.stdout.is_empty() {
-        bail!(
-            "ffmpeg returned an empty preview frame for {:?}",
-            video_path
-        );
-    }
-
-    Ok(image::load_from_memory(&output.stdout)
-        .context("Failed to decode preview frame image")?
-        .into_rgba8())
 }
 
 pub fn spawn_clip_export(
@@ -402,9 +271,15 @@ fn run_clip_export(
     })?;
 
     // Stream copy mode: fast export without re-encoding
-    #[cfg(not(feature = "ffmpeg"))]
     if request.stream_copy {
-        return run_stream_copy_export(request, progress_tx, cancel_flag);
+        #[cfg(feature = "ffmpeg")]
+        {
+            return super::sdk_export::run_stream_copy_export_sdk(request, progress_tx, cancel_flag);
+        }
+        #[cfg(not(feature = "ffmpeg"))]
+        {
+            anyhow::bail!("ffmpeg feature is required for stream copy export");
+        }
     }
 
     let output_duration_secs = request.output_duration_secs().max(0.1);
@@ -439,6 +314,11 @@ fn run_clip_export(
     if selected_encoder == ExportVideoEncoder::HevcAmf {
         let sample_duration_secs = calibration_duration_secs(output_duration_secs);
         let calibration_path = export_work_dir.join("amf-calibration.mp4");
+        // Calibration path only supported with ffmpeg SDK
+        #[cfg(not(feature = "ffmpeg"))]
+        if selected_encoder == ExportVideoEncoder::HevcAmf {
+            anyhow::bail!("AMF calibration requires ffmpeg feature");
+        }
         let calibration_request =
             build_amf_calibration_request(request, sample_duration_secs, calibration_path.clone());
         let calibration_bitrate_kbps = bitrate_estimate
@@ -446,7 +326,7 @@ fn run_clip_export(
             .max(selected_encoder.min_video_bitrate_kbps());
 
         let mut calibration_result = None;
-        match attempt_export(
+        match super::sdk_export::attempt_export(
             &calibration_request,
             &calibration_path,
             calibration_bitrate_kbps,
@@ -529,7 +409,7 @@ fn run_clip_export(
             }
 
             let output_path = export_work_dir.join(format!("attempt-{}.mp4", attempt_index + 1));
-            let attempt_result = match attempt_export(
+            let attempt_result = match super::sdk_export::attempt_export(
                 request,
                 &output_path,
                 current_video_bitrate_kbps,
@@ -697,529 +577,6 @@ fn run_clip_export(
     export_result
 }
 
-/// Fast stream copy export - trims and concatenates without re-encoding.
-/// Used when user hasn't manually adjusted the target size.
-#[cfg(not(feature = "ffmpeg"))]
-fn run_stream_copy_export(
-    request: &ClipExportRequest,
-    progress_tx: &Sender<ClipExportUpdate>,
-    cancel_flag: &Arc<AtomicBool>,
-) -> Result<ExportOutcome> {
-    let ffmpeg = ffmpeg_executable_path();
-    
-    let _ = progress_tx.send(ClipExportUpdate::Progress {
-        phase: ClipExportPhase::Preparing,
-        fraction: 0.0,
-        message: "Stream copy export (no re-encoding)".to_string(),
-    });
-
-    info!(
-        "Stream copy export {:?} -> {:?} ({} kept ranges)",
-        request.input_path,
-        request.output_path,
-        request.keep_ranges.len()
-    );
-
-    // Build filter for trimming and concatenation
-    let filter = build_stream_copy_filter(&request.keep_ranges, request.metadata.has_audio);
-    
-    let mut args = vec![
-        "-y".to_string(),
-        "-hide_banner".to_string(),
-        "-loglevel".to_string(),
-        "error".to_string(),
-        "-nostats".to_string(),
-        "-progress".to_string(),
-        "pipe:1".to_string(),
-        "-i".to_string(),
-        request.input_path.to_string_lossy().into_owned(),
-        "-filter_complex".to_string(),
-        filter,
-    ];
-
-    // Stream copy for video
-    args.extend([
-        "-map".to_string(),
-        "[outv]".to_string(),
-        "-c:v".to_string(),
-        "copy".to_string(),
-    ]);
-
-    // Stream copy for audio if present
-    if request.metadata.has_audio {
-        args.extend([
-            "-map".to_string(),
-            "[outa]".to_string(),
-            "-c:a".to_string(),
-            "copy".to_string(),
-        ]);
-    }
-
-    args.extend([
-        "-movflags".to_string(),
-        "+faststart".to_string(),
-        request.output_path.to_string_lossy().into_owned(),
-    ]);
-
-    let total_duration_secs = request.output_duration_secs().max(0.1);
-    
-    let progress_ctx = FFmpegProgressContext {
-        phase: ClipExportPhase::Preparing,
-        start_fraction: 0.0,
-        span_fraction: 1.0,
-        progress_tx: progress_tx.clone(),
-        cancel_flag: cancel_flag.clone(),
-        attempt_index: 0,
-        attempt_count: 1,
-        last_progress_time: std::time::Instant::now(),
-    };
-
-    if run_ffmpeg_phase(&ffmpeg, &args, total_duration_secs, progress_ctx)? {
-        return Ok(ExportOutcome::Cancelled);
-    }
-
-    if cancel_flag.load(Ordering::Relaxed) {
-        return Ok(ExportOutcome::Cancelled);
-    }
-
-    Ok(ExportOutcome::Finished(request.output_path.clone()))
-}
-
-/// Build filter complex for stream copy mode - only trim and concat, no encoding filters
-fn build_stream_copy_filter(keep_ranges: &[TimeRange], has_audio: bool) -> String {
-    let mut filters = Vec::new();
-
-    for (index, range) in keep_ranges.iter().enumerate() {
-        // Trim without fps filter - stream copy doesn't need frame timing adjustment
-        filters.push(format!(
-            "[0:v:0]trim=start={}:end={},setpts=PTS-STARTPTS[v{index}]",
-            format_seconds_arg(range.start_secs),
-            format_seconds_arg(range.end_secs),
-        ));
-        if has_audio {
-            filters.push(format!(
-                "[0:a:0]atrim=start={}:end={},asetpts=PTS-STARTPTS[a{index}]",
-                format_seconds_arg(range.start_secs),
-                format_seconds_arg(range.end_secs),
-            ));
-        }
-    }
-
-    let mut concat_inputs = String::new();
-    for index in 0..keep_ranges.len() {
-        concat_inputs.push_str(&format!("[v{index}]"));
-        if has_audio {
-            concat_inputs.push_str(&format!("[a{index}]"));
-        }
-    }
-
-    concat_inputs.push_str(&format!(
-        "concat=n={}:v=1:a={}",
-        keep_ranges.len(),
-        if has_audio { 1 } else { 0 }
-    ));
-    if has_audio {
-        concat_inputs.push_str("[outv][outa]");
-    } else {
-        concat_inputs.push_str("[outv]");
-    }
-
-    filters.push(concat_inputs);
-    filters.join(";")
-}
-
-#[cfg(not(feature = "ffmpeg"))]
-fn attempt_export(
-    request: &ClipExportRequest,
-    output_path: &Path,
-    video_bitrate_kbps: u32,
-    audio_bitrate_kbps: u32,
-    video_encoder: ExportVideoEncoder,
-    progress_tx: &Sender<ClipExportUpdate>,
-    cancel_flag: &Arc<AtomicBool>,
-    attempt_index: usize,
-    attempt_count: usize,
-    single_pass_phase: ClipExportPhase,
-) -> Result<Option<ExportAttemptResult>> {
-    let first_pass_filter = build_filter_complex_for_request(request, false);
-    let second_pass_filter = build_filter_complex_for_request(request, request.metadata.has_audio);
-    let ffmpeg = ffmpeg_executable_path();
-    let passlog_prefix = output_path.with_extension("passlog");
-    let passlog_prefix_str = passlog_prefix.to_string_lossy().into_owned();
-
-    let preset = select_adaptive_preset(video_bitrate_kbps, &request.metadata, video_encoder);
-
-    let _ = progress_tx.send(ClipExportUpdate::Progress {
-        phase: ClipExportPhase::Preparing,
-        fraction: 0.0,
-        message: "Preparing export".to_string(),
-    });
-
-    info!(
-        "Exporting clipped video {:?} -> {:?} ({} kept ranges, target={} MB, video bitrate={} kbps, preset={}, encoder={})",
-        request.input_path,
-        output_path,
-        request.keep_ranges.len(),
-        request.target_size_mb,
-        video_bitrate_kbps,
-        preset,
-        video_encoder.ffmpeg_name()
-    );
-
-    if video_encoder.supports_two_pass() {
-        let first_pass_args = build_ffmpeg_args(
-            request,
-            &first_pass_filter,
-            Some(&passlog_prefix_str),
-            video_bitrate_kbps,
-            audio_bitrate_kbps,
-            true,
-            &preset,
-            output_path,
-            video_encoder,
-        );
-        if run_ffmpeg_phase(
-            &ffmpeg,
-            &first_pass_args,
-            request.output_duration_secs().max(0.1),
-            FFmpegProgressContext {
-                phase: ClipExportPhase::FirstPass,
-                start_fraction: 0.0,
-                span_fraction: 0.5,
-                progress_tx: progress_tx.clone(),
-                cancel_flag: cancel_flag.clone(),
-                attempt_index,
-                attempt_count,
-                last_progress_time: std::time::Instant::now(),
-            },
-        )? {
-            cleanup_passlog_files(&passlog_prefix);
-            let _ = std::fs::remove_file(output_path);
-            return Ok(None);
-        }
-
-        if cancel_flag.load(Ordering::Relaxed) {
-            cleanup_passlog_files(&passlog_prefix);
-            let _ = std::fs::remove_file(output_path);
-            return Ok(None);
-        }
-
-        let second_pass_args = build_ffmpeg_args(
-            request,
-            &second_pass_filter,
-            Some(&passlog_prefix_str),
-            video_bitrate_kbps,
-            audio_bitrate_kbps,
-            false,
-            &preset,
-            output_path,
-            video_encoder,
-        );
-        if run_ffmpeg_phase(
-            &ffmpeg,
-            &second_pass_args,
-            request.output_duration_secs().max(0.1),
-            FFmpegProgressContext {
-                phase: ClipExportPhase::SecondPass,
-                start_fraction: 0.5,
-                span_fraction: 0.5,
-                progress_tx: progress_tx.clone(),
-                cancel_flag: cancel_flag.clone(),
-                attempt_index,
-                attempt_count,
-                last_progress_time: std::time::Instant::now(),
-            },
-        )? {
-            cleanup_passlog_files(&passlog_prefix);
-            let _ = std::fs::remove_file(output_path);
-            return Ok(None);
-        }
-    } else {
-        let single_pass_args = build_ffmpeg_args(
-            request,
-            &second_pass_filter,
-            None,
-            video_bitrate_kbps,
-            audio_bitrate_kbps,
-            false,
-            &preset,
-            output_path,
-            video_encoder,
-        );
-        if run_ffmpeg_phase(
-            &ffmpeg,
-            &single_pass_args,
-            request.output_duration_secs().max(0.1),
-            FFmpegProgressContext {
-                phase: single_pass_phase,
-                start_fraction: 0.0,
-                span_fraction: 1.0,
-                progress_tx: progress_tx.clone(),
-                cancel_flag: cancel_flag.clone(),
-                attempt_index,
-                attempt_count,
-                last_progress_time: std::time::Instant::now(),
-            },
-        )? {
-            let _ = std::fs::remove_file(output_path);
-            return Ok(None);
-        }
-    }
-
-    let size_bytes = std::fs::metadata(output_path)
-        .with_context(|| format!("Failed to get size of export output file {:?}", output_path))?
-        .len();
-
-    if video_encoder.supports_two_pass() {
-        cleanup_passlog_files(&passlog_prefix);
-    }
-
-    Ok(Some(ExportAttemptResult {
-        output_path: output_path.to_path_buf(),
-        video_bitrate_kbps,
-        size_bytes,
-    }))
-}
-
-fn build_ffmpeg_args(
-    request: &ClipExportRequest,
-    filter_complex: &str,
-    passlog_prefix: Option<&str>,
-    video_bitrate_kbps: u32,
-    audio_bitrate_kbps: u32,
-    first_pass: bool,
-    preset: &str,
-    output_path: &Path,
-    video_encoder: ExportVideoEncoder,
-) -> Vec<String> {
-    let mut args = vec![
-        "-y".to_string(),
-        "-hide_banner".to_string(),
-        "-loglevel".to_string(),
-        "error".to_string(),
-        "-nostats".to_string(),
-        "-progress".to_string(),
-        "pipe:1".to_string(),
-        "-i".to_string(),
-        request.input_path.to_string_lossy().into_owned(),
-    ];
-    if let Some(w) = &request.webcam {
-        args.push("-i".to_string());
-        args.push(w.path.to_string_lossy().into_owned());
-    }
-    args.extend([
-        "-filter_complex".to_string(),
-        filter_complex.to_string(),
-        "-map".to_string(),
-        "[outv]".to_string(),
-        "-c:v".to_string(),
-        video_encoder.ffmpeg_name().to_string(),
-        "-pix_fmt".to_string(),
-        "yuv420p".to_string(),
-        "-b:v".to_string(),
-        format!("{video_bitrate_kbps}k"),
-        "-maxrate".to_string(),
-        format!("{video_bitrate_kbps}k"),
-        "-bufsize".to_string(),
-        format!("{}k", video_bitrate_kbps.saturating_mul(2)),
-    ]);
-
-    match video_encoder {
-        ExportVideoEncoder::SoftwareHevc => {
-            args.extend(["-preset".to_string(), preset.to_string()]);
-            if let Some(passlog_prefix) = passlog_prefix {
-                args.extend([
-                    "-pass".to_string(),
-                    if first_pass { "1" } else { "2" }.to_string(),
-                    "-passlogfile".to_string(),
-                    passlog_prefix.to_string(),
-                ]);
-            }
-        }
-        ExportVideoEncoder::HevcNvenc => {
-            args.extend([
-                "-preset".to_string(),
-                preset.to_string(),
-                "-rc".to_string(),
-                "vbr".to_string(),
-            ]);
-        }
-        ExportVideoEncoder::HevcAmf => {
-            // Use VBR peak mode for export - recommended by AMD for recording use cases
-            // vbr_latency is for low-latency streaming and doesn't respect bitrate targets well
-            // vbr_peak allows encoder to vary bitrate up to maxrate for quality
-            args.extend([
-                "-quality".to_string(),
-                preset.to_string(),
-                "-rc".to_string(),
-                "vbr_peak".to_string(),
-                "-vbaq".to_string(),
-                "true".to_string(),
-                "-preencode".to_string(),
-                "true".to_string(),
-            ]);
-        }
-        ExportVideoEncoder::HevcQsv => {
-            args.extend([
-                "-preset".to_string(),
-                preset.to_string(),
-                "-look_ahead".to_string(),
-                "1".to_string(),
-            ]);
-        }
-    }
-
-    if first_pass {
-        args.extend([
-            "-an".to_string(),
-            "-f".to_string(),
-            "null".to_string(),
-            null_output_path().to_string(),
-        ]);
-        return args;
-    }
-
-    if request.metadata.has_audio {
-        args.extend([
-            "-map".to_string(),
-            "[outa]".to_string(),
-            "-c:a".to_string(),
-            "aac".to_string(),
-            "-b:a".to_string(),
-            format!("{}k", audio_bitrate_kbps.max(48)),
-        ]);
-    }
-
-    args.extend([
-        "-movflags".to_string(),
-        "+faststart".to_string(),
-        output_path.to_string_lossy().into_owned(),
-    ]);
-    args
-}
-
-struct FFmpegProgressContext {
-    phase: ClipExportPhase,
-    start_fraction: f32,
-    span_fraction: f32,
-    progress_tx: Sender<ClipExportUpdate>,
-    cancel_flag: Arc<AtomicBool>,
-    attempt_index: usize,
-    attempt_count: usize,
-    last_progress_time: std::time::Instant,
-}
-
-fn run_ffmpeg_phase(
-    ffmpeg: &Path,
-    args: &[String],
-    total_duration_secs: f64,
-    mut progress_ctx: FFmpegProgressContext,
-) -> Result<bool> {
-    let mut command = Command::new(ffmpeg);
-    command
-        .args(args.iter().map(|arg| arg.as_str()))
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
-
-    let mut child = command.spawn().with_context(|| {
-        format!(
-            "Failed to spawn ffmpeg phase {:?} via {:?}",
-            progress_ctx.phase, ffmpeg
-        )
-    })?;
-
-    let stderr = child
-        .stderr
-        .take()
-        .context("ffmpeg phase stderr pipe was unavailable")?;
-    let stderr_handle = thread::spawn(move || {
-        let mut buffer = String::new();
-        let _ = BufReader::new(stderr).read_to_string(&mut buffer);
-        buffer
-    });
-
-    let stdout = child
-        .stdout
-        .take()
-        .context("ffmpeg phase stdout pipe was unavailable")?;
-
-    {
-        let reader = BufReader::new(stdout);
-        for line in reader.lines() {
-            let line = line.context("Failed to read ffmpeg progress output")?;
-            if progress_ctx.cancel_flag.load(Ordering::Relaxed) {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = stderr_handle.join();
-                return Ok(true);
-            }
-
-            if let Some(processed_secs) = parse_progress_seconds(&line) {
-                let now = std::time::Instant::now();
-                const MIN_PROGRESS_INTERVAL: std::time::Duration =
-                    std::time::Duration::from_millis(100);
-
-                if now.duration_since(progress_ctx.last_progress_time) >= MIN_PROGRESS_INTERVAL {
-                    progress_ctx.last_progress_time = now;
-                    let fraction = if total_duration_secs > 0.0 {
-                        (processed_secs / total_duration_secs) as f32
-                    } else {
-                        0.0
-                    };
-                    let adjusted_fraction =
-                        progress_ctx.start_fraction + (fraction * progress_ctx.span_fraction);
-                    let _ = progress_ctx.progress_tx.send(ClipExportUpdate::Progress {
-                        phase: progress_ctx.phase,
-                        fraction: adjusted_fraction.clamp(0.0, 1.0),
-                        message: format!(
-                            "Attempt {}/{} - {}: {}",
-                            progress_ctx.attempt_index + 1,
-                            progress_ctx.attempt_count,
-                            phase_label(progress_ctx.phase),
-                            format_seconds_arg(processed_secs)
-                        ),
-                    });
-                }
-            }
-        }
-    }
-
-    let status = child
-        .wait()
-        .context("Failed waiting for ffmpeg phase to finish")?;
-    let stderr = stderr_handle.join().unwrap_or_default();
-
-    if progress_ctx.cancel_flag.load(Ordering::SeqCst) {
-        return Ok(true);
-    }
-
-    if !status.success() {
-        bail!(
-            "FFmpeg {} failed: {}",
-            phase_label(progress_ctx.phase),
-            stderr.trim()
-        );
-    }
-
-    let _ = progress_ctx.progress_tx.send(ClipExportUpdate::Progress {
-        phase: progress_ctx.phase,
-        fraction: (progress_ctx.start_fraction + progress_ctx.span_fraction).clamp(0.0, 1.0),
-        message: format!(
-            "Attempt {}/{} - {} complete",
-            progress_ctx.attempt_index + 1,
-            progress_ctx.attempt_count,
-            phase_label(progress_ctx.phase)
-        ),
-    });
-
-    Ok(false)
-}
 
 fn build_filter_complex_for_request(request: &ClipExportRequest, has_audio: bool) -> String {
     if let Some(webcam) = &request.webcam {
@@ -1431,24 +788,6 @@ fn parse_progress_seconds(line: &str) -> Option<f64> {
         }
         "out_time" => parse_hhmmss_time(value.trim()),
         _ => None,
-    }
-}
-
-fn cleanup_passlog_files(prefix: &Path) {
-    let Some(parent) = prefix.parent() else {
-        return;
-    };
-    let Some(prefix_name) = prefix.file_name().and_then(|name| name.to_str()) else {
-        return;
-    };
-
-    if let Ok(entries) = std::fs::read_dir(parent) {
-        for entry in entries.flatten() {
-            let file_name = entry.file_name();
-            if file_name.to_string_lossy().starts_with(prefix_name) {
-                let _ = std::fs::remove_file(entry.path());
-            }
-        }
     }
 }
 
@@ -1901,6 +1240,29 @@ fn select_preferred_attempt(
     }
 }
 
+/// Query available encoders via ffmpeg-next SDK
+#[cfg(feature = "ffmpeg")]
+fn query_sdk_codecs() -> Vec<&'static str> {
+    use ffmpeg_next as ffmpeg;
+    
+    let mut available = Vec::new();
+    
+    // Check for hardware encoders by trying to find them
+    if ffmpeg::encoder::find_by_name("hevc_nvenc").is_some() {
+        available.push("hevc_nvenc");
+    }
+    if ffmpeg::encoder::find_by_name("hevc_amf").is_some() {
+        available.push("hevc_amf");
+    }
+    if ffmpeg::encoder::find_by_name("hevc_qsv").is_some() {
+        available.push("hevc_qsv");
+    }
+    // libx265 is always available in software
+    available.push("libx265");
+    
+    available
+}
+
 fn select_export_video_encoder(request: &ClipExportRequest) -> Result<ExportVideoEncoder> {
     if !request.use_hardware_acceleration {
         return Ok(ExportVideoEncoder::SoftwareHevc);
@@ -1916,7 +1278,7 @@ fn select_export_video_encoder(request: &ClipExportRequest) -> Result<ExportVide
             ExportVideoEncoder::HevcQsv,
         ]
         .into_iter()
-        .filter(|encoder| available_codecs.contains(encoder.ffmpeg_name()))
+        .filter(|encoder| available_codecs.contains(&encoder.ffmpeg_name()))
         .map(|encoder| encoder.ffmpeg_name())
         .collect();
 
@@ -1932,65 +1294,17 @@ fn select_export_video_encoder(request: &ClipExportRequest) -> Result<ExportVide
         ];
 
         for encoder in requested_order {
-            if available_codecs.contains(encoder.ffmpeg_name()) {
+            if available_codecs.contains(&encoder.ffmpeg_name()) {
                 return Ok(*encoder);
             }
         }
 
-        for encoder in [
-            ExportVideoEncoder::HevcAmf,
-            ExportVideoEncoder::HevcNvenc,
-            ExportVideoEncoder::HevcQsv,
-        ] {
-            if available_codecs.contains(encoder.ffmpeg_name()) {
-                return Ok(encoder);
-            }
-        }
-
-        return Ok(ExportVideoEncoder::SoftwareHevc);
+        Ok(ExportVideoEncoder::SoftwareHevc)
     }
 
     #[cfg(not(feature = "ffmpeg"))]
     {
-        let ffmpeg = ffmpeg_executable_path();
-        let available_encoders = query_ffmpeg_encoders(&ffmpeg)?;
-        let detected_hevc_hardware: Vec<&str> = [
-            ExportVideoEncoder::HevcNvenc,
-            ExportVideoEncoder::HevcAmf,
-            ExportVideoEncoder::HevcQsv,
-        ]
-        .into_iter()
-        .filter(|encoder| available_encoders.contains(encoder.ffmpeg_name()))
-        .map(|encoder| encoder.ffmpeg_name())
-        .collect();
-
-        info!(
-            hardware_encoders = %detected_hevc_hardware.join(","),
-            "Detected HEVC hardware encoders from FFmpeg CLI"
-        );
-
-        let requested_order: &[ExportVideoEncoder] = &[
-            ExportVideoEncoder::HevcAmf,
-            ExportVideoEncoder::HevcNvenc,
-            ExportVideoEncoder::HevcQsv,
-        ];
-
-        for encoder in requested_order {
-            if available_encoders.contains(encoder.ffmpeg_name()) {
-                return Ok(*encoder);
-            }
-        }
-
-        for encoder in [
-            ExportVideoEncoder::HevcAmf,
-            ExportVideoEncoder::HevcNvenc,
-            ExportVideoEncoder::HevcQsv,
-        ] {
-            if available_encoders.contains(encoder.ffmpeg_name()) {
-                return Ok(encoder);
-            }
-        }
-
+        // Without ffmpeg SDK, hardware acceleration is not available for export
         Ok(ExportVideoEncoder::SoftwareHevc)
     }
 }
@@ -2013,24 +1327,6 @@ fn should_fallback_to_software_encoder(err: &anyhow::Error) -> bool {
     .any(|needle| message.contains(needle))
 }
 
-#[cfg(not(feature = "ffmpeg"))]
-fn query_ffmpeg_encoders(ffmpeg: &Path) -> Result<String> {
-    let output = command_output(
-        Command::new(ffmpeg)
-            .args(["-hide_banner", "-encoders"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null()),
-    )
-    .with_context(|| format!("Failed to query ffmpeg encoders via {:?}", ffmpeg))?;
-
-    if !output.status.success() {
-        bail!("ffmpeg encoder query failed via {:?}", ffmpeg);
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
-}
-
 fn move_or_copy_file(source_path: &Path, destination_path: &Path) -> Result<()> {
     let _ = std::fs::remove_file(destination_path);
     match std::fs::rename(source_path, destination_path) {
@@ -2048,107 +1344,6 @@ fn move_or_copy_file(source_path: &Path, destination_path: &Path) -> Result<()> 
     }
 }
 
-fn select_adaptive_preset(
-    video_bitrate_kbps: u32,
-    metadata: &VideoFileMetadata,
-    encoder: ExportVideoEncoder,
-) -> &'static str {
-    // Adaptive preset selection: use slower presets at lower bitrates
-    // for better compression efficiency, and faster presets at high bitrates
-    let pixels_per_frame = f64::from(metadata.width.max(1)) * f64::from(metadata.height.max(1));
-    let bits_per_pixel_frame =
-        (f64::from(video_bitrate_kbps) * 1000.0) / (pixels_per_frame * metadata.fps.max(1.0));
-    let high_throughput_source = pixels_per_frame * metadata.fps.max(1.0) >= 2560.0 * 1440.0 * 60.0;
-
-    match encoder {
-        ExportVideoEncoder::SoftwareHevc => {
-            if bits_per_pixel_frame < 0.05 {
-                "veryslow"
-            } else if bits_per_pixel_frame < 0.09 {
-                if high_throughput_source {
-                    "slower"
-                } else {
-                    "veryslow"
-                }
-            } else if bits_per_pixel_frame < 0.16 {
-                "slower"
-            } else if high_throughput_source {
-                "slow"
-            } else {
-                "slower"
-            }
-        }
-        ExportVideoEncoder::HevcNvenc => {
-            if bits_per_pixel_frame < 0.1 {
-                "p7"
-            } else {
-                "p6"
-            }
-        }
-        ExportVideoEncoder::HevcAmf => "quality",
-        ExportVideoEncoder::HevcQsv => {
-            if high_throughput_source {
-                "slow"
-            } else {
-                "slower"
-            }
-        }
-    }
-}
-
-fn phase_label(phase: ClipExportPhase) -> &'static str {
-    match phase {
-        ClipExportPhase::Preparing => "Preparing export",
-        ClipExportPhase::Calibration => "Calibration pass",
-        ClipExportPhase::FirstPass => "Encoding pass 1",
-        ClipExportPhase::SecondPass => "Encoding pass 2",
-    }
-}
-
-#[cfg(all(feature = "ffmpeg-cli", not(feature = "ffmpeg")))]
-fn ffprobe_executable_path() -> PathBuf {
-    let ffmpeg = ffmpeg_executable_path();
-    let sibling = ffmpeg.with_file_name(if cfg!(target_os = "windows") {
-        "ffprobe.exe"
-    } else {
-        "ffprobe"
-    });
-
-    if sibling.exists() {
-        sibling
-    } else {
-        PathBuf::from("ffprobe")
-    }
-}
-
-#[cfg(not(feature = "ffmpeg"))]
-fn command_output(command: &mut Command) -> Result<std::process::Output> {
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
-
-    Ok(command.output()?)
-}
-
-#[cfg(not(feature = "ffmpeg"))]
-fn format_seconds_arg(seconds: f64) -> String {
-    format!("{:.3}", seconds.max(0.0))
-}
-
-#[cfg(all(feature = "ffmpeg-cli", not(feature = "ffmpeg")))]
-fn parse_rational_fps(value: &str) -> Option<f64> {
-    if let Some((num, den)) = value.split_once('/') {
-        let n = num.trim().parse::<f64>().ok()?;
-        let d = den.trim().parse::<f64>().ok()?;
-        if d > 0.0 {
-            return Some(n / d);
-        }
-    }
-    value.trim().parse::<f64>().ok()
-}
-
 fn parse_hhmmss_time(value: &str) -> Option<f64> {
     let mut total = 0.0;
     let parts: Vec<_> = value.split(':').collect();
@@ -2161,222 +1356,8 @@ fn parse_hhmmss_time(value: &str) -> Option<f64> {
     Some(total)
 }
 
-#[cfg(not(feature = "ffmpeg"))]
-fn null_output_path() -> &'static str {
-    #[cfg(target_os = "windows")]
-    {
-        "NUL"
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        "/dev/null"
-    }
-}
-
-#[derive(Debug, Clone)]
-struct ExportAttemptResult {
-    output_path: PathBuf,
-    video_bitrate_kbps: u32,
-    size_bytes: u64,
-}
-
-#[cfg(feature = "ffmpeg")]
-fn query_sdk_codecs() -> String {
-    use ffmpeg_next::codec::Id;
-    let mut result = String::new();
-    
-    // Check for HEVC encoders
-    for id in [Id::HEVC, Id::H265] {
-        if let Some(codec) = ffmpeg_next::encoder::find(id) {
-            result.push_str(&format!("{}\n", codec.name()));
-        }
-    }
-    
-    // Check for hardware HEVC encoders by name
-    for name in ["libx265", "hevc_nvenc", "hevc_amf", "hevc_qsv"] {
-        if ffmpeg_next::encoder::find_by_name(name).is_some() {
-            result.push_str(&format!("{}\n", name));
-        }
-    }
-    
-    result
-}
-
-#[cfg(feature = "ffmpeg")]
-fn attempt_export(
-    request: &ClipExportRequest,
-    output_path: &Path,
-    video_bitrate_kbps: u32,
-    audio_bitrate_kbps: u32,
-    video_encoder: ExportVideoEncoder,
-    progress_tx: &Sender<ClipExportUpdate>,
-    cancel_flag: &Arc<AtomicBool>,
-    attempt_index: usize,
-    attempt_count: usize,
-    single_pass_phase: ClipExportPhase,
-) -> Result<Option<ExportAttemptResult>> {
-    // SDK path delegates to CLI subprocess for trimming operations.
-    // The ffmpeg-next filter graph API is complex and the CLI path already works correctly
-    // with proper trim/setpts/concat for continuous timestamps.
-    use std::time::Instant;
-    
-    let total_duration_secs = request.output_duration_secs().max(0.1);
-    let preset = select_adaptive_preset(video_bitrate_kbps, &request.metadata, video_encoder);
-
-    let _ = progress_tx.send(ClipExportUpdate::Progress {
-        phase: ClipExportPhase::Preparing,
-        fraction: 0.0,
-        message: "Preparing export".to_string(),
-    });
-
-    info!(
-        "Exporting clipped video (SDK->CLI) {:?} -> {:?} ({} kept ranges, target={} MB, video bitrate={} kbps, preset={}, encoder={})",
-        request.input_path,
-        output_path,
-        request.keep_ranges.len(),
-        request.target_size_mb,
-        video_bitrate_kbps,
-        preset,
-        video_encoder.ffmpeg_name()
-    );
-
-    // Build filter complex for trimming
-    let filter_complex = build_filter_complex_for_request(request, request.metadata.has_audio);
-    let ffmpeg = ffmpeg_executable_path();
-    let passlog_prefix = output_path.with_extension("passlog");
-    let passlog_prefix_str = passlog_prefix.to_string_lossy().into_owned();
-
-    if video_encoder.supports_two_pass() {
-        // Two-pass encoding for software encoder
-        let first_pass_args = build_ffmpeg_args(
-            request,
-            &filter_complex,
-            Some(&passlog_prefix_str),
-            video_bitrate_kbps,
-            audio_bitrate_kbps,
-            true,
-            &preset,
-            output_path,
-            video_encoder,
-        );
-        if run_ffmpeg_phase(
-            &ffmpeg,
-            &first_pass_args,
-            total_duration_secs,
-            FFmpegProgressContext {
-                phase: ClipExportPhase::FirstPass,
-                start_fraction: 0.0,
-                span_fraction: 0.5,
-                progress_tx: progress_tx.clone(),
-                cancel_flag: cancel_flag.clone(),
-                attempt_index,
-                attempt_count,
-                last_progress_time: Instant::now(),
-            },
-        )? {
-            cleanup_passlog_files(&passlog_prefix);
-            let _ = std::fs::remove_file(output_path);
-            return Ok(None);
-        }
-
-        if cancel_flag.load(Ordering::Relaxed) {
-            cleanup_passlog_files(&passlog_prefix);
-            let _ = std::fs::remove_file(output_path);
-            return Ok(None);
-        }
-
-        let second_pass_args = build_ffmpeg_args(
-            request,
-            &filter_complex,
-            Some(&passlog_prefix_str),
-            video_bitrate_kbps,
-            audio_bitrate_kbps,
-            false,
-            &preset,
-            output_path,
-            video_encoder,
-        );
-        if run_ffmpeg_phase(
-            &ffmpeg,
-            &second_pass_args,
-            total_duration_secs,
-            FFmpegProgressContext {
-                phase: ClipExportPhase::SecondPass,
-                start_fraction: 0.5,
-                span_fraction: 0.5,
-                progress_tx: progress_tx.clone(),
-                cancel_flag: cancel_flag.clone(),
-                attempt_index,
-                attempt_count,
-                last_progress_time: Instant::now(),
-            },
-        )? {
-            cleanup_passlog_files(&passlog_prefix);
-            let _ = std::fs::remove_file(output_path);
-            return Ok(None);
-        }
-
-        cleanup_passlog_files(&passlog_prefix);
-    } else {
-        // Single-pass encoding for hardware encoders
-        let args = build_ffmpeg_args(
-            request,
-            &filter_complex,
-            None,
-            video_bitrate_kbps,
-            audio_bitrate_kbps,
-            false,
-            &preset,
-            output_path,
-            video_encoder,
-        );
-        if run_ffmpeg_phase(
-            &ffmpeg,
-            &args,
-            total_duration_secs,
-            FFmpegProgressContext {
-                phase: single_pass_phase,
-                start_fraction: 0.0,
-                span_fraction: 1.0,
-                progress_tx: progress_tx.clone(),
-                cancel_flag: cancel_flag.clone(),
-                attempt_index,
-                attempt_count,
-                last_progress_time: Instant::now(),
-            },
-        )? {
-            let _ = std::fs::remove_file(output_path);
-            return Ok(None);
-        }
-    }
-
-    let size_bytes = std::fs::metadata(output_path)
-        .with_context(|| format!("Failed to get size of export output file {:?}", output_path))?
-        .len();
-
-    Ok(Some(ExportAttemptResult {
-        output_path: output_path.to_path_buf(),
-        video_bitrate_kbps,
-        size_bytes,
-    }))
-}
-
-#[cfg(feature = "ffmpeg")]
 fn format_seconds_arg(seconds: f64) -> String {
     format!("{:.3}", seconds.max(0.0))
-}
-
-#[cfg(feature = "ffmpeg")]
-fn null_output_path() -> &'static str {
-    #[cfg(target_os = "windows")]
-    {
-        "NUL"
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        "/dev/null"
-    }
 }
 
 #[cfg(test)]
@@ -2479,6 +1460,10 @@ mod tests {
                 fps: 60.0,
             },
             webcam: None,
+            stream_copy: false,
+            output_width: None,
+            output_height: None,
+            output_fps: None,
         };
 
         let calibration =
@@ -2543,89 +1528,5 @@ mod tests {
             farther_attempt.size_bytes,
             target_size_bytes,
         ));
-    }
-
-    #[cfg(all(feature = "ffmpeg-cli", not(feature = "ffmpeg")))]
-    #[test]
-    fn exports_trimmed_snippets_with_ffmpeg() {
-        let ffmpeg = ffmpeg_executable_path();
-        if !ffmpeg.exists() {
-            return;
-        }
-
-        let temp_dir = std::env::temp_dir().join(format!(
-            "liteclip-export-test-{}-{}",
-            std::process::id(),
-            chrono::Utc::now().timestamp_millis()
-        ));
-        std::fs::create_dir_all(&temp_dir).unwrap();
-
-        let input_path = temp_dir.join("input.mp4");
-        let output_path = temp_dir.join("output.mp4");
-
-        let sample_status = command_output(Command::new(&ffmpeg).args([
-            "-y",
-            "-f",
-            "lavfi",
-            "-i",
-            "testsrc=size=320x240:rate=30",
-            "-f",
-            "lavfi",
-            "-i",
-            "sine=frequency=1000:sample_rate=48000",
-            "-t",
-            "2",
-            "-c:v",
-            "libx265",
-            "-pix_fmt",
-            "yuv420p",
-            "-c:a",
-            "aac",
-            &input_path.to_string_lossy(),
-        ]))
-        .unwrap();
-        assert!(sample_status.status.success());
-
-        let metadata = probe_video_file(&input_path).unwrap();
-        let (progress_tx, _progress_rx) = std::sync::mpsc::channel();
-        let cancel_flag = Arc::new(AtomicBool::new(false));
-
-        let outcome = run_clip_export(
-            &ClipExportRequest {
-                input_path: input_path.clone(),
-                output_path: output_path.clone(),
-                keep_ranges: vec![
-                    TimeRange {
-                        start_secs: 0.0,
-                        end_secs: 0.5,
-                    },
-                    TimeRange {
-                        start_secs: 1.0,
-                        end_secs: 1.5,
-                    },
-                ],
-                target_size_mb: 2,
-                audio_bitrate_kbps: 96,
-                use_hardware_acceleration: false,
-                preferred_encoder: EncoderType::Auto,
-                metadata,
-                webcam: None,
-                stream_copy: false,
-            },
-            &progress_tx,
-            &cancel_flag,
-        )
-        .unwrap();
-
-        match outcome {
-            ExportOutcome::Finished(path) => assert!(path.exists()),
-            ExportOutcome::Cancelled => panic!("export unexpectedly cancelled"),
-        }
-
-        let exported = probe_video_file(&output_path).unwrap();
-        assert!(exported.duration_secs > 0.8);
-        assert!(exported.duration_secs < 1.3);
-
-        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }
