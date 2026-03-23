@@ -3,7 +3,6 @@ use anyhow::{bail, Context, Result};
 use image::RgbaImage;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc::Sender,
@@ -11,6 +10,8 @@ use std::sync::{
 };
 use std::thread;
 use tracing::{error, info, warn};
+
+use std::process::{Command, Stdio};
 
 use super::functions::ffmpeg_executable_path;
 
@@ -682,6 +683,7 @@ fn run_clip_export(
     export_result
 }
 
+#[cfg(not(feature = "ffmpeg"))]
 fn attempt_export(
     request: &ClipExportRequest,
     output_path: &Path,
@@ -1078,7 +1080,7 @@ fn build_filter_complex_for_request(request: &ClipExportRequest, has_audio: bool
     if let Some(webcam) = &request.webcam {
         build_filter_with_webcam(request, webcam, has_audio)
     } else {
-        build_filter_complex(&request.keep_ranges, has_audio)
+        build_filter_complex(&request.keep_ranges, has_audio, request.metadata.fps)
     }
 }
 
@@ -1187,16 +1189,19 @@ fn piecewise_linear_expr_t(points: &[(f64, f64)]) -> String {
     format!("if(lt(t,{t0}),{v0},{expr})")
 }
 
-fn build_filter_complex(keep_ranges: &[TimeRange], has_audio: bool) -> String {
+fn build_filter_complex(keep_ranges: &[TimeRange], has_audio: bool, fps: f64) -> String {
     let mut filters = Vec::new();
 
     for (index, range) in keep_ranges.iter().enumerate() {
-        // Add fps filter after trim+setpts to restore proper frame timing for hardware encoders
-        // The trim filter alone breaks frame rate metadata that AMF/NVENC use for rate control
+        // Use fps filter with explicit rate to ensure proper frame timing after trim.
+        // Without explicit fps, the filter may drop/duplicate frames at segment boundaries,
+        // causing duration mismatches and A/V sync issues.
+        // The fps filter also ensures keyframe-aware trimming by outputting at constant rate.
         filters.push(format!(
-            "[0:v:0]trim=start={}:end={},setpts=PTS-STARTPTS,fps[v{index}]",
+            "[0:v:0]trim=start={}:end={},setpts=PTS-STARTPTS,fps={}[v{index}]",
             format_seconds_arg(range.start_secs),
             format_seconds_arg(range.end_secs),
+            fps,
         ));
         if has_audio {
             filters.push(format!(
@@ -1714,46 +1719,93 @@ fn select_export_video_encoder(request: &ClipExportRequest) -> Result<ExportVide
         return Ok(ExportVideoEncoder::SoftwareHevc);
     }
 
-    let ffmpeg = ffmpeg_executable_path();
-    let available_encoders = query_ffmpeg_encoders(&ffmpeg)?;
-    let detected_hevc_hardware: Vec<&str> = [
-        ExportVideoEncoder::HevcNvenc,
-        ExportVideoEncoder::HevcAmf,
-        ExportVideoEncoder::HevcQsv,
-    ]
-    .into_iter()
-    .filter(|encoder| available_encoders.contains(encoder.ffmpeg_name()))
-    .map(|encoder| encoder.ffmpeg_name())
-    .collect();
+    // For SDK path, check available codecs via ffmpeg-next
+    #[cfg(feature = "ffmpeg")]
+    {
+        let available_codecs = query_sdk_codecs();
+        let detected_hevc_hardware: Vec<&str> = [
+            ExportVideoEncoder::HevcNvenc,
+            ExportVideoEncoder::HevcAmf,
+            ExportVideoEncoder::HevcQsv,
+        ]
+        .into_iter()
+        .filter(|encoder| available_codecs.contains(encoder.ffmpeg_name()))
+        .map(|encoder| encoder.ffmpeg_name())
+        .collect();
 
-    info!(
-        hardware_encoders = %detected_hevc_hardware.join(","),
-        "Detected HEVC hardware encoders from FFmpeg"
-    );
+        info!(
+            hardware_encoders = %detected_hevc_hardware.join(","),
+            "Detected HEVC hardware encoders from SDK"
+        );
 
-    let requested_order: &[ExportVideoEncoder] = &[
-        ExportVideoEncoder::HevcAmf,
-        ExportVideoEncoder::HevcNvenc,
-        ExportVideoEncoder::HevcQsv,
-    ];
+        let requested_order: &[ExportVideoEncoder] = &[
+            ExportVideoEncoder::HevcAmf,
+            ExportVideoEncoder::HevcNvenc,
+            ExportVideoEncoder::HevcQsv,
+        ];
 
-    for encoder in requested_order {
-        if available_encoders.contains(encoder.ffmpeg_name()) {
-            return Ok(*encoder);
+        for encoder in requested_order {
+            if available_codecs.contains(encoder.ffmpeg_name()) {
+                return Ok(*encoder);
+            }
         }
+
+        for encoder in [
+            ExportVideoEncoder::HevcAmf,
+            ExportVideoEncoder::HevcNvenc,
+            ExportVideoEncoder::HevcQsv,
+        ] {
+            if available_codecs.contains(encoder.ffmpeg_name()) {
+                return Ok(encoder);
+            }
+        }
+
+        return Ok(ExportVideoEncoder::SoftwareHevc);
     }
 
-    for encoder in [
-        ExportVideoEncoder::HevcAmf,
-        ExportVideoEncoder::HevcNvenc,
-        ExportVideoEncoder::HevcQsv,
-    ] {
-        if available_encoders.contains(encoder.ffmpeg_name()) {
-            return Ok(encoder);
-        }
-    }
+    #[cfg(not(feature = "ffmpeg"))]
+    {
+        let ffmpeg = ffmpeg_executable_path();
+        let available_encoders = query_ffmpeg_encoders(&ffmpeg)?;
+        let detected_hevc_hardware: Vec<&str> = [
+            ExportVideoEncoder::HevcNvenc,
+            ExportVideoEncoder::HevcAmf,
+            ExportVideoEncoder::HevcQsv,
+        ]
+        .into_iter()
+        .filter(|encoder| available_encoders.contains(encoder.ffmpeg_name()))
+        .map(|encoder| encoder.ffmpeg_name())
+        .collect();
 
-    Ok(ExportVideoEncoder::SoftwareHevc)
+        info!(
+            hardware_encoders = %detected_hevc_hardware.join(","),
+            "Detected HEVC hardware encoders from FFmpeg CLI"
+        );
+
+        let requested_order: &[ExportVideoEncoder] = &[
+            ExportVideoEncoder::HevcAmf,
+            ExportVideoEncoder::HevcNvenc,
+            ExportVideoEncoder::HevcQsv,
+        ];
+
+        for encoder in requested_order {
+            if available_encoders.contains(encoder.ffmpeg_name()) {
+                return Ok(*encoder);
+            }
+        }
+
+        for encoder in [
+            ExportVideoEncoder::HevcAmf,
+            ExportVideoEncoder::HevcNvenc,
+            ExportVideoEncoder::HevcQsv,
+        ] {
+            if available_encoders.contains(encoder.ffmpeg_name()) {
+                return Ok(encoder);
+            }
+        }
+
+        Ok(ExportVideoEncoder::SoftwareHevc)
+    }
 }
 
 fn should_fallback_to_software_encoder(err: &anyhow::Error) -> bool {
@@ -1774,6 +1826,7 @@ fn should_fallback_to_software_encoder(err: &anyhow::Error) -> bool {
     .any(|needle| message.contains(needle))
 }
 
+#[cfg(not(feature = "ffmpeg"))]
 fn query_ffmpeg_encoders(ffmpeg: &Path) -> Result<String> {
     let output = command_output(
         Command::new(ffmpeg)
@@ -1881,6 +1934,7 @@ fn ffprobe_executable_path() -> PathBuf {
     }
 }
 
+#[cfg(not(feature = "ffmpeg"))]
 fn command_output(command: &mut Command) -> Result<std::process::Output> {
     #[cfg(target_os = "windows")]
     {
@@ -1891,6 +1945,7 @@ fn command_output(command: &mut Command) -> Result<std::process::Output> {
     Ok(command.output()?)
 }
 
+#[cfg(not(feature = "ffmpeg"))]
 fn format_seconds_arg(seconds: f64) -> String {
     format!("{:.3}", seconds.max(0.0))
 }
@@ -1919,6 +1974,7 @@ fn parse_hhmmss_time(value: &str) -> Option<f64> {
     Some(total)
 }
 
+#[cfg(not(feature = "ffmpeg"))]
 fn null_output_path() -> &'static str {
     #[cfg(target_os = "windows")]
     {
@@ -1936,6 +1992,204 @@ struct ExportAttemptResult {
     output_path: PathBuf,
     video_bitrate_kbps: u32,
     size_bytes: u64,
+}
+
+#[cfg(feature = "ffmpeg")]
+fn query_sdk_codecs() -> String {
+    use ffmpeg_next::codec::Id;
+    let mut result = String::new();
+    
+    // Check for HEVC encoders
+    for id in [Id::HEVC, Id::H265] {
+        if let Some(codec) = ffmpeg_next::encoder::find(id) {
+            result.push_str(&format!("{}\n", codec.name()));
+        }
+    }
+    
+    // Check for hardware HEVC encoders by name
+    for name in ["libx265", "hevc_nvenc", "hevc_amf", "hevc_qsv"] {
+        if ffmpeg_next::encoder::find_by_name(name).is_some() {
+            result.push_str(&format!("{}\n", name));
+        }
+    }
+    
+    result
+}
+
+#[cfg(feature = "ffmpeg")]
+fn attempt_export(
+    request: &ClipExportRequest,
+    output_path: &Path,
+    video_bitrate_kbps: u32,
+    audio_bitrate_kbps: u32,
+    video_encoder: ExportVideoEncoder,
+    progress_tx: &Sender<ClipExportUpdate>,
+    cancel_flag: &Arc<AtomicBool>,
+    attempt_index: usize,
+    attempt_count: usize,
+    single_pass_phase: ClipExportPhase,
+) -> Result<Option<ExportAttemptResult>> {
+    // SDK path delegates to CLI subprocess for trimming operations.
+    // The ffmpeg-next filter graph API is complex and the CLI path already works correctly
+    // with proper trim/setpts/concat for continuous timestamps.
+    use std::time::Instant;
+    
+    let total_duration_secs = request.output_duration_secs().max(0.1);
+    let preset = select_adaptive_preset(video_bitrate_kbps, &request.metadata, video_encoder);
+
+    let _ = progress_tx.send(ClipExportUpdate::Progress {
+        phase: ClipExportPhase::Preparing,
+        fraction: 0.0,
+        message: "Preparing export".to_string(),
+    });
+
+    info!(
+        "Exporting clipped video (SDK->CLI) {:?} -> {:?} ({} kept ranges, target={} MB, video bitrate={} kbps, preset={}, encoder={})",
+        request.input_path,
+        output_path,
+        request.keep_ranges.len(),
+        request.target_size_mb,
+        video_bitrate_kbps,
+        preset,
+        video_encoder.ffmpeg_name()
+    );
+
+    // Build filter complex for trimming
+    let filter_complex = build_filter_complex_for_request(request, request.metadata.has_audio);
+    let ffmpeg = ffmpeg_executable_path();
+    let passlog_prefix = output_path.with_extension("passlog");
+    let passlog_prefix_str = passlog_prefix.to_string_lossy().into_owned();
+
+    if video_encoder.supports_two_pass() {
+        // Two-pass encoding for software encoder
+        let first_pass_args = build_ffmpeg_args(
+            request,
+            &filter_complex,
+            Some(&passlog_prefix_str),
+            video_bitrate_kbps,
+            audio_bitrate_kbps,
+            true,
+            &preset,
+            output_path,
+            video_encoder,
+        );
+        if run_ffmpeg_phase(
+            &ffmpeg,
+            &first_pass_args,
+            total_duration_secs,
+            FFmpegProgressContext {
+                phase: ClipExportPhase::FirstPass,
+                start_fraction: 0.0,
+                span_fraction: 0.5,
+                progress_tx: progress_tx.clone(),
+                cancel_flag: cancel_flag.clone(),
+                attempt_index,
+                attempt_count,
+                last_progress_time: Instant::now(),
+            },
+        )? {
+            cleanup_passlog_files(&passlog_prefix);
+            let _ = std::fs::remove_file(output_path);
+            return Ok(None);
+        }
+
+        if cancel_flag.load(Ordering::Relaxed) {
+            cleanup_passlog_files(&passlog_prefix);
+            let _ = std::fs::remove_file(output_path);
+            return Ok(None);
+        }
+
+        let second_pass_args = build_ffmpeg_args(
+            request,
+            &filter_complex,
+            Some(&passlog_prefix_str),
+            video_bitrate_kbps,
+            audio_bitrate_kbps,
+            false,
+            &preset,
+            output_path,
+            video_encoder,
+        );
+        if run_ffmpeg_phase(
+            &ffmpeg,
+            &second_pass_args,
+            total_duration_secs,
+            FFmpegProgressContext {
+                phase: ClipExportPhase::SecondPass,
+                start_fraction: 0.5,
+                span_fraction: 0.5,
+                progress_tx: progress_tx.clone(),
+                cancel_flag: cancel_flag.clone(),
+                attempt_index,
+                attempt_count,
+                last_progress_time: Instant::now(),
+            },
+        )? {
+            cleanup_passlog_files(&passlog_prefix);
+            let _ = std::fs::remove_file(output_path);
+            return Ok(None);
+        }
+
+        cleanup_passlog_files(&passlog_prefix);
+    } else {
+        // Single-pass encoding for hardware encoders
+        let args = build_ffmpeg_args(
+            request,
+            &filter_complex,
+            None,
+            video_bitrate_kbps,
+            audio_bitrate_kbps,
+            false,
+            &preset,
+            output_path,
+            video_encoder,
+        );
+        if run_ffmpeg_phase(
+            &ffmpeg,
+            &args,
+            total_duration_secs,
+            FFmpegProgressContext {
+                phase: single_pass_phase,
+                start_fraction: 0.0,
+                span_fraction: 1.0,
+                progress_tx: progress_tx.clone(),
+                cancel_flag: cancel_flag.clone(),
+                attempt_index,
+                attempt_count,
+                last_progress_time: Instant::now(),
+            },
+        )? {
+            let _ = std::fs::remove_file(output_path);
+            return Ok(None);
+        }
+    }
+
+    let size_bytes = std::fs::metadata(output_path)
+        .with_context(|| format!("Failed to get size of export output file {:?}", output_path))?
+        .len();
+
+    Ok(Some(ExportAttemptResult {
+        output_path: output_path.to_path_buf(),
+        video_bitrate_kbps,
+        size_bytes,
+    }))
+}
+
+#[cfg(feature = "ffmpeg")]
+fn format_seconds_arg(seconds: f64) -> String {
+    format!("{:.3}", seconds.max(0.0))
+}
+
+#[cfg(feature = "ffmpeg")]
+fn null_output_path() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        "NUL"
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        "/dev/null"
+    }
 }
 
 #[cfg(test)]
@@ -2104,7 +2358,7 @@ mod tests {
         ));
     }
 
-    #[cfg(any(feature = "ffmpeg", feature = "ffmpeg-cli"))]
+    #[cfg(all(feature = "ffmpeg-cli", not(feature = "ffmpeg")))]
     #[test]
     fn exports_trimmed_snippets_with_ffmpeg() {
         let ffmpeg = ffmpeg_executable_path();

@@ -9,7 +9,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 Push-Location $PSScriptRoot
 
-$releaseDir = Resolve-Path "..\target\release"
+$releaseDir = Join-Path $PSScriptRoot "..\target\release"
 $ffmpegBinDir = Join-Path $PSScriptRoot "..\ffmpeg_dev\sdk\bin"
 $appExe = Join-Path $releaseDir "liteclip-replay.exe"
 $outputDir = Join-Path $PSScriptRoot "output"
@@ -66,8 +66,11 @@ Copy-Item $appExe -Destination $portableDir
 
 $requiredDlls = @(
   "avcodec-61.dll",
+  "avdevice-61.dll",
+  "avfilter-10.dll",
   "avformat-61.dll",
   "avutil-59.dll",
+  "postproc-58.dll",
   "swresample-5.dll",
   "swscale-8.dll"
 )

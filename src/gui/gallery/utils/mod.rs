@@ -2,8 +2,9 @@ use anyhow::Context;
 use eframe::egui;
 use image::RgbaImage;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use tracing::warn;
+
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 
 use super::{
     EditorState, SnippetSegment, ThumbnailStrip, TimeRange, VideoEntry, MIN_RANGE_SECS,
@@ -11,10 +12,7 @@ use super::{
 };
 use crate::output::{estimate_export_bitrates, VideoFileMetadata};
 
-#[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
-
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", not(feature = "ffmpeg")))]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 pub(super) fn collect_video_paths_impl(
@@ -47,9 +45,9 @@ pub(super) fn collect_video_paths_impl(
 pub(super) fn open_path_impl(path: &Path) -> anyhow::Result<()> {
     #[cfg(target_os = "windows")]
     {
-        Command::new("cmd")
+        std::process::Command::new("cmd")
             .args(["/C", "start", "", &path.to_string_lossy()])
-            .creation_flags(CREATE_NO_WINDOW)
+            .creation_flags(0x08000000)
             .spawn()
             .map_err(anyhow::Error::from)?;
         Ok(())
@@ -57,7 +55,7 @@ pub(super) fn open_path_impl(path: &Path) -> anyhow::Result<()> {
 
     #[cfg(not(target_os = "windows"))]
     {
-        Command::new("xdg-open")
+        std::process::Command::new("xdg-open")
             .arg(path)
             .spawn()
             .map_err(anyhow::Error::from)?;
@@ -384,9 +382,71 @@ pub(super) fn generate_thumbnail_strip_frames_impl(
     duration_secs: f64,
     _has_audio: bool,
 ) -> anyhow::Result<ThumbnailStrip> {
+    #[cfg(feature = "ffmpeg")]
+    {
+        return generate_thumbnail_strip_frames_sdk(video_path, duration_secs);
+    }
+    #[cfg(not(feature = "ffmpeg"))]
+    {
+        return generate_thumbnail_strip_frames_cli(video_path, duration_secs);
+    }
+}
+
+#[cfg(feature = "ffmpeg")]
+fn generate_thumbnail_strip_frames_sdk(
+    video_path: &Path,
+    duration_secs: f64,
+) -> anyhow::Result<ThumbnailStrip> {
+    use crate::output::sdk_ffmpeg_output::extract_preview_frame;
+    use tracing::{debug, warn};
+
+    let mut thumbnails = Vec::with_capacity(THUMBNAIL_STRIP_COUNT);
+
+    if duration_secs <= 0.0 {
+        return Ok(ThumbnailStrip::new(thumbnails, duration_secs));
+    }
+
+    let frame_times: Vec<f64> = (1..=THUMBNAIL_STRIP_COUNT)
+        .map(|i| duration_secs * (i as f64) / (THUMBNAIL_STRIP_COUNT + 1) as f64)
+        .collect();
+
+    for (i, time_secs) in frame_times.iter().enumerate() {
+        debug!("Extracting thumbnail strip frame {}/{} at {:.2}s", i + 1, THUMBNAIL_STRIP_COUNT, time_secs);
+        match extract_preview_frame(video_path, *time_secs, THUMBNAIL_STRIP_WIDTH) {
+            Ok(frame) => {
+                thumbnails.push((*time_secs, frame));
+            }
+            Err(e) => {
+                warn!("Failed to extract frame at {:.2}s: {}", time_secs, e);
+                if let Some(last) = thumbnails.last() {
+                    thumbnails.push((frame_times[i], last.1.clone()));
+                }
+            }
+        }
+    }
+
+    while thumbnails.len() < THUMBNAIL_STRIP_COUNT {
+        if let Some(last) = thumbnails.last() {
+            let idx = thumbnails.len();
+            let time = duration_secs * (idx as f64) / (THUMBNAIL_STRIP_COUNT as f64);
+            thumbnails.push((time, last.1.clone()));
+        } else {
+            break;
+        }
+    }
+
+    Ok(ThumbnailStrip::new(thumbnails, duration_secs))
+}
+
+#[cfg(not(feature = "ffmpeg"))]
+fn generate_thumbnail_strip_frames_cli(
+    video_path: &Path,
+    duration_secs: f64,
+) -> anyhow::Result<ThumbnailStrip> {
     use crate::output::functions::ffmpeg_executable_path;
     use std::io::Read;
-    use std::process::Stdio;
+    use std::process::{Command, Stdio};
+    use tracing::warn;
 
     let ffmpeg = ffmpeg_executable_path();
     let mut thumbnails = Vec::with_capacity(THUMBNAIL_STRIP_COUNT);
@@ -399,7 +459,7 @@ pub(super) fn generate_thumbnail_strip_frames_impl(
     let fps_filter = format!("fps={:.6}", fps_value);
     let scale_filter =
         format!("scale={THUMBNAIL_STRIP_WIDTH}:-2:force_original_aspect_ratio=decrease");
-    let vf = format!("{},{}", fps_filter, scale_filter);
+    let vf = format!("{},{}" , fps_filter, scale_filter);
 
     let mut cmd = Command::new(&ffmpeg);
     cmd.args([
