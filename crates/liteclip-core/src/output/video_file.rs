@@ -59,6 +59,8 @@ pub struct WebcamExport {
     pub keyframes: Vec<super::webcam_layout::WebcamKeyframe>,
 }
 
+/// Functions for webcam overlay export - currently unused but reserved for future use.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct ClipExportRequest {
     pub input_path: PathBuf,
@@ -231,7 +233,10 @@ impl ExportVideoEncoder {
         }?;
 
         let high = ((initial_video_bitrate_kbps as f64) * multiplier).round() as u32;
-        Some(high.min(MAX_VIDEO_BITRATE_KBPS).max(initial_video_bitrate_kbps.saturating_add(100)))
+        Some(
+            high.min(MAX_VIDEO_BITRATE_KBPS)
+                .max(initial_video_bitrate_kbps.saturating_add(100)),
+        )
     }
 }
 
@@ -337,11 +342,8 @@ fn run_clip_export(
     if request.stream_copy {
         #[cfg(feature = "ffmpeg")]
         {
-            let stream_copy_result = super::sdk_export::run_stream_copy_export_sdk(
-                request,
-                progress_tx,
-                cancel_flag,
-            );
+            let stream_copy_result =
+                super::sdk_export::run_stream_copy_export_sdk(request, progress_tx, cancel_flag);
             info!(
                 elapsed_secs = export_started_at.elapsed().as_secs_f64(),
                 output = ?request.output_path,
@@ -499,7 +501,8 @@ fn run_clip_export(
         let mut low_video_bitrate_kbps = selected_encoder.min_video_bitrate_kbps();
         let mut high_video_bitrate_kbps =
             selected_encoder.initial_high_bitrate_kbps(current_video_bitrate_kbps);
-        if selected_encoder == ExportVideoEncoder::SoftwareHevc && prototype_flags.software_two_pass {
+        if selected_encoder == ExportVideoEncoder::SoftwareHevc && prototype_flags.software_two_pass
+        {
             info!(
                 "Software two-pass prototype flag is enabled. Current export path remains iterative; two-pass implementation is not yet wired."
             );
@@ -705,6 +708,7 @@ fn run_clip_export(
     export_result
 }
 
+#[allow(dead_code)]
 fn build_filter_complex_for_request(request: &ClipExportRequest, has_audio: bool) -> String {
     if let Some(webcam) = &request.webcam {
         build_filter_with_webcam(request, webcam, has_audio)
@@ -723,6 +727,7 @@ fn build_filter_complex_for_request(request: &ClipExportRequest, has_audio: bool
     }
 }
 
+#[allow(dead_code)]
 fn build_filter_with_webcam(
     request: &ClipExportRequest,
     webcam: &WebcamExport,
@@ -836,6 +841,7 @@ fn build_filter_with_webcam(
 }
 
 /// Piecewise linear interpolation of `v` over `t` for ffmpeg `eval=frame` expressions.
+#[allow(dead_code)]
 fn piecewise_linear_expr_t(points: &[(f64, f64)]) -> String {
     let mut p = points.to_vec();
     if p.is_empty() {
@@ -858,6 +864,7 @@ fn piecewise_linear_expr_t(points: &[(f64, f64)]) -> String {
     format!("if(lt(t,{t0}),{v0},{expr})")
 }
 
+#[allow(dead_code)]
 fn build_filter_complex(
     keep_ranges: &[TimeRange],
     has_audio: bool,
@@ -916,6 +923,7 @@ fn build_filter_complex(
     filters.join(";")
 }
 
+#[allow(dead_code)]
 fn parse_progress_seconds(line: &str) -> Option<f64> {
     let (_, value) = line.split_once('=')?;
     match line.split_once('=')?.0 {
@@ -1333,11 +1341,15 @@ fn calibrate_amf_video_bitrate(
 
     let (capped_ratio, was_capped) = if raw_bitrate_ratio > MAX_UPWARD_EXTRAPOLATION_RATIO {
         // Extrapolation ratio exceeds cap - apply both cap and safety margin
-        (MAX_UPWARD_EXTRAPOLATION_RATIO * EXTRAPOLATION_SAFETY_MARGIN, true)
+        (
+            MAX_UPWARD_EXTRAPOLATION_RATIO * EXTRAPOLATION_SAFETY_MARGIN,
+            true,
+        )
     } else if raw_bitrate_ratio > 1.0 {
         // Upward extrapolation within normal range - apply proportional compensation
         // for non-linear VBR overshoot. Higher ratios need more compensation.
-        let overshoot_compensation = 1.0 - UPWARD_EXTRAPOLATION_COMPENSATION * (raw_bitrate_ratio - 1.0);
+        let overshoot_compensation =
+            1.0 - UPWARD_EXTRAPOLATION_COMPENSATION * (raw_bitrate_ratio - 1.0);
         (raw_bitrate_ratio * overshoot_compensation, false)
     } else {
         // Downward extrapolation - use as-is (undershoot is acceptable)
@@ -1404,7 +1416,7 @@ fn select_preferred_attempt(
     encoder: ExportVideoEncoder,
 ) -> Option<ExportAttemptResult> {
     let (_min_fill, max_fill) = encoder.acceptable_fill_range();
-    
+
     match (best_under_target, best_over_target) {
         (Some(under_target), Some(over_target)) => {
             // Check if over_target is within acceptable range for this encoder
@@ -1621,8 +1633,11 @@ mod tests {
         // Generic hw uses fill ratio 1.0 and efficiency 0.50
         // The lower fill ratio reduces target size, so AMF estimate may be lower
         // The key assertion is that AMF estimate lands in the target band
-        assert!((240..=290).contains(&estimate.video_kbps), 
-            "AMF estimate {} should be in 240-290 range", estimate.video_kbps);
+        assert!(
+            (240..=290).contains(&estimate.video_kbps),
+            "AMF estimate {} should be in 240-290 range",
+            estimate.video_kbps
+        );
         assert_eq!(
             desired_output_size_bytes(ExportVideoEncoder::HevcAmf, target_size_bytes(3)),
             ((target_size_bytes(3) as f64) * AMF_TARGET_FILL_RATIO_IDEAL).round() as u64
