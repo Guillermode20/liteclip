@@ -96,8 +96,15 @@ pub(super) fn build_clipped_output_path_impl(video: &VideoEntry) -> PathBuf {
         ));
     }
 
-    let game_folder = format!("Clipped-{}", video.game.replace(['\\', '/'], "-"));
-    let output_dir = video.save_root.join(game_folder);
+    // Check if the video is already in a clipped folder to avoid nesting
+    let output_dir = if video.game.starts_with("Clipped-") {
+        // Video is already in a clipped folder, save to the same folder
+        video.path.parent().map(Path::to_path_buf).unwrap_or_else(|| video.save_root.clone())
+    } else {
+        // Create a new clipped folder for non-clipped videos
+        let game_folder = format!("Clipped-{}", video.game.replace(['\\', '/'], "-"));
+        video.save_root.join(game_folder)
+    };
     let _ = std::fs::create_dir_all(&output_dir);
 
     for attempt in 0..1000 {

@@ -352,6 +352,8 @@ pub struct ClipCompressApp {
     delete_hold_started_at: Option<Instant>,
     focus_filter_requested: bool,
     preferred_export_encoder: EncoderType,
+    /// Track last time we checked for new thumbnails to avoid excessive polling
+    last_thumbnail_check: Instant,
 }
 
 pub type GalleryApp = ClipCompressApp;
@@ -389,6 +391,7 @@ impl ClipCompressApp {
             delete_hold_started_at: None,
             focus_filter_requested: false,
             preferred_export_encoder: config.video.encoder,
+            last_thumbnail_check: Instant::now(),
         }
     }
 
@@ -577,6 +580,48 @@ impl ClipCompressApp {
                 color_image,
                 egui::TextureOptions::LINEAR,
             ));
+        }
+    }
+
+    /// Check for newly generated thumbnails for videos that don't have them yet
+    /// Called periodically to detect thumbnails created after initial scan
+    fn check_for_new_thumbnails(&mut self, ctx: &egui::Context) {
+        let now = Instant::now();
+        
+        // Only check every 3 seconds to avoid excessive polling
+        if now.duration_since(self.last_thumbnail_check) < Duration::from_secs(3) {
+            return;
+        }
+        
+        self.last_thumbnail_check = now;
+        
+        // Find videos without thumbnails (limit to 3 per check to avoid blocking)
+        let videos_to_check: Vec<_> = self
+            .videos_by_game
+            .iter()
+            .flat_map(|(_, videos)| videos.iter())
+            .filter(|video| !self.thumbnails.contains_key(&video.path))
+            .take(3)
+            .collect();
+        
+        if videos_to_check.is_empty() {
+            return;
+        }
+        
+        // Check if thumbnails now exist and load them
+        let mut newly_found = Vec::new();
+        for video in videos_to_check {
+            let thumb_path = self.get_thumb_path(&video.path);
+            if thumb_path.exists() {
+                if let Ok(image) = load_rgba_image_from_path(&thumb_path) {
+                    newly_found.push((video.path.clone(), video.filename.clone(), image));
+                }
+            }
+        }
+        
+        // Load any newly found thumbnails
+        for (video_path, filename, image) in newly_found {
+            self.insert_thumbnail_texture(ctx, video_path, &filename, image);
         }
     }
 
@@ -778,6 +823,9 @@ impl ClipCompressApp {
 
     fn poll_background_work(&mut self, ctx: &egui::Context) -> Option<f64> {
         let mut follow_up_preview = None;
+
+        // Check for newly generated thumbnails periodically
+        self.check_for_new_thumbnails(ctx);
 
         while let Ok(result) = self.thumbnail_strip_rx.try_recv() {
             if let Some(editor) = self.editor.as_mut() {

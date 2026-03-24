@@ -1,9 +1,10 @@
 use eframe::egui;
 
 use super::{
-    format_compact_duration, format_size_mb, BrowserUiOutcome, ClipCompressApp, VideoEntry,
+    format_compact_duration, format_size_mb, utils, BrowserUiOutcome, ClipCompressApp, VideoEntry,
     ALL_GAMES_FILTER,
 };
+use crate::gui::manager::{show_toast, ToastKind};
 
 pub(super) fn render_browser_ui(app: &mut ClipCompressApp, ui: &mut egui::Ui) -> BrowserUiOutcome {
     let mut outcome = BrowserUiOutcome::default();
@@ -28,6 +29,11 @@ pub(super) fn render_browser_ui(app: &mut ClipCompressApp, ui: &mut egui::Ui) ->
         ui.label(format!("({total_videos} videos)"));
         if ui.button("Open Video File...").clicked() {
             outcome.request_import_video_dialog = true;
+        }
+        if ui.button("Open Folder").clicked() {
+            if let Err(err) = utils::open_path_impl(&app.save_directory) {
+                show_toast(ToastKind::Error, format!("Failed to open folder: {err:#}"));
+            }
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.button("Refresh").clicked() {
