@@ -8,7 +8,7 @@ use bytes::Bytes;
 use crossbeam::channel::Sender;
 use std::sync::Arc;
 #[cfg(windows)]
-use windows::Win32::Foundation::HANDLE;
+use windows::Win32::Foundation::{CloseHandle, HANDLE};
 #[cfg(windows)]
 use windows::Win32::Graphics::Direct3D11::{
     ID3D11Device, ID3D11Texture2D, ID3D11VideoProcessorOutputView,
@@ -30,6 +30,20 @@ pub struct D3d11TexturePoolItem {
     pub texture: ID3D11Texture2D,
     pub output_view: Option<ID3D11VideoProcessorOutputView>,
     pub shared_handle: HANDLE,
+}
+
+#[cfg(windows)]
+impl Drop for D3d11TexturePoolItem {
+    fn drop(&mut self) {
+        // Close the DXGI shared handle obtained from IDXGIResource::GetSharedHandle.
+        // The underlying ID3D11Texture2D COM object is released by its own Drop impl,
+        // but the shared handle is a separate kernel object that requires CloseHandle.
+        if !self.shared_handle.is_invalid() {
+            unsafe {
+                let _ = CloseHandle(self.shared_handle);
+            }
+        }
+    }
 }
 
 #[cfg(windows)]

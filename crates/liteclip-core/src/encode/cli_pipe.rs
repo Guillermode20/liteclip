@@ -3,12 +3,10 @@
 use crate::encode::{
     EncodeError, EncodeResult, EncodedPacket, Encoder, ResolvedEncoderConfig, StreamType,
 };
-use crossbeam::channel::{unbounded, Receiver, Sender};
+use crossbeam::channel::{bounded, Receiver, Sender};
 use ffmpeg_next as ffmpeg;
 use ffmpeg_next::format::Pixel;
-use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
-use std::thread::{self, JoinHandle};
+use std::thread::JoinHandle;
 use tracing::{debug, info, warn};
 
 pub struct CliPipeEncoder {
@@ -20,14 +18,15 @@ pub struct CliPipeEncoder {
     packet_rx: Receiver<EncodedPacket>,
     frame_count: i64,
     running: bool,
-    pts_queue: Arc<Mutex<VecDeque<i64>>>,
     input_frame: ffmpeg::util::frame::video::Video,
     output_frame: ffmpeg::util::frame::video::Video,
 }
 
 impl CliPipeEncoder {
     pub fn new(config: &ResolvedEncoderConfig) -> EncodeResult<Self> {
-        let (packet_tx, packet_rx) = unbounded();
+        // Use a bounded channel (256 packets ≈ ~4 s at 60 fps) so a stalled consumer
+        // cannot grow the packet queue without bound.
+        let (packet_tx, packet_rx) = bounded(256);
         let mut input_frame = ffmpeg::util::frame::video::Video::empty();
         let mut output_frame = ffmpeg::util::frame::video::Video::empty();
         input_frame.set_format(Pixel::BGRA);
@@ -42,7 +41,6 @@ impl CliPipeEncoder {
             packet_rx,
             frame_count: 0,
             running: false,
-            pts_queue: Arc::new(Mutex::new(VecDeque::new())),
             input_frame,
             output_frame,
         })
@@ -179,13 +177,6 @@ impl Encoder for CliPipeEncoder {
                 StreamType::Video,
             );
             let _ = self.packet_tx.send(encoded);
-        }
-
-        if let Ok(mut q) = self.pts_queue.lock() {
-            q.push_back(frame.timestamp);
-            while q.len() > 512 {
-                q.pop_front();
-            }
         }
 
         self.frame_count += 1;

@@ -44,7 +44,7 @@ use self::context::D3d11HardwareContext;
 use super::{EncodedPacket, Encoder, ResolvedEncoderConfig, ResolvedEncoderType, StreamType};
 use crate::encode::EncodeResult;
 use bytes::BytesMut;
-use crossbeam::channel::{unbounded, Receiver, Sender};
+use crossbeam::channel::{bounded, Receiver, Sender};
 use ffmpeg::color::{Primaries, Range, Space, TransferCharacteristic};
 use ffmpeg_next as ffmpeg;
 use std::collections::VecDeque;
@@ -97,7 +97,7 @@ impl FfmpegEncoder {
     }
 
     pub fn new(config: &ResolvedEncoderConfig) -> EncodeResult<Self> {
-        let (tx, rx) = unbounded();
+        let (tx, rx) = bounded(1024);
         Ok(Self {
             config: config.clone(),
             encoder: None,

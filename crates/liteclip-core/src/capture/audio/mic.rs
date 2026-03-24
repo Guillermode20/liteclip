@@ -7,7 +7,7 @@ use bytes::BytesMut;
 use crossbeam::channel::{bounded, Receiver, Sender};
 use nnnoiseless::DenoiseState;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 use tracing::{debug, error, warn};
@@ -60,6 +60,7 @@ pub struct WasapiMicCapture {
     packet_rx: Receiver<EncodedPacket>,
     processed_samples: Arc<AtomicU64>,
     capture_thread: Option<thread::JoinHandle<()>>,
+    noise_thread: Option<Arc<Mutex<Option<thread::JoinHandle<()>>>>>,
 }
 
 impl WasapiMicCapture {
@@ -73,6 +74,7 @@ impl WasapiMicCapture {
             packet_rx,
             processed_samples: Arc::new(AtomicU64::new(0)),
             capture_thread: None,
+            noise_thread: None,
         })
     }
 
@@ -87,6 +89,8 @@ impl WasapiMicCapture {
         let initialized = self.initialized.clone();
         let packet_tx = self.packet_tx.clone();
         let processed_samples = self.processed_samples.clone();
+        let noise_thread_handle = Arc::new(Mutex::new(None));
+        let noise_thread_handle_clone = noise_thread_handle.clone();
 
         let handle = thread::spawn(move || {
             if let Err(e) = Self::capture_loop(
@@ -95,6 +99,7 @@ impl WasapiMicCapture {
                 initialized,
                 packet_tx,
                 processed_samples,
+                noise_thread_handle_clone,
             ) {
                 error!("Microphone capture loop error: {:?}", e);
                 running.store(false, Ordering::SeqCst);
@@ -102,6 +107,7 @@ impl WasapiMicCapture {
         });
 
         self.capture_thread = Some(handle);
+        self.noise_thread = Some(noise_thread_handle);
 
         // Wait for initialization to complete or fail
         let mut attempts = 0;
@@ -129,6 +135,13 @@ impl WasapiMicCapture {
         if let Some(handle) = self.capture_thread.take() {
             let _ = handle.join();
         }
+        if let Some(noise_thread_handle) = self.noise_thread.take() {
+            if let Ok(mut guard) = noise_thread_handle.lock() {
+                if let Some(handle) = guard.take() {
+                    let _ = handle.join();
+                }
+            }
+        }
         self.initialized.store(false, Ordering::SeqCst);
     }
 
@@ -148,6 +161,7 @@ impl WasapiMicCapture {
         initialized: Arc<AtomicBool>,
         packet_tx: Sender<EncodedPacket>,
         processed_samples: Arc<AtomicU64>,
+        noise_thread_handle: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
     ) -> Result<()> {
         let _com = ComApartment::new(COINIT_MULTITHREADED)?;
         Self::set_audio_thread_priority();
@@ -212,6 +226,7 @@ impl WasapiMicCapture {
             .context("Failed to get IAudioCaptureClient service for microphone")?;
 
         unsafe { audio_client.Start() }.context("Failed to start microphone capture")?;
+        let _audio_client_guard = AudioClientGuard::new(audio_client);
         let wait_timeout_ms = config.buffer_duration.as_millis().clamp(1, 25) as u32;
 
         // Signal that WASAPI initialization succeeded
@@ -239,7 +254,7 @@ impl WasapiMicCapture {
                 let packet_tx_noise = packet_tx.clone();
                 let running_noise = running.clone();
                 let processed_samples_noise = processed_samples.clone();
-                thread::spawn(move || {
+                let handle = thread::spawn(move || {
                     run_noise_thread(
                         rx,
                         packet_tx_noise,
@@ -248,6 +263,9 @@ impl WasapiMicCapture {
                         processed_samples_noise,
                     );
                 });
+                if let Ok(mut guard) = noise_thread_handle.lock() {
+                    *guard = Some(handle);
+                }
                 Some(tx)
             } else {
                 tracing::warn!(
@@ -420,7 +438,30 @@ impl EventHandle {
 
 impl Drop for EventHandle {
     fn drop(&mut self) {
-        let _ = unsafe { CloseHandle(self.0) };
+        // Guard against closing an invalid handle (matches defensive pattern in system.rs).
+        if self.0 != HANDLE::default() {
+            let _ = unsafe { CloseHandle(self.0) };
+        }
+    }
+}
+
+struct AudioClientGuard {
+    audio_client: Option<IAudioClient>,
+}
+
+impl AudioClientGuard {
+    fn new(audio_client: IAudioClient) -> Self {
+        Self {
+            audio_client: Some(audio_client),
+        }
+    }
+}
+
+impl Drop for AudioClientGuard {
+    fn drop(&mut self) {
+        if let Some(audio_client) = self.audio_client.take() {
+            let _ = unsafe { audio_client.Stop() };
+        }
     }
 }
 
@@ -716,6 +757,16 @@ impl RNNoiseProcessor {
         }
         self.hp_x_prev = hp_x;
         self.hp_y_prev = hp_y;
+
+        // Hard cap: if the write-ahead backlog exceeds 640 ms (64 × 480-sample frames),
+        // discard the oldest frames to prevent in_buf from growing unboundedly under
+        // sustained mic input when the consumer is slow.
+        const MAX_IN_BUF_FRAMES: usize = AUDIO_FRAME_SIZE * 64;
+        let backlog = self.in_buf.len().saturating_sub(self.in_head);
+        if backlog > MAX_IN_BUF_FRAMES {
+            self.in_head = self.in_buf.len() - MAX_IN_BUF_FRAMES;
+            Self::compact_queue(&mut self.in_buf, &mut self.in_head);
+        }
 
         // Process complete RNNoise frames (480 samples = 10 ms each)
         while (self.in_buf.len() - self.in_head) >= AUDIO_FRAME_SIZE {

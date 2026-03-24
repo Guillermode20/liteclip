@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
-use windows::Win32::Foundation::{BOOL, HANDLE};
+use windows::Win32::Foundation::{CloseHandle, BOOL, HANDLE};
 use windows::Win32::Graphics::Direct3D11::{
     ID3D11Device, ID3D11Device5, ID3D11DeviceContext, ID3D11Fence, ID3D11Multithread,
     ID3D11Resource, ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoDevice, ID3D11VideoProcessor,
@@ -528,6 +528,27 @@ impl DxgiCaptureState {
                 Some(video_processor_enumerator),
                 true,
             ))
+        }
+    }
+}
+
+impl Drop for DxgiCaptureState {
+    fn drop(&mut self) {
+        // Close the NT kernel handles that back the shared D3D11 fences.
+        // `ID3D11Fence` COM objects are released automatically by their Drop impls, but the
+        // *shared* handle returned by `CreateSharedHandle` is a separate NT object that must
+        // be closed explicitly with `CloseHandle`.
+        unsafe {
+            if let Some(h) = self.nv12_fence_shared_handle.take() {
+                if !h.is_invalid() {
+                    let _ = CloseHandle(h);
+                }
+            }
+            if let Some(h) = self.bgra_fence_shared_handle.take() {
+                if !h.is_invalid() {
+                    let _ = CloseHandle(h);
+                }
+            }
         }
     }
 }

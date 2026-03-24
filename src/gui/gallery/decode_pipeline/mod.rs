@@ -52,6 +52,8 @@ pub struct PlaybackController {
     decoder: DecodePipeline,
     audio_handle: Option<rodio::OutputStreamHandle>,
     _audio_shutdown_tx: Option<std::sync::mpsc::Sender<()>>,
+    audio_stream_thread: Mutex<Option<JoinHandle<()>>>,
+    audio_playback_thread: Mutex<Option<JoinHandle<()>>>,
 }
 
 struct SharedPlaybackState {
@@ -175,7 +177,7 @@ impl PlaybackController {
         let (audio_shutdown_tx, audio_shutdown_rx) = std::sync::mpsc::channel();
         let (audio_handle_tx, audio_handle_rx) = std::sync::mpsc::channel();
 
-        thread::spawn(move || {
+        let audio_stream_thread = thread::spawn(move || {
             if let Ok((stream, handle)) = rodio::OutputStream::try_default() {
                 let _ = audio_handle_tx.send(Some(handle));
                 let _ = audio_shutdown_rx.recv();
@@ -193,6 +195,8 @@ impl PlaybackController {
             decoder,
             audio_handle,
             _audio_shutdown_tx: Some(audio_shutdown_tx),
+            audio_stream_thread: Mutex::new(Some(audio_stream_thread)),
+            audio_playback_thread: Mutex::new(None),
         };
         controller.begin_audio_preload(video_path);
         controller
@@ -707,7 +711,7 @@ impl PlaybackController {
             .audio_started_generation
             .store(generation, Ordering::SeqCst);
         let shared = self.shared.clone();
-        thread::spawn(move || {
+        let handle = thread::spawn(move || {
             let sink = match Sink::try_new(&handle) {
                 Ok(sink) => sink,
                 Err(err) => {
@@ -729,6 +733,9 @@ impl PlaybackController {
             }
             drop(sink);
         });
+        if let Ok(mut guard) = self.audio_playback_thread.lock() {
+            *guard = Some(handle);
+        }
     }
 
     fn stop_audio(&mut self) {
@@ -740,6 +747,16 @@ impl Drop for PlaybackController {
     fn drop(&mut self) {
         let _ = self.shared.playing_since.lock().map(|mut g| *g = None);
         self.shared.audio_generation.fetch_add(1, Ordering::SeqCst);
+        if let Ok(mut guard) = self.audio_stream_thread.lock() {
+            if let Some(handle) = guard.take() {
+                let _ = handle.join();
+            }
+        }
+        if let Ok(mut guard) = self.audio_playback_thread.lock() {
+            if let Some(handle) = guard.take() {
+                let _ = handle.join();
+            }
+        }
     }
 }
 
@@ -1763,27 +1780,29 @@ fn clone_audio_buffer(buffer: &AudioBuffer) -> AudioBuffer {
 fn decode_audio_track(video_path: &PathBuf) -> Result<AudioBuffer> {
     use anyhow::anyhow;
     use ffmpeg_next::media::Type;
-    
+
     let mut input = ffmpeg::format::input(video_path)
         .context("Failed to open video file for audio decoding")?;
-    
+
     // Find audio stream
-    let audio_stream_idx = input.streams()
+    let audio_stream_idx = input
+        .streams()
         .enumerate()
         .find(|(_, s)| s.parameters().medium() == Type::Audio)
         .map(|(idx, _)| idx)
         .ok_or_else(|| anyhow!("No audio stream found in video"))?;
-    
-    let stream = input.stream(audio_stream_idx)
+
+    let stream = input
+        .stream(audio_stream_idx)
         .ok_or_else(|| anyhow!("Cannot access audio stream"))?;
     let mut decoder = ffmpeg::codec::context::Context::from_parameters(stream.parameters())?
         .decoder()
         .audio()?;
-    
+
     // Get audio properties
     let in_channel_layout = decoder.channel_layout();
     let in_format = decoder.format();
-    
+
     // Create resampler to convert to PCM 16-bit stereo 48kHz
     let out_sample_format = ffmpeg::format::Sample::I16(ffmpeg_next::format::sample::Type::Packed);
     let mut resampler = ffmpeg::software::resampling::Context::get(
@@ -1793,21 +1812,22 @@ fn decode_audio_track(video_path: &PathBuf) -> Result<AudioBuffer> {
         out_sample_format,
         ffmpeg::util::channel_layout::ChannelLayout::STEREO,
         48_000,
-    ).context("Failed to create audio resampler")?;
-    
+    )
+    .context("Failed to create audio resampler")?;
+
     let mut samples = Vec::new();
     let mut decoded_frame = ffmpeg::util::frame::audio::Audio::empty();
-    
+
     for (_, packet) in input.packets() {
         if packet.stream() == audio_stream_idx {
             let _ = decoder.send_packet(&packet);
-            
+
             while decoder.receive_frame(&mut decoded_frame).is_ok() {
                 let mut resampled = ffmpeg::util::frame::audio::Audio::empty();
                 if resampler.run(&decoded_frame, &mut resampled).is_ok() {
                     let plane = resampled.data(0);
                     let sample_count = resampled.samples() as usize * resampled.channels() as usize;
-                    
+
                     for i in 0..sample_count {
                         let bytes = [plane[i * 2], plane[i * 2 + 1]];
                         samples.push(i16::from_le_bytes(bytes));
@@ -1816,7 +1836,7 @@ fn decode_audio_track(video_path: &PathBuf) -> Result<AudioBuffer> {
             }
         }
     }
-    
+
     // Flush decoder
     let _ = decoder.send_eof();
     let mut decoded_frame = ffmpeg::util::frame::audio::Audio::empty();
@@ -1825,7 +1845,7 @@ fn decode_audio_track(video_path: &PathBuf) -> Result<AudioBuffer> {
         if resampler.run(&decoded_frame, &mut resampled).is_ok() {
             let plane = resampled.data(0);
             let sample_count = resampled.samples() as usize * resampled.channels() as usize;
-            
+
             for i in 0..sample_count {
                 let bytes = [plane[i * 2], plane[i * 2 + 1]];
                 samples.push(i16::from_le_bytes(bytes));

@@ -50,6 +50,7 @@ pub struct DetectedApp {
 pub struct GameDetector {
     detected: Arc<RwLock<DetectedApp>>,
     running: Arc<AtomicBool>,
+    join_handle: std::sync::Mutex<Option<thread::JoinHandle<()>>>,
 }
 
 impl Default for GameDetector {
@@ -69,6 +70,7 @@ impl GameDetector {
         Self {
             detected,
             running: Arc::new(AtomicBool::new(false)),
+            join_handle: std::sync::Mutex::new(None),
         }
     }
 
@@ -80,7 +82,7 @@ impl GameDetector {
         let detected = self.detected.clone();
         let running = self.running.clone();
 
-        thread::spawn(move || {
+        let handle = thread::spawn(move || {
             debug!("Game detector thread started");
 
             while running.load(Ordering::SeqCst) {
@@ -95,6 +97,10 @@ impl GameDetector {
 
             debug!("Game detector thread stopped");
         });
+
+        if let Ok(mut guard) = self.join_handle.lock() {
+            *guard = Some(handle);
+        }
     }
 
     pub fn stop(&self) {
@@ -109,6 +115,11 @@ impl GameDetector {
 impl Drop for GameDetector {
     fn drop(&mut self) {
         self.stop();
+        if let Ok(mut guard) = self.join_handle.lock() {
+            if let Some(handle) = guard.take() {
+                let _ = handle.join();
+            }
+        }
     }
 }
 
