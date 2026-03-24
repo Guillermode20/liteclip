@@ -172,12 +172,31 @@ impl GuiManagerApp {
     }
 
     fn sync_mouse_passthrough(&mut self, ctx: &egui::Context) {
-        let passthrough = self.toasts.is_empty();
-        if self.last_mouse_passthrough == Some(passthrough) {
+        // Default to allowing mouse passthrough
+        let mut should_passthrough = true;
+        
+        // Only consider blocking if we have toasts and mouse is in the viewport
+        if !self.toasts.is_empty() {
+            if let Some(mouse_pos) = ctx.input(|i| i.pointer.hover_pos()) {
+                let viewport_rect = ctx.available_rect();
+                if viewport_rect.contains(mouse_pos) {
+                    // Only block mouse events in the top-right corner where toasts appear
+                    // This leaves most of the overlay area clickable for other windows
+                    let toast_region = egui::Rect::from_min_max(
+                        egui::pos2(viewport_rect.max.x - 250.0, viewport_rect.min.y),
+                        egui::pos2(viewport_rect.max.x, viewport_rect.min.y + 150.0)
+                    );
+                    
+                    should_passthrough = !toast_region.contains(mouse_pos);
+                }
+            }
+        }
+
+        if self.last_mouse_passthrough == Some(should_passthrough) {
             return;
         }
-        self.last_mouse_passthrough = Some(passthrough);
-        ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(passthrough));
+        self.last_mouse_passthrough = Some(should_passthrough);
+        ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(should_passthrough));
     }
 }
 
