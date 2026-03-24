@@ -224,17 +224,19 @@ impl eframe::App for GuiManagerApp {
                         ToastKind::Success => {
                             self.toasts
                                 .success(message)
+                                .closable(false)
                                 .duration(Duration::from_secs(3));
                         }
                         ToastKind::Error => {
-                            self.toasts.error(message).duration(Duration::from_secs(5));
+                            self.toasts.error(message).closable(false).duration(Duration::from_secs(5));
                         }
                         ToastKind::Info => {
-                            self.toasts.info(message).duration(Duration::from_secs(3));
+                            self.toasts.info(message).closable(false).duration(Duration::from_secs(3));
                         }
                         ToastKind::Warning => {
                             self.toasts
                                 .warning(message)
+                                .closable(false)
                                 .duration(Duration::from_secs(4));
                         }
                     }
