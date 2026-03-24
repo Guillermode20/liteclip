@@ -1,4 +1,3 @@
-use anyhow::Context;
 use eframe::egui;
 use image::RgbaImage;
 use std::path::{Path, PathBuf};
@@ -382,14 +381,7 @@ pub(super) fn generate_thumbnail_strip_frames_impl(
     duration_secs: f64,
     _has_audio: bool,
 ) -> anyhow::Result<ThumbnailStrip> {
-    #[cfg(feature = "ffmpeg")]
-    {
-        return generate_thumbnail_strip_frames_sdk(video_path, duration_secs);
-    }
-    #[cfg(not(feature = "ffmpeg"))]
-    {
-        return generate_thumbnail_strip_frames_cli(video_path, duration_secs);
-    }
+    generate_thumbnail_strip_frames_sdk(video_path, duration_secs)
 }
 
 #[cfg(feature = "ffmpeg")]
@@ -430,110 +422,6 @@ fn generate_thumbnail_strip_frames_sdk(
             let idx = thumbnails.len();
             let time = duration_secs * (idx as f64) / (THUMBNAIL_STRIP_COUNT as f64);
             thumbnails.push((time, last.1.clone()));
-        } else {
-            break;
-        }
-    }
-
-    Ok(ThumbnailStrip::new(thumbnails, duration_secs))
-}
-
-#[cfg(not(feature = "ffmpeg"))]
-fn generate_thumbnail_strip_frames_cli(
-    video_path: &Path,
-    duration_secs: f64,
-) -> anyhow::Result<ThumbnailStrip> {
-    use crate::output::functions::ffmpeg_executable_path;
-    use std::io::Read;
-    use std::process::{Command, Stdio};
-    use tracing::warn;
-
-    let ffmpeg = ffmpeg_executable_path();
-    let mut thumbnails = Vec::with_capacity(THUMBNAIL_STRIP_COUNT);
-
-    if duration_secs <= 0.0 {
-        return Ok(ThumbnailStrip::new(thumbnails, duration_secs));
-    }
-
-    let fps_value = (THUMBNAIL_STRIP_COUNT as f64) / duration_secs;
-    let fps_filter = format!("fps={:.6}", fps_value);
-    let scale_filter =
-        format!("scale={THUMBNAIL_STRIP_WIDTH}:-2:force_original_aspect_ratio=decrease");
-    let vf = format!("{},{}" , fps_filter, scale_filter);
-
-    let mut cmd = Command::new(&ffmpeg);
-    cmd.args([
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-i",
-        &video_path.to_string_lossy(),
-        "-vf",
-        &vf,
-        "-f",
-        "image2pipe",
-        "-vcodec",
-        "mjpeg",
-        "-q:v",
-        "5",
-        "-",
-    ]);
-
-    #[cfg(target_os = "windows")]
-    cmd.creation_flags(0x08000000);
-
-    let mut child = cmd
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .context("Failed to spawn FFmpeg for thumbnail strip")?;
-
-    let stdout = child.stdout.take().context("FFmpeg stdout not available")?;
-    let mut reader = std::io::BufReader::new(stdout);
-
-    let mut jpeg_buffer = Vec::with_capacity(64 * 1024);
-    let frame_times: Vec<f64> = (1..=THUMBNAIL_STRIP_COUNT)
-        .map(|i| duration_secs * (i as f64) / (THUMBNAIL_STRIP_COUNT + 1) as f64)
-        .collect();
-    let mut frame_idx = 0;
-
-    loop {
-        let mut byte = [0u8; 1];
-        match reader.read_exact(&mut byte) {
-            Ok(()) => {
-                jpeg_buffer.push(byte[0]);
-
-                if jpeg_buffer.len() >= 2 {
-                    let len = jpeg_buffer.len();
-                    if jpeg_buffer[len - 2] == 0xFF && jpeg_buffer[len - 1] == 0xD9 {
-                        if jpeg_buffer.len() > 2 && jpeg_buffer[0] == 0xFF && jpeg_buffer[1] == 0xD8
-                        {
-                            if let Ok(img) = image::load_from_memory(&jpeg_buffer) {
-                                if frame_idx < frame_times.len() {
-                                    thumbnails.push((frame_times[frame_idx], img.into_rgba8()));
-                                    frame_idx += 1;
-                                }
-                            }
-                        }
-                        jpeg_buffer.clear();
-                        jpeg_buffer.push(0xFF);
-                        jpeg_buffer.push(0xD8);
-                    }
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-            Err(e) => {
-                warn!("Error reading FFmpeg output: {}", e);
-                break;
-            }
-        }
-    }
-
-    let _ = child.wait();
-
-    while thumbnails.len() < THUMBNAIL_STRIP_COUNT {
-        if let Some(last) = thumbnails.last() {
-            thumbnails.push(last.clone());
         } else {
             break;
         }

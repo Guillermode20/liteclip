@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use ffmpeg_next as ffmpeg;
 use image::{DynamicImage, ImageBuffer, Rgba, RgbaImage};
 use std::path::Path;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use super::video_file::VideoFileMetadata;
 
@@ -138,11 +138,20 @@ pub fn probe_video_file(path: &Path) -> Result<VideoFileMetadata> {
     let width = decoder.width();
     let height = decoder.height();
     let rate = video.rate();
-    let fps = if rate.denominator() > 0 {
+    let raw_fps = if rate.denominator() > 0 {
         rate.numerator() as f64 / rate.denominator() as f64
     } else {
-        30.0
+        0.0
     };
+    let fps = super::video_file::normalize_output_fps(raw_fps, 60.0);
+    if (raw_fps - fps).abs() > f64::EPSILON {
+        warn!(
+            path = %path.display(),
+            raw_fps,
+            sanitized_fps = fps,
+            "Ignoring unreasonable FPS reported by container"
+        );
+    }
     let has_audio = ictx.streams().best(ffmpeg::media::Type::Audio).is_some();
 
     Ok(VideoFileMetadata {

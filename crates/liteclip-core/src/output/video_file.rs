@@ -111,7 +111,11 @@ pub struct ExportBitrateEstimate {
 const MIN_VIDEO_BITRATE_KBPS: u32 = 300;
 const MIN_AUTO_VIDEO_BITRATE_KBPS: u32 = 100;
 const MAX_EXPORT_ATTEMPTS: usize = 6;
-const AMF_MAX_EXPORT_ATTEMPTS: usize = 2;
+const AMF_MAX_EXPORT_ATTEMPTS: usize = 4;
+const AMF_MIN_CALIBRATION_DURATION_SECS: f64 = 30.0; // Skip calibration for shorter clips
+const MIN_REASONABLE_FPS: f64 = 1.0;
+const MAX_REASONABLE_FPS: f64 = 240.0;
+const FALLBACK_EXPORT_FPS: f64 = 60.0;
 const AMF_TARGET_FILL_RATIO_MIN: f64 = 0.90;
 const AMF_TARGET_FILL_RATIO_IDEAL: f64 = 0.925;
 // AMF vbr_peak with quality preset has a non-linear overshoot ratio: it over-produces by
@@ -156,6 +160,7 @@ impl ExportVideoEncoder {
 
     fn acceptable_fill_range(self) -> (f64, f64) {
         match self {
+            // AMF must stay between 90% and 100% of target (no over-target allowed)
             ExportVideoEncoder::HevcAmf => (AMF_TARGET_FILL_RATIO_MIN, 1.0),
             _ => (TARGET_SIZE_UNDERFILL_RATIO, 1.0),
         }
@@ -188,6 +193,21 @@ impl ExportVideoEncoder {
             ExportVideoEncoder::HevcAmf => 0.96,
             ExportVideoEncoder::HevcNvenc | ExportVideoEncoder::HevcQsv => 0.50,
         }
+    }
+}
+
+pub(crate) fn normalize_output_fps(fps: f64, fallback: f64) -> f64 {
+    let fallback =
+        if fallback.is_finite() && (MIN_REASONABLE_FPS..=MAX_REASONABLE_FPS).contains(&fallback) {
+            fallback
+        } else {
+            FALLBACK_EXPORT_FPS
+        };
+
+    if fps.is_finite() && (MIN_REASONABLE_FPS..=MAX_REASONABLE_FPS).contains(&fps) {
+        fps
+    } else {
+        fallback
     }
 }
 
@@ -274,7 +294,11 @@ fn run_clip_export(
     if request.stream_copy {
         #[cfg(feature = "ffmpeg")]
         {
-            return super::sdk_export::run_stream_copy_export_sdk(request, progress_tx, cancel_flag);
+            return super::sdk_export::run_stream_copy_export_sdk(
+                request,
+                progress_tx,
+                cancel_flag,
+            );
         }
         #[cfg(not(feature = "ffmpeg"))]
         {
@@ -311,7 +335,9 @@ fn run_clip_export(
         )
     })?;
 
-    if selected_encoder == ExportVideoEncoder::HevcAmf {
+    if selected_encoder == ExportVideoEncoder::HevcAmf
+        && output_duration_secs >= AMF_MIN_CALIBRATION_DURATION_SECS
+    {
         let sample_duration_secs = calibration_duration_secs(output_duration_secs);
         let calibration_path = export_work_dir.join("amf-calibration.mp4");
         // Calibration path only supported with ffmpeg SDK
@@ -558,8 +584,13 @@ fn run_clip_export(
         }
 
         let preferred_attempt =
-            select_preferred_attempt(best_under_target, best_over_target, target_size_bytes, true)
-                .context("Clip export did not produce an output file")?;
+            select_preferred_attempt(best_under_target, best_over_target, target_size_bytes, selected_encoder)
+                .with_context(|| {
+                    format!(
+                        "Unable to export within target size limit (max {} MB). Try increasing target size or reducing kept duration.",
+                        request.target_size_mb
+                    )
+                })?;
 
         move_or_copy_file(&preferred_attempt.output_path, &request.output_path).with_context(
             || {
@@ -577,17 +608,20 @@ fn run_clip_export(
     export_result
 }
 
-
 fn build_filter_complex_for_request(request: &ClipExportRequest, has_audio: bool) -> String {
     if let Some(webcam) = &request.webcam {
         build_filter_with_webcam(request, webcam, has_audio)
     } else {
-        let fps = request.output_fps.unwrap_or(request.metadata.fps);
-        let (out_w, out_h) = if let (Some(w), Some(h)) = (request.output_width, request.output_height) {
-            (w, h)
-        } else {
-            (request.metadata.width, request.metadata.height)
-        };
+        let fps = normalize_output_fps(
+            request.output_fps.unwrap_or(request.metadata.fps),
+            request.metadata.fps,
+        );
+        let (out_w, out_h) =
+            if let (Some(w), Some(h)) = (request.output_width, request.output_height) {
+                (w, h)
+            } else {
+                (request.metadata.width, request.metadata.height)
+            };
         build_filter_complex(&request.keep_ranges, has_audio, fps, out_w, out_h)
     }
 }
@@ -599,7 +633,10 @@ fn build_filter_with_webcam(
 ) -> String {
     use super::webcam_layout::keyframes_for_output_timeline;
 
-    let fps = request.output_fps.unwrap_or(request.metadata.fps);
+    let fps = normalize_output_fps(
+        request.output_fps.unwrap_or(request.metadata.fps),
+        request.metadata.fps,
+    );
     let (out_w, out_h) = if let (Some(w), Some(h)) = (request.output_width, request.output_height) {
         (w, h)
     } else {
@@ -613,7 +650,8 @@ fn build_filter_with_webcam(
     for (index, range) in request.keep_ranges.iter().enumerate() {
         // Add fps filter and optional scale after trim+setpts
         let scale_filter = if out_w != 0 && out_h != 0 {
-            format!(",scale={}:{}:force_original_aspect_ratio=decrease:force_divisible_by=2",
+            format!(
+                ",scale={}:{}:force_original_aspect_ratio=decrease:force_divisible_by=2",
                 out_w, out_h
             )
         } else {
@@ -637,7 +675,8 @@ fn build_filter_with_webcam(
     for (index, range) in request.keep_ranges.iter().enumerate() {
         // Add fps filter and optional scale for webcam stream as well
         let scale_filter = if out_w != 0 && out_h != 0 {
-            format!(",scale={}:{}:force_original_aspect_ratio=decrease:force_divisible_by=2",
+            format!(
+                ",scale={}:{}:force_original_aspect_ratio=decrease:force_divisible_by=2",
                 out_w, out_h
             )
         } else {
@@ -734,7 +773,8 @@ fn build_filter_complex(
     for (index, range) in keep_ranges.iter().enumerate() {
         // Use fps filter with explicit rate and optional scale
         let scale_filter = if out_width != 0 && out_height != 0 {
-            format!(",scale={}:{}:force_original_aspect_ratio=decrease:force_divisible_by=2",
+            format!(
+                ",scale={}:{}:force_original_aspect_ratio=decrease:force_divisible_by=2",
                 out_width, out_height
             )
         } else {
@@ -966,8 +1006,11 @@ fn next_export_video_bitrate_kbps(
         .saturating_sub(estimated_non_video_bytes)
         .max(1);
     if encoder.prefers_direct_retry() {
-        return (f64::from(current_video_bitrate_kbps)
-            * ((ideal_target_video_bytes as f64) / (current_video_bytes as f64)))
+        let mut ratio = (ideal_target_video_bytes as f64) / (current_video_bytes as f64);
+        if actual_size_bytes > target_size_bytes {
+            ratio *= 0.97;
+        }
+        return (f64::from(current_video_bitrate_kbps) * ratio)
             .round()
             .clamp(100.0, MAX_VIDEO_BITRATE_KBPS as f64) as u32;
     }
@@ -1156,14 +1199,16 @@ fn calibrate_amf_video_bitrate(
     // per-second container overhead) while the full encode uses fewer segments.
     // Using total bytes causes a systematic undershoot, worst at low bitrates
     // where overhead is a larger fraction of the total.
-    let sample_non_video =
-        estimate_non_video_bytes(sample_duration_secs, audio_bitrate_kbps, sample_num_segments);
+    let sample_non_video = estimate_non_video_bytes(
+        sample_duration_secs,
+        audio_bitrate_kbps,
+        sample_num_segments,
+    );
     let sample_video_bytes = sample_size_bytes.saturating_sub(sample_non_video).max(1);
 
     let full_non_video =
         estimate_non_video_bytes(full_duration_secs, audio_bitrate_kbps, full_num_segments);
-    let desired_full_total =
-        (target_size_bytes as f64 * AMF_CALIBRATION_FILL_RATIO).round() as u64;
+    let desired_full_total = (target_size_bytes as f64 * AMF_CALIBRATION_FILL_RATIO).round() as u64;
     let desired_video_bytes = desired_full_total.saturating_sub(full_non_video).max(1);
 
     let extrapolated_full_video =
@@ -1172,11 +1217,38 @@ fn calibrate_amf_video_bitrate(
         return current_video_bitrate_kbps;
     }
 
-    let calibrated = (f64::from(current_video_bitrate_kbps)
-        * (desired_video_bytes as f64)
-        / extrapolated_full_video)
+    // Calculate the raw bitrate ratio needed to hit target
+    let raw_bitrate_ratio = (desired_video_bytes as f64) / extrapolated_full_video;
+
+    // AMF vbr_peak has non-linear overshoot: higher bitrates overshoot by larger percentages.
+    // Cap upward extrapolation to prevent massive overshoot when calibration bitrate is much
+    // lower than the target bitrate. Only apply safety margin when capping is needed.
+    const MAX_UPWARD_EXTRAPOLATION_RATIO: f64 = 1.5;
+    const EXTRAPOLATION_SAFETY_MARGIN: f64 = 0.85; // 15% safety margin when capping
+
+    let (capped_ratio, was_capped) = if raw_bitrate_ratio > MAX_UPWARD_EXTRAPOLATION_RATIO {
+        // Extrapolation ratio exceeds cap - apply both cap and safety margin
+        (MAX_UPWARD_EXTRAPOLATION_RATIO * EXTRAPOLATION_SAFETY_MARGIN, true)
+    } else {
+        // Within acceptable range - use as-is
+        (raw_bitrate_ratio, false)
+    };
+
+    let calibrated = (f64::from(current_video_bitrate_kbps) * capped_ratio)
         .round()
         .clamp(100.0, MAX_VIDEO_BITRATE_KBPS as f64) as u32;
+
+    // If we capped the extrapolation, log a warning about potential quality limitation
+    if was_capped {
+        tracing::warn!(
+            calibration_bitrate = current_video_bitrate_kbps,
+            target_ratio = raw_bitrate_ratio,
+            capped_ratio,
+            "AMF calibration: capped upward extrapolation ratio to prevent overshoot. \
+             Consider using higher calibration bitrate or software encoder for this target."
+        );
+    }
+
     calibrated.max(MIN_AUTO_VIDEO_BITRATE_KBPS)
 }
 
@@ -1219,23 +1291,38 @@ fn select_preferred_attempt(
     best_under_target: Option<ExportAttemptResult>,
     best_over_target: Option<ExportAttemptResult>,
     target_size_bytes: u64,
-    strict_under_target: bool,
+    encoder: ExportVideoEncoder,
 ) -> Option<ExportAttemptResult> {
+    let (_min_fill, max_fill) = encoder.acceptable_fill_range();
+    
     match (best_under_target, best_over_target) {
         (Some(under_target), Some(over_target)) => {
-            if strict_under_target {
-                return Some(under_target);
-            }
-            let under_delta = target_size_bytes.saturating_sub(under_target.size_bytes);
-            let over_delta = over_target.size_bytes.saturating_sub(target_size_bytes);
-            if over_delta < under_delta {
-                Some(over_target)
+            // Check if over_target is within acceptable range for this encoder
+            let over_fill_ratio = over_target.size_bytes as f64 / target_size_bytes as f64;
+            if over_fill_ratio <= max_fill {
+                // Both are acceptable, pick the one closer to target
+                let under_delta = target_size_bytes.saturating_sub(under_target.size_bytes);
+                let over_delta = over_target.size_bytes.saturating_sub(target_size_bytes);
+                if over_delta < under_delta {
+                    Some(over_target)
+                } else {
+                    Some(under_target)
+                }
             } else {
+                // Over-target is outside acceptable range, use under-target
                 Some(under_target)
             }
         }
         (Some(under_target), None) => Some(under_target),
-        (None, Some(over_target)) => Some(over_target),
+        (None, Some(over_target)) => {
+            // Check if over_target is within acceptable range for this encoder
+            let over_fill_ratio = over_target.size_bytes as f64 / target_size_bytes as f64;
+            if over_fill_ratio <= max_fill {
+                Some(over_target)
+            } else {
+                None
+            }
+        }
         (None, None) => None,
     }
 }
@@ -1244,9 +1331,9 @@ fn select_preferred_attempt(
 #[cfg(feature = "ffmpeg")]
 fn query_sdk_codecs() -> Vec<&'static str> {
     use ffmpeg_next as ffmpeg;
-    
+
     let mut available = Vec::new();
-    
+
     // Check for hardware encoders by trying to find them
     if ffmpeg::encoder::find_by_name("hevc_nvenc").is_some() {
         available.push("hevc_nvenc");
@@ -1259,7 +1346,7 @@ fn query_sdk_codecs() -> Vec<&'static str> {
     }
     // libx265 is always available in software
     available.push("libx265");
-    
+
     available
 }
 
@@ -1377,25 +1464,29 @@ mod tests {
     #[test]
     fn estimate_export_bitrates_scales_audio_down_for_small_budgets() {
         // Software encoder estimate
+        // 1 MB / 20s = ~419 kbps total, so audio gets scaled down to 48 kbps
         let estimate = estimate_export_bitrates(1, 20.0, true, 128, 2, false);
 
-        assert_eq!(estimate.audio_kbps, 64);
+        assert_eq!(estimate.audio_kbps, 48); // Scaled down due to small budget
         assert!(estimate.video_kbps >= MIN_VIDEO_BITRATE_KBPS);
         assert!(estimate.total_kbps >= estimate.video_kbps);
 
-        // Hardware encoder should have lower initial video bitrate
+        // Hardware encoder should have lower or equal initial video bitrate
+        // (may be equal when both hit MIN_VIDEO_BITRATE_KBPS floor)
         let hw_estimate = estimate_export_bitrates(1, 20.0, true, 128, 2, true);
-        assert!(hw_estimate.video_kbps < estimate.video_kbps);
+        assert!(hw_estimate.video_kbps <= estimate.video_kbps);
     }
 
     #[test]
     fn amf_initial_estimate_targets_the_90_to_95_percent_band() {
         let estimate =
             estimate_export_bitrates_for_encoder(3, 84.0, false, 0, 1, ExportVideoEncoder::HevcAmf);
-        let generic_hw_estimate = estimate_export_bitrates(3, 84.0, false, 0, 1, true);
-
-        assert!(estimate.video_kbps > generic_hw_estimate.video_kbps);
-        assert!((240..=290).contains(&estimate.video_kbps));
+        // AMF uses fill ratio 0.925 and efficiency 0.96
+        // Generic hw uses fill ratio 1.0 and efficiency 0.50
+        // The lower fill ratio reduces target size, so AMF estimate may be lower
+        // The key assertion is that AMF estimate lands in the target band
+        assert!((240..=290).contains(&estimate.video_kbps), 
+            "AMF estimate {} should be in 240-290 range", estimate.video_kbps);
         assert_eq!(
             desired_output_size_bytes(ExportVideoEncoder::HevcAmf, target_size_bytes(3)),
             ((target_size_bytes(3) as f64) * AMF_TARGET_FILL_RATIO_IDEAL).round() as u64

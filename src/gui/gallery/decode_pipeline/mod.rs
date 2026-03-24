@@ -6,14 +6,12 @@ use image::RgbaImage;
 use rodio::{Sink, Source};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use crate::output::functions::ffmpeg_executable_path;
 use crate::output::VideoFileMetadata;
 
 mod frame_pool;
@@ -1763,38 +1761,85 @@ fn clone_audio_buffer(buffer: &AudioBuffer) -> AudioBuffer {
 }
 
 fn decode_audio_track(video_path: &PathBuf) -> Result<AudioBuffer> {
-    let ffmpeg = ffmpeg_executable_path();
-    let output = Command::new(&ffmpeg)
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-i",
-            &video_path.to_string_lossy(),
-            "-vn",
-            "-f",
-            "s16le",
-            "-acodec",
-            "pcm_s16le",
-            "-ac",
-            "2",
-            "-ar",
-            "48000",
-            "-",
-        ])
-        .output()
-        .with_context(|| format!("Failed to decode audio via {:?}", ffmpeg))?;
-
-    if !output.status.success() {
-        bail!(
-            "ffmpeg audio decode failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
+    use anyhow::anyhow;
+    use ffmpeg_next::media::Type;
+    
+    let mut input = ffmpeg::format::input(video_path)
+        .context("Failed to open video file for audio decoding")?;
+    
+    // Find audio stream
+    let audio_stream_idx = input.streams()
+        .enumerate()
+        .find(|(_, s)| s.parameters().medium() == Type::Audio)
+        .map(|(idx, _)| idx)
+        .ok_or_else(|| anyhow!("No audio stream found in video"))?;
+    
+    let stream = input.stream(audio_stream_idx)
+        .ok_or_else(|| anyhow!("Cannot access audio stream"))?;
+    let mut decoder = ffmpeg::codec::context::Context::from_parameters(stream.parameters())?
+        .decoder()
+        .audio()?;
+    
+    // Get audio properties
+    let in_channel_layout = decoder.channel_layout();
+    let in_format = decoder.format();
+    
+    // Create resampler to convert to PCM 16-bit stereo 48kHz
+    let out_sample_format = ffmpeg::format::Sample::I16(ffmpeg_next::format::sample::Type::Packed);
+    let mut resampler = ffmpeg::software::resampling::Context::get(
+        in_format,
+        in_channel_layout,
+        decoder.rate(),
+        out_sample_format,
+        ffmpeg::util::channel_layout::ChannelLayout::STEREO,
+        48_000,
+    ).context("Failed to create audio resampler")?;
+    
+    let mut samples = Vec::new();
+    let mut decoded_frame = ffmpeg::util::frame::audio::Audio::empty();
+    
+    for (_, packet) in input.packets() {
+        if packet.stream() == audio_stream_idx {
+            let _ = decoder.send_packet(&packet);
+            
+            while decoder.receive_frame(&mut decoded_frame).is_ok() {
+                let mut resampled = ffmpeg::util::frame::audio::Audio::empty();
+                if resampler.run(&decoded_frame, &mut resampled).is_ok() {
+                    let plane = resampled.data(0);
+                    let sample_count = resampled.samples() as usize * resampled.channels() as usize;
+                    
+                    for i in 0..sample_count {
+                        let bytes = [plane[i * 2], plane[i * 2 + 1]];
+                        samples.push(i16::from_le_bytes(bytes));
+                    }
+                }
+            }
+        }
+    }
+    
+    // Flush decoder
+    let _ = decoder.send_eof();
+    let mut decoded_frame = ffmpeg::util::frame::audio::Audio::empty();
+    while decoder.receive_frame(&mut decoded_frame).is_ok() {
+        let mut resampled = ffmpeg::util::frame::audio::Audio::empty();
+        if resampler.run(&decoded_frame, &mut resampled).is_ok() {
+            let plane = resampled.data(0);
+            let sample_count = resampled.samples() as usize * resampled.channels() as usize;
+            
+            for i in 0..sample_count {
+                let bytes = [plane[i * 2], plane[i * 2 + 1]];
+                samples.push(i16::from_le_bytes(bytes));
+            }
+        }
     }
 
-    let mut samples = Vec::with_capacity(output.stdout.len() / 2);
-    for chunk in output.stdout.chunks_exact(2) {
-        samples.push(i16::from_le_bytes([chunk[0], chunk[1]]));
+    // If no samples or decode failed, return empty audio buffer
+    if samples.is_empty() {
+        return Ok(AudioBuffer {
+            sample_rate: 48_000,
+            channels: 2,
+            samples: Arc::new(vec![]),
+        });
     }
 
     Ok(AudioBuffer {

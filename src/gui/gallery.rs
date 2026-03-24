@@ -318,7 +318,12 @@ impl EditorState {
 
     /// Get effective output FPS. Returns manual setting or original.
     fn effective_output_fps(&self) -> f64 {
-        self.output_fps.unwrap_or(self.video.metadata.fps)
+        let fps = self.output_fps.unwrap_or(self.video.metadata.fps);
+        if fps.is_finite() {
+            fps.clamp(1.0, 240.0)
+        } else {
+            60.0
+        }
     }
 }
 
