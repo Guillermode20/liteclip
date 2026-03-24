@@ -37,6 +37,7 @@ pub(super) struct Nv12TexturePool {
     pub(super) width: u32,
     pub(super) height: u32,
     pub(super) max_capacity: usize,
+    pub(super) total_created: std::sync::atomic::AtomicUsize,
 }
 
 pub(super) struct BgraTexturePool {
@@ -46,6 +47,7 @@ pub(super) struct BgraTexturePool {
     pub(super) width: u32,
     pub(super) height: u32,
     pub(super) max_capacity: usize,
+    pub(super) total_created: std::sync::atomic::AtomicUsize,
 }
 
 enum CaptureOutcome {
@@ -64,7 +66,8 @@ impl Nv12TexturePool {
             return_rx,
             width,
             height,
-            max_capacity, // Sufficient for jitter but caps VRAM usage
+            max_capacity,
+            total_created: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 }
@@ -79,7 +82,8 @@ impl BgraTexturePool {
             return_rx,
             width,
             height,
-            max_capacity, // Sufficient for jitter but caps VRAM usage
+            max_capacity,
+            total_created: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 }
@@ -1080,12 +1084,30 @@ impl DxgiCapture {
                 adaptive_adjust_tick = Instant::now();
             }
             if window_start.elapsed() >= Duration::from_secs(30) {
+                let nv12_stats = state.nv12_pool.as_ref().map(|p| {
+                    (
+                        p.available.len(),
+                        p.total_created.load(std::sync::atomic::Ordering::Relaxed),
+                        p.max_capacity,
+                    )
+                });
+                let bgra_stats = state.bgra_pool.as_ref().map(|p| {
+                    (
+                        p.available.len(),
+                        p.total_created.load(std::sync::atomic::Ordering::Relaxed),
+                        p.max_capacity,
+                    )
+                });
                 debug!(
-                    "Capture: {}fps, drops={}, duplicates={}, divisor={}",
+                    "Capture: {}fps, drops={}, duplicates={}, divisor={}, queue={}/{}, nv12={:?}, bgra={:?}",
                     window_frames / 30,
                     window_drops,
                     window_duplicates,
-                    backpressure.current_fps_divisor()
+                    backpressure.current_fps_divisor(),
+                    frame_tx.len(),
+                    frame_tx.capacity().unwrap_or(32),
+                    nv12_stats,
+                    bgra_stats
                 );
                 window_start = Instant::now();
                 window_frames = 0;

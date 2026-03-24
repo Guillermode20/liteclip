@@ -34,7 +34,7 @@
 //! ```
 
 pub mod manager;
-pub use manager::{init_gui_manager, send_gui_message, show_toast, ToastKind};
+pub use manager::{init_gui_manager, send_gui_message, show_toast, shutdown_gui, ToastKind};
 
 pub mod settings;
 pub use settings::show_settings_gui;

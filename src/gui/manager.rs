@@ -109,6 +109,12 @@ pub fn show_toast(kind: ToastKind, message: impl Into<String>) {
     send_gui_message(GuiMessage::Toast(kind, message.into()));
 }
 
+pub fn shutdown_gui() {
+    if let Ok(mut guard) = GUI_TX.lock() {
+        *guard = None;
+    }
+}
+
 struct GuiManagerApp {
     rx: Receiver<GuiMessage>,
     settings: Arc<Mutex<Option<crate::gui::settings::SettingsApp>>>,
@@ -174,7 +180,7 @@ impl GuiManagerApp {
     fn sync_mouse_passthrough(&mut self, ctx: &egui::Context) {
         // Default to allowing mouse passthrough
         let mut should_passthrough = true;
-        
+
         // Only consider blocking if we have toasts and mouse is in the viewport
         if !self.toasts.is_empty() {
             if let Some(mouse_pos) = ctx.input(|i| i.pointer.hover_pos()) {
@@ -184,9 +190,9 @@ impl GuiManagerApp {
                     // This leaves most of the overlay area clickable for other windows
                     let toast_region = egui::Rect::from_min_max(
                         egui::pos2(viewport_rect.max.x - 250.0, viewport_rect.min.y),
-                        egui::pos2(viewport_rect.max.x, viewport_rect.min.y + 150.0)
+                        egui::pos2(viewport_rect.max.x, viewport_rect.min.y + 150.0),
                     );
-                    
+
                     should_passthrough = !toast_region.contains(mouse_pos);
                 }
             }
@@ -228,10 +234,16 @@ impl eframe::App for GuiManagerApp {
                                 .duration(Duration::from_secs(3));
                         }
                         ToastKind::Error => {
-                            self.toasts.error(message).closable(false).duration(Duration::from_secs(5));
+                            self.toasts
+                                .error(message)
+                                .closable(false)
+                                .duration(Duration::from_secs(5));
                         }
                         ToastKind::Info => {
-                            self.toasts.info(message).closable(false).duration(Duration::from_secs(3));
+                            self.toasts
+                                .info(message)
+                                .closable(false)
+                                .duration(Duration::from_secs(3));
                         }
                         ToastKind::Warning => {
                             self.toasts

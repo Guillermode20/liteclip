@@ -265,6 +265,12 @@ mod imp {
             Self::new()
         }
     }
+
+    impl Drop for WebcamCapture {
+        fn drop(&mut self) {
+            self.stop();
+        }
+    }
 }
 
 #[cfg(all(feature = "ffmpeg", windows))]

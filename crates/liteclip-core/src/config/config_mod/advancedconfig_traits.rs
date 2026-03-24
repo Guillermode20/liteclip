@@ -14,7 +14,7 @@ use super::types::AdvancedConfig;
 impl Default for AdvancedConfig {
     fn default() -> Self {
         Self {
-            memory_limit_mb: 0,
+            memory_limit_mb: 1024,
             gpu_index: default_gpu_index(),
             keyframe_interval_secs: default_keyframe_interval(),
             use_cpu_readback: default_false(),

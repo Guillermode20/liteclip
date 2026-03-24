@@ -54,6 +54,7 @@ pub struct PlaybackController {
     _audio_shutdown_tx: Option<std::sync::mpsc::Sender<()>>,
     audio_stream_thread: Mutex<Option<JoinHandle<()>>>,
     audio_playback_thread: Mutex<Option<JoinHandle<()>>>,
+    audio_preload_thread: Mutex<Option<JoinHandle<()>>>,
 }
 
 struct SharedPlaybackState {
@@ -197,6 +198,7 @@ impl PlaybackController {
             _audio_shutdown_tx: Some(audio_shutdown_tx),
             audio_stream_thread: Mutex::new(Some(audio_stream_thread)),
             audio_playback_thread: Mutex::new(None),
+            audio_preload_thread: Mutex::new(None),
         };
         controller.begin_audio_preload(video_path);
         controller
@@ -666,7 +668,7 @@ impl PlaybackController {
         }
 
         let shared = self.shared.clone();
-        thread::spawn(move || {
+        let handle = thread::spawn(move || {
             let result = decode_audio_track(&video_path);
             match result {
                 Ok(buffer) => {
@@ -682,6 +684,9 @@ impl PlaybackController {
             }
             shared.audio_loading.store(false, Ordering::SeqCst);
         });
+        if let Ok(mut guard) = self.audio_preload_thread.lock() {
+            *guard = Some(handle);
+        }
     }
 
     fn maybe_start_audio(&mut self) {
@@ -747,6 +752,12 @@ impl Drop for PlaybackController {
     fn drop(&mut self) {
         let _ = self.shared.playing_since.lock().map(|mut g| *g = None);
         self.shared.audio_generation.fetch_add(1, Ordering::SeqCst);
+        self._audio_shutdown_tx.take();
+        if let Ok(mut guard) = self.audio_preload_thread.lock() {
+            if let Some(handle) = guard.take() {
+                let _ = handle.join();
+            }
+        }
         if let Ok(mut guard) = self.audio_stream_thread.lock() {
             if let Some(handle) = guard.take() {
                 let _ = handle.join();

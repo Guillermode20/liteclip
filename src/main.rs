@@ -332,7 +332,7 @@ async fn main() -> Result<()> {
 
     // Bridge: hotkey/tray crossbeam events -> tokio
     let tokio_tx_bridge = tokio_tx.clone();
-    std::thread::spawn(move || {
+    let event_bridge_handle = std::thread::spawn(move || {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             while let Ok(event) = event_rx.recv() {
                 if tokio_tx_bridge.blocking_send(event).is_err() {
@@ -565,6 +565,16 @@ async fn main() -> Result<()> {
 
     // Wait for platform thread (should be quick; we sent Quit above).
     platform_handle.join().ok();
+
+    // Drop the tokio sender to signal the event bridge to stop
+    drop(tokio_tx);
+    
+    // Join the event bridge thread
+    let _ = event_bridge_handle.join();
+    info!("Event bridge thread joined");
+
+    // Shutdown GUI manager to release static channel
+    liteclip_replay::gui::shutdown_gui();
 
     let _ = shutdown_done_tx.send(());
     info!("LiteClip Replay stopped");

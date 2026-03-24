@@ -292,9 +292,9 @@ impl LockFreeReplayBuffer {
         // RAM unboundedly when the configured bitrate generates packets larger than the
         // packet-count estimate assumed when sizing the ring capacity.
         if inner.max_memory_bytes > 0 {
+            let mut eviction_count = 0usize;
             while inner.total_bytes.load(Ordering::Relaxed) > inner.max_memory_bytes {
                 let evict = inner.evict_frontier.load(Ordering::Relaxed);
-                // Never evict the packet we just wrote (at index `write_idx`).
                 if evict >= write_idx {
                     break;
                 }
@@ -309,9 +309,18 @@ impl LockFreeReplayBuffer {
                         if old.is_keyframe {
                             inner.keyframe_count.fetch_sub(1, Ordering::Relaxed);
                         }
+                        eviction_count += 1;
                     }
                 }
                 inner.evict_frontier.fetch_add(1, Ordering::Release);
+            }
+            if eviction_count > 0 {
+                debug!(
+                    "Buffer memory eviction: {} packets removed, {}MB / {}MB",
+                    eviction_count,
+                    inner.total_bytes.load(Ordering::Relaxed) / 1_000_000,
+                    inner.max_memory_bytes / 1_000_000
+                );
             }
         }
     }

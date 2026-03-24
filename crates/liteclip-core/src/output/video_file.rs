@@ -399,6 +399,7 @@ fn run_clip_export(
             export_work_dir
         )
     })?;
+    let _work_dir_guard = WorkDirGuard::new(export_work_dir.clone());
 
     if selected_encoder == ExportVideoEncoder::HevcAmf
         && output_duration_secs >= AMF_MIN_CALIBRATION_DURATION_SECS
@@ -704,7 +705,6 @@ fn run_clip_export(
         final_encoder = selected_encoder.ffmpeg_name(),
         "Clip export encode pipeline completed"
     );
-    cleanup_export_work_dir(&export_work_dir);
     export_result
 }
 
@@ -938,6 +938,24 @@ fn parse_progress_seconds(line: &str) -> Option<f64> {
 
 fn cleanup_export_work_dir(work_dir: &Path) {
     let _ = std::fs::remove_dir_all(work_dir);
+}
+
+struct WorkDirGuard {
+    path: Option<PathBuf>,
+}
+
+impl WorkDirGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path: Some(path) }
+    }
+}
+
+impl Drop for WorkDirGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.path.take() {
+            cleanup_export_work_dir(&path);
+        }
+    }
 }
 
 pub fn estimate_export_bitrates(

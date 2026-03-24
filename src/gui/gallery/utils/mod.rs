@@ -99,7 +99,11 @@ pub(super) fn build_clipped_output_path_impl(video: &VideoEntry) -> PathBuf {
     // Check if the video is already in a clipped folder to avoid nesting
     let output_dir = if video.game.starts_with("Clipped-") {
         // Video is already in a clipped folder, save to the same folder
-        video.path.parent().map(Path::to_path_buf).unwrap_or_else(|| video.save_root.clone())
+        video
+            .path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| video.save_root.clone())
     } else {
         // Create a new clipped folder for non-clipped videos
         let game_folder = format!("Clipped-{}", video.game.replace(['\\', '/'], "-"));
@@ -410,7 +414,12 @@ fn generate_thumbnail_strip_frames_sdk(
         .collect();
 
     for (i, time_secs) in frame_times.iter().enumerate() {
-        debug!("Extracting thumbnail strip frame {}/{} at {:.2}s", i + 1, THUMBNAIL_STRIP_COUNT, time_secs);
+        debug!(
+            "Extracting thumbnail strip frame {}/{} at {:.2}s",
+            i + 1,
+            THUMBNAIL_STRIP_COUNT,
+            time_secs
+        );
         match extract_preview_frame(video_path, *time_secs, THUMBNAIL_STRIP_WIDTH) {
             Ok(frame) => {
                 thumbnails.push((*time_secs, frame));

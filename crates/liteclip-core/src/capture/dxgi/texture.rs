@@ -209,7 +209,7 @@ impl DxgiCapture {
     pub(super) fn acquire_bgra_pool_item(
         state: &mut DxgiCaptureState,
     ) -> Result<D3d11TexturePoolItem> {
-        let (width, height, maybe_item) = {
+        let (width, height, maybe_item, at_capacity) = {
             let pool = state
                 .bgra_pool
                 .as_mut()
@@ -219,20 +219,48 @@ impl DxgiCapture {
                     pool.available.push(item);
                 }
             }
-            (pool.width, pool.height, pool.available.pop())
+            let at_capacity = pool
+                .total_created
+                .load(std::sync::atomic::Ordering::Relaxed)
+                >= pool.max_capacity;
+            (pool.width, pool.height, pool.available.pop(), at_capacity)
         };
 
         if let Some(item) = maybe_item {
             return Ok(item);
         }
 
+        if at_capacity {
+            warn!("BGRA texture pool at capacity, waiting for texture to return");
+            let pool = state
+                .bgra_pool
+                .as_mut()
+                .context("BGRA pool is not initialized")?;
+            match pool.return_rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(item) => return Ok(item),
+                Err(_) => bail!("BGRA texture pool exhausted, cannot acquire texture"),
+            }
+        }
+
+        let pool = state
+            .bgra_pool
+            .as_mut()
+            .context("BGRA pool is not initialized")?;
+        pool.total_created
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        debug!(
+            "Created new BGRA texture (total: {}/{})",
+            pool.total_created
+                .load(std::sync::atomic::Ordering::Relaxed),
+            pool.max_capacity
+        );
         Self::create_bgra_pool_item(&state.d3d_device, width, height)
     }
 
     pub(super) fn acquire_nv12_pool_item(
         state: &mut DxgiCaptureState,
     ) -> Result<D3d11TexturePoolItem> {
-        let (width, height, maybe_item) = {
+        let (width, height, maybe_item, at_capacity) = {
             let pool = state
                 .nv12_pool
                 .as_mut()
@@ -242,12 +270,41 @@ impl DxgiCapture {
                     pool.available.push(item);
                 }
             }
-            (pool.width, pool.height, pool.available.pop())
+            let at_capacity = pool
+                .total_created
+                .load(std::sync::atomic::Ordering::Relaxed)
+                >= pool.max_capacity;
+            (pool.width, pool.height, pool.available.pop(), at_capacity)
         };
 
         if let Some(item) = maybe_item {
             return Ok(item);
         }
+
+        if at_capacity {
+            warn!("NV12 texture pool at capacity, waiting for texture to return");
+            let pool = state
+                .nv12_pool
+                .as_mut()
+                .context("NV12 pool is not initialized")?;
+            match pool.return_rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(item) => return Ok(item),
+                Err(_) => bail!("NV12 texture pool exhausted, cannot acquire texture"),
+            }
+        }
+
+        let pool = state
+            .nv12_pool
+            .as_mut()
+            .context("NV12 pool is not initialized")?;
+        pool.total_created
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        debug!(
+            "Created new NV12 texture (total: {}/{})",
+            pool.total_created
+                .load(std::sync::atomic::Ordering::Relaxed),
+            pool.max_capacity
+        );
 
         let video_device = state
             .video_device

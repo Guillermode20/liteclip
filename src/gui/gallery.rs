@@ -587,14 +587,14 @@ impl ClipCompressApp {
     /// Called periodically to detect thumbnails created after initial scan
     fn check_for_new_thumbnails(&mut self, ctx: &egui::Context) {
         let now = Instant::now();
-        
+
         // Only check every 3 seconds to avoid excessive polling
         if now.duration_since(self.last_thumbnail_check) < Duration::from_secs(3) {
             return;
         }
-        
+
         self.last_thumbnail_check = now;
-        
+
         // Find videos without thumbnails (limit to 3 per check to avoid blocking)
         let videos_to_check: Vec<_> = self
             .videos_by_game
@@ -603,11 +603,11 @@ impl ClipCompressApp {
             .filter(|video| !self.thumbnails.contains_key(&video.path))
             .take(3)
             .collect();
-        
+
         if videos_to_check.is_empty() {
             return;
         }
-        
+
         // Check if thumbnails now exist and load them
         let mut newly_found = Vec::new();
         for video in videos_to_check {
@@ -618,7 +618,7 @@ impl ClipCompressApp {
                 }
             }
         }
-        
+
         // Load any newly found thumbnails
         for (video_path, filename, image) in newly_found {
             self.insert_thumbnail_texture(ctx, video_path, &filename, image);

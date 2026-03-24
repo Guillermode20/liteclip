@@ -142,6 +142,17 @@ impl PlatformHandle {
     }
 }
 
+impl Drop for PlatformHandle {
+    fn drop(&mut self) {
+        let _ = self.quit();
+        if let Ok(mut guard) = self.thread.lock() {
+            if let Some(handle) = guard.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+}
+
 /// Spawn the platform message loop thread with hotkey configuration
 ///
 /// Returns a [`PlatformHandle`] containing the thread handle and command sender,
