@@ -1098,17 +1098,34 @@ impl DxgiCapture {
                         p.max_capacity,
                     )
                 });
-                debug!(
-                    "Capture: {}fps, drops={}, duplicates={}, divisor={}, queue={}/{}, nv12={:?}, bgra={:?}",
-                    window_frames / 30,
-                    window_drops,
-                    window_duplicates,
-                    backpressure.current_fps_divisor(),
-                    frame_tx.len(),
-                    frame_tx.capacity().unwrap_or(32),
-                    nv12_stats,
-                    bgra_stats
-                );
+                if let Some((working_set_mb, private_mb)) = crate::output::saver::process_memory_mb()
+                {
+                    info!(
+                        "Memory telemetry [capture]: fps={}, drops={}, duplicates={}, divisor={}, queue={}/{}, nv12={:?}, bgra={:?}, process_working_set_mb={:.1}, process_private_mb={:.1}",
+                        window_frames / 30,
+                        window_drops,
+                        window_duplicates,
+                        backpressure.current_fps_divisor(),
+                        frame_tx.len(),
+                        frame_tx.capacity().unwrap_or(32),
+                        nv12_stats,
+                        bgra_stats,
+                        working_set_mb,
+                        private_mb
+                    );
+                } else {
+                    info!(
+                        "Memory telemetry [capture]: fps={}, drops={}, duplicates={}, divisor={}, queue={}/{}, nv12={:?}, bgra={:?}",
+                        window_frames / 30,
+                        window_drops,
+                        window_duplicates,
+                        backpressure.current_fps_divisor(),
+                        frame_tx.len(),
+                        frame_tx.capacity().unwrap_or(32),
+                        nv12_stats,
+                        bgra_stats
+                    );
+                }
                 window_start = Instant::now();
                 window_frames = 0;
                 window_drops = 0;

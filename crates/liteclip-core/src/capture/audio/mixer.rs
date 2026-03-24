@@ -57,6 +57,10 @@ impl AudioMixer {
         self.config = config.clone();
     }
 
+    pub fn pending_packet_counts(&self) -> (usize, usize) {
+        (self.system_packets.len(), self.mic_packets.len())
+    }
+
     /// Mix audio packets from system and microphone with timestamp-based synchronization
     pub fn mix_packets(
         &mut self,

@@ -5,6 +5,9 @@ use tokio::sync::mpsc::Sender;
 use crate::capture::audio::AudioLevelMonitor;
 use crate::capture::list_dshow_video_devices;
 use crate::config::{config_mod::types::*, Config};
+use crate::config::{
+    MAX_REPLAY_MEMORY_LIMIT_MB, MIN_REPLAY_MEMORY_LIMIT_MB, REPLAY_MEMORY_LIMIT_AUTO_MB,
+};
 use crate::platform::AppEvent;
 
 pub fn show_settings_gui(event_tx: Sender<AppEvent>, level_monitor: Option<AudioLevelMonitor>) {
@@ -568,6 +571,43 @@ impl SettingsApp {
             &mut self.config.advanced.use_cpu_readback,
             "Use CPU Readback for HW Encoding",
         );
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(8.0);
+
+        let estimated_mb = self.config.estimated_replay_storage_mb();
+        let recommended_mb = self.config.recommended_replay_memory_limit_mb();
+        let mut auto_memory_limit = self.config.advanced.memory_limit_mb == REPLAY_MEMORY_LIMIT_AUTO_MB;
+        if ui
+            .checkbox(
+                &mut auto_memory_limit,
+                format!("Auto replay memory limit (recommended {} MB)", recommended_mb),
+            )
+            .changed()
+        {
+            self.config.advanced.memory_limit_mb = if auto_memory_limit {
+                REPLAY_MEMORY_LIMIT_AUTO_MB
+            } else {
+                recommended_mb.clamp(MIN_REPLAY_MEMORY_LIMIT_MB, MAX_REPLAY_MEMORY_LIMIT_MB)
+            };
+        }
+
+        if !auto_memory_limit {
+            ui.add(
+                egui::Slider::new(
+                    &mut self.config.advanced.memory_limit_mb,
+                    MIN_REPLAY_MEMORY_LIMIT_MB..=MAX_REPLAY_MEMORY_LIMIT_MB,
+                )
+                .text("Replay Memory Limit (MB)"),
+            );
+        }
+
+        let effective_mb = self.config.effective_replay_memory_limit_mb();
+        ui.label(format!(
+            "Replay estimate: {} MB, effective memory cap: {} MB",
+            estimated_mb, effective_mb
+        ));
     }
 }
 

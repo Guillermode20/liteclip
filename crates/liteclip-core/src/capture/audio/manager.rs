@@ -202,6 +202,7 @@ impl WasapiAudioManager {
         let mut mic_packet: Option<EncodedPacket> = None;
         let mut forwarded_total: u64 = 0;
         let mut last_peak_decay = Instant::now();
+        let mut last_telemetry = Instant::now();
 
         while running.load(Ordering::SeqCst) {
             while let Ok(new_config) = config_update_rx.try_recv() {
@@ -292,6 +293,33 @@ impl WasapiAudioManager {
             } else {
                 // No packets available, sleep briefly
                 thread::sleep(Duration::from_millis(1));
+            }
+
+            if last_telemetry.elapsed() >= Duration::from_secs(30) {
+                let (system_pending, mic_pending) = mixer.pending_packet_counts();
+                if system_pending > 256 || mic_pending > 256 {
+                    warn!(
+                        "Audio mixer pending packets unexpectedly high: pending_system={}, pending_mic={}",
+                        system_pending, mic_pending
+                    );
+                }
+                if let Some((working_set_mb, private_mb)) = crate::output::saver::process_memory_mb()
+                {
+                    debug!(
+                        "Memory telemetry [audio]: forwarded_total={}, pending_system={}, pending_mic={}, process_working_set_mb={:.1}, process_private_mb={:.1}",
+                        forwarded_total,
+                        system_pending,
+                        mic_pending,
+                        working_set_mb,
+                        private_mb
+                    );
+                } else {
+                    debug!(
+                        "Memory telemetry [audio]: forwarded_total={}, pending_system={}, pending_mic={}",
+                        forwarded_total, system_pending, mic_pending
+                    );
+                }
+                last_telemetry = Instant::now();
             }
 
             if system_disconnected {

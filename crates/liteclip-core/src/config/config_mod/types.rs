@@ -17,8 +17,9 @@ use super::functions::{
     default_quality_value_for_preset, default_rate_control, default_replay_duration,
     default_resolution, default_save_directory, default_system_volume, default_true,
     default_webcam_height, default_webcam_width, ESTIMATED_MIC_AUDIO_BITRATE_BPS,
-    ESTIMATED_SYSTEM_AUDIO_BITRATE_BPS, MAX_FRAMERATE, RECOMMENDED_BUFFER_BASE_OVERHEAD_MB,
-    RECOMMENDED_BUFFER_HEADROOM_PERCENT,
+    ESTIMATED_SYSTEM_AUDIO_BITRATE_BPS, MAX_FRAMERATE, MAX_REPLAY_MEMORY_LIMIT_MB,
+    MIN_REPLAY_MEMORY_LIMIT_MB, RECOMMENDED_BUFFER_BASE_OVERHEAD_MB,
+    RECOMMENDED_BUFFER_HEADROOM_PERCENT, REPLAY_MEMORY_LIMIT_AUTO_MB,
 };
 
 /// Encoder selection for video encoding.
@@ -252,6 +253,13 @@ impl Config {
             warn!("Config: keyframe_interval_secs was 0, clamping to 1");
             self.advanced.keyframe_interval_secs = 1;
         }
+        if self.advanced.memory_limit_mb > MAX_REPLAY_MEMORY_LIMIT_MB {
+            warn!(
+                "Config: memory_limit_mb was {}, clamping to {}",
+                self.advanced.memory_limit_mb, MAX_REPLAY_MEMORY_LIMIT_MB
+            );
+            self.advanced.memory_limit_mb = MAX_REPLAY_MEMORY_LIMIT_MB;
+        }
         if !self.video.use_native_resolution && matches!(self.video.resolution, Resolution::Native)
         {
             warn!(
@@ -333,12 +341,18 @@ impl Config {
         let recommended_mb = with_headroom
             .saturating_add((1024 * 1024) - 1)
             .checked_div(1024 * 1024)
-            .unwrap_or(u64::MAX);
-        recommended_mb as u32
+            .unwrap_or(u64::MAX)
+            .min(u32::MAX as u64) as u32;
+        recommended_mb.clamp(MIN_REPLAY_MEMORY_LIMIT_MB, MAX_REPLAY_MEMORY_LIMIT_MB)
     }
 
     pub fn effective_replay_memory_limit_mb(&self) -> u32 {
-        self.advanced.memory_limit_mb
+        let requested = self.advanced.memory_limit_mb;
+        if requested == REPLAY_MEMORY_LIMIT_AUTO_MB {
+            self.recommended_replay_memory_limit_mb()
+        } else {
+            requested.clamp(MIN_REPLAY_MEMORY_LIMIT_MB, MAX_REPLAY_MEMORY_LIMIT_MB)
+        }
     }
 
     pub fn requires_pipeline_restart(&self, other: &Config) -> bool {

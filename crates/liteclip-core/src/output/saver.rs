@@ -299,7 +299,7 @@ pub fn log_save_memory(
 }
 
 #[cfg(target_os = "windows")]
-fn process_memory_mb() -> Option<(f64, f64)> {
+pub fn process_memory_mb() -> Option<(f64, f64)> {
     use std::mem::size_of;
     use windows::Win32::System::ProcessStatus::{
         K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS_EX,
@@ -326,6 +326,6 @@ fn process_memory_mb() -> Option<(f64, f64)> {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn process_memory_mb() -> Option<(f64, f64)> {
+pub fn process_memory_mb() -> Option<(f64, f64)> {
     None
 }

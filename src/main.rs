@@ -357,6 +357,7 @@ async fn main() -> Result<()> {
 
     let mut should_restart = false;
     let save_in_progress = Arc::new(AtomicBool::new(false));
+    let mut last_pipeline_memory_telemetry = std::time::Instant::now();
 
     // Main event loop
     loop {
@@ -518,7 +519,38 @@ async fn main() -> Result<()> {
                                         error!("Recording stopped due to fatal pipeline error: {}", reason);
                                         let _ = platform_handle.update_recording_state(false);
                                     }
-                                    Ok(None) => {}
+                                    Ok(None) => {
+                                        if last_pipeline_memory_telemetry.elapsed()
+                                            >= std::time::Duration::from_secs(30)
+                                        {
+                                            let _ = app_state_blocking(&app_state, |s| {
+                                                if s.is_recording() {
+                                                    let stats = s.replay_buffer_stats();
+                                                    if let Some((working_set_mb, private_mb)) =
+                                                        liteclip_replay::output::saver::process_memory_mb()
+                                                    {
+                                                        info!(
+                                                            "Memory telemetry [pipeline]: process_working_set_mb={:.1}, process_private_mb={:.1}, buffer_mb={:.1}, buffer_packets={}, buffer_usage_pct={:.1}",
+                                                            working_set_mb,
+                                                            private_mb,
+                                                            stats.total_bytes as f64 / (1024.0 * 1024.0),
+                                                            stats.packet_count,
+                                                            stats.memory_usage_percent
+                                                        );
+                                                    } else {
+                                                        info!(
+                                                            "Memory telemetry [pipeline]: buffer_mb={:.1}, buffer_packets={}, buffer_usage_pct={:.1}",
+                                                            stats.total_bytes as f64 / (1024.0 * 1024.0),
+                                                            stats.packet_count,
+                                                            stats.memory_usage_percent
+                                                        );
+                                                    }
+                                                }
+                                            })
+                                            .await;
+                                            last_pipeline_memory_telemetry = std::time::Instant::now();
+                                        }
+                                    }
                                     Err(e) => {
                                         error!("Failed to enforce pipeline health: {}", e);
                                     }

@@ -9,6 +9,9 @@ pub const RECOMMENDED_BUFFER_HEADROOM_PERCENT: u64 = 135;
 pub const RECOMMENDED_BUFFER_BASE_OVERHEAD_MB: u64 = 24;
 pub const ESTIMATED_SYSTEM_AUDIO_BITRATE_BPS: u64 = 192_000;
 pub const ESTIMATED_MIC_AUDIO_BITRATE_BPS: u64 = 128_000;
+pub const REPLAY_MEMORY_LIMIT_AUTO_MB: u32 = 0;
+pub const MIN_REPLAY_MEMORY_LIMIT_MB: u32 = 1;
+pub const MAX_REPLAY_MEMORY_LIMIT_MB: u32 = 4096;
 
 pub(crate) fn default_true() -> bool {
     true
@@ -171,5 +174,35 @@ mod tests {
 
         assert!(estimated_mb >= 140);
         assert!(recommended_mb > estimated_mb);
+    }
+
+    #[test]
+    fn test_effective_replay_memory_limit_uses_recommended_when_auto() {
+        let mut config = Config::default();
+        config.advanced.memory_limit_mb = REPLAY_MEMORY_LIMIT_AUTO_MB;
+
+        let expected = config
+            .recommended_replay_memory_limit_mb()
+            .clamp(MIN_REPLAY_MEMORY_LIMIT_MB, MAX_REPLAY_MEMORY_LIMIT_MB);
+        assert_eq!(config.effective_replay_memory_limit_mb(), expected);
+    }
+
+    #[test]
+    fn test_effective_replay_memory_limit_clamps_manual_value() {
+        let mut config = Config::default();
+        config.advanced.memory_limit_mb = MAX_REPLAY_MEMORY_LIMIT_MB + 1024;
+
+        assert_eq!(
+            config.effective_replay_memory_limit_mb(),
+            MAX_REPLAY_MEMORY_LIMIT_MB
+        );
+    }
+
+    #[test]
+    fn test_validate_memory_limit_clamps_upper_bound() {
+        let mut config = Config::default();
+        config.advanced.memory_limit_mb = MAX_REPLAY_MEMORY_LIMIT_MB + 1;
+        config.validate();
+        assert_eq!(config.advanced.memory_limit_mb, MAX_REPLAY_MEMORY_LIMIT_MB);
     }
 }

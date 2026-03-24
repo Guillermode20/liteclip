@@ -156,6 +156,10 @@ impl AppState {
         )
     }
 
+    pub fn replay_buffer_stats(&self) -> crate::buffer::BufferStats {
+        self.buffer.stats()
+    }
+
     /// Checks if recording is currently active.
     ///
     /// # Returns
