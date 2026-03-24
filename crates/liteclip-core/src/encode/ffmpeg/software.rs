@@ -1,4 +1,4 @@
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use ffmpeg::format::Pixel;
 use ffmpeg_next as ffmpeg;
 use tracing::info;
@@ -6,6 +6,9 @@ use tracing::info;
 use crate::encode::{EncodeError, EncodeResult};
 
 use super::{EncodedPacket, FfmpegEncoder, StreamType};
+
+const PACKET_BUFFER_BASE_CAPACITY: usize = 1024 * 1024;
+const PACKET_BUFFER_SHRINK_THRESHOLD: usize = PACKET_BUFFER_BASE_CAPACITY * 8;
 
 impl FfmpegEncoder {
     pub(super) fn init_encoder(&mut self, width: u32, height: u32) -> EncodeResult<()> {
@@ -193,6 +196,10 @@ impl FfmpegEncoder {
                     post_warmup_packets
                 );
             }
+        }
+
+        if self.packet_buffer.capacity() > PACKET_BUFFER_SHRINK_THRESHOLD {
+            self.packet_buffer = BytesMut::with_capacity(PACKET_BUFFER_BASE_CAPACITY);
         }
 
         Ok(())

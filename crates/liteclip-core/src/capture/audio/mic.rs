@@ -267,6 +267,7 @@ impl WasapiMicCapture {
 
         let max_buffer_size = (config.sample_rate as usize / 10) * block_align as usize;
         let mut audio_buffer = BytesMut::with_capacity(max_buffer_size);
+        let mut packet_counter: u64 = 0;
 
         while running.load(Ordering::SeqCst) {
             let mut packet_frames = unsafe { capture_client.GetNextPacketSize() }?;
@@ -376,6 +377,14 @@ impl WasapiMicCapture {
                     processed_samples.fetch_add(frame_count as u64, Ordering::Relaxed);
                 }
 
+                packet_counter = packet_counter.saturating_add(1);
+                if packet_counter.is_multiple_of(MIC_BUFFER_SHRINK_INTERVAL_PACKETS)
+                    && audio_buffer.capacity()
+                        > max_buffer_size.saturating_mul(MIC_BUFFER_SHRINK_MULTIPLIER)
+                {
+                    audio_buffer = BytesMut::with_capacity(max_buffer_size);
+                }
+
                 packet_frames = unsafe { capture_client.GetNextPacketSize() }?;
             }
         }
@@ -456,6 +465,10 @@ impl WasapiMicCapture {
 }
 
 const AUDIO_FRAME_SIZE: usize = 480;
+const MIC_BUFFER_SHRINK_INTERVAL_PACKETS: u64 = 1024;
+const MIC_BUFFER_SHRINK_MULTIPLIER: usize = 2;
+const RNNOISE_QUEUE_BASE_CAPACITY: usize = AUDIO_FRAME_SIZE * 16;
+const RNNOISE_QUEUE_SHRINK_THRESHOLD: usize = AUDIO_FRAME_SIZE * 64;
 
 struct RawMicFrame {
     data: BytesMut,
@@ -596,6 +609,12 @@ impl RNNoiseProcessor {
             buf.copy_within(*head.., 0);
             buf.truncate(remaining);
             *head = 0;
+        }
+
+        if buf.capacity() > RNNOISE_QUEUE_SHRINK_THRESHOLD
+            && buf.len().saturating_mul(4) < buf.capacity()
+        {
+            buf.shrink_to(buf.len().max(RNNOISE_QUEUE_BASE_CAPACITY));
         }
     }
 

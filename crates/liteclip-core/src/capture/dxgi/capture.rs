@@ -5,7 +5,7 @@ use crate::capture::{
 };
 use anyhow::{bail, Context, Result};
 use bytes::{Bytes, BytesMut};
-use crossbeam::channel::{bounded, unbounded, Receiver, Sender};
+use crossbeam::channel::{bounded, Receiver, Sender};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -56,28 +56,30 @@ enum CaptureOutcome {
 
 impl Nv12TexturePool {
     fn new(width: u32, height: u32) -> Self {
-        let (return_tx, return_rx) = unbounded();
+        let max_capacity = 12usize;
+        let (return_tx, return_rx) = bounded(max_capacity * 2);
         Self {
             available: Vec::new(),
             return_tx,
             return_rx,
             width,
             height,
-            max_capacity: 12, // Sufficient for jitter but caps VRAM usage
+            max_capacity, // Sufficient for jitter but caps VRAM usage
         }
     }
 }
 
 impl BgraTexturePool {
     fn new(width: u32, height: u32) -> Self {
-        let (return_tx, return_rx) = unbounded();
+        let max_capacity = 12usize;
+        let (return_tx, return_rx) = bounded(max_capacity * 2);
         Self {
             available: Vec::new(),
             return_tx,
             return_rx,
             width,
             height,
-            max_capacity: 12, // Sufficient for jitter but caps VRAM usage
+            max_capacity, // Sufficient for jitter but caps VRAM usage
         }
     }
 }
@@ -744,7 +746,13 @@ impl DxgiCapture {
                         }
 
                         let bgra = state.native_buffer.split_to(total_bytes).freeze();
-                        state.native_buffer.reserve(total_bytes);
+
+                        // Keep a small headroom but shed unusually large retained allocations.
+                        if state.native_buffer.capacity() > total_bytes.saturating_mul(2) {
+                            state.native_buffer = BytesMut::with_capacity(total_bytes);
+                        } else {
+                            state.native_buffer.reserve(total_bytes);
+                        }
 
                         state.d3d_context.Unmap(Some(&staging_resource), 0);
                         state.duplication.ReleaseFrame().ok();

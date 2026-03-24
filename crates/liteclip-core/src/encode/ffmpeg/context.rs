@@ -12,6 +12,8 @@ use crate::encode::{EncodeError, EncodeResult};
 
 use super::FfmpegEncoder;
 
+const MAX_CACHED_SHARED_TEXTURES: usize = 32;
+
 #[repr(C)]
 pub(super) struct AvD3d11vaDeviceContext {
     pub device: *mut c_void,
@@ -216,6 +218,9 @@ impl FfmpegEncoder {
                 hw_context
                     .cached_shared_textures
                     .push((gpu_frame.shared_handle, opened.clone()));
+                if hw_context.cached_shared_textures.len() > MAX_CACHED_SHARED_TEXTURES {
+                    hw_context.cached_shared_textures.remove(0);
+                }
                 opened
             };
 

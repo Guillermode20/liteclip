@@ -42,7 +42,7 @@ struct D3d11TextureRecycle {
 impl Drop for D3d11TextureRecycle {
     fn drop(&mut self) {
         if let Some(item) = self.item.take() {
-            let _ = self.return_tx.send(item);
+            let _ = self.return_tx.try_send(item);
         }
     }
 }
