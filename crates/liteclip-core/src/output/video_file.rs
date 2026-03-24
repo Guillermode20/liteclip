@@ -8,6 +8,7 @@ use std::sync::{
     Arc,
 };
 use std::thread;
+use std::time::Instant;
 use tracing::{error, info, warn};
 
 #[derive(Debug, Clone)]
@@ -127,6 +128,33 @@ const AMF_CALIBRATION_FILL_RATIO: f64 = 0.990;
 const TARGET_SIZE_UNDERFILL_RATIO: f64 = 0.992;
 const MAX_VIDEO_BITRATE_KBPS: u32 = 400_000;
 
+#[derive(Debug, Clone, Copy)]
+struct ExportPrototypeFlags {
+    software_two_pass: bool,
+    export_hw_decode: bool,
+    filter_graph_concat: bool,
+}
+
+impl ExportPrototypeFlags {
+    fn from_env() -> Self {
+        Self {
+            software_two_pass: env_flag("LITECLIP_EXPORT_PROTO_TWO_PASS_SW"),
+            export_hw_decode: env_flag("LITECLIP_EXPORT_PROTO_HW_DECODE"),
+            filter_graph_concat: env_flag("LITECLIP_EXPORT_PROTO_FILTER_GRAPH"),
+        }
+    }
+}
+
+fn env_flag(key: &str) -> bool {
+    match std::env::var(key) {
+        Ok(value) => matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => false,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExportVideoEncoder {
     SoftwareHevc,
@@ -193,6 +221,17 @@ impl ExportVideoEncoder {
             ExportVideoEncoder::HevcAmf => 0.96,
             ExportVideoEncoder::HevcNvenc | ExportVideoEncoder::HevcQsv => 0.50,
         }
+    }
+
+    fn initial_high_bitrate_kbps(self, initial_video_bitrate_kbps: u32) -> Option<u32> {
+        let multiplier = match self {
+            ExportVideoEncoder::SoftwareHevc => Some(1.55),
+            ExportVideoEncoder::HevcAmf => Some(1.75),
+            ExportVideoEncoder::HevcNvenc | ExportVideoEncoder::HevcQsv => None,
+        }?;
+
+        let high = ((initial_video_bitrate_kbps as f64) * multiplier).round() as u32;
+        Some(high.min(MAX_VIDEO_BITRATE_KBPS).max(initial_video_bitrate_kbps.saturating_add(100)))
     }
 }
 
@@ -273,6 +312,10 @@ fn run_clip_export(
     progress_tx: &Sender<ClipExportUpdate>,
     cancel_flag: &Arc<AtomicBool>,
 ) -> Result<ExportOutcome> {
+    let export_started_at = Instant::now();
+    let mut attempt_duration_total_secs = 0.0f64;
+    let mut attempt_count_executed = 0usize;
+    let prototype_flags = ExportPrototypeFlags::from_env();
     if request.keep_ranges.is_empty() {
         bail!("Cannot export a clip with no kept ranges");
     }
@@ -294,11 +337,17 @@ fn run_clip_export(
     if request.stream_copy {
         #[cfg(feature = "ffmpeg")]
         {
-            return super::sdk_export::run_stream_copy_export_sdk(
+            let stream_copy_result = super::sdk_export::run_stream_copy_export_sdk(
                 request,
                 progress_tx,
                 cancel_flag,
             );
+            info!(
+                elapsed_secs = export_started_at.elapsed().as_secs_f64(),
+                output = ?request.output_path,
+                "Stream copy export path completed"
+            );
+            return stream_copy_result;
         }
         #[cfg(not(feature = "ffmpeg"))]
         {
@@ -307,6 +356,20 @@ fn run_clip_export(
     }
 
     let output_duration_secs = request.output_duration_secs().max(0.1);
+    info!(
+        input = ?request.input_path,
+        output = ?request.output_path,
+        output_duration_secs,
+        keep_ranges = request.keep_ranges.len(),
+        target_size_mb = request.target_size_mb,
+        output_width = ?request.output_width,
+        output_height = ?request.output_height,
+        output_fps = ?request.output_fps,
+        software_two_pass_proto = prototype_flags.software_two_pass,
+        export_hw_decode_proto = prototype_flags.export_hw_decode,
+        filter_graph_concat_proto = prototype_flags.filter_graph_concat,
+        "Starting clip export encode pipeline"
+    );
     let mut selected_encoder = select_export_video_encoder(request)
         .with_context(|| "Unable to resolve an export video encoder")?;
     let mut bitrate_estimate = estimate_export_bitrates_for_encoder(
@@ -347,6 +410,16 @@ fn run_clip_export(
         }
         let calibration_request =
             build_amf_calibration_request(request, sample_duration_secs, calibration_path.clone());
+        if prototype_flags.filter_graph_concat {
+            info!(
+                "Filter-graph export prototype flag is enabled. Calibration/export currently uses seek-based range processing; filter-graph path is planned but not yet wired."
+            );
+        }
+        if prototype_flags.export_hw_decode {
+            info!(
+                "Hardware decode export prototype flag is enabled. Export decode currently remains software-decoded in attempt_export; D3D11VA export decode path is planned."
+            );
+        }
         let calibration_bitrate_kbps = bitrate_estimate
             .video_kbps
             .max(selected_encoder.min_video_bitrate_kbps());
@@ -424,7 +497,13 @@ fn run_clip_export(
             .video_kbps
             .max(selected_encoder.min_video_bitrate_kbps());
         let mut low_video_bitrate_kbps = selected_encoder.min_video_bitrate_kbps();
-        let mut high_video_bitrate_kbps: Option<u32> = None;
+        let mut high_video_bitrate_kbps =
+            selected_encoder.initial_high_bitrate_kbps(current_video_bitrate_kbps);
+        if selected_encoder == ExportVideoEncoder::SoftwareHevc && prototype_flags.software_two_pass {
+            info!(
+                "Software two-pass prototype flag is enabled. Current export path remains iterative; two-pass implementation is not yet wired."
+            );
+        }
         let mut best_under_target: Option<ExportAttemptResult> = None;
         let mut best_over_target: Option<ExportAttemptResult> = None;
         let mut amf_attempts = 0usize;
@@ -435,6 +514,7 @@ fn run_clip_export(
             }
 
             let output_path = export_work_dir.join(format!("attempt-{}.mp4", attempt_index + 1));
+            let attempt_started_at = Instant::now();
             let attempt_result = match super::sdk_export::attempt_export(
                 request,
                 &output_path,
@@ -480,6 +560,9 @@ fn run_clip_export(
                 }
                 Err(err) => return Err(err),
             };
+            let attempt_elapsed_secs = attempt_started_at.elapsed().as_secs_f64();
+            attempt_duration_total_secs += attempt_elapsed_secs;
+            attempt_count_executed = attempt_count_executed.saturating_add(1);
 
             if selected_encoder == ExportVideoEncoder::HevcAmf {
                 amf_attempts = amf_attempts.saturating_add(1);
@@ -492,6 +575,13 @@ fn run_clip_export(
                 attempt_result.size_bytes,
                 attempt_result.video_bitrate_kbps,
                 target_size_bytes
+            );
+            info!(
+                attempt_index = attempt_index + 1,
+                attempt_elapsed_secs,
+                fill_ratio = (attempt_result.size_bytes as f64) / (target_size_bytes as f64),
+                encoder = selected_encoder.ffmpeg_name(),
+                "Export attempt instrumentation"
             );
 
             if attempt_result.size_bytes <= target_size_bytes {
@@ -604,6 +694,13 @@ fn run_clip_export(
         Ok(ExportOutcome::Finished(request.output_path.clone()))
     })();
 
+    info!(
+        elapsed_secs = export_started_at.elapsed().as_secs_f64(),
+        attempt_duration_total_secs,
+        attempt_count_executed,
+        final_encoder = selected_encoder.ffmpeg_name(),
+        "Clip export encode pipeline completed"
+    );
     cleanup_export_work_dir(&export_work_dir);
     export_result
 }
@@ -1023,11 +1120,17 @@ fn next_export_video_bitrate_kbps(
     let byte_ratio = (target_video_bytes as f64) / (current_video_bytes as f64);
     let overshoot_ratio = (actual_size_bytes as f64) / (target_size_bytes as f64);
 
-    // When over target, calculate the exact bitrate needed and aim for 95% of target
-    // to ensure we land just under. When under, be conservative to avoid overshooting.
+    // When over target, apply a stronger correction for larger overshoots to reduce
+    // full-attempt count. When under, stay conservative to avoid bouncing over target.
     let target_ratio = if actual_size_bytes > target_size_bytes {
-        // Aim for 95% of target to ensure we're safely under without over-correcting
-        byte_ratio * 0.95
+        let safety = if overshoot_ratio > 1.20 {
+            0.88
+        } else if overshoot_ratio > 1.10 {
+            0.92
+        } else {
+            0.95
+        };
+        byte_ratio * safety
     } else {
         // Slightly increase when under target to get closer without overshooting
         byte_ratio.min(1.05)
@@ -1221,16 +1324,23 @@ fn calibrate_amf_video_bitrate(
     let raw_bitrate_ratio = (desired_video_bytes as f64) / extrapolated_full_video;
 
     // AMF vbr_peak has non-linear overshoot: higher bitrates overshoot by larger percentages.
-    // Cap upward extrapolation to prevent massive overshoot when calibration bitrate is much
-    // lower than the target bitrate. Only apply safety margin when capping is needed.
+    // Apply a small compensation factor when extrapolating upward to account for this.
+    // Observed: extrapolating from 793→972 kbps (ratio 1.23) produced 2% overshoot.
+    // The overshoot grows roughly proportionally to the extrapolation ratio above 1.0.
+    const UPWARD_EXTRAPOLATION_COMPENSATION: f64 = 0.015; // 1.5% per unit ratio above 1.0
     const MAX_UPWARD_EXTRAPOLATION_RATIO: f64 = 1.5;
     const EXTRAPOLATION_SAFETY_MARGIN: f64 = 0.85; // 15% safety margin when capping
 
     let (capped_ratio, was_capped) = if raw_bitrate_ratio > MAX_UPWARD_EXTRAPOLATION_RATIO {
         // Extrapolation ratio exceeds cap - apply both cap and safety margin
         (MAX_UPWARD_EXTRAPOLATION_RATIO * EXTRAPOLATION_SAFETY_MARGIN, true)
+    } else if raw_bitrate_ratio > 1.0 {
+        // Upward extrapolation within normal range - apply proportional compensation
+        // for non-linear VBR overshoot. Higher ratios need more compensation.
+        let overshoot_compensation = 1.0 - UPWARD_EXTRAPOLATION_COMPENSATION * (raw_bitrate_ratio - 1.0);
+        (raw_bitrate_ratio * overshoot_compensation, false)
     } else {
-        // Within acceptable range - use as-is
+        // Downward extrapolation - use as-is (undershoot is acceptable)
         (raw_bitrate_ratio, false)
     };
 
@@ -1350,6 +1460,27 @@ fn query_sdk_codecs() -> Vec<&'static str> {
     available
 }
 
+fn ordered_hardware_encoder_preferences(preferred: EncoderType) -> Vec<ExportVideoEncoder> {
+    let mut order = Vec::with_capacity(3);
+    match preferred {
+        EncoderType::Nvenc => order.push(ExportVideoEncoder::HevcNvenc),
+        EncoderType::Amf => order.push(ExportVideoEncoder::HevcAmf),
+        EncoderType::Qsv => order.push(ExportVideoEncoder::HevcQsv),
+        EncoderType::Auto => {}
+    }
+
+    for encoder in [
+        ExportVideoEncoder::HevcAmf,
+        ExportVideoEncoder::HevcNvenc,
+        ExportVideoEncoder::HevcQsv,
+    ] {
+        if !order.contains(&encoder) {
+            order.push(encoder);
+        }
+    }
+    order
+}
+
 fn select_export_video_encoder(request: &ClipExportRequest) -> Result<ExportVideoEncoder> {
     if !request.use_hardware_acceleration {
         return Ok(ExportVideoEncoder::SoftwareHevc);
@@ -1374,13 +1505,18 @@ fn select_export_video_encoder(request: &ClipExportRequest) -> Result<ExportVide
             "Detected HEVC hardware encoders from SDK"
         );
 
-        let requested_order: &[ExportVideoEncoder] = &[
-            ExportVideoEncoder::HevcAmf,
-            ExportVideoEncoder::HevcNvenc,
-            ExportVideoEncoder::HevcQsv,
-        ];
+        let requested_order = ordered_hardware_encoder_preferences(request.preferred_encoder);
+        info!(
+            preferred_encoder = ?request.preferred_encoder,
+            requested_order = %requested_order
+                .iter()
+                .map(|encoder| encoder.ffmpeg_name())
+                .collect::<Vec<_>>()
+                .join(","),
+            "Resolved export encoder preference order"
+        );
 
-        for encoder in requested_order {
+        for encoder in &requested_order {
             if available_codecs.contains(&encoder.ffmpeg_name()) {
                 return Ok(*encoder);
             }
@@ -1494,6 +1630,109 @@ mod tests {
     }
 
     #[test]
+    fn ordered_hardware_encoder_preferences_respects_auto_and_explicit_requests() {
+        assert_eq!(
+            ordered_hardware_encoder_preferences(EncoderType::Auto),
+            vec![
+                ExportVideoEncoder::HevcAmf,
+                ExportVideoEncoder::HevcNvenc,
+                ExportVideoEncoder::HevcQsv
+            ]
+        );
+        assert_eq!(
+            ordered_hardware_encoder_preferences(EncoderType::Nvenc),
+            vec![
+                ExportVideoEncoder::HevcNvenc,
+                ExportVideoEncoder::HevcAmf,
+                ExportVideoEncoder::HevcQsv
+            ]
+        );
+        assert_eq!(
+            ordered_hardware_encoder_preferences(EncoderType::Amf),
+            vec![
+                ExportVideoEncoder::HevcAmf,
+                ExportVideoEncoder::HevcNvenc,
+                ExportVideoEncoder::HevcQsv
+            ]
+        );
+        assert_eq!(
+            ordered_hardware_encoder_preferences(EncoderType::Qsv),
+            vec![
+                ExportVideoEncoder::HevcQsv,
+                ExportVideoEncoder::HevcAmf,
+                ExportVideoEncoder::HevcNvenc
+            ]
+        );
+    }
+
+    #[test]
+    fn initial_high_bitrate_is_encoder_specific_and_bounded() {
+        assert_eq!(
+            ExportVideoEncoder::HevcNvenc.initial_high_bitrate_kbps(2_000),
+            None
+        );
+        assert_eq!(
+            ExportVideoEncoder::HevcQsv.initial_high_bitrate_kbps(2_000),
+            None
+        );
+
+        assert_eq!(
+            ExportVideoEncoder::SoftwareHevc.initial_high_bitrate_kbps(1_000),
+            Some(1_550)
+        );
+        assert_eq!(
+            ExportVideoEncoder::HevcAmf.initial_high_bitrate_kbps(1_000),
+            Some(1_750)
+        );
+
+        // Even very low initial values should get at least +100 kbps headroom.
+        assert_eq!(
+            ExportVideoEncoder::SoftwareHevc.initial_high_bitrate_kbps(100),
+            Some(200)
+        );
+        assert_eq!(
+            ExportVideoEncoder::HevcAmf.initial_high_bitrate_kbps(100),
+            Some(200)
+        );
+
+        let near_cap = MAX_VIDEO_BITRATE_KBPS - 100;
+        assert_eq!(
+            ExportVideoEncoder::SoftwareHevc.initial_high_bitrate_kbps(near_cap),
+            Some(MAX_VIDEO_BITRATE_KBPS)
+        );
+        assert_eq!(
+            ExportVideoEncoder::HevcAmf.initial_high_bitrate_kbps(near_cap),
+            Some(MAX_VIDEO_BITRATE_KBPS)
+        );
+    }
+
+    #[test]
+    fn next_export_video_bitrate_uses_stronger_reduction_for_large_overshoot() {
+        let moderate_overshoot_next = next_export_video_bitrate_kbps(
+            ExportVideoEncoder::SoftwareHevc,
+            4_000,
+            4_600_000,
+            4_000_000,
+            0,
+            MIN_VIDEO_BITRATE_KBPS,
+            Some(3_900),
+        );
+        let high_overshoot_next = next_export_video_bitrate_kbps(
+            ExportVideoEncoder::SoftwareHevc,
+            4_000,
+            5_200_000,
+            4_000_000,
+            0,
+            MIN_VIDEO_BITRATE_KBPS,
+            Some(3_900),
+        );
+
+        assert!(high_overshoot_next < moderate_overshoot_next);
+        assert!((100..=3_900).contains(&moderate_overshoot_next));
+        assert!((100..=3_900).contains(&high_overshoot_next));
+    }
+
+    #[test]
     fn next_export_video_bitrate_tracks_video_budget_instead_of_total_size() {
         let next_video_bitrate_kbps = next_export_video_bitrate_kbps(
             ExportVideoEncoder::SoftwareHevc,
@@ -1521,7 +1760,7 @@ mod tests {
             None,
         );
 
-        assert!((265..=275).contains(&next_video_bitrate_kbps));
+        assert!((260..=264).contains(&next_video_bitrate_kbps));
     }
 
     #[test]
