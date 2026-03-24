@@ -51,8 +51,8 @@ members = ["crates/liteclip-core"]
 opt-level = 3
 
 [profile.release]
-codegen-units = 1
-lto = "fat"
+codegen-units = 12
+lto = "thin"
 panic = "abort"
 strip = true
 
