@@ -47,6 +47,8 @@ impl Muxer {
         packets: &[EncodedPacket],
     ) -> Result<PathBuf> {
         crate::output::saver::log_save_memory("Muxer::mux_clip_entry", None, Some(packets));
+
+        // Separate video and audio by stream type.
         let mut raw_video_packets: Vec<&EncodedPacket> = packets
             .iter()
             .filter(|packet| matches!(packet.stream, StreamType::Video))
@@ -68,13 +70,31 @@ impl Muxer {
         raw_video_packets.sort_by_key(|packet| packet.pts);
         audio_packets.sort_by_key(|packet| packet.pts);
 
-        let normalized_video_storage = normalize_video_packets_for_mp4(&raw_video_packets);
-        let video_packets: Vec<&EncodedPacket> = normalized_video_storage.iter().collect();
-        if video_packets.is_empty() {
+        // Check if any standalone parameter set packets need merging.
+        // If none, we can avoid the deep-copy normalization entirely.
+        let needs_normalization = raw_video_packets.iter().any(|p| is_parameter_set_packet(p));
+
+        // video_refs holds the final &EncodedPacket slices we pass to the muxer.
+        // normalized_storage owns the merged packets only when normalization was needed.
+        let normalized_storage: Vec<EncodedPacket>;
+        let video_refs: Vec<&EncodedPacket>;
+
+        if needs_normalization {
+            normalized_storage = normalize_video_packets_for_mp4(&raw_video_packets);
+            video_refs = normalized_storage.iter().collect();
+            // raw_video_packets Vec is no longer needed — release it
+            drop(raw_video_packets);
+        } else {
+            // No normalization needed — use the original reference Vec directly.
+            // Avoids allocating + cloning every packet into a new owned Vec.
+            video_refs = raw_video_packets;
+        }
+
+        if video_refs.is_empty() {
             bail!("No muxable video packets available for MP4 generation");
         }
 
-        let detected_video_codec = Self::detect_video_codec(&video_packets, &config.video_codec);
+        let detected_video_codec = Self::detect_video_codec(&video_refs, &config.video_codec);
         if detected_video_codec != config.video_codec {
             warn!(
                 "Muxer video codec override: configured={}, detected={} from buffered packets",
@@ -93,7 +113,7 @@ impl Muxer {
             config,
         )?;
 
-        let (video_count, audio_count) = muxer.write_packets(&video_packets, &audio_packets)?;
+        let (video_count, audio_count) = muxer.write_packets(&video_refs, &audio_packets)?;
         drop(muxer);
 
         info!(
@@ -104,6 +124,10 @@ impl Muxer {
     }
 }
 
+/// Merges standalone parameter-set packets (SPS/PPS/VPS) into their following
+/// video frame packets so the MP4 muxer sees complete samples.
+///
+/// Only creates new allocations when actual merging is needed.
 #[cfg(feature = "ffmpeg")]
 fn normalize_video_packets_for_mp4(video_packets: &[&EncodedPacket]) -> Vec<EncodedPacket> {
     let mut normalized = Vec::with_capacity(video_packets.len());
@@ -183,7 +207,6 @@ fn normalize_video_packets_for_mp4(video_packets: &[&EncodedPacket]) -> Vec<Enco
 
     normalized
 }
-
 
 #[cfg(feature = "ffmpeg")]
 fn is_parameter_set_packet(packet: &EncodedPacket) -> bool {

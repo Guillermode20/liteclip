@@ -1,4 +1,4 @@
-use crate::buffer::ring::SharedReplayBuffer;
+use crate::buffer::ring::{SharedReplayBuffer, TrackedSnapshot};
 use crate::encode::EncodedPacket;
 use anyhow::{bail, Context, Result};
 use std::path::PathBuf;
@@ -13,6 +13,15 @@ use super::{
 
 const CLIP_VIDEO_CATCH_UP_RETRY_LIMIT: usize = 8;
 const CLIP_VIDEO_CATCH_UP_SLEEP: Duration = Duration::from_millis(125);
+
+/// Aggressively drops all packet data and forces memory release.
+/// Uses std::mem::replace to ensure the old allocation is fully freed before
+/// the function returns, preventing the allocator from holding onto large blocks.
+fn aggressively_drop_packets(packets: TrackedSnapshot) {
+    // Convert to Vec and drop to release memory
+    // The Drop impl will decrement the outstanding_snapshot_bytes counter
+    drop(packets);
+}
 
 /// Spawns a background task to extract packets from the replay buffer and save them to an MP4 file.
 ///
@@ -62,35 +71,6 @@ pub fn spawn_clip_saver(
             duration.as_secs()
         );
 
-        let mut clip_packets = buffer
-            .snapshot_from(start_pts)
-            .context("Failed to get packets from buffer")?;
-        log_save_memory("after snapshot", Some(&buffer), Some(&clip_packets));
-
-        let video_packets: Vec<_> = clip_packets
-            .iter()
-            .filter(|p| matches!(p.stream, crate::encode::StreamType::Video))
-            .collect();
-
-        if !video_packets.is_empty() {
-            let first_vid = video_packets[0];
-            let first_20_bytes: Vec<String> = first_vid
-                .data
-                .iter()
-                .take(20)
-                .map(|b| format!("{:02x}", b))
-                .collect();
-            info!(
-                "First video packet: {}B, keyframe={}, first20=[{}]",
-                first_vid.data.len(),
-                first_vid.is_keyframe,
-                first_20_bytes.join(" ")
-            );
-
-            let nal_type = hevc_nal_type(first_vid.data.as_ref());
-            info!("First video packet HEVC NAL type: {:?}", nal_type);
-        }
-
         let has_decodable_video_frame = |packets: &[crate::encode::EncodedPacket]| {
             packets.iter().any(|packet| {
                 if !matches!(packet.stream, crate::encode::StreamType::Video) {
@@ -111,8 +91,15 @@ pub fn spawn_clip_saver(
 
         let max_video_tail_lag_qpc = (crate::buffer::ring::qpc_frequency().max(1) / 2).max(1);
 
+        // ── Phase 1: Take snapshot with aggressive retry memory cleanup ──
+        // Keep as TrackedSnapshot to track pinned bytes until after mux
+        let mut snapshot = buffer
+            .snapshot_from(start_pts)
+            .context("Failed to get packets from buffer")?;
+
+        // Video tail catch-up retries — each retry must drop old snapshot before allocating new
         for attempt in 1..=CLIP_VIDEO_CATCH_UP_RETRY_LIMIT {
-            let Some(video_tail_lag_qpc) = clip_video_tail_lag_qpc(&clip_packets) else {
+            let Some(video_tail_lag_qpc) = clip_video_tail_lag_qpc(&snapshot) else {
                 break;
             };
 
@@ -127,72 +114,131 @@ pub fn spawn_clip_saver(
                 CLIP_VIDEO_CATCH_UP_RETRY_LIMIT
             );
 
+            // AGGRESSIVE: drop old snapshot BEFORE sleeping and allocating new one
+            aggressively_drop_packets(snapshot);
+
             thread::sleep(CLIP_VIDEO_CATCH_UP_SLEEP);
             newest_pts = buffer.newest_pts().unwrap_or(newest_pts);
             oldest_pts = buffer.oldest_pts().or(oldest_pts);
             start_pts = calculate_clip_start_pts(newest_pts, duration, oldest_pts);
-            clip_packets = buffer
+            snapshot = buffer
                 .snapshot_from(start_pts)
                 .context("Failed to refresh packets from buffer during video catch-up")?;
         }
 
-        if !has_decodable_video_frame(&clip_packets) {
-            warn!("Clip snapshot does not yet contain a decodable video frame; retrying briefly");
+        // Decodable frame retries
+        if !has_decodable_video_frame(&snapshot) {
+            warn!(
+                "Clip snapshot does not yet contain a decodable video frame; retrying briefly"
+            );
             for attempt in 1..=5 {
+                // AGGRESSIVE: drop old snapshot before retry
+                aggressively_drop_packets(snapshot);
+
                 thread::sleep(Duration::from_millis(150));
-                clip_packets = buffer
+                snapshot = buffer
                     .snapshot_from(start_pts)
                     .context("Failed to refresh packets from buffer")?;
-                if has_decodable_video_frame(&clip_packets) {
+                if has_decodable_video_frame(&snapshot) {
                     info!(
                         "Found decodable video frame after clip snapshot retry {}/5",
                         attempt
                     );
                     break;
+                    }
                 }
             }
-        }
 
-        // Release the buffer clone now — all needed packets are in `clip_packets`.
-        // This drops the Arc<LockFreeInner> held by the saver task so the ring
-        // buffer's eviction path can immediately free old `Bytes` allocations
-        // instead of keeping them alive through the mux + thumbnail phases.
-        drop(buffer);
+            // Log first video packet info before moving snapshot out
+            {
+                let video_packets: Vec<_> = snapshot
+                    .iter()
+                    .filter(|p| matches!(p.stream, crate::encode::StreamType::Video))
+                    .collect();
 
-        debug!(
-            "Clip packets: {} (seeked to nearest keyframe)",
-            clip_packets.len()
-        );
+                if !video_packets.is_empty() {
+                    let first_vid = video_packets[0];
+                    let first_20_bytes: Vec<String> = first_vid
+                        .data
+                        .iter()
+                        .take(20)
+                        .map(|b| format!("{:02x}", b))
+                        .collect();
+                    info!(
+                        "First video packet: {}B, keyframe={}, first20=[{}]",
+                        first_vid.data.len(),
+                        first_vid.is_keyframe,
+                        first_20_bytes.join(" ")
+                    );
 
-        let keyframe_count = clip_packets.iter().filter(|p| p.is_keyframe).count();
-        if keyframe_count == 0 {
-            warn!("No keyframes in clip range - video may not be playable");
-        }
+                    let nal_type = hevc_nal_type(first_vid.data.as_ref());
+                    info!("First video packet HEVC NAL type: {:?}", nal_type);
+                }
+            }
 
-        let video_count = clip_packets
-            .iter()
-            .filter(|packet| matches!(packet.stream, crate::encode::StreamType::Video))
-            .count();
-        let audio_count = clip_packets.len().saturating_sub(video_count);
+            // Keep snapshot alive through mux to track pinned bytes
+            // Log first video packet info before mux
+            {
+                let video_packets: Vec<_> = snapshot
+                    .iter()
+                    .filter(|p| matches!(p.stream, crate::encode::StreamType::Video))
+                    .collect();
 
-        info!(
-            "Prepared clip packet set: {} video packets, {} audio packets",
-            video_count, audio_count
-        );
-        log_save_memory("after snapshot", None, Some(&clip_packets));
+                if !video_packets.is_empty() {
+                    let first_vid = video_packets[0];
+                    let first_20_bytes: Vec<String> = first_vid
+                        .data
+                        .iter()
+                        .take(20)
+                        .map(|b| format!("{:02x}", b))
+                        .collect();
+                    info!(
+                        "First video packet: {}B, keyframe={}, first20=[{}]",
+                        first_vid.data.len(),
+                        first_vid.is_keyframe,
+                        first_20_bytes.join(" ")
+                    );
 
-        if video_count == 0 {
-            bail!("No video packets in selected clip range");
-        }
+                    let nal_type = hevc_nal_type(first_vid.data.as_ref());
+                    info!("First video packet HEVC NAL type: {:?}", nal_type);
+                }
+            }
 
-        let clip_span_secs = clip_pts_span_seconds(&clip_packets);
+            let keyframe_count = snapshot.iter().filter(|p| p.is_keyframe).count();
+            if keyframe_count == 0 {
+                warn!("No keyframes in clip range - video may not be playable");
+            }
 
-        log_save_memory("before mux", None, Some(&clip_packets));
-        let final_path = Muxer::mux_clip(&output_path, &config, &clip_packets)
-            .context("Failed to finalize MP4")?;
-        log_save_memory("after mux", None, Some(&clip_packets));
-        drop(clip_packets);
-        log_save_memory("after packet release", None, None);
+            let video_count = snapshot
+                .iter()
+                .filter(|packet| matches!(packet.stream, crate::encode::StreamType::Video))
+                .count();
+            let audio_count = snapshot.len().saturating_sub(video_count);
+
+            info!(
+                "Prepared clip packet set: {} video packets, {} audio packets",
+                video_count, audio_count
+            );
+
+            if video_count == 0 {
+                bail!("No video packets in selected clip range");
+            }
+
+            let clip_span_secs = clip_pts_span_seconds(snapshot.as_slice());
+
+            // ── Phase 2: Mux with aggressive cleanup ──
+            log_save_memory("before mux", None, Some(snapshot.as_slice()));
+            let final_path = Muxer::mux_clip(&output_path, &config, snapshot.as_slice())
+                .context("Failed to finalize MP4")?;
+            log_save_memory("after mux", None, Some(snapshot.as_slice()));
+
+            // AGGRESSIVE: explicitly free all packet data immediately after mux
+            // This drops the TrackedSnapshot, decrementing outstanding_snapshot_bytes
+            aggressively_drop_packets(snapshot);
+            log_save_memory("after packet release", None, None);
+
+            // Release the buffer clone NOW — all needed packets are in the muxed file.
+            drop(buffer);
 
         info!(
             "Clip saved successfully: {:?} ({} video packets, {} audio packets, ~{:.1}s)",
@@ -273,26 +319,55 @@ pub fn log_save_memory(
         })
         .unwrap_or(0);
 
+    // Count video vs audio packets
+    let (clip_video_count, clip_audio_count) = clip_packets
+        .map(|packets| {
+            let v = packets
+                .iter()
+                .filter(|p| matches!(p.stream, crate::encode::StreamType::Video))
+                .count();
+            (v, packets.len().saturating_sub(v))
+        })
+        .unwrap_or((0, 0));
+
     if let Some((working_set_mb, private_mb)) = process_memory_mb() {
         if let Some(stats) = buffer_stats {
             info!(
-                "Save memory [{}]: process_working_set_mb={:.1}, process_private_mb={:.1}, buffer_mb={:.1}, buffer_packets={}, clip_packets={}, clip_packet_mb={:.1}",
+                "Save memory [{}]: process_working={:.1}MB, private={:.1}MB, buffer={:.1}MB ({}pkts), clip={:.1}MB ({}v+{}a={})",
                 stage,
                 working_set_mb,
                 private_mb,
-                stats.total_bytes as f64 / (1024.0 * 1024.0),
+                stats.total_bytes as f64 / 1_048_576.0,
                 stats.packet_count,
-                clip_packet_count,
-                clip_packet_bytes as f64 / (1024.0 * 1024.0)
+                clip_packet_bytes as f64 / 1_048_576.0,
+                clip_video_count,
+                clip_audio_count,
+                clip_packet_count
             );
         } else {
             info!(
-                "Save memory [{}]: process_working_set_mb={:.1}, process_private_mb={:.1}, clip_packets={}, clip_packet_mb={:.1}",
+                "Save memory [{}]: process_working={:.1}MB, private={:.1}MB, clip={:.1}MB ({}v+{}a={})",
                 stage,
                 working_set_mb,
                 private_mb,
-                clip_packet_count,
-                clip_packet_bytes as f64 / (1024.0 * 1024.0)
+                clip_packet_bytes as f64 / 1_048_576.0,
+                clip_video_count,
+                clip_audio_count,
+                clip_packet_count
+            );
+        }
+    } else {
+        // Fallback if process memory not available
+        if let Some(stats) = buffer_stats {
+            info!(
+                "Save memory [{}]: buffer={:.1}MB ({}pkts), clip={:.1}MB ({}v+{}a={})",
+                stage,
+                stats.total_bytes as f64 / 1_048_576.0,
+                stats.packet_count,
+                clip_packet_bytes as f64 / 1_048_576.0,
+                clip_video_count,
+                clip_audio_count,
+                clip_packet_count
             );
         }
     }

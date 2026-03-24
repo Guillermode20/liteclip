@@ -5,7 +5,7 @@
 use crate::buffer::BufferResult;
 use crate::encode::EncodedPacket;
 
-use super::spmc_ring::LockFreeReplayBuffer;
+use super::spmc_ring::{LockFreeReplayBuffer, TrackedSnapshot};
 
 /// Thread-safe wrapper around LockFreeReplayBuffer
 #[derive(Clone)]
@@ -27,11 +27,11 @@ impl SharedReplayBuffer {
         self.inner.push(packet);
     }
 
-    pub fn snapshot(&self) -> BufferResult<Vec<EncodedPacket>> {
+    pub fn snapshot(&self) -> BufferResult<TrackedSnapshot> {
         self.inner.snapshot()
     }
 
-    pub fn snapshot_from(&self, start_pts: i64) -> BufferResult<Vec<EncodedPacket>> {
+    pub fn snapshot_from(&self, start_pts: i64) -> BufferResult<TrackedSnapshot> {
         self.inner.snapshot_from(start_pts)
     }
 
@@ -41,6 +41,10 @@ impl SharedReplayBuffer {
 
     pub fn stats(&self) -> BufferStats {
         self.inner.stats()
+    }
+
+    pub fn pinned_bytes(&self) -> usize {
+        self.inner.pinned_bytes()
     }
 
     pub fn oldest_pts(&self) -> Option<i64> {

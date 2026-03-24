@@ -312,6 +312,11 @@ impl FfmpegMuxer {
                 audio_count += 1;
             }
         }
+        // aac_iter is consumed by the for loop above.
+        // encoded_audio goes out of scope after video_packets_ordered is dropped below.
+
+        // Release video packet reference Vec — all data has been written to the file.
+        drop(video_packets_ordered);
 
         crate::output::saver::log_save_memory("before write_trailer", None, None);
         self.format_context.write_trailer()?;
@@ -598,10 +603,7 @@ fn compute_audio_placements<'a>(
             start_index,
         });
 
-        stream_next_indices.insert(
-            stream_id,
-            start_index.saturating_add(samples_len),
-        );
+        stream_next_indices.insert(stream_id, start_index.saturating_add(samples_len));
     }
 
     placements.sort_by_key(|p| p.start_index);
@@ -626,7 +628,7 @@ fn mix_audio_packets_to_pcm(
         let p_start = p.start_index;
         let p_len = p.packet.data.len() / 2;
         let p_end = p_start + p_len;
-        
+
         let overlap_end = p_end.min(final_len);
         let len = overlap_end.saturating_sub(p_start);
 
@@ -834,7 +836,8 @@ fn mix_and_encode_audio_chunks(
             offset += samples_per_chunk;
 
             let samples_in_frame = (chunk.len() / AUDIO_CHANNELS as usize).max(1);
-            let mut input = ffmpeg::frame::Audio::new(input_format, samples_in_frame, channel_layout);
+            let mut input =
+                ffmpeg::frame::Audio::new(input_format, samples_in_frame, channel_layout);
             input.set_rate(AUDIO_SAMPLE_RATE);
             input.set_pts(Some(next_pts));
             copy_pcm_into_frame(&mut input, chunk);
@@ -854,6 +857,11 @@ fn mix_and_encode_audio_chunks(
 
         if offset > 0 {
             pcm_buffer.drain(..offset);
+            // Aggressively release capacity when it significantly exceeds current length.
+            // This prevents the allocator from holding onto large blocks across chunks.
+            if pcm_buffer.capacity() > pcm_buffer.len() * 4 && pcm_buffer.capacity() > 16384 {
+                pcm_buffer.shrink_to_fit();
+            }
         }
 
         chunk_start += current_chunk_len;
@@ -881,6 +889,14 @@ fn mix_and_encode_audio_chunks(
 
     encoder.send_eof().ok();
     drain_encoder_to_vec(encoder, &mut result);
+
+    // Release working set buffers — they are no longer needed.
+    drop(pcm_buffer);
+    drop(mixed_i16);
+    drop(mixed_i32);
+
+    // Shrink result to exact size — no extra capacity after encoding completes.
+    result.shrink_to_fit();
 
     Ok(result)
 }

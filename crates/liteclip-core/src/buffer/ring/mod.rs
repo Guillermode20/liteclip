@@ -50,7 +50,7 @@ pub mod spmc_ring;
 pub mod types;
 
 pub use functions::*;
-pub use spmc_ring::LockFreeReplayBuffer;
+pub use spmc_ring::{LockFreeReplayBuffer, TrackedSnapshot};
 pub use types::{BufferStats, SharedReplayBuffer};
 
 /// Main replay buffer type.

@@ -348,4 +348,75 @@ mod tests {
         assert_eq!(super::hevc_nal_type(&snapshot[1].data), Some(33));
         assert_eq!(super::hevc_nal_type(&snapshot[2].data), Some(34));
     }
+
+    /// Test that evict_frontier is correctly updated after ring wrap.
+    /// This was the root cause of a memory leak: without updating evict_frontier,
+    /// memory eviction would evict NEW packets instead of old ones after wrap.
+    #[test]
+    fn test_evict_frontier_updates_after_ring_wrap() {
+        // Create a buffer with small capacity to force ring wrap quickly.
+        // Duration=1s at 30fps = ~30 video packets, but we use a tiny memory limit
+        // to ensure the ring wraps multiple times.
+        let buffer = LockFreeReplayBuffer::new(&make_config(1, 10)).unwrap();
+
+        // Push 500 packets, which should wrap the ring many times.
+        // Each packet is 50KB, so 500 packets = 25MB total.
+        // With 10MB limit, we should never exceed ~10MB.
+        for i in 0..500 {
+            let packet = create_test_packet(i * 1_000_000, i % 10 == 0, 50_000);
+            buffer.push(packet);
+        }
+
+        let stats = buffer.stats();
+
+        // Memory should stay within budget (10MB + some headroom for in-flight eviction)
+        assert!(
+            stats.memory_usage_percent <= 110.0,
+            "Memory usage {}% exceeds budget after ring wrap (expected <=110%)",
+            stats.memory_usage_percent
+        );
+
+        // The packet count should be bounded, not 500
+        assert!(
+            stats.packet_count < 500,
+            "Packet count {} indicates packets were not evicted",
+            stats.packet_count
+        );
+    }
+
+    /// Test that memory stays bounded during continuous operation with ring wrap.
+    /// Simulates long-running recording scenario.
+    #[test]
+    fn test_memory_stays_bounded_during_long_run() {
+        let buffer = LockFreeReplayBuffer::new(&make_config(5, 5)).unwrap();
+
+        // Push 1000 packets over "time", simulating continuous recording.
+        // Each packet = 100KB, total = 100MB pushed.
+        // With 5MB limit, memory should never exceed ~5-6MB.
+        let mut max_memory_percent = 0.0f32;
+
+        for i in 0..1000 {
+            let packet = create_test_packet(i * 33_333_333, i % 30 == 0, 100_000);
+            buffer.push(packet);
+
+            let stats = buffer.stats();
+            max_memory_percent = max_memory_percent.max(stats.memory_usage_percent);
+        }
+
+        let final_stats = buffer.stats();
+
+        // Final memory should be within budget
+        assert!(
+            final_stats.memory_usage_percent <= 110.0,
+            "Final memory usage {}% exceeds budget",
+            final_stats.memory_usage_percent
+        );
+
+        // Max memory during run should also be bounded (allow 10% overshoot for race between add/evict)
+        assert!(
+            max_memory_percent <= 120.0,
+            "Peak memory usage {}% indicates memory leak during ring wrap",
+            max_memory_percent
+        );
+    }
 }

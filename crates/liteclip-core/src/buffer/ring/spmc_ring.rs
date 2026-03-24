@@ -44,7 +44,7 @@ use bytes::Bytes;
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, info, trace};
+use tracing::{debug, info, trace, warn};
 
 use super::functions::{h264_nal_type, hevc_nal_type, qpc_frequency};
 use super::types::BufferStats;
@@ -98,6 +98,89 @@ impl FirstVideoKind {
     }
 }
 
+/// Wrapper for snapshot results that tracks outstanding bytes.
+///
+/// When a snapshot is created, the total bytes in the snapshot are added to
+/// `outstanding_snapshot_bytes`. When this wrapper is dropped, the bytes are
+/// subtracted, providing visibility into memory pinned by in-flight snapshots.
+pub struct SnapshotBytes {
+    inner: Arc<LockFreeInner>,
+    bytes: usize,
+}
+
+impl SnapshotBytes {
+    fn new(inner: Arc<LockFreeInner>, bytes: usize) -> Self {
+        if bytes > 0 {
+            inner.outstanding_snapshot_bytes.fetch_add(bytes, Ordering::Relaxed);
+        }
+        Self { inner, bytes }
+    }
+}
+
+impl Drop for SnapshotBytes {
+    fn drop(&mut self) {
+        if self.bytes > 0 {
+            self.inner
+                .outstanding_snapshot_bytes
+                .fetch_sub(self.bytes, Ordering::Relaxed);
+        }
+    }
+}
+
+/// A snapshot of encoded packets with memory tracking.
+///
+/// This wrapper tracks the total bytes in the snapshot and decrements
+/// the outstanding count when dropped, providing visibility into memory
+/// pinned by in-flight snapshots.
+pub struct TrackedSnapshot {
+    packets: Vec<EncodedPacket>,
+    _tracker: SnapshotBytes,
+}
+
+impl TrackedSnapshot {
+    fn new(packets: Vec<EncodedPacket>, inner: Arc<LockFreeInner>) -> Self {
+        let bytes = packets.iter().map(|p| p.data.len()).sum();
+        let tracker = SnapshotBytes::new(inner, bytes);
+        Self {
+            packets,
+            _tracker: tracker,
+        }
+    }
+
+    pub fn into_inner(self) -> Vec<EncodedPacket> {
+        self.packets
+    }
+
+    pub fn as_slice(&self) -> &[EncodedPacket] {
+        &self.packets
+    }
+
+    pub fn len(&self) -> usize {
+        self.packets.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.packets.is_empty()
+    }
+}
+
+impl std::ops::Deref for TrackedSnapshot {
+    type Target = [EncodedPacket];
+
+    fn deref(&self) -> &Self::Target {
+        &self.packets
+    }
+}
+
+impl IntoIterator for TrackedSnapshot {
+    type Item = EncodedPacket;
+    type IntoIter = std::vec::IntoIter<EncodedPacket>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.packets.into_iter()
+    }
+}
+
 /// Replay buffer ring: atomic write cursor with mutex-protected slots.
 ///
 /// See the [module-level description](self) for the locking model.
@@ -124,7 +207,9 @@ struct LockFreeInner {
     newest_pts: AtomicI64,
     param_cache: std::sync::Mutex<ParameterCache>,
     param_cache_complete: std::sync::atomic::AtomicBool,
+    param_cache_pushes_since_complete: AtomicUsize,
     first_video_info: std::sync::Mutex<Option<(usize, FirstVideoKind)>>,
+    outstanding_snapshot_bytes: AtomicUsize,
 }
 
 #[repr(align(64))]
@@ -201,7 +286,9 @@ impl LockFreeReplayBuffer {
                 newest_pts: AtomicI64::new(0),
                 param_cache: std::sync::Mutex::new(ParameterCache::default()),
                 param_cache_complete: std::sync::atomic::AtomicBool::new(false),
+                param_cache_pushes_since_complete: AtomicUsize::new(0),
                 first_video_info: std::sync::Mutex::new(None),
+                outstanding_snapshot_bytes: AtomicUsize::new(0),
             }),
         })
     }
@@ -248,11 +335,26 @@ impl LockFreeReplayBuffer {
         let packet_size = packet.data.len();
         let packet_pts = packet.pts;
         let is_keyframe = packet.is_keyframe;
+        let stream_type = packet.stream;
+
+        // Track pushes since param cache was completed for periodic refresh
+        // Check BEFORE cache_parameter_sets to avoid race where we populate and immediately clear
+        if inner.param_cache_complete.load(Ordering::Relaxed) {
+            let pushes = inner.param_cache_pushes_since_complete.fetch_add(1, Ordering::Relaxed) + 1;
+            // Periodic cache clear every 1000 pushes to prevent stale parameter sets
+            // and to handle encoder reconfiguration (resolution changes, etc.)
+            if pushes >= 1000 {
+                self.clear_parameter_cache();
+            }
+        }
 
         self.cache_parameter_sets(&packet);
 
         if matches!(packet.stream, StreamType::Video) {
-            let mut first_video_info = inner.first_video_info.lock().unwrap();
+            let mut first_video_info = inner
+                .first_video_info
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             if first_video_info.is_none() {
                 let kind = self.detect_first_video_kind(packet.data.as_ref());
                 *first_video_info = Some((inner.write_idx.load(Ordering::Relaxed), kind));
@@ -263,28 +365,70 @@ impl LockFreeReplayBuffer {
         let slot_idx = write_idx & inner.mask;
         let slot = &inner.slots[slot_idx];
 
-        let old_packet = {
-            let mut packet_guard = slot.packet.lock().unwrap();
+        // Load total_bytes_before for logging BEFORE the lock block where fetch_add happens
+        let total_bytes_before = inner.total_bytes.load(Ordering::Relaxed);
+
+        // Track old packet for memory accounting - now includes new packet accounting inside lock
+        let old_packet_size = {
+            let mut packet_guard = slot.packet.lock().unwrap_or_else(|e| e.into_inner());
             let old = packet_guard.take();
+            let old_size = old.as_ref().map(|p| p.data.len()).unwrap_or(0);
+            let old_was_keyframe = old.as_ref().map(|p| p.is_keyframe).unwrap_or(false);
             *packet_guard = Some(packet);
-            old
+            // Account for new packet bytes immediately, inside the lock
+            inner.total_bytes.fetch_add(packet_size, Ordering::Relaxed);
+            if old.is_some() {
+                inner.total_bytes.fetch_sub(old_size, Ordering::Relaxed);
+                if old_was_keyframe {
+                    inner.keyframe_count.fetch_sub(1, Ordering::Relaxed);
+                }
+            }
+            if is_keyframe {
+                inner.keyframe_count.fetch_add(1, Ordering::Relaxed);
+            }
+            old_size
         };
 
-        if let Some(ref old) = old_packet {
-            inner
-                .total_bytes
-                .fetch_sub(old.data.len(), Ordering::Relaxed);
-            if old.is_keyframe {
-                inner.keyframe_count.fetch_sub(1, Ordering::Relaxed);
+        inner.newest_pts.store(packet_pts, Ordering::Release);
+
+        // Update evict_frontier to track the oldest valid packet after ring wrap.
+        // After fetch_add, the next write will be at write_idx + 1.
+        // The oldest valid packet is at (write_idx + 1) - capacity when buffer is full.
+        // Without this, memory eviction would evict NEW packets instead of old ones.
+        let next_write_idx = write_idx + 1;
+        if next_write_idx > inner.capacity {
+            let oldest_valid = next_write_idx - inner.capacity;
+            let current_frontier = inner.evict_frontier.load(Ordering::Relaxed);
+            if current_frontier < oldest_valid {
+                inner.evict_frontier.store(oldest_valid, Ordering::Release);
+                trace!(
+                    "Ring wrap: write_idx={}, capacity={}, evict_frontier {}->{}",
+                    write_idx,
+                    inner.capacity,
+                    current_frontier,
+                    oldest_valid
+                );
             }
         }
 
-        inner.total_bytes.fetch_add(packet_size, Ordering::Relaxed);
-        if is_keyframe {
-            inner.keyframe_count.fetch_add(1, Ordering::Relaxed);
+        // Log every 100 video packets for memory tracking
+        if matches!(stream_type, StreamType::Video) && write_idx % 100 == 0 {
+            let evict_frontier = inner.evict_frontier.load(Ordering::Relaxed);
+            let packet_count = write_idx.saturating_sub(evict_frontier);
+            debug!(
+                "Buffer push[{}]: stream={:?}, pkt_size={}KB, old_pkt_size={}KB, total={:.1}MB/{:.1}MB ({:.0}%), packets={}, write_idx={}, evict_frontier={}",
+                write_idx,
+                stream_type,
+                packet_size / 1024,
+                old_packet_size / 1024,
+                total_bytes_before as f64 / 1_048_576.0,
+                inner.max_memory_bytes as f64 / 1_048_576.0,
+                (total_bytes_before as f64 / inner.max_memory_bytes as f64 * 100.0).min(999.0),
+                packet_count,
+                write_idx,
+                evict_frontier
+            );
         }
-
-        inner.newest_pts.store(packet_pts, Ordering::Release);
 
         // Enforce memory budget: if total_bytes exceeds max_memory_bytes, proactively
         // evict the oldest packets (those the ring would discard next anyway) until we
@@ -293,33 +437,52 @@ impl LockFreeReplayBuffer {
         // packet-count estimate assumed when sizing the ring capacity.
         if inner.max_memory_bytes > 0 {
             let mut eviction_count = 0usize;
+            let mut evicted_bytes = 0usize;
+            let mut evicted_keyframes = 0usize;
+            let start_total = inner.total_bytes.load(Ordering::Relaxed);
+
             while inner.total_bytes.load(Ordering::Relaxed) > inner.max_memory_bytes {
                 let evict = inner.evict_frontier.load(Ordering::Relaxed);
                 if evict >= write_idx {
+                    warn!(
+                        "Eviction abort: evict_frontier={} >= write_idx={} (no packets to evict!)",
+                        evict, write_idx
+                    );
                     break;
                 }
                 let evict_slot_idx = evict & inner.mask;
                 let slot = &inner.slots[evict_slot_idx];
                 {
-                    let mut guard = slot.packet.lock().unwrap();
+                    let mut guard = slot.packet.lock().unwrap_or_else(|e| e.into_inner());
                     if let Some(old) = guard.take() {
-                        inner
-                            .total_bytes
-                            .fetch_sub(old.data.len(), Ordering::Relaxed);
+                        let old_len = old.data.len();
+                        inner.total_bytes.fetch_sub(old_len, Ordering::Relaxed);
                         if old.is_keyframe {
                             inner.keyframe_count.fetch_sub(1, Ordering::Relaxed);
+                            evicted_keyframes += 1;
                         }
+                        evicted_bytes += old_len;
                         eviction_count += 1;
+                    } else {
+                        warn!(
+                            "Eviction slot empty: evict_frontier={}, slot_idx={}, no packet to evict",
+                            evict, evict_slot_idx
+                        );
                     }
                 }
                 inner.evict_frontier.fetch_add(1, Ordering::Release);
             }
+
             if eviction_count > 0 {
+                let end_total = inner.total_bytes.load(Ordering::Relaxed);
                 debug!(
-                    "Buffer memory eviction: {} packets removed, {}MB / {}MB",
+                    "Buffer memory eviction: {} packets ({} keyframes) removed, {:.1}MB freed, total {:.1}MB -> {:.1}MB / {:.1}MB limit",
                     eviction_count,
-                    inner.total_bytes.load(Ordering::Relaxed) / 1_000_000,
-                    inner.max_memory_bytes / 1_000_000
+                    evicted_keyframes,
+                    evicted_bytes as f64 / 1_048_576.0,
+                    start_total as f64 / 1_048_576.0,
+                    end_total as f64 / 1_048_576.0,
+                    inner.max_memory_bytes as f64 / 1_048_576.0
                 );
             }
         }
@@ -337,7 +500,7 @@ impl LockFreeReplayBuffer {
         let inner = &self.inner;
         let data = packet.data.as_ref();
 
-        let mut cache = inner.param_cache.lock().unwrap();
+        let mut cache = inner.param_cache.lock().unwrap_or_else(|e| e.into_inner());
 
         // Early exit if we already have all parameters for current codec
         let has_all_params = match cache.codec_kind {
@@ -462,12 +625,12 @@ impl LockFreeReplayBuffer {
     /// # Thread Safety
     ///
     /// Safe to call from multiple consumer threads.
-    pub fn snapshot(&self) -> BufferResult<Vec<EncodedPacket>> {
+    pub fn snapshot(&self) -> BufferResult<TrackedSnapshot> {
         let inner = &self.inner;
         let write_idx = inner.write_idx.load(Ordering::Acquire);
 
         if write_idx == 0 {
-            return Ok(vec![]);
+            return Ok(TrackedSnapshot::new(vec![], Arc::clone(&inner)));
         }
 
         let capacity = inner.capacity;
@@ -483,7 +646,16 @@ impl LockFreeReplayBuffer {
 
             if let Ok(packet_guard) = slot.packet.try_lock() {
                 if let Some(ref packet) = *packet_guard {
-                    result.push(packet.clone());
+                    // Deep copy to break arc sharing — allows ring to evict freely
+                    // without waiting for snapshot to be dropped
+                    result.push(EncodedPacket {
+                        data: Bytes::copy_from_slice(packet.data.as_ref()),
+                        pts: packet.pts,
+                        dts: packet.dts,
+                        stream: packet.stream,
+                        is_keyframe: packet.is_keyframe,
+                        resolution: packet.resolution,
+                    });
                 }
             }
         }
@@ -507,7 +679,7 @@ impl LockFreeReplayBuffer {
                 })
                 .unwrap_or(0);
 
-            let cache = inner.param_cache.lock().unwrap();
+            let cache = inner.param_cache.lock().unwrap_or_else(|e| e.into_inner());
             let mut prepend = Vec::new();
 
             match cache.codec_kind {
@@ -570,10 +742,10 @@ impl LockFreeReplayBuffer {
             let mut final_result = Vec::with_capacity(prepend.len() + result.len());
             final_result.extend(prepend);
             final_result.extend(result);
-            return Ok(final_result);
+            return Ok(TrackedSnapshot::new(final_result, Arc::clone(&inner)));
         }
 
-        Ok(result)
+        Ok(TrackedSnapshot::new(result, Arc::clone(&inner)))
     }
 
     /// Gets a snapshot starting from a specific PTS.
@@ -598,17 +770,29 @@ impl LockFreeReplayBuffer {
     /// # Thread Safety
     ///
     /// Safe to call from multiple consumer threads.
-    pub fn snapshot_from(&self, start_pts: i64) -> BufferResult<Vec<EncodedPacket>> {
+    pub fn snapshot_from(&self, start_pts: i64) -> BufferResult<TrackedSnapshot> {
         let inner = &self.inner;
         let write_idx = inner.write_idx.load(Ordering::Acquire);
 
         if write_idx == 0 {
-            return Ok(vec![]);
+            return Ok(TrackedSnapshot::new(vec![], Arc::clone(&inner)));
         }
 
         let first_idx = write_idx.saturating_sub(inner.capacity);
         let evict_frontier = inner.evict_frontier.load(Ordering::Acquire);
         let first_idx = first_idx.max(evict_frontier);
+
+        // Log buffer state at snapshot start
+        let buffer_total_bytes = inner.total_bytes.load(Ordering::Relaxed);
+        let buffer_packet_count = write_idx.saturating_sub(evict_frontier);
+        debug!(
+            "snapshot_from START: start_pts={}, write_idx={}, evict_frontier={}, buffer_packets={}, buffer_bytes={:.1}MB",
+            start_pts,
+            write_idx,
+            evict_frontier,
+            buffer_packet_count,
+            buffer_total_bytes as f64 / 1_048_576.0
+        );
 
         // ── Pass 1: scan-only (no clones) ──────────────────────────────────
         // Record lightweight metadata per slot to determine the keyframe
@@ -709,7 +893,9 @@ impl LockFreeReplayBuffer {
             }
         }
 
-        // We no longer need the metadata vec.
+        // Aggressively release metas — we no longer need it.
+        metas.clear();
+        metas.shrink_to_fit();
         drop(metas);
 
         // ── Pass 2: selective clone ────────────────────────────────────────
@@ -726,10 +912,24 @@ impl LockFreeReplayBuffer {
 
             if let Ok(packet_guard) = slot.packet.try_lock() {
                 if let Some(ref packet) = *packet_guard {
-                    result.push(packet.clone());
+                    // Deep copy to break arc sharing — allows ring to evict freely
+                    // without waiting for snapshot to be dropped
+                    result.push(EncodedPacket {
+                        data: Bytes::copy_from_slice(packet.data.as_ref()),
+                        pts: packet.pts,
+                        dts: packet.dts,
+                        stream: packet.stream,
+                        is_keyframe: packet.is_keyframe,
+                        resolution: packet.resolution,
+                    });
                 }
             }
         }
+
+        // Release include_flags immediately after loop completes.
+        include_flags.clear();
+        include_flags.shrink_to_fit();
+        drop(include_flags);
 
         result.sort_by_key(|p| {
             (
@@ -742,14 +942,30 @@ impl LockFreeReplayBuffer {
             )
         });
 
+        // Calculate result memory footprint
+        let result_bytes: usize = result.iter().map(|p| p.data.len()).sum();
         let result_video = result
             .iter()
             .filter(|p| matches!(p.stream, StreamType::Video))
             .count();
+        let result_audio = result.len().saturating_sub(result_video);
+
+        // Log buffer state after snapshot to see if anything changed
+        let buffer_bytes_after = inner.total_bytes.load(Ordering::Relaxed);
+        let evict_after = inner.evict_frontier.load(Ordering::Relaxed);
+        let write_idx_after = inner.write_idx.load(Ordering::Relaxed);
+
         debug!(
-            "snapshot_from: result={} packets ({} video)",
+            "snapshot_from RESULT: result={} packets ({} video, {} audio), result_bytes={:.1}MB, buffer_after={:.1}MB, write_idx {}->{}, evict_frontier {}->{}",
             result.len(),
-            result_video
+            result_video,
+            result_audio,
+            result_bytes as f64 / 1_048_576.0,
+            buffer_bytes_after as f64 / 1_048_576.0,
+            write_idx,
+            write_idx_after,
+            evict_frontier,
+            evict_after
         );
 
         if !result.is_empty() {
@@ -768,7 +984,11 @@ impl LockFreeReplayBuffer {
                 );
 
                 if first_is_keyframe && !first_nal_is_vps && !first_nal_is_sps {
-                    let cache = self.inner.param_cache.lock().unwrap();
+                    let cache = self
+                        .inner
+                        .param_cache
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
                     info!(
                         "snapshot_from: prepending param sets (codec={:?}, vps={}, sps={}, pps={})",
                         cache.codec_kind,
@@ -845,13 +1065,13 @@ impl LockFreeReplayBuffer {
                         let mut final_result = Vec::with_capacity(prepend.len() + result.len());
                         final_result.extend(prepend);
                         final_result.extend(result);
-                        return Ok(final_result);
+                        return Ok(TrackedSnapshot::new(final_result, Arc::clone(&inner)));
                     }
                 }
             }
         }
 
-        Ok(result)
+        Ok(TrackedSnapshot::new(result, Arc::clone(&inner)))
     }
 
     /// Clears all packets from the buffer.
@@ -865,11 +1085,25 @@ impl LockFreeReplayBuffer {
     pub fn clear(&self) {
         let inner = &self.inner;
 
+        // Log state before clear
+        let bytes_before = inner.total_bytes.load(Ordering::Relaxed);
+        let packets_before = inner
+            .write_idx
+            .load(Ordering::Relaxed)
+            .saturating_sub(inner.evict_frontier.load(Ordering::Relaxed));
+
+        debug!(
+            "Buffer clear START: {} packets, {:.1}MB",
+            packets_before,
+            bytes_before as f64 / 1_048_576.0
+        );
+
         for i in 0..inner.capacity {
             let slot = &inner.slots[i];
-            if let Ok(mut packet_guard) = slot.packet.try_lock() {
-                *packet_guard = None;
-            }
+            // Use blocking lock with poison recovery — try_lock could silently
+            // skip slots if a snapshot consumer holds the lock, leaking packets.
+            let mut packet_guard = slot.packet.lock().unwrap_or_else(|e| e.into_inner());
+            *packet_guard = None;
         }
 
         inner.write_idx.store(0, Ordering::Release);
@@ -877,17 +1111,54 @@ impl LockFreeReplayBuffer {
         inner.total_bytes.store(0, Ordering::Release);
         inner.keyframe_count.store(0, Ordering::Release);
         inner.param_cache_complete.store(false, Ordering::Release);
-        *inner.first_video_info.lock().unwrap() = None;
+        inner.param_cache_pushes_since_complete.store(0, Ordering::Release);
+        *inner
+            .first_video_info
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
 
-        let cache = inner.param_cache.lock().unwrap();
+        let cache = inner.param_cache.lock().unwrap_or_else(|e| e.into_inner());
         debug!(
-            "Lock-free buffer cleared (H.264 SPS: {}, PPS: {} | HEVC VPS: {}, SPS: {}, PPS: {})",
+            "Buffer clear DONE: cleared {} packets ({:.1}MB), param cache preserved (H.264 SPS: {}, PPS: {} | HEVC VPS: {}, SPS: {}, PPS: {})",
+            packets_before,
+            bytes_before as f64 / 1_048_576.0,
             cache.h264_sps.is_some(),
             cache.h264_pps.is_some(),
             cache.hevc_vps.is_some(),
             cache.hevc_sps.is_some(),
             cache.hevc_pps.is_some()
         );
+    }
+
+    /// Clears the parameter set cache and resets tracking state.
+    ///
+    /// Called periodically (every 1000 pushes after cache completion) to prevent
+    /// stale parameter sets and to handle encoder reconfiguration. Also clears
+    /// first_video_info so the next video packet becomes the new reference point.
+    fn clear_parameter_cache(&self) {
+        let inner = &self.inner;
+
+        debug!("Clearing parameter cache (periodic refresh)");
+
+        // Clear the cached parameter data
+        {
+            let mut cache = inner.param_cache.lock().unwrap_or_else(|e| e.into_inner());
+            cache.h264_sps = None;
+            cache.h264_pps = None;
+            cache.hevc_vps = None;
+            cache.hevc_sps = None;
+            cache.hevc_pps = None;
+        }
+
+        // Reset completion state and push counter
+        inner.param_cache_complete.store(false, Ordering::Release);
+        inner.param_cache_pushes_since_complete.store(0, Ordering::Release);
+
+        // Clear first_video_info so next video packet becomes new reference
+        *inner
+            .first_video_info
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     /// Gets current buffer statistics.
@@ -913,6 +1184,21 @@ impl LockFreeReplayBuffer {
         } else {
             0.0
         };
+
+        // Detailed stats logging for debugging
+        if write_idx % 300 == 0 && write_idx > 0 {
+            debug!(
+                "Buffer stats: write_idx={}, evict_frontier={}, capacity={}, packets={}, keyframes={}, bytes={:.1}MB/{:.1}MB ({:.0}%)",
+                write_idx,
+                evict_frontier,
+                inner.capacity,
+                write_idx.saturating_sub(actual_start),
+                keyframe_count,
+                total_bytes as f64 / 1_048_576.0,
+                inner.max_memory_bytes as f64 / 1_048_576.0,
+                memory_usage_percent
+            );
+        }
 
         let duration_secs = if write_idx >= 2 {
             // Read actual oldest packet's PTS from its slot (evict_frontier aware).
@@ -942,6 +1228,22 @@ impl LockFreeReplayBuffer {
             keyframe_count,
             memory_usage_percent: memory_usage_percent.min(100.0),
         }
+    }
+
+    /// Returns the number of bytes currently pinned by in-flight snapshots.
+    ///
+    /// This is memory that has been cloned from the ring but is still being
+    /// processed (e.g., being encoded to disk). The ring's `total_bytes` doesn't
+    /// account for these pinned allocations, so this method provides visibility
+    /// into the actual RSS beyond the ring's configured budget.
+    ///
+    /// **Note:** This uses `Bytes::len()` (logical slice length), not the backing
+    /// allocation size. If packets are views into larger `BytesMut` pages, this
+    /// will underreport actual RSS — it's a lower bound, not exact.
+    pub fn pinned_bytes(&self) -> usize {
+        self.inner
+            .outstanding_snapshot_bytes
+            .load(Ordering::Relaxed)
     }
 
     pub fn oldest_pts(&self) -> Option<i64> {

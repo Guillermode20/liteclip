@@ -100,6 +100,43 @@ impl ClipManager {
         let duration = Duration::from_secs(config.general.replay_duration_secs as u64);
         let save_directory = PathBuf::from(&config.general.save_directory);
 
+        // Check for webcam buffer and prepare its task BEFORE spawning the main save.
+        // We spawn it as a detached task so the main clip save can return and free
+        // its local resources immediately, rather than holding them while webcam saves.
+        let webcam_handle = if let Some(wb) = webcam_buffer {
+            let wstats = wb.stats();
+            if wstats.packet_count > 0 && wstats.keyframe_count > 0 {
+                let webcam_path = webcam_video_path(&save_directory, &output_path);
+                if let Some(parent) = webcam_path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let w = config.video.webcam_width;
+                let h = config.video.webcam_height;
+                let muxer_webcam = MuxerConfig::new(w, h, fps, &webcam_path)
+                    .with_video_codec("hevc")
+                    .with_expect_audio(false);
+                let wb_clone = wb.clone();
+                let save_dir = save_directory.clone();
+                // Spawn as independent tokio task — don't await it inline.
+                // This ensures the main save function's stack (and the main buffer
+                // reference) are released as soon as the primary clip is saved.
+                Some(tokio::spawn(async move {
+                    let handle_w = spawn_clip_saver(
+                        wb_clone,
+                        duration,
+                        webcam_path,
+                        muxer_webcam,
+                        save_dir,
+                    );
+                    handle_w.await
+                }))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         crate::output::saver::log_save_memory("before_spawn_saver", Some(buffer), None);
         let handle = spawn_clip_saver(
             buffer_clone,
@@ -113,36 +150,19 @@ impl ClipManager {
 
         info!("Clip saver completed (buffer preserved for continuous replay)");
 
-        if let Some(wb) = webcam_buffer {
-            let wstats = wb.stats();
-            if wstats.packet_count > 0 && wstats.keyframe_count > 0 {
-                let webcam_path = webcam_video_path(&save_directory, &final_path);
-                if let Some(parent) = webcam_path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                let w = config.video.webcam_width;
-                let h = config.video.webcam_height;
-                let muxer_webcam = MuxerConfig::new(w, h, fps, &webcam_path)
-                    .with_video_codec("hevc")
-                    .with_expect_audio(false);
-                let wb_clone = wb.clone();
-                let handle_w = spawn_clip_saver(
-                    wb_clone,
-                    duration,
-                    webcam_path,
-                    muxer_webcam,
-                    save_directory,
-                );
-                match handle_w.await {
-                    Ok(Ok(path)) => info!("Webcam companion clip saved: {:?}", path),
-                    Ok(Err(e)) => warn!("Webcam companion save failed: {:#}", e),
-                    Err(e) => warn!("Webcam companion save task failed: {}", e),
-                }
-            }
-        }
-
+        // Notify host immediately — don't wait for webcam
         if let Some(h) = host {
             h.on_clip_saved(&final_path);
+        }
+
+        // Await webcam save in a background-friendly way.
+        // The webcam task was already spawned as independent — this just waits for it.
+        if let Some(wh) = webcam_handle {
+            match wh.await {
+                Ok(Ok(path)) => info!("Webcam companion clip saved: {:?}", path),
+                Ok(Err(e)) => warn!("Webcam companion save failed: {:#}", e),
+                Err(e) => warn!("Webcam companion save task failed: {}", e),
+            }
         }
 
         Ok(final_path)

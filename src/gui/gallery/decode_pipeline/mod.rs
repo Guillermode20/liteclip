@@ -16,7 +16,7 @@ use crate::output::VideoFileMetadata;
 
 mod frame_pool;
 
-use frame_pool::{FramePool, FRAME_POOL_SIZE};
+use frame_pool::{FramePool, PooledBuffer, PooledRgbaImage, FRAME_POOL_SIZE};
 
 const FRAME_CHANNEL_CAPACITY: usize = 24;
 const PLAYBACK_QUEUE_DEPTH: usize = 20;
@@ -38,12 +38,12 @@ impl Drop for DecoderHardwareContext {
 }
 
 pub struct PlaybackFrame {
-    pub image: RgbaImage,
+    pub image: PooledRgbaImage,
 }
 
 struct TimedFrame {
     pts_secs: f64,
-    image: RgbaImage,
+    image: PooledRgbaImage,
 }
 
 pub struct PlaybackController {
@@ -103,7 +103,7 @@ struct DecoderFrame {
     request_id: u64,
     kind: DecoderFrameKind,
     pts_secs: f64,
-    image: RgbaImage,
+    image: PooledRgbaImage,
 }
 
 struct DecoderError {
@@ -372,7 +372,7 @@ impl PlaybackController {
             .take()
     }
 
-    pub fn take_playback_frame(&self) -> Option<RgbaImage> {
+    pub fn take_playback_frame(&self) -> Option<PooledRgbaImage> {
         let wall_time_secs = self.playback_position_secs();
         let mut queue = self
             .shared
@@ -1601,7 +1601,7 @@ impl DecoderSession {
         Ok(())
     }
 
-    fn decode_next_image(&mut self) -> Result<Option<(f64, RgbaImage)>> {
+    fn decode_next_image(&mut self) -> Result<Option<(f64, PooledRgbaImage)>> {
         loop {
             match self.decoder.receive_frame(&mut self.decoded_frame) {
                 Ok(()) => {
@@ -1884,14 +1884,12 @@ fn rgba_frame_to_image_pooled(
     frame: &ffmpeg::util::frame::video::Video,
     width: u32,
     height: u32,
-    pool: &FramePool,
-) -> Result<RgbaImage> {
+    pool: &Arc<FramePool>,
+) -> Result<PooledRgbaImage> {
     let stride = frame.stride(0);
     let data = frame.data(0);
     let row_bytes = width as usize * 4;
-    let mut rgba = pool
-        .acquire()
-        .unwrap_or_else(|| vec![0u8; pool.buffer_size()]);
+    let mut rgba = pool.acquire();
 
     for y in 0..height as usize {
         let src_offset = y * stride;
@@ -1900,7 +1898,8 @@ fn rgba_frame_to_image_pooled(
             .copy_from_slice(&data[src_offset..src_offset + row_bytes]);
     }
 
-    RgbaImage::from_raw(width, height, rgba).context("Failed to create RGBA image from frame")
+    PooledRgbaImage::from_pooled_buffer(rgba, width, height)
+        .context("Failed to create RGBA image from frame")
 }
 
 fn scaled_dimensions(preview_width: u32, metadata: &VideoFileMetadata) -> (u32, u32) {
