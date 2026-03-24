@@ -583,6 +583,10 @@ impl LockFreeReplayBuffer {
     /// Falls back to the first keyframe after the requested PTS only when no
     /// earlier keyframe is available.
     ///
+    /// Uses a two-pass approach to avoid doubling memory:
+    ///   Pass 1 — scan slot metadata (pts, keyframe, stream) without cloning.
+    ///   Pass 2 — clone only the packets that belong in the final result.
+    ///
     /// # Arguments
     ///
     /// * `start_pts` - The starting presentation timestamp (in stream timebase).
@@ -606,10 +610,20 @@ impl LockFreeReplayBuffer {
         let evict_frontier = inner.evict_frontier.load(Ordering::Acquire);
         let first_idx = first_idx.max(evict_frontier);
 
+        // ── Pass 1: scan-only (no clones) ──────────────────────────────────
+        // Record lightweight metadata per slot to determine the keyframe
+        // boundary and the video_start_pts, without cloning any packet data.
+        struct SlotMeta {
+            ring_idx: usize,
+            pts: i64,
+            is_keyframe: bool,
+            stream: StreamType,
+        }
+
         let capacity_estimate = write_idx.saturating_sub(first_idx);
-        let mut packets: Vec<(usize, EncodedPacket)> = Vec::with_capacity(capacity_estimate);
-        let mut first_keyframe_at_or_after = None;
-        let mut last_keyframe_at_or_before = None;
+        let mut metas: Vec<SlotMeta> = Vec::with_capacity(capacity_estimate);
+        let mut first_keyframe_at_or_after: Option<usize> = None;
+        let mut last_keyframe_at_or_before: Option<usize> = None;
 
         for i in first_idx..write_idx {
             let slot_idx = i & inner.mask;
@@ -625,7 +639,12 @@ impl LockFreeReplayBuffer {
                             last_keyframe_at_or_before = Some(i);
                         }
                     }
-                    packets.push((i, packet.clone()));
+                    metas.push(SlotMeta {
+                        ring_idx: i,
+                        pts: packet.pts,
+                        is_keyframe: packet.is_keyframe,
+                        stream: packet.stream,
+                    });
                 }
             }
         }
@@ -634,40 +653,83 @@ impl LockFreeReplayBuffer {
             .or(first_keyframe_at_or_after)
             .unwrap_or(first_idx);
 
-        let video_count = packets
+        // Derive video_start_pts from the metadata (no clones yet).
+        let video_start_pts = metas
             .iter()
-            .filter(|(_, p)| matches!(p.stream, StreamType::Video))
-            .count();
-        let keyframe_count = packets.iter().filter(|(_, p)| p.is_keyframe).count();
-        debug!(
-            "snapshot_from: all_packets={} ({} video, {} keyframes), start_pts={}, start_idx={}",
-            packets.len(),
-            video_count,
-            keyframe_count,
-            start_pts,
-            start_idx
-        );
-
-        let video_start_pts = packets
-            .iter()
-            .filter(|(_, p)| matches!(p.stream, StreamType::Video))
-            .find(|(i, _)| *i >= start_idx)
-            .map(|(_, p)| p.pts)
+            .filter(|m| matches!(m.stream, StreamType::Video))
+            .find(|m| m.ring_idx >= start_idx)
+            .map(|m| m.pts)
             .unwrap_or(start_pts);
 
-        let mut result: Vec<EncodedPacket> = packets
+        // Build an index set of which ring indices to include.
+        // Packets at or after start_idx are always included.
+        // Audio packets before start_idx are included if their PTS >= video_start_pts.
+        let included_count = metas
             .iter()
-            .filter(|(i, p)| {
-                if *i >= start_idx {
+            .filter(|m| {
+                if m.ring_idx >= start_idx {
                     return true;
                 }
-                if matches!(p.stream, StreamType::SystemAudio | StreamType::Microphone) {
-                    return p.pts >= video_start_pts;
+                if matches!(m.stream, StreamType::SystemAudio | StreamType::Microphone) {
+                    return m.pts >= video_start_pts;
                 }
                 false
             })
-            .map(|(_, p)| p.clone())
-            .collect();
+            .count();
+
+        {
+            let video_count = metas
+                .iter()
+                .filter(|m| matches!(m.stream, StreamType::Video))
+                .count();
+            let keyframe_count = metas.iter().filter(|m| m.is_keyframe).count();
+            debug!(
+                "snapshot_from: all_packets={} ({} video, {} keyframes), start_pts={}, start_idx={}, included={}",
+                metas.len(),
+                video_count,
+                keyframe_count,
+                start_pts,
+                start_idx,
+                included_count
+            );
+        }
+
+        // Build a quick-lookup set of ring indices that should be included.
+        // We use a Vec<bool> indexed by (ring_idx - first_idx) for O(1) lookup
+        // without any heap allocation beyond the Vec itself.
+        let range_len = write_idx.saturating_sub(first_idx);
+        let mut include_flags = vec![false; range_len];
+        for m in &metas {
+            let dominated = m.ring_idx >= start_idx;
+            let audio_in_range = !dominated
+                && matches!(m.stream, StreamType::SystemAudio | StreamType::Microphone)
+                && m.pts >= video_start_pts;
+            if dominated || audio_in_range {
+                include_flags[m.ring_idx - first_idx] = true;
+            }
+        }
+
+        // We no longer need the metadata vec.
+        drop(metas);
+
+        // ── Pass 2: selective clone ────────────────────────────────────────
+        // Re-iterate only slots whose ring index is included, cloning just
+        // those packets into the result vec.
+        let mut result: Vec<EncodedPacket> = Vec::with_capacity(included_count);
+
+        for i in first_idx..write_idx {
+            if !include_flags[i - first_idx] {
+                continue;
+            }
+            let slot_idx = i & inner.mask;
+            let slot = &inner.slots[slot_idx];
+
+            if let Ok(packet_guard) = slot.packet.try_lock() {
+                if let Some(ref packet) = *packet_guard {
+                    result.push(packet.clone());
+                }
+            }
+        }
 
         result.sort_by_key(|p| {
             (

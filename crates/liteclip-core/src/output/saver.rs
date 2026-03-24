@@ -153,6 +153,12 @@ pub fn spawn_clip_saver(
             }
         }
 
+        // Release the buffer clone now — all needed packets are in `clip_packets`.
+        // This drops the Arc<LockFreeInner> held by the saver task so the ring
+        // buffer's eviction path can immediately free old `Bytes` allocations
+        // instead of keeping them alive through the mux + thumbnail phases.
+        drop(buffer);
+
         debug!(
             "Clip packets: {} (seeked to nearest keyframe)",
             clip_packets.len()
@@ -182,9 +188,9 @@ pub fn spawn_clip_saver(
 
         let final_path = Muxer::mux_clip(&output_path, &config, &clip_packets)
             .context("Failed to finalize MP4")?;
-        log_save_memory("after mux", Some(&buffer), Some(&clip_packets));
+        log_save_memory("after mux", None, Some(&clip_packets));
         drop(clip_packets);
-        log_save_memory("after packet release", Some(&buffer), None);
+        log_save_memory("after packet release", None, None);
 
         info!(
             "Clip saved successfully: {:?} ({} video packets, {} audio packets, ~{:.1}s)",
@@ -220,7 +226,7 @@ pub fn spawn_clip_saver(
                 warn!("Failed to generate thumbnail: {}", e);
             }
         }
-        log_save_memory("after thumbnail", Some(&buffer), None);
+        log_save_memory("after thumbnail", None, None);
 
         Ok(final_path)
     })

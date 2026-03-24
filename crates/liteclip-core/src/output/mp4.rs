@@ -198,12 +198,10 @@ impl FfmpegMuxer {
         let encoded_audio: Vec<EncodedAudioPacket> = if let (Some(_), Some(audio_encoder)) =
             (self.audio_stream_index, self.audio_encoder.as_mut())
         {
-            let mixed_pcm = mix_audio_packets_to_pcm(audio_packets, base_qpc, video_end_qpc);
-
-            if mixed_pcm.is_empty() && !self.expect_audio {
+            if audio_packets.is_empty() && !self.expect_audio {
                 vec![]
             } else {
-                encode_audio_to_vec(audio_encoder, &mixed_pcm)?
+                mix_and_encode_audio_chunks(audio_encoder, audio_packets, base_qpc, video_end_qpc)?
             }
         } else {
             vec![]
@@ -550,30 +548,29 @@ fn audio_stream_id(packet: &EncodedPacket) -> u8 {
     }
 }
 
-fn mix_audio_packets_to_pcm(
-    audio_packets: &[&EncodedPacket],
+struct AudioPacketPlacement<'a> {
+    packet: &'a EncodedPacket,
+    start_index: usize,
+}
+
+fn compute_audio_placements<'a>(
+    audio_packets: &[&'a EncodedPacket],
     base_qpc: i64,
-    video_end_qpc: i64,
-) -> Vec<i16> {
-    let mut stream_buffers: std::collections::HashMap<u8, Vec<i32>> =
-        std::collections::HashMap::new();
+) -> Vec<AudioPacketPlacement<'a>> {
     let mut stream_next_indices: std::collections::HashMap<u8, usize> =
         std::collections::HashMap::new();
     let mut ordered_audio_packets: Vec<&EncodedPacket> = audio_packets.to_vec();
     ordered_audio_packets.sort_by_key(|packet| (audio_stream_id(packet), packet.pts));
+
+    let mut placements: Vec<AudioPacketPlacement> = Vec::with_capacity(ordered_audio_packets.len());
 
     for packet in ordered_audio_packets {
         let stream_id = audio_stream_id(packet);
         let start_frames = qpc_to_sample_index(packet.pts.saturating_sub(base_qpc));
         let nominal_start_index = start_frames.saturating_mul(AUDIO_CHANNELS as usize);
 
-        let samples: Vec<i16> = packet
-            .data
-            .chunks_exact(2)
-            .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
-            .collect();
-
-        if samples.is_empty() {
+        let samples_len = packet.data.len() / 2;
+        if samples_len == 0 {
             continue;
         }
 
@@ -588,32 +585,48 @@ fn mix_audio_packets_to_pcm(
             _ => nominal_start_index,
         };
 
-        let required_len = start_index.saturating_add(samples.len());
-        let stream_buffer = stream_buffers.entry(stream_id).or_default();
-        if stream_buffer.len() < required_len {
-            stream_buffer.resize(required_len, 0);
-        }
-
-        for (offset, sample) in samples.into_iter().enumerate() {
-            stream_buffer[start_index + offset] = sample as i32;
-        }
+        placements.push(AudioPacketPlacement {
+            packet,
+            start_index,
+        });
 
         stream_next_indices.insert(
             stream_id,
-            start_index.saturating_add(required_len - start_index),
+            start_index.saturating_add(samples_len),
         );
     }
+
+    placements.sort_by_key(|p| p.start_index);
+    placements
+}
+
+#[cfg(test)]
+fn mix_audio_packets_to_pcm(
+    audio_packets: &[&EncodedPacket],
+    base_qpc: i64,
+    video_end_qpc: i64,
+) -> Vec<i16> {
+    let placements = compute_audio_placements(audio_packets, base_qpc);
 
     let video_duration_qpc = video_end_qpc.saturating_sub(base_qpc);
     let video_required_samples =
         qpc_to_sample_index(video_duration_qpc).saturating_mul(AUDIO_CHANNELS as usize);
-
     let final_len = video_required_samples.max(1);
 
     let mut mixed = vec![0_i32; final_len];
-    for buf in stream_buffers.values() {
-        for (i, &sample) in buf.iter().enumerate().take(final_len) {
-            mixed[i] = mixed[i].saturating_add(sample);
+    for p in placements {
+        let p_start = p.start_index;
+        let p_len = p.packet.data.len() / 2;
+        let p_end = p_start + p_len;
+        
+        let overlap_end = p_end.min(final_len);
+        let len = overlap_end.saturating_sub(p_start);
+
+        let data = p.packet.data.as_ref();
+        for i in 0..len {
+            let data_idx = i * 2;
+            let sample = i16::from_le_bytes([data[data_idx], data[data_idx + 1]]) as i32;
+            mixed[p_start + i] = mixed[p_start + i].saturating_add(sample);
         }
     }
 
@@ -708,16 +721,23 @@ fn write_f32_plane(dst: &mut [u8], samples: &[f32]) {
     }
 }
 
-fn encode_audio_to_vec(
+fn mix_and_encode_audio_chunks(
     encoder: &mut ffmpeg::encoder::Audio,
-    pcm_samples: &[i16],
+    audio_packets: &[&EncodedPacket],
+    base_qpc: i64,
+    video_end_qpc: i64,
 ) -> Result<Vec<EncodedAudioPacket>> {
+    let placements = compute_audio_placements(audio_packets, base_qpc);
+
+    let video_duration_qpc = video_end_qpc.saturating_sub(base_qpc);
+    let video_required_samples =
+        qpc_to_sample_index(video_duration_qpc).saturating_mul(AUDIO_CHANNELS as usize);
+    let final_len = video_required_samples.max(1);
+
+    let mut result = Vec::new();
+
     let input_format = ffmpeg::format::Sample::I16(ffmpeg::format::sample::Type::Packed);
     let channel_layout = ffmpeg::channel_layout::ChannelLayout::STEREO;
-    let frame_size = encoder.frame_size().max(1024) as usize;
-    let samples_per_chunk = frame_size.saturating_mul(AUDIO_CHANNELS as usize);
-    let mut result: Vec<EncodedAudioPacket> = Vec::new();
-    let mut next_pts = 0i64;
     let mut resampler = ffmpeg::software::resampling::Context::get(
         input_format,
         channel_layout,
@@ -728,16 +748,111 @@ fn encode_audio_to_vec(
     )
     .context("Failed to create audio resampler")?;
 
-    let mut offset = 0usize;
-    while offset < pcm_samples.len() {
-        let end = (offset + samples_per_chunk).min(pcm_samples.len());
-        let chunk = &pcm_samples[offset..end];
-        offset = end;
+    let frame_size = encoder.frame_size().max(1024) as usize;
+    let samples_per_chunk = frame_size.saturating_mul(AUDIO_CHANNELS as usize);
+    let mut next_pts = 0i64;
 
-        if chunk.is_empty() {
-            continue;
+    // Process in ~1-second chunks to bound working set memory
+    let chunk_samples = AUDIO_SAMPLE_RATE as usize * AUDIO_CHANNELS as usize; // 1 second
+    let mut chunk_start = 0;
+    let mut search_idx = 0;
+
+    let mut mixed_i32 = vec![0_i32; chunk_samples];
+    let mut mixed_i16 = vec![0_i16; chunk_samples];
+    let mut pcm_buffer = Vec::with_capacity(samples_per_chunk * 2);
+
+    while chunk_start < final_len {
+        let chunk_end = (chunk_start + chunk_samples).min(final_len);
+        let current_chunk_len = chunk_end - chunk_start;
+
+        mixed_i32[..current_chunk_len].fill(0);
+
+        while search_idx < placements.len() {
+            let p = &placements[search_idx];
+            let p_len = p.packet.data.len() / 2;
+            if p.start_index + p_len <= chunk_start {
+                search_idx += 1;
+            } else {
+                break;
+            }
         }
 
+        for i in search_idx..placements.len() {
+            let p = &placements[i];
+            let p_start = p.start_index;
+            if p_start >= chunk_end {
+                break;
+            }
+
+            let p_len = p.packet.data.len() / 2;
+            let p_end = p_start + p_len;
+            if p_end <= chunk_start {
+                continue;
+            }
+
+            let overlap_start = p_start.max(chunk_start);
+            let overlap_end = p_end.min(chunk_end);
+
+            let packet_offset = overlap_start - p_start;
+            let chunk_offset = overlap_start - chunk_start;
+            let len = overlap_end - overlap_start;
+
+            let data = p.packet.data.as_ref();
+            for j in 0..len {
+                let data_idx = (packet_offset + j) * 2;
+                let sample = i16::from_le_bytes([data[data_idx], data[data_idx + 1]]) as i32;
+                mixed_i32[chunk_offset + j] = mixed_i32[chunk_offset + j].saturating_add(sample);
+            }
+        }
+
+        for (i, &sample) in mixed_i32[..current_chunk_len].iter().enumerate() {
+            let limit = 24000.0;
+            let sample_f32 = sample as f32;
+            let clipped = if sample_f32 > limit {
+                limit + (sample_f32 - limit) / (1.0 + (sample_f32 - limit) / (32767.0 - limit))
+            } else if sample_f32 < -limit {
+                -limit + (sample_f32 + limit) / (1.0 - (sample_f32 + limit) / (32768.0 - limit))
+            } else {
+                sample_f32
+            };
+            mixed_i16[i] = clipped.clamp(-32768.0, 32767.0).round() as i16;
+        }
+
+        pcm_buffer.extend_from_slice(&mixed_i16[..current_chunk_len]);
+
+        let mut offset = 0usize;
+        while offset + samples_per_chunk <= pcm_buffer.len() {
+            let chunk = &pcm_buffer[offset..offset + samples_per_chunk];
+            offset += samples_per_chunk;
+
+            let samples_in_frame = (chunk.len() / AUDIO_CHANNELS as usize).max(1);
+            let mut input = ffmpeg::frame::Audio::new(input_format, samples_in_frame, channel_layout);
+            input.set_rate(AUDIO_SAMPLE_RATE);
+            input.set_pts(Some(next_pts));
+            copy_pcm_into_frame(&mut input, chunk);
+
+            let mut converted = ffmpeg::frame::Audio::empty();
+            resampler
+                .run(&input, &mut converted)
+                .context("Failed to resample audio frame")?;
+            converted.set_pts(Some(next_pts));
+            next_pts = next_pts.saturating_add(converted.samples() as i64);
+
+            encoder
+                .send_frame(&converted)
+                .context("Failed to send audio frame to encoder")?;
+            drain_encoder_to_vec(encoder, &mut result);
+        }
+
+        if offset > 0 {
+            pcm_buffer.drain(..offset);
+        }
+
+        chunk_start += current_chunk_len;
+    }
+
+    if !pcm_buffer.is_empty() {
+        let chunk = &pcm_buffer;
         let samples_in_frame = (chunk.len() / AUDIO_CHANNELS as usize).max(1);
         let mut input = ffmpeg::frame::Audio::new(input_format, samples_in_frame, channel_layout);
         input.set_rate(AUDIO_SAMPLE_RATE);
@@ -749,7 +864,6 @@ fn encode_audio_to_vec(
             .run(&input, &mut converted)
             .context("Failed to resample audio frame")?;
         converted.set_pts(Some(next_pts));
-        next_pts = next_pts.saturating_add(converted.samples() as i64);
 
         encoder
             .send_frame(&converted)
@@ -759,6 +873,7 @@ fn encode_audio_to_vec(
 
     encoder.send_eof().ok();
     drain_encoder_to_vec(encoder, &mut result);
+
     Ok(result)
 }
 

@@ -118,6 +118,7 @@ fn normalize_video_packets_for_mp4(video_packets: &[&EncodedPacket]) -> Vec<Enco
         }
 
         if pending_param_sets.is_empty() {
+            // No merging needed — cheap Bytes refcount clone only.
             normalized.push((*packet).clone());
             continue;
         }
@@ -181,6 +182,7 @@ fn normalize_video_packets_for_mp4(video_packets: &[&EncodedPacket]) -> Vec<Enco
 
     normalized
 }
+
 
 #[cfg(feature = "ffmpeg")]
 fn is_parameter_set_packet(packet: &EncodedPacket) -> bool {
