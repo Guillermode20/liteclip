@@ -4,8 +4,8 @@ use super::{
     add_cut_point, estimate_export_bitrates_from_editor, format_compact_duration, format_size_mb,
     format_timestamp_precise, remove_cut_point, start_export, toggle_editor_playback,
     upsert_webcam_keyframe, x_to_time, ClipCompressApp, EditorState, EditorUiOutcome,
-    EDITOR_SIDEBAR_MIN_WIDTH, EDITOR_SIDEBAR_WIDTH, EDITOR_STACK_BREAKPOINT,
-    SCRUB_FAST_RATE_SECS_PER_SEC, SCRUB_SAMPLE_MIN_DT_SECS, DEFAULT_TARGET_SIZE_MB,
+    DEFAULT_TARGET_SIZE_MB, EDITOR_SIDEBAR_MIN_WIDTH, EDITOR_SIDEBAR_WIDTH,
+    EDITOR_STACK_BREAKPOINT, SCRUB_FAST_RATE_SECS_PER_SEC, SCRUB_SAMPLE_MIN_DT_SECS,
 };
 
 pub(super) fn render_preview_panel_impl(
@@ -15,12 +15,19 @@ pub(super) fn render_preview_panel_impl(
 ) {
     egui::Frame::group(ui.style()).show(ui, |ui| {
         let available_width = ui.available_width().max(220.0);
+        let wide_layout = available_width >= 1200.0;
         let aspect_ratio = (editor.video.metadata.width.max(1) as f32
             / editor.video.metadata.height.max(1) as f32)
             .max(1.0 / 3.0);
         let available_height = ui.available_height().max(220.0);
-        let mut preview_height = (available_width / aspect_ratio).max(180.0);
-        let max_preview_height = (available_height - 72.0).max(180.0);
+        let reserved_height = (available_height * 0.14).clamp(64.0, 140.0);
+        let max_preview_height = (available_height - reserved_height).clamp(200.0, 860.0);
+        let max_preview_width = if wide_layout {
+            (max_preview_height * aspect_ratio).min(available_width)
+        } else {
+            available_width
+        };
+        let mut preview_height = (max_preview_width / aspect_ratio).max(200.0);
         preview_height = preview_height.min(max_preview_height);
         let preview_size = egui::vec2(available_width, preview_height);
 
@@ -227,7 +234,7 @@ fn render_timeline_panel(
 
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
-            .max_height(260.0)
+            .max_height(ui.available_height().clamp(120.0, 280.0))
             .show(ui, |ui| {
                 render_timeline(ui, editor, outcome);
             });
@@ -235,7 +242,7 @@ fn render_timeline_panel(
 }
 
 fn render_timeline(ui: &mut egui::Ui, editor: &mut EditorState, outcome: &mut EditorUiOutcome) {
-    let timeline_height = ui.available_height().clamp(92.0, 180.0);
+    let timeline_height = ui.available_height().clamp(96.0, 190.0);
     let desired_size = egui::vec2(ui.available_width(), timeline_height);
     let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::click_and_drag());
     let track_rect = egui::Rect::from_min_max(
@@ -390,9 +397,16 @@ pub(super) fn render_editor_workspace_impl(
     }
 
     ui.horizontal_top(|ui| {
+        let content_width = available_size.x.min(1820.0);
+        let horizontal_gutter = ((available_size.x - content_width) * 0.5).max(0.0);
+        if horizontal_gutter > 0.0 {
+            ui.add_space(horizontal_gutter);
+        }
+
+        let max_sidebar_width = (content_width * 0.34).clamp(EDITOR_SIDEBAR_WIDTH, 460.0);
         let sidebar_width =
-            (available_size.x * 0.32).clamp(EDITOR_SIDEBAR_MIN_WIDTH, EDITOR_SIDEBAR_WIDTH);
-        let main_width = (ui.available_width() - sidebar_width - 12.0).max(320.0);
+            (content_width * 0.28).clamp(EDITOR_SIDEBAR_MIN_WIDTH, max_sidebar_width);
+        let main_width = (content_width - sidebar_width - 16.0).max(360.0);
 
         ui.allocate_ui_with_layout(
             egui::vec2(main_width, available_size.y.max(320.0)),
@@ -522,9 +536,10 @@ fn render_snippet_list(ui: &mut egui::Ui, editor: &mut EditorState, outcome: &mu
         ui.label(egui::RichText::new("Use the timeline and add cuts at the playhead to split the clip into snippets. Disabled snippets are skipped in preview/export.").weak());
 
         let snippets = editor.snippets();
+        let snippet_max_height = (ui.available_height() * 0.5).clamp(180.0, 420.0);
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
-            .max_height(260.0)
+            .max_height(snippet_max_height)
             .show(ui, |ui| {
                 for (index, snippet) in snippets.iter().copied().enumerate() {
                     let snippet_frame = egui::Frame::group(ui.style()).inner_margin(egui::Margin::same(8));
@@ -573,12 +588,12 @@ fn render_size_section(ui: &mut egui::Ui, editor: &mut EditorState) {
         1.0
     };
     let auto_target_size_mb = (editor.video.size_mb * kept_proportion).ceil().max(1.0) as u32;
-    
+
     // Clamp target size to max allowed based on enabled segments
     if editor.target_size_mb > max_output_size_mb {
         editor.target_size_mb = max_output_size_mb;
     }
-    
+
     let (video_kbps, total_kbps) = estimate_export_bitrates_from_editor(
         editor.target_size_mb,
         kept_duration,
@@ -592,17 +607,21 @@ fn render_size_section(ui: &mut egui::Ui, editor: &mut EditorState) {
     egui::Frame::group(ui.style()).show(ui, |ui| {
         ui.label(egui::RichText::new("Export Settings").strong());
         ui.add_space(6.0);
-        
+
         // Show stream copy mode when size hasn't been manually adjusted
         if !editor.target_size_manually_adjusted {
             ui.horizontal_wrapped(|ui| {
                 ui.label("Output Size:");
-                ui.label(egui::RichText::new(format!("{} MB (auto)", auto_target_size_mb))
-                    .strong());
+                ui.label(
+                    egui::RichText::new(format!("{} MB (auto)", auto_target_size_mb)).strong(),
+                );
             });
-            ui.label(egui::RichText::new(
-                "Stream copy mode: no re-encoding (fastest, preserves quality)"
-            ).color(egui::Color32::from_rgb(100, 200, 100)));
+            ui.label(
+                egui::RichText::new(
+                    "Stream copy mode: no re-encoding (fastest, preserves quality)",
+                )
+                .color(egui::Color32::from_rgb(100, 200, 100)),
+            );
             if ui.button("Adjust size to enable compression").clicked() {
                 editor.target_size_manually_adjusted = true;
             }
@@ -621,11 +640,15 @@ fn render_size_section(ui: &mut egui::Ui, editor: &mut EditorState) {
                     editor.target_size_manually_adjusted = true;
                 }
             });
-            ui.label(egui::RichText::new(format!(
-                "Max size for kept segments: {} MB",
-                max_output_size_mb
-            )).small().weak());
-            
+            ui.label(
+                egui::RichText::new(format!(
+                    "Max size for kept segments: {} MB",
+                    max_output_size_mb
+                ))
+                .small()
+                .weak(),
+            );
+
             // Button to revert to stream copy mode
             if ui.button("Use stream copy (no compression)").clicked() {
                 editor.target_size_manually_adjusted = false;
@@ -635,7 +658,7 @@ fn render_size_section(ui: &mut egui::Ui, editor: &mut EditorState) {
                     .min(editor.video.size_mb.ceil().max(1.0) as u32)
                     .min(max_output_size_mb);
             }
-            
+
             if editor.video.metadata.has_audio {
                 ui.horizontal_wrapped(|ui| {
                     ui.label("Audio Bitrate:");
@@ -651,21 +674,20 @@ fn render_size_section(ui: &mut egui::Ui, editor: &mut EditorState) {
                 &mut editor.use_hardware_acceleration,
                 "Use hardware acceleration (fallback to software if unavailable)",
             );
-            
+
             ui.add_space(8.0);
             ui.separator();
             ui.add_space(4.0);
-            
+
             // Resolution settings
             ui.horizontal(|ui| {
                 ui.checkbox(&mut editor.use_auto_resolution, "Auto resolution");
                 if editor.use_auto_resolution {
                     let (auto_w, auto_h) = editor.effective_output_resolution();
-                    ui.label(egui::RichText::new(format!("-> {}x{}", auto_w, auto_h))
-                        .small());
+                    ui.label(egui::RichText::new(format!("-> {}x{}", auto_w, auto_h)).small());
                 }
             });
-            
+
             if !editor.use_auto_resolution {
                 ui.horizontal(|ui| {
                     ui.label("Resolution:");
@@ -688,7 +710,7 @@ fn render_size_section(ui: &mut egui::Ui, editor: &mut EditorState) {
                     editor.output_height = Some(h);
                 });
             }
-            
+
             // FPS settings
             ui.horizontal(|ui| {
                 ui.label("Frame Rate:");
@@ -704,7 +726,7 @@ fn render_size_section(ui: &mut egui::Ui, editor: &mut EditorState) {
                 }
                 editor.output_fps = Some(fps);
             });
-            
+
             ui.label(format!(
                 "Estimated Quality: [{}{}] {} (video ~{:.2} Mbps, total ~{:.2} Mbps)",
                 "#".repeat(bars),
@@ -714,7 +736,7 @@ fn render_size_section(ui: &mut egui::Ui, editor: &mut EditorState) {
                 total_kbps as f64 / 1000.0,
             ));
         }
-        
+
         ui.label(format!(
             "Kept duration after cuts: {}",
             format_compact_duration(kept_duration)
