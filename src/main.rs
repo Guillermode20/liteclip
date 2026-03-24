@@ -188,6 +188,8 @@ async fn main() -> Result<()> {
         .map_err(|e| anyhow::anyhow!("{}", e))
         .context("FFmpeg runtime validation failed")?;
 
+    liteclip_replay::output::saver::log_save_memory("app_start", None, None);
+
     // Suppress all Vulkan loader output (prints directly to stderr from C code)
     std::env::set_var("VK_LOADER_DEBUG", "none");
     std::env::set_var("DISABLE_LAYER_AMD_SWITCHABLE_GRAPHICS_1", "1");

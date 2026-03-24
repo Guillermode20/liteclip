@@ -1,4 +1,4 @@
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use ffmpeg::format::Pixel;
 use ffmpeg_next as ffmpeg;
 use tracing::info;
@@ -7,8 +7,7 @@ use crate::encode::{EncodeError, EncodeResult};
 
 use super::{EncodedPacket, FfmpegEncoder, StreamType};
 
-const PACKET_BUFFER_BASE_CAPACITY: usize = 1024 * 1024;
-const PACKET_BUFFER_SHRINK_THRESHOLD: usize = PACKET_BUFFER_BASE_CAPACITY * 8;
+// Removed PACKET_BUFFER_SHRINK_THRESHOLD as we no longer share a persistent buffer
 
 impl FfmpegEncoder {
     pub(super) fn init_encoder(&mut self, width: u32, height: u32) -> EncodeResult<()> {
@@ -105,8 +104,7 @@ impl FfmpegEncoder {
             let mut packet = ffmpeg::Packet::empty();
             while encoder.receive_packet(&mut packet).is_ok() {
                 let data_slice = packet.data().unwrap_or(&[]);
-                self.packet_buffer.extend_from_slice(data_slice);
-                let data = self.packet_buffer.split_to(data_slice.len()).freeze();
+                let data = Bytes::copy_from_slice(data_slice);
                 let packet_is_key = packet.is_key();
                 packets_data.push((data, packet_is_key));
             }
@@ -198,10 +196,7 @@ impl FfmpegEncoder {
             }
         }
 
-        if self.packet_buffer.capacity() > PACKET_BUFFER_SHRINK_THRESHOLD {
-            self.packet_buffer = BytesMut::with_capacity(PACKET_BUFFER_BASE_CAPACITY);
-        }
-
+        // Removed buffer shrink logic as we use copy_from_slice for better memory granularity
         Ok(())
     }
 }

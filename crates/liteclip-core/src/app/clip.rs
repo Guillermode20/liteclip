@@ -58,6 +58,7 @@ impl ClipManager {
         game_name: Option<&str>,
         host: Option<Arc<dyn CoreHost>>,
     ) -> Result<PathBuf> {
+        crate::output::saver::log_save_memory("save_clip_entry", Some(buffer), None);
         info!("Clip: saving replay buffer");
 
         let output_path = Self::generate_output_path(config, game_name)?;
@@ -99,6 +100,7 @@ impl ClipManager {
         let duration = Duration::from_secs(config.general.replay_duration_secs as u64);
         let save_directory = PathBuf::from(&config.general.save_directory);
 
+        crate::output::saver::log_save_memory("before_spawn_saver", Some(buffer), None);
         let handle = spawn_clip_saver(
             buffer_clone,
             duration,

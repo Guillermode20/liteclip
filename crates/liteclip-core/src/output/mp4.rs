@@ -41,6 +41,7 @@ impl FfmpegMuxer {
         fps: f64,
         config: &MuxerConfig,
     ) -> Result<Self> {
+        crate::output::saver::log_save_memory("FfmpegMuxer::new_entry", None, None);
         let mut format_context = ffmpeg::format::output(&output_path)
             .context("Failed to create output format context")?;
 
@@ -312,7 +313,14 @@ impl FfmpegMuxer {
             }
         }
 
+        crate::output::saver::log_save_memory("before write_trailer", None, None);
         self.format_context.write_trailer()?;
+        crate::output::saver::log_save_memory("after write_trailer", None, None);
+
+        // Explicitly drop audio encoder to free FFmpeg resources early
+        let _ = self.audio_encoder.take();
+        crate::output::saver::log_save_memory("after audio_encoder drop", None, None);
+
         info!(
             "Muxed {} video packets and {} audio packets to {:?}",
             video_count, audio_count, self.output_path

@@ -179,6 +179,7 @@ pub fn spawn_clip_saver(
             "Prepared clip packet set: {} video packets, {} audio packets",
             video_count, audio_count
         );
+        log_save_memory("after snapshot", None, Some(&clip_packets));
 
         if video_count == 0 {
             bail!("No video packets in selected clip range");
@@ -186,6 +187,7 @@ pub fn spawn_clip_saver(
 
         let clip_span_secs = clip_pts_span_seconds(&clip_packets);
 
+        log_save_memory("before mux", None, Some(&clip_packets));
         let final_path = Muxer::mux_clip(&output_path, &config, &clip_packets)
             .context("Failed to finalize MP4")?;
         log_save_memory("after mux", None, Some(&clip_packets));
@@ -218,15 +220,16 @@ pub fn spawn_clip_saver(
 
         // Generate thumbnail immediately after saving
         debug!("Generating thumbnail for saved clip");
+        log_save_memory("before thumbnail", None, None);
         match generate_thumbnail(&final_path, &save_directory) {
             Ok(thumb_path) => {
+                log_save_memory("after thumbnail", None, None);
                 info!("Thumbnail generated: {:?}", thumb_path);
             }
             Err(e) => {
                 warn!("Failed to generate thumbnail: {}", e);
             }
         }
-        log_save_memory("after thumbnail", None, None);
 
         Ok(final_path)
     })
@@ -254,7 +257,7 @@ fn clip_pts_span_seconds(packets: &[EncodedPacket]) -> Option<f64> {
     Some(max_pts.saturating_sub(min_pts) as f64 / QPC_TICKS_PER_SEC)
 }
 
-fn log_save_memory(
+pub fn log_save_memory(
     stage: &str,
     buffer: Option<&SharedReplayBuffer>,
     clip_packets: Option<&[crate::encode::EncodedPacket]>,

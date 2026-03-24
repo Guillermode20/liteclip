@@ -46,6 +46,7 @@ impl Muxer {
         config: &MuxerConfig,
         packets: &[EncodedPacket],
     ) -> Result<PathBuf> {
+        crate::output::saver::log_save_memory("Muxer::mux_clip_entry", None, Some(packets));
         let mut raw_video_packets: Vec<&EncodedPacket> = packets
             .iter()
             .filter(|packet| matches!(packet.stream, StreamType::Video))
