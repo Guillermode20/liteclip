@@ -57,7 +57,12 @@ pub struct FfmpegEncoder {
     encoder: Option<ffmpeg::encoder::Video>,
     packet_tx: Sender<EncodedPacket>,
     packet_rx: Receiver<EncodedPacket>,
+    /// Total frames processed (including duplicates emitted without encoding).
     frame_count: i64,
+    /// Frames actually sent to the encoder (used for keyframe/GOP decisions).
+    /// This diverges from frame_count when GPU duplicate optimization emits
+    /// cached bitstreams instead of encoding new frames.
+    encoder_frame_count: i64,
     packet_count: i64,
     warmup_packet_count: i64,
     running: bool,
@@ -109,6 +114,7 @@ impl FfmpegEncoder {
             packet_tx: tx,
             packet_rx: rx,
             frame_count: 0,
+            encoder_frame_count: 0,
             packet_count: 0,
             warmup_packet_count: 0,
             running: false,
@@ -130,12 +136,12 @@ impl FfmpegEncoder {
 
     /// Re-emit the last encoded video bitstream with a new wall-clock PTS (static / duplicate DXGI frame).
     fn emit_duplicate_video_packets(&mut self, timestamp: i64) -> EncodeResult<()> {
-        for (data, _) in &self.last_duplicate_template {
+        for (data, is_keyframe) in &self.last_duplicate_template {
             let mut encoded_packet = EncodedPacket::new(
                 data.clone(),
                 timestamp,
                 timestamp,
-                false,
+                *is_keyframe,
                 StreamType::Video,
             );
             if !self.config.use_native_resolution {
@@ -183,7 +189,7 @@ impl FfmpegEncoder {
     }
 
     fn next_encoder_pts(&self) -> i64 {
-        self.frame_count
+        self.encoder_frame_count
     }
 
     fn gpu_frame_matches_encoder(&self, gpu_frame: &crate::media::D3d11Frame) -> bool {
@@ -260,15 +266,31 @@ impl Encoder for FfmpegEncoder {
         }
 
         let gop = self.config.keyframe_interval_frames() as i64;
-        let at_keyframe = gop > 0 && self.frame_count % gop == 0;
+        // Keyframe decision based on encoder_frame_count - this matches what the encoder
+        // actually sees, keeping in sync with the encoder's internal GOP state.
+        let at_keyframe = gop > 0 && self.encoder_frame_count % gop == 0;
 
+        // GPU duplicate frame optimization DISABLED.
+        // 
+        // The optimization conflicts with the encoder's internal GOP management. When duplicates
+        // are emitted, frame_count advances but encoder_frame_count doesn't, causing keyframe
+        // decisions to diverge from the encoder's actual frame count. This results in missing
+        // keyframes and corrupted video output.
+        //
+        // The encoder has its own GOP setting (set_gop) that expects keyframes at regular
+        // intervals based on frames it receives. We also manually set key_frame=1 for explicit
+        // control. These two mechanisms must stay synchronized, which requires encoder_frame_count
+        // to be used for all keyframe decisions.
+        //
+        // Re-enabling this optimization would require either:
+        // 1. Letting the encoder handle all GOP decisions (remove manual keyframe setting)
+        // 2. Or tracking duplicate state in a way that doesn't affect GOP timing
         #[cfg(windows)]
         {
-            if can_use_gpu {
+            if false && can_use_gpu && !at_keyframe {
                 if let Some(d3d) = &frame.d3d11 {
                     let ptr = Arc::as_ptr(d3d) as usize;
-                    if !at_keyframe
-                        && self.frame_count >= WARMUP_FRAMES
+                    if self.encoder_frame_count >= WARMUP_FRAMES
                         && self.last_gpu_frame_arc_ptr == Some(ptr)
                         && !self.last_duplicate_template.is_empty()
                         && self
@@ -278,6 +300,7 @@ impl Encoder for FfmpegEncoder {
                     {
                         self.emit_duplicate_video_packets(frame.timestamp)?;
                         self.frame_count += 1;
+                        // Note: encoder_frame_count is NOT incremented here since we didn't encode
                         self.last_gpu_frame_arc_ptr = Some(ptr);
                         return Ok(());
                     }
@@ -338,6 +361,7 @@ impl Encoder for FfmpegEncoder {
 
         self.drain_encoder_packets(frame.timestamp)?;
         self.frame_count += 1;
+        self.encoder_frame_count += 1;
         #[cfg(windows)]
         if can_use_gpu {
             if let Some(d3d) = &frame.d3d11 {
