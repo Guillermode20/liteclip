@@ -45,8 +45,11 @@ use super::{EncodedPacket, Encoder, ResolvedEncoderConfig, ResolvedEncoderType, 
 use crate::encode::EncodeResult;
 use crossbeam::channel::{bounded, Receiver, Sender};
 use ffmpeg::color::{Primaries, Range, Space, TransferCharacteristic};
+use bytes::Bytes;
 use ffmpeg_next as ffmpeg;
 use std::collections::VecDeque;
+#[cfg(windows)]
+use std::sync::Arc;
 use tracing::{info, warn};
 
 pub struct FfmpegEncoder {
@@ -64,6 +67,10 @@ pub struct FfmpegEncoder {
     hw_context: Option<D3d11HardwareContext>,
     last_input_res: (u32, u32),
     pending_packet_timestamps: VecDeque<i64>,
+    /// [`Arc::as_ptr`] of the last captured GPU frame (DXGI duplicate / static scene fast path).
+    last_gpu_frame_arc_ptr: Option<usize>,
+    /// Bitstream template from the last real encode: reused when the GPU frame is unchanged.
+    last_duplicate_template: Vec<(Bytes, bool)>,
 }
 
 const WARMUP_FRAMES: i64 = 60;
@@ -111,7 +118,35 @@ impl FfmpegEncoder {
             hw_context: None,
             last_input_res: (0, 0),
             pending_packet_timestamps: VecDeque::with_capacity(256),
+            last_gpu_frame_arc_ptr: None,
+            last_duplicate_template: Vec::new(),
         })
+    }
+
+    fn clear_gpu_duplicate_state(&mut self) {
+        self.last_gpu_frame_arc_ptr = None;
+        self.last_duplicate_template.clear();
+    }
+
+    /// Re-emit the last encoded video bitstream with a new wall-clock PTS (static / duplicate DXGI frame).
+    fn emit_duplicate_video_packets(&mut self, timestamp: i64) -> EncodeResult<()> {
+        for (data, _) in &self.last_duplicate_template {
+            let mut encoded_packet = EncodedPacket::new(
+                data.clone(),
+                timestamp,
+                timestamp,
+                false,
+                StreamType::Video,
+            );
+            if !self.config.use_native_resolution {
+                encoded_packet.resolution = Some(self.config.resolution);
+            }
+            if self.packet_tx.send(encoded_packet).is_err() {
+                break;
+            }
+            self.packet_count += 1;
+        }
+        Ok(())
     }
 
     pub(super) fn init_hardware_encoder(
@@ -220,8 +255,39 @@ impl Encoder for FfmpegEncoder {
             }
         }
 
-        let encoder_pts = self.next_encoder_pts();
+        if !can_use_gpu {
+            self.clear_gpu_duplicate_state();
+        }
+
         let gop = self.config.keyframe_interval_frames() as i64;
+        let at_keyframe = gop > 0 && self.frame_count % gop == 0;
+
+        #[cfg(windows)]
+        {
+            if can_use_gpu {
+                if let Some(d3d) = &frame.d3d11 {
+                    let ptr = Arc::as_ptr(d3d) as usize;
+                    if !at_keyframe
+                        && self.frame_count >= WARMUP_FRAMES
+                        && self.last_gpu_frame_arc_ptr == Some(ptr)
+                        && !self.last_duplicate_template.is_empty()
+                        && self
+                            .last_duplicate_template
+                            .iter()
+                            .all(|(_, is_key)| !*is_key)
+                    {
+                        self.emit_duplicate_video_packets(frame.timestamp)?;
+                        self.frame_count += 1;
+                        self.last_gpu_frame_arc_ptr = Some(ptr);
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
+        self.last_duplicate_template.clear();
+
+        let encoder_pts = self.next_encoder_pts();
         self.pending_packet_timestamps.push_back(frame.timestamp);
         if self.pending_packet_timestamps.len() > 512 {
             self.pending_packet_timestamps.pop_front();
@@ -272,6 +338,12 @@ impl Encoder for FfmpegEncoder {
 
         self.drain_encoder_packets(frame.timestamp)?;
         self.frame_count += 1;
+        #[cfg(windows)]
+        if can_use_gpu {
+            if let Some(d3d) = &frame.d3d11 {
+                self.last_gpu_frame_arc_ptr = Some(Arc::as_ptr(d3d) as usize);
+            }
+        }
         Ok(())
     }
 
@@ -287,6 +359,7 @@ impl Encoder for FfmpegEncoder {
             packets.push(packet);
         }
 
+        self.clear_gpu_duplicate_state();
         self.running = false;
         Ok(packets)
     }
@@ -297,5 +370,18 @@ impl Encoder for FfmpegEncoder {
 
     fn is_running(&self) -> bool {
         self.running
+    }
+}
+
+#[cfg(test)]
+mod gpu_duplicate_template_tests {
+    use bytes::Bytes;
+
+    #[test]
+    fn template_eligible_for_reuse_only_when_no_keyframe_packet() {
+        let ok = vec![(Bytes::from_static(b"x"), false)];
+        assert!(ok.iter().all(|(_, k)| !*k));
+        let bad = vec![(Bytes::from_static(b"x"), true)];
+        assert!(!bad.iter().all(|(_, k)| !*k));
     }
 }

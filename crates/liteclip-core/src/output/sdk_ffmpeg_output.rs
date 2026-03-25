@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use ffmpeg_next as ffmpeg;
-use image::{DynamicImage, ImageBuffer, Rgba, RgbaImage};
+use image::{DynamicImage, RgbaImage};
 use std::path::Path;
 use tracing::{debug, info, warn};
 
@@ -294,24 +294,26 @@ fn ffmpeg_frame_to_rgba(frame: &ffmpeg::util::frame::video::Video) -> Result<Rgb
     let linesize0 = unsafe { (*frame.as_ptr()).linesize[0] };
     let stride = linesize0.unsigned_abs() as usize;
     let data = frame.data(0);
-    let mut img: RgbaImage = ImageBuffer::new(w, h);
+    let row_bytes = (w as usize).saturating_mul(4);
+    let mut raw: Vec<u8> = vec![0u8; row_bytes * h as usize];
     let top_offset = if linesize0 < 0 {
         stride.saturating_mul(h as usize - 1)
     } else {
         0
     };
     for y in 0..h {
-        let row_start = top_offset + (y as usize * stride);
-        let row = &data[row_start..][..(w as usize * 4).min(data.len().saturating_sub(row_start))];
-        for x in 0..w {
-            let i = x as usize * 4;
-            if i + 3 < row.len() {
-                let px = Rgba([row[i], row[i + 1], row[i + 2], row[i + 3]]);
-                img.put_pixel(x, y, px);
-            }
+        let row_start = top_offset.saturating_add((y as usize).saturating_mul(stride));
+        let available = data.len().saturating_sub(row_start);
+        let n = row_bytes.min(available);
+        if n == 0 {
+            continue;
         }
+        let row_src = &data[row_start..row_start + n];
+        let dst_off = (y as usize).saturating_mul(row_bytes);
+        raw[dst_off..dst_off + n].copy_from_slice(row_src);
     }
-    Ok(img)
+    RgbaImage::from_raw(w, h, raw)
+        .with_context(|| "failed to build RGBA image from decoder frame")
 }
 
 /// Gallery thumbnail at ~1s; same cache path scheme as the CLI implementation.

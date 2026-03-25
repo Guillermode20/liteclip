@@ -124,6 +124,7 @@ impl FfmpegEncoder {
         self.dst_frame = None;
         self.last_input_res = (width, height);
         self.pending_packet_timestamps.clear();
+        self.clear_gpu_duplicate_state();
 
         info!(
             "AMF hardware encoder initialized (shared device): {} ({}x{})",

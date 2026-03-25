@@ -191,34 +191,6 @@ pub fn spawn_clip_saver(
                 }
             }
 
-            // Keep snapshot alive through mux to track pinned bytes
-            // Log first video packet info before mux
-            {
-                let video_packets: Vec<_> = snapshot
-                    .iter()
-                    .filter(|p| matches!(p.stream, crate::encode::StreamType::Video))
-                    .collect();
-
-                if !video_packets.is_empty() {
-                    let first_vid = video_packets[0];
-                    let first_20_bytes: Vec<String> = first_vid
-                        .data
-                        .iter()
-                        .take(20)
-                        .map(|b| format!("{:02x}", b))
-                        .collect();
-                    info!(
-                        "First video packet: {}B, keyframe={}, first20=[{}]",
-                        first_vid.data.len(),
-                        first_vid.is_keyframe,
-                        first_20_bytes.join(" ")
-                    );
-
-                    let nal_type = hevc_nal_type(first_vid.data.as_ref());
-                    info!("First video packet HEVC NAL type: {:?}", nal_type);
-                }
-            }
-
             let keyframe_count = snapshot.iter().filter(|p| p.is_keyframe).count();
             if keyframe_count == 0 {
                 warn!("No keyframes in clip range - video may not be playable");

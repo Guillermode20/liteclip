@@ -111,7 +111,12 @@ impl FfmpegMuxer {
                 audio.set_flags(ffmpeg::codec::flag::Flags::GLOBAL_HEADER);
             }
 
-            let audio = audio.open_as(codec).context("Failed to open AAC encoder")?;
+            let mut aac_opts = ffmpeg::Dictionary::new();
+            aac_opts.set("aac_coder", "fast");
+
+            let audio = audio
+                .open_as_with(codec, aac_opts)
+                .context("Failed to open AAC encoder")?;
 
             stream.set_time_base(audio_time_base);
             stream.set_parameters(&audio);

@@ -94,6 +94,7 @@ impl FfmpegEncoder {
 
         self.last_input_res = (width, height);
         self.pending_packet_timestamps.clear();
+        self.clear_gpu_duplicate_state();
         Ok(())
     }
 
@@ -114,6 +115,8 @@ impl FfmpegEncoder {
         let mut drained_count = 0usize;
 
         for (idx, (data, is_keyframe)) in packets_data.into_iter().enumerate() {
+            self.last_duplicate_template
+                .push((data.clone(), is_keyframe));
             let pts = self
                 .pending_packet_timestamps
                 .pop_front()
