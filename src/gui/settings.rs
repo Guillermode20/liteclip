@@ -164,6 +164,11 @@ impl SettingsApp {
         self.render(ctx, is_open);
     }
 
+    pub fn release_resources(&mut self) {
+        self.save_status = None;
+        self.level_monitor = None;
+    }
+
     fn render(&mut self, ctx: &egui::Context, is_open: &mut bool) {
         // Render sidebar on the left
         egui::SidePanel::left("settings_sidebar")

@@ -232,6 +232,7 @@ struct LockFreeInner {
     slots: Box<[Slot]>,
     capacity: usize,
     mask: usize,
+    max_duration_qpc: i64,
     write_idx: AtomicUsize,
     evict_frontier: AtomicUsize,
     max_memory_bytes: usize,
@@ -282,6 +283,9 @@ impl LockFreeReplayBuffer {
         let duration = Duration::from_secs(config.general.replay_duration_secs as u64 + 1);
         let effective_memory_limit_mb = config.effective_replay_memory_limit_mb();
         let max_memory_bytes = (effective_memory_limit_mb as usize).saturating_mul(1024 * 1024);
+        let qpc_freq = qpc_frequency().max(1) as i64;
+        let max_duration_qpc =
+            (config.general.replay_duration_secs.max(1) as i64).saturating_mul(qpc_freq);
 
         let video_packets_per_sec = config.video.framerate as f32;
         let audio_streams =
@@ -311,6 +315,7 @@ impl LockFreeReplayBuffer {
                 slots: slots.into_boxed_slice(),
                 capacity,
                 mask,
+                max_duration_qpc,
                 write_idx: AtomicUsize::new(0),
                 evict_frontier: AtomicUsize::new(0),
                 max_memory_bytes,
@@ -426,6 +431,7 @@ impl LockFreeReplayBuffer {
         };
 
         inner.newest_pts.store(packet_pts, Ordering::Release);
+        self.evict_packets_older_than(packet_pts);
 
         // Update evict_frontier to track the oldest valid packet after ring wrap.
         // After fetch_add, the next write will be at write_idx + 1.
@@ -594,6 +600,64 @@ impl LockFreeReplayBuffer {
                     }
                 }
             }
+        }
+    }
+
+    fn evict_packets_older_than(&self, newest_pts: i64) {
+        let inner = &self.inner;
+        if inner.max_duration_qpc <= 0 || newest_pts <= 0 {
+            return;
+        }
+
+        let cutoff_pts = newest_pts.saturating_sub(inner.max_duration_qpc);
+        let write_idx = inner.write_idx.load(Ordering::Acquire);
+        let mut duration_evicted_packets = 0usize;
+        let mut duration_evicted_bytes = 0usize;
+        let mut duration_evicted_keyframes = 0usize;
+
+        loop {
+            let evict = inner.evict_frontier.load(Ordering::Acquire);
+            if evict >= write_idx {
+                break;
+            }
+
+            let slot_idx = evict & inner.mask;
+            let slot = &inner.slots[slot_idx];
+            let mut guard = slot.packet.lock().unwrap_or_else(|e| e.into_inner());
+
+            let should_evict = match guard.as_ref() {
+                Some(packet) => packet.pts < cutoff_pts,
+                None => true,
+            };
+
+            if !should_evict {
+                break;
+            }
+
+            if let Some(old) = guard.take() {
+                let old_len = old.data.len();
+                inner.total_bytes.fetch_sub(old_len, Ordering::Relaxed);
+                if old.is_keyframe {
+                    inner.keyframe_count.fetch_sub(1, Ordering::Relaxed);
+                    duration_evicted_keyframes += 1;
+                }
+                duration_evicted_bytes += old_len;
+                duration_evicted_packets += 1;
+            }
+            drop(guard);
+            inner.evict_frontier.fetch_add(1, Ordering::Release);
+        }
+
+        if duration_evicted_packets > 0 {
+            debug!(
+                "Buffer duration eviction: {} packets ({} keyframes), {:.1}MB freed, cutoff_pts={}, newest_pts={}, target_window={:.1}s",
+                duration_evicted_packets,
+                duration_evicted_keyframes,
+                duration_evicted_bytes as f64 / 1_048_576.0,
+                cutoff_pts,
+                newest_pts,
+                inner.max_duration_qpc as f64 / qpc_frequency().max(1) as f64
+            );
         }
     }
 
@@ -1219,6 +1283,7 @@ impl LockFreeReplayBuffer {
         inner.evict_frontier.store(0, Ordering::Release);
         inner.total_bytes.store(0, Ordering::Release);
         inner.keyframe_count.store(0, Ordering::Release);
+        inner.newest_pts.store(0, Ordering::Release);
         inner.param_cache_complete.store(false, Ordering::Release);
         inner
             .param_cache_pushes_since_complete
@@ -1276,6 +1341,7 @@ impl LockFreeReplayBuffer {
         inner.evict_frontier.store(0, Ordering::Release);
         inner.total_bytes.store(0, Ordering::Release);
         inner.keyframe_count.store(0, Ordering::Release);
+        inner.newest_pts.store(0, Ordering::Release);
         inner.param_cache_complete.store(false, Ordering::Release);
         inner
             .param_cache_pushes_since_complete

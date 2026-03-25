@@ -204,6 +204,28 @@ impl GuiManagerApp {
         self.last_mouse_passthrough = Some(should_passthrough);
         ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(should_passthrough));
     }
+
+    fn release_idle_resources(&mut self, ctx: &egui::Context) {
+        if !self.toasts.is_empty() {
+            return;
+        }
+        let settings_open = self
+            .settings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some();
+        let gallery_open = self
+            .gallery
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some();
+        if settings_open || gallery_open {
+            return;
+        }
+
+        self.last_mouse_passthrough = None;
+        ctx.memory_mut(|mem| mem.reset_areas());
+    }
 }
 
 impl eframe::App for GuiManagerApp {
@@ -285,6 +307,7 @@ impl eframe::App for GuiManagerApp {
                         let mut is_open = true;
                         settings.update(ctx, &mut is_open);
                         if !is_open || ctx.input(|i| i.viewport().close_requested()) {
+                            settings.release_resources();
                             *lock = None;
                         }
                     }
@@ -315,6 +338,7 @@ impl eframe::App for GuiManagerApp {
                         let mut is_open = true;
                         gallery.update(ctx, &mut is_open);
                         if ctx.input(|i| i.viewport().close_requested()) {
+                            gallery.release_all_gui_resources();
                             *lock = None;
                         }
                     }
@@ -331,5 +355,6 @@ impl eframe::App for GuiManagerApp {
         self.toasts.show(ctx);
         self.sync_mouse_passthrough(ctx);
         self.sync_overlay_window_size(ctx);
+        self.release_idle_resources(ctx);
     }
 }

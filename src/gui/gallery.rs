@@ -656,6 +656,27 @@ impl ClipCompressApp {
         });
     }
 
+    fn unload_browser_thumbnails(&mut self) {
+        self.thumbnails.clear();
+    }
+
+    fn close_editor(&mut self) {
+        if let Some(mut editor) = self.editor.take() {
+            editor.playback.release_idle_resources();
+            editor.preview_texture = None;
+            editor.thumbnail_strip = None;
+            editor.thumbnail_strip_loading = false;
+            editor.pending_preview_request = None;
+            editor.last_requested_preview_time = None;
+        }
+    }
+
+    pub fn release_all_gui_resources(&mut self) {
+        self.close_editor();
+        self.unload_browser_thumbnails();
+        self.thumbnails_generating.clear();
+    }
+
     fn request_import_video_dialog(&mut self) {
         if self.import_dialog_pending {
             return;
@@ -948,7 +969,7 @@ impl ClipCompressApp {
         }
 
         if editor_outcome.back_to_browser {
-            self.editor = None;
+            self.close_editor();
         }
 
         if let Some(preview_request) = editor_outcome.preview_request {
@@ -989,6 +1010,7 @@ impl ClipCompressApp {
 
     fn open_editor(&mut self, video: VideoEntry) {
         info!("Opening Clip & Compress editor for {:?}", video.path);
+        self.unload_browser_thumbnails();
         self.editor = Some(EditorState::new(video, self.preferred_export_encoder));
         self.generate_thumbnail_strip();
     }
@@ -1002,6 +1024,7 @@ impl ClipCompressApp {
     }
 
     pub fn refresh(&mut self) {
+        self.close_editor();
         self.loaded = false;
         self.scan_error = None;
         self.videos_by_game.clear();
@@ -1010,6 +1033,12 @@ impl ClipCompressApp {
         self.keyboard_selected_video = None;
         self.delete_hold_started_at = None;
         self.delete_slider_progress = 0.0;
+    }
+}
+
+impl Drop for ClipCompressApp {
+    fn drop(&mut self) {
+        self.release_all_gui_resources();
     }
 }
 

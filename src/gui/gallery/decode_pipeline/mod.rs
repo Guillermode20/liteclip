@@ -360,6 +360,16 @@ impl PlaybackController {
             || self.shared.video_request_in_flight.load(Ordering::SeqCst)
     }
 
+    pub fn release_idle_resources(&mut self) {
+        self.pause_at(self.playback_position_secs());
+        let _ = self.shared.latest_frame.lock().map(|mut g| *g = None);
+        let _ = self.shared.frame_queue.lock().map(|mut g| g.clear());
+        let _ = self.shared.audio_buffer.lock().map(|mut g| *g = None);
+        self.shared.playback_empty_polls.store(0, Ordering::SeqCst);
+        self.shared.playback_drop_bursts.store(0, Ordering::SeqCst);
+        self.shared.frame_pool.trim_to(FRAME_POOL_SIZE);
+    }
+
     pub fn is_frame_request_in_flight(&self) -> bool {
         self.shared.video_request_in_flight.load(Ordering::SeqCst)
     }
@@ -750,6 +760,7 @@ impl PlaybackController {
 
 impl Drop for PlaybackController {
     fn drop(&mut self) {
+        self.release_idle_resources();
         let _ = self.shared.playing_since.lock().map(|mut g| *g = None);
         self.shared.audio_generation.fetch_add(1, Ordering::SeqCst);
         self._audio_shutdown_tx.take();

@@ -40,6 +40,10 @@ unsafe impl Send for D3d11HardwareContext {}
 
 impl Drop for D3d11HardwareContext {
     fn drop(&mut self) {
+        // Drop cached shared textures first to release their COM references
+        // (the shared HANDLEs are owned by the capture/pool and should not be closed here).
+        self.cached_shared_textures.clear();
+
         unsafe {
             if !self.reusable_hw_frame.is_null() {
                 ffmpeg::ffi::av_frame_free(&mut self.reusable_hw_frame);

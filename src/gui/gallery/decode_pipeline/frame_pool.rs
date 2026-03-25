@@ -47,6 +47,13 @@ impl FramePool {
     pub(super) fn buffer_size(&self) -> usize {
         self.buffer_size
     }
+
+    pub(super) fn trim_to(&self, target: usize) {
+        let mut guard = self.buffers.lock().unwrap_or_else(|e| e.into_inner());
+        while guard.len() > target {
+            guard.pop_back();
+        }
+    }
 }
 
 /// A buffer that returns to its pool on drop.
