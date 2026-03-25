@@ -20,6 +20,8 @@
 //! - Parameter set caching (SPS/PPS/VPS) for proper clip decoding
 //! - Keyframe tracking for seekable clips
 //! - Memory and duration-based eviction
+//! - Proactive eviction at 80% memory watermark to prevent mutex storms
+//! - Batch eviction to reduce lock contention
 //!
 //! # Thread Safety
 //!
@@ -48,6 +50,16 @@ use tracing::{debug, info, trace, warn};
 
 use super::functions::{h264_nal_type, hevc_nal_type, qpc_frequency};
 use super::types::BufferStats;
+
+/// Memory usage percentage at which proactive eviction begins.
+/// This prevents sudden mutex storms when memory hits 100% by smoothing
+/// the eviction load across multiple push operations.
+const PROACTIVE_EVICTION_WATERMARK: f32 = 0.80;
+
+/// Number of slots to evict in a single batch.
+/// Batch eviction reduces mutex contention by acquiring multiple locks
+/// in a tight loop rather than with the full push path overhead between each.
+const EVICTION_BATCH_SIZE: usize = 8;
 
 /// Cached codec parameter sets.
 ///
@@ -440,76 +452,127 @@ impl LockFreeReplayBuffer {
         // are back under the limit.  This prevents the initial fill phase from growing
         // RAM unboundedly when the configured bitrate generates packets larger than the
         // packet-count estimate assumed when sizing the ring capacity.
+        //
+        // We use two eviction triggers:
+        // 1. Proactive eviction at 80% watermark - smooths eviction load and prevents
+        //    sudden mutex storms when memory hits 100%
+        // 2. Hard eviction at 100% - ensures memory stays bounded
+        //
+        // Batch eviction acquires multiple slot locks in a tight loop to reduce
+        // contention compared to one-by-one eviction with full push path overhead.
         if inner.max_memory_bytes > 0 {
-            let mut eviction_count = 0usize;
-            let mut evicted_bytes = 0usize;
-            let mut evicted_keyframes = 0usize;
-            let start_total = inner.total_bytes.load(Ordering::Relaxed);
-            let mut stopped_at_head = false;
+            let current_total = inner.total_bytes.load(Ordering::Relaxed);
+            let memory_ratio = current_total as f32 / inner.max_memory_bytes as f32;
 
-            while inner.total_bytes.load(Ordering::Relaxed) > inner.max_memory_bytes {
-                let evict = inner.evict_frontier.load(Ordering::Relaxed);
-                if evict >= write_idx {
-                    stopped_at_head = true;
-                    warn!(
-                        "Eviction: evict_frontier={} >= write_idx={}; no older slots to free (e.g. single packet larger than cap or empty eviction slots)",
-                        evict, write_idx
-                    );
-                    break;
-                }
-                let evict_slot_idx = evict & inner.mask;
-                let slot = &inner.slots[evict_slot_idx];
-                {
-                    let mut guard = slot.packet.lock().unwrap_or_else(|e| e.into_inner());
-                    if let Some(old) = guard.take() {
-                        let old_len = old.data.len();
-                        inner.total_bytes.fetch_sub(old_len, Ordering::Relaxed);
-                        if old.is_keyframe {
-                            inner.keyframe_count.fetch_sub(1, Ordering::Relaxed);
-                            evicted_keyframes += 1;
+            // Determine if we need eviction and how aggressively
+            let needs_eviction = memory_ratio > PROACTIVE_EVICTION_WATERMARK;
+
+            if needs_eviction {
+                let mut eviction_count = 0usize;
+                let mut evicted_bytes = 0usize;
+                let mut evicted_keyframes = 0usize;
+                let start_total = current_total;
+                let mut stopped_at_head = false;
+
+                // Calculate target memory level:
+                // - If above 100%, evict until below max_memory_bytes
+                // - If above 80% but below 100%, evict a small batch to smooth load
+                let target_ratio = if memory_ratio > 1.0 {
+                    1.0 // Hard eviction: get below 100%
+                } else {
+                    PROACTIVE_EVICTION_WATERMARK - 0.05 // Proactive: evict to ~75%
+                };
+                let target_bytes = (inner.max_memory_bytes as f32 * target_ratio) as usize;
+
+                // Batch eviction loop
+                while inner.total_bytes.load(Ordering::Relaxed) > target_bytes {
+                    // Collect a batch of slots to evict
+                    let mut batch_evicted = 0usize;
+
+                    for _ in 0..EVICTION_BATCH_SIZE {
+                        let evict = inner.evict_frontier.load(Ordering::Relaxed);
+                        if evict >= write_idx {
+                            stopped_at_head = true;
+                            warn!(
+                                "Eviction: evict_frontier={} >= write_idx={}; no older slots to free",
+                                evict, write_idx
+                            );
+                            break;
                         }
-                        evicted_bytes += old_len;
-                        eviction_count += 1;
-                    } else {
+
+                        let evict_slot_idx = evict & inner.mask;
+                        let slot = &inner.slots[evict_slot_idx];
+
+                        // Acquire lock and evict packet
+                        {
+                            let mut guard = slot.packet.lock().unwrap_or_else(|e| e.into_inner());
+                            if let Some(old) = guard.take() {
+                                let old_len = old.data.len();
+                                inner.total_bytes.fetch_sub(old_len, Ordering::Relaxed);
+                                if old.is_keyframe {
+                                    inner.keyframe_count.fetch_sub(1, Ordering::Relaxed);
+                                    evicted_keyframes += 1;
+                                }
+                                evicted_bytes += old_len;
+                                eviction_count += 1;
+                                batch_evicted += 1;
+                            } else {
+                                trace!(
+                                    "Eviction slot empty: evict_frontier={}, slot_idx={}",
+                                    evict, evict_slot_idx
+                                );
+                            }
+                        }
+                        inner.evict_frontier.fetch_add(1, Ordering::Release);
+                    }
+
+                    // If we couldn't evict any packets in this batch, stop
+                    if batch_evicted == 0 {
+                        break;
+                    }
+
+                    // For proactive eviction, one batch is usually enough
+                    if memory_ratio <= 1.0 && eviction_count >= EVICTION_BATCH_SIZE {
+                        break;
+                    }
+                }
+
+                if eviction_count > 0 {
+                    let end_total = inner.total_bytes.load(Ordering::Relaxed);
+                    let eviction_type = if memory_ratio > 1.0 { "hard" } else { "proactive" };
+                    debug!(
+                        "Buffer {} eviction: {} packets ({} keyframes) removed in batches of {}, {:.1}MB freed, total {:.1}MB -> {:.1}MB / {:.1}MB limit ({:.0}% -> {:.0}%)",
+                        eviction_type,
+                        eviction_count,
+                        evicted_keyframes,
+                        EVICTION_BATCH_SIZE,
+                        evicted_bytes as f64 / 1_048_576.0,
+                        start_total as f64 / 1_048_576.0,
+                        end_total as f64 / 1_048_576.0,
+                        inner.max_memory_bytes as f64 / 1_048_576.0,
+                        (start_total as f64 / inner.max_memory_bytes as f64 * 100.0),
+                        (end_total as f64 / inner.max_memory_bytes as f64 * 100.0)
+                    );
+                }
+
+                // Oldest packets are gone but the packet we just wrote (or accounting skew) still exceeds the cap.
+                if stopped_at_head && inner.total_bytes.load(Ordering::Relaxed) > inner.max_memory_bytes
+                {
+                    let slot_idx = write_idx & inner.mask;
+                    let slot = &inner.slots[slot_idx];
+                    let mut guard = slot.packet.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(removed) = guard.take() {
+                        let rm = removed.data.len();
+                        inner.total_bytes.fetch_sub(rm, Ordering::Relaxed);
+                        if removed.is_keyframe {
+                            inner.keyframe_count.fetch_sub(1, Ordering::Relaxed);
+                        }
                         warn!(
-                            "Eviction slot empty: evict_frontier={}, slot_idx={}, no packet to evict",
-                            evict, evict_slot_idx
+                            "Buffer: dropped newest packet ({:.1}KB) to enforce memory cap {:.1}MB",
+                            rm as f64 / 1024.0,
+                            inner.max_memory_bytes as f64 / 1_048_576.0
                         );
                     }
-                }
-                inner.evict_frontier.fetch_add(1, Ordering::Release);
-            }
-
-            if eviction_count > 0 {
-                let end_total = inner.total_bytes.load(Ordering::Relaxed);
-                debug!(
-                    "Buffer memory eviction: {} packets ({} keyframes) removed, {:.1}MB freed, total {:.1}MB -> {:.1}MB / {:.1}MB limit",
-                    eviction_count,
-                    evicted_keyframes,
-                    evicted_bytes as f64 / 1_048_576.0,
-                    start_total as f64 / 1_048_576.0,
-                    end_total as f64 / 1_048_576.0,
-                    inner.max_memory_bytes as f64 / 1_048_576.0
-                );
-            }
-
-            // Oldest packets are gone but the packet we just wrote (or accounting skew) still exceeds the cap.
-            if stopped_at_head && inner.total_bytes.load(Ordering::Relaxed) > inner.max_memory_bytes
-            {
-                let slot_idx = write_idx & inner.mask;
-                let slot = &inner.slots[slot_idx];
-                let mut guard = slot.packet.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(removed) = guard.take() {
-                    let rm = removed.data.len();
-                    inner.total_bytes.fetch_sub(rm, Ordering::Relaxed);
-                    if removed.is_keyframe {
-                        inner.keyframe_count.fetch_sub(1, Ordering::Relaxed);
-                    }
-                    warn!(
-                        "Buffer: dropped newest packet ({:.1}KB) to enforce memory cap {:.1}MB",
-                        rm as f64 / 1024.0,
-                        inner.max_memory_bytes as f64 / 1_048_576.0
-                    );
                 }
             }
         }
@@ -657,7 +720,7 @@ impl LockFreeReplayBuffer {
         let write_idx = inner.write_idx.load(Ordering::Acquire);
 
         if write_idx == 0 {
-            return Ok(TrackedSnapshot::new(vec![], Arc::clone(&inner)));
+            return Ok(TrackedSnapshot::new(vec![], Arc::clone(inner)));
         }
 
         let capacity = inner.capacity;
@@ -770,10 +833,10 @@ impl LockFreeReplayBuffer {
             let mut final_result = Vec::with_capacity(prepend.len() + result.len());
             final_result.extend(prepend);
             final_result.extend(result);
-            return Ok(TrackedSnapshot::new(final_result, Arc::clone(&inner)));
+            return Ok(TrackedSnapshot::new(final_result, Arc::clone(inner)));
         }
 
-        Ok(TrackedSnapshot::new(result, Arc::clone(&inner)))
+        Ok(TrackedSnapshot::new(result, Arc::clone(inner)))
     }
 
     /// Gets a snapshot starting from a specific PTS.
@@ -803,7 +866,7 @@ impl LockFreeReplayBuffer {
         let write_idx = inner.write_idx.load(Ordering::Acquire);
 
         if write_idx == 0 {
-            return Ok(TrackedSnapshot::new(vec![], Arc::clone(&inner)));
+            return Ok(TrackedSnapshot::new(vec![], Arc::clone(inner)));
         }
 
         let first_idx = write_idx.saturating_sub(inner.capacity);
@@ -1094,13 +1157,13 @@ impl LockFreeReplayBuffer {
                         let mut final_result = Vec::with_capacity(prepend.len() + result.len());
                         final_result.extend(prepend);
                         final_result.extend(result);
-                        return Ok(TrackedSnapshot::new(final_result, Arc::clone(&inner)));
+                        return Ok(TrackedSnapshot::new(final_result, Arc::clone(inner)));
                     }
                 }
             }
         }
 
-        Ok(TrackedSnapshot::new(result, Arc::clone(&inner)))
+        Ok(TrackedSnapshot::new(result, Arc::clone(inner)))
     }
 
     /// Clears all packets from the buffer.

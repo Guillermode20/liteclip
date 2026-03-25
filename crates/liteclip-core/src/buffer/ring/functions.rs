@@ -436,4 +436,186 @@ mod tests {
             max_memory_percent
         );
     }
+
+    /// Test that proactive eviction triggers at ~80% memory watermark.
+    /// This prevents sudden mutex storms when memory hits 100%.
+    #[test]
+    fn test_proactive_eviction_triggers_at_80_percent() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        // Create a buffer with 10MB limit
+        let buffer = LockFreeReplayBuffer::new(&make_config(10, 10)).unwrap();
+
+        // Track the memory usage percentage when eviction first occurs
+        let proactive_eviction_triggered = Arc::new(AtomicUsize::new(0));
+        let trigger_clone = Arc::clone(&proactive_eviction_triggered);
+
+        // Push packets until we hit memory pressure
+        // Each packet is 100KB, so 80 packets = 8MB (80% of 10MB)
+        for i in 0..150usize {
+            let packet = create_test_packet(i as i64 * 1_000_000, i % 10 == 0, 100_000);
+            buffer.push(packet);
+
+            let stats = buffer.stats();
+
+            // Record the memory percentage when we first see packet count decrease
+            // (indicating eviction started)
+            if stats.packet_count < i + 1 && trigger_clone.load(Ordering::Relaxed) == 0 {
+                trigger_clone.store(stats.memory_usage_percent as usize, Ordering::Relaxed);
+            }
+        }
+
+        let trigger_percent = proactive_eviction_triggered.load(Ordering::Relaxed);
+
+        // Proactive eviction should start at around 80% (allow some variance)
+        assert!(
+            trigger_percent >= 70 && trigger_percent <= 95,
+            "Proactive eviction should trigger around 80%, but triggered at {}%",
+            trigger_percent
+        );
+    }
+
+    /// Test that eviction removes oldest packets first (FIFO ordering).
+    #[test]
+    fn test_eviction_maintains_fifo_ordering() {
+        // Create a buffer with small memory limit to trigger eviction
+        let buffer = LockFreeReplayBuffer::new(&make_config(10, 1)).unwrap();
+
+        // Push 50 packets with distinct PTS values
+        for i in 0..50 {
+            let packet = create_test_packet(i * 1_000_000, i % 10 == 0, 50_000);
+            buffer.push(packet);
+        }
+
+        let snapshot = buffer.snapshot().unwrap();
+
+        // Verify packets are in ascending PTS order (oldest first)
+        let mut prev_pts = i64::MIN;
+        for packet in snapshot.as_slice() {
+            assert!(
+                packet.pts >= prev_pts,
+                "FIFO ordering violated: packet with pts {} came after pts {}",
+                packet.pts,
+                prev_pts
+            );
+            prev_pts = packet.pts;
+        }
+
+        // Verify the oldest packets were evicted (first few should be gone)
+        assert!(
+            snapshot[0].pts > 0,
+            "Oldest packets should have been evicted, but found pts {}",
+            snapshot[0].pts
+        );
+    }
+
+    /// Test that snapshot returns valid data during concurrent eviction.
+    /// Uses multiple iterations to increase chance of catching race conditions.
+    #[test]
+    fn test_snapshot_valid_during_concurrent_eviction() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use std::thread;
+        use std::time::Duration;
+
+        // Create a buffer with small memory limit
+        let buffer = LockFreeReplayBuffer::new(&make_config(5, 5)).unwrap();
+        let buffer2 = buffer.clone(); // Clone before moving to thread
+
+        let running = Arc::new(AtomicBool::new(true));
+        let running_clone = Arc::clone(&running);
+
+        // Spawn a thread that continuously pushes packets (triggering eviction)
+        let push_handle = thread::spawn(move || {
+            let mut i = 0usize;
+            while running_clone.load(Ordering::Relaxed) {
+                let packet = create_test_packet(i as i64 * 1_000_000, i % 30 == 0, 100_000);
+                buffer.push(packet);
+                i += 1;
+                if i % 100 == 0 {
+                    thread::sleep(Duration::from_micros(100));
+                }
+            }
+        });
+
+        // On main thread, take snapshots and verify validity
+        let snapshot_handle = thread::spawn(move || {
+            for _ in 0..50 {
+                let snapshot = buffer2.snapshot().unwrap();
+                // Verify all packets have valid data
+                for packet in snapshot.as_slice() {
+                    assert!(
+                        packet.pts >= 0,
+                        "Invalid PTS in snapshot: {}",
+                        packet.pts
+                    );
+                    assert!(
+                        !packet.data.is_empty(),
+                        "Empty packet data in snapshot"
+                    );
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+        });
+
+        // Let the test run for a bit
+        thread::sleep(Duration::from_millis(200));
+        running.store(false, Ordering::Relaxed);
+
+        push_handle.join().expect("Push thread panicked");
+        snapshot_handle.join().expect("Snapshot thread panicked");
+    }
+
+    /// Test that memory stays within 10% of max after any push operation.
+    /// This validates VAL-RING-001.
+    #[test]
+    fn test_memory_never_exceeds_limit_plus_headroom() {
+        let buffer = LockFreeReplayBuffer::new(&make_config(10, 5)).unwrap();
+
+        let max_memory_bytes = 5 * 1024 * 1024; // 5MB
+        let headroom = (max_memory_bytes as f64 * 1.10) as usize;
+
+        // Push packets that will exceed memory limit
+        for i in 0..100 {
+            let packet = create_test_packet(i * 1_000_000, i % 10 == 0, 200_000);
+            buffer.push(packet);
+
+            let stats = buffer.stats();
+            let current_bytes = stats.total_bytes;
+
+            assert!(
+                current_bytes <= headroom,
+                "Memory {} exceeds max + 10% headroom {} after push {}",
+                current_bytes,
+                headroom,
+                i
+            );
+        }
+    }
+
+    /// Test that no packets are lost during normal operation under memory limit.
+    /// This validates VAL-RING-003.
+    #[test]
+    fn test_no_frame_drops_under_memory_limit() {
+        // Create buffer with enough memory to hold all packets without eviction
+        let buffer = LockFreeReplayBuffer::new(&make_config(10, 100)).unwrap();
+
+        let packet_count: usize = 1000;
+        for i in 0..packet_count {
+            let packet = create_test_packet(i as i64 * 1_000_000, i % 30 == 0, 1024);
+            buffer.push(packet);
+        }
+
+        let snapshot = buffer.snapshot().unwrap();
+
+        // All packets should be present
+        assert_eq!(
+            snapshot.len(),
+            packet_count,
+            "Expected {} packets in snapshot, got {}",
+            packet_count,
+            snapshot.len()
+        );
+    }
 }
