@@ -262,9 +262,6 @@ fn handle_editor_shortcuts(
             );
             editor.current_time_secs = clamped_time;
             editor.playback.pause_at(clamped_time);
-            if let Some(ref mut webcam_playback) = editor.webcam_playback {
-                webcam_playback.pause_at(clamped_time);
-            }
 
             outcome.preview_request = Some(editor.current_time_secs);
         }

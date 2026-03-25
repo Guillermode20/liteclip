@@ -653,7 +653,7 @@ async fn spawn_save_clip_task(
     }
 
     let save_ctx = app_state_blocking(app_state, |s| s.save_context()).await;
-    let (config, buffer, webcam_buffer) = match save_ctx {
+    let (config, buffer) = match save_ctx {
         Ok(x) => x,
         Err(e) => {
             error!("Failed to read app state for clip save: {}", e);
@@ -676,7 +676,6 @@ async fn spawn_save_clip_task(
         let result = liteclip_replay::app::ClipManager::save_clip(
             &config,
             &buffer,
-            webcam_buffer.as_ref(),
             game_name.as_deref(),
             None,
         )

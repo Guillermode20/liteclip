@@ -440,12 +440,14 @@ impl LockFreeReplayBuffer {
             let mut evicted_bytes = 0usize;
             let mut evicted_keyframes = 0usize;
             let start_total = inner.total_bytes.load(Ordering::Relaxed);
+            let mut stopped_at_head = false;
 
             while inner.total_bytes.load(Ordering::Relaxed) > inner.max_memory_bytes {
                 let evict = inner.evict_frontier.load(Ordering::Relaxed);
                 if evict >= write_idx {
+                    stopped_at_head = true;
                     warn!(
-                        "Eviction abort: evict_frontier={} >= write_idx={} (no packets to evict!)",
+                        "Eviction: evict_frontier={} >= write_idx={}; no older slots to free (e.g. single packet larger than cap or empty eviction slots)",
                         evict, write_idx
                     );
                     break;
@@ -484,6 +486,27 @@ impl LockFreeReplayBuffer {
                     end_total as f64 / 1_048_576.0,
                     inner.max_memory_bytes as f64 / 1_048_576.0
                 );
+            }
+
+            // Oldest packets are gone but the packet we just wrote (or accounting skew) still exceeds the cap.
+            if stopped_at_head
+                && inner.total_bytes.load(Ordering::Relaxed) > inner.max_memory_bytes
+            {
+                let slot_idx = write_idx & inner.mask;
+                let slot = &inner.slots[slot_idx];
+                let mut guard = slot.packet.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(removed) = guard.take() {
+                    let rm = removed.data.len();
+                    inner.total_bytes.fetch_sub(rm, Ordering::Relaxed);
+                    if removed.is_keyframe {
+                        inner.keyframe_count.fetch_sub(1, Ordering::Relaxed);
+                    }
+                    warn!(
+                        "Buffer: dropped newest packet ({:.1}KB) to enforce memory cap {:.1}MB",
+                        rm as f64 / 1024.0,
+                        inner.max_memory_bytes as f64 / 1_048_576.0
+                    );
+                }
             }
         }
     }
@@ -646,10 +669,11 @@ impl LockFreeReplayBuffer {
 
             if let Ok(packet_guard) = slot.packet.try_lock() {
                 if let Some(ref packet) = *packet_guard {
-                    // Deep copy to break arc sharing — allows ring to evict freely
-                    // without waiting for snapshot to be dropped
+                    // Zero-copy clone: Bytes uses Arc internally, so clone() just bumps
+                    // the refcount. Ring eviction still works because the slot is cleared
+                    // via guard.take(), and the snapshot's clone keeps data alive.
                     result.push(EncodedPacket {
-                        data: Bytes::copy_from_slice(packet.data.as_ref()),
+                        data: packet.data.clone(),
                         pts: packet.pts,
                         dts: packet.dts,
                         stream: packet.stream,
@@ -912,10 +936,11 @@ impl LockFreeReplayBuffer {
 
             if let Ok(packet_guard) = slot.packet.try_lock() {
                 if let Some(ref packet) = *packet_guard {
-                    // Deep copy to break arc sharing — allows ring to evict freely
-                    // without waiting for snapshot to be dropped
+                    // Zero-copy clone: Bytes uses Arc internally, so clone() just bumps
+                    // the refcount. Ring eviction still works because the slot is cleared
+                    // via guard.take(), and the snapshot's clone keeps data alive.
                     result.push(EncodedPacket {
-                        data: Bytes::copy_from_slice(packet.data.as_ref()),
+                        data: packet.data.clone(),
                         pts: packet.pts,
                         dts: packet.dts,
                         stream: packet.stream,

@@ -48,24 +48,17 @@ pub mod sdk_ffmpeg_output;
 pub mod sdk_export;
 pub mod types;
 pub mod video_file;
-pub mod webcam_layout;
 
-pub use companion_cache::{
-    hash_main_video_path, webcam_cache_dir, webcam_layout_path, webcam_video_path,
-};
+pub use companion_cache::hash_main_video_path;
 pub use error::{OutputError, OutputResult};
 pub use functions::{
     calculate_clip_start_pts, ffmpeg_executable_path, generate_output_path, generate_thumbnail,
     h264_nal_type, hevc_nal_type,
 };
-pub use saver::spawn_clip_saver;
+pub use saver::{spawn_clip_saver, SKIP_THUMBNAIL_ENV};
 pub use types::{Muxer, MuxerConfig};
 pub use video_file::{
     estimate_export_bitrates, extract_preview_frame, probe_video_file, spawn_clip_export,
     ClipExportPhase, ClipExportRequest, ClipExportUpdate, ExportBitrateEstimate, TimeRange,
-    VideoFileMetadata, WebcamExport,
-};
-pub use webcam_layout::{
-    default_webcam_keyframes, interpolate_norm_rect, keyframes_for_output_timeline,
-    source_time_to_output_time, WebcamKeyframe, WebcamLayoutFile,
+    VideoFileMetadata,
 };

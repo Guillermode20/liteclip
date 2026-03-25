@@ -6,7 +6,7 @@ use crossbeam::channel::{bounded, Receiver};
 use ffmpeg_next as ffmpeg;
 #[cfg(feature = "ffmpeg")]
 use ffmpeg_next::format::Pixel;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 #[cfg(windows)]
 use windows::Win32::System::Threading::{
@@ -339,6 +339,8 @@ pub fn spawn_encoder_with_receiver(
             let mut total_forwarded_packets = 0u64;
             let mut flush_batches = 0usize;
             let mut last_packet_flush = Instant::now();
+            let mut last_mem_diag = Instant::now();
+            const MEM_DIAG_INTERVAL: Duration = Duration::from_secs(30);
 
             fn flush_packet_batch(
                 buffer: &crate::buffer::ring::SharedReplayBuffer,
@@ -378,6 +380,11 @@ pub fn spawn_encoder_with_receiver(
             }
 
             loop {
+                if last_mem_diag.elapsed() >= MEM_DIAG_INTERVAL {
+                    crate::memory_diag::log_recording_memory("encoder_periodic", &buffer);
+                    last_mem_diag = Instant::now();
+                }
+
                 total_forwarded_packets =
                     total_forwarded_packets.saturating_add(drain_ready_packets(
                         &packet_rx,

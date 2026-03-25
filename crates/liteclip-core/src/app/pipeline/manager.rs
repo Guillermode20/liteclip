@@ -35,12 +35,8 @@ pub struct RecordingPipeline {
     encoder_factory: Box<dyn EncoderFactory>,
     /// Handle to the encoder thread.
     encoder_handle: Option<EncoderHandle>,
-    /// Optional second encoder for webcam (same config family, separate replay buffer).
-    webcam_encoder_handle: Option<EncoderHandle>,
     /// Capture backend instance.
     capture: Option<Box<dyn CaptureBackend>>,
-    /// Webcam DirectShow capture (stopped before the webcam encoder is joined).
-    webcam_capture: Option<crate::capture::WebcamCapture>,
     /// Audio capture manager.
     audio_manager: Option<crate::capture::audio::WasapiAudioManager>,
     /// Current lifecycle state.
@@ -64,9 +60,7 @@ impl RecordingPipeline {
             capture_factory,
             encoder_factory,
             encoder_handle: None,
-            webcam_encoder_handle: None,
             capture: None,
-            webcam_capture: None,
             audio_manager: None,
             lifecycle: RecordingLifecycle::Idle,
             level_monitor: None,
@@ -139,26 +133,12 @@ impl RecordingPipeline {
                 Err(e) => warn!("Encoder thread panicked during rollback: {:?}", e),
             }
         }
-        if let Some(mut cap) = self.webcam_capture.take() {
-            cap.stop();
-        }
-        if let Some(handle) = self.webcam_encoder_handle.take() {
-            let crate::encode::EncoderHandle {
-                thread,
-                frame_tx,
-                health_rx: _,
-                effective_config: _,
-            } = handle;
-            drop(frame_tx);
-            let _ = thread.join();
-        }
     }
 
     pub fn start(
         &mut self,
         config: &Config,
         buffer: &ReplayBuffer,
-        webcam_buffer: Option<&ReplayBuffer>,
     ) -> Result<()> {
         if matches!(
             self.lifecycle,
@@ -204,31 +184,6 @@ impl RecordingPipeline {
             }
         }
 
-        if config.video.webcam_enabled {
-            if let Some(wb) = webcam_buffer {
-                let mut cap = crate::capture::WebcamCapture::new();
-                match super::webcam::start_webcam_pipeline(
-                    config,
-                    wb,
-                    &*self.encoder_factory,
-                    &mut cap,
-                ) {
-                    Ok(h) => {
-                        self.webcam_encoder_handle = Some(h);
-                        self.webcam_capture = Some(cap);
-                    }
-                    Err(e) => {
-                        warn!(
-                            "Webcam could not start (desktop recording continues): {:#}",
-                            e
-                        );
-                    }
-                }
-            } else {
-                warn!("Webcam enabled but internal webcam buffer is missing");
-            }
-        }
-
         self.lifecycle = RecordingLifecycle::Running;
         info!("Recording mode: DXGI capture + native encoder + audio");
         info!("Recording started");
@@ -250,36 +205,6 @@ impl RecordingPipeline {
 
         if let Some(capture) = self.capture.take() {
             drop(capture);
-        }
-
-        if let Some(mut cap) = self.webcam_capture.take() {
-            cap.stop();
-        }
-
-        if let Some(handle) = self.webcam_encoder_handle.take() {
-            let crate::encode::EncoderHandle {
-                thread,
-                frame_tx,
-                health_rx: _,
-                effective_config: _,
-            } = handle;
-            drop(frame_tx);
-
-            match thread.join() {
-                Ok(Ok(())) => info!("Webcam encoder thread stopped successfully"),
-                Ok(Err(e)) => {
-                    error!("Webcam encoder thread returned error: {}", e);
-                    if first_error.is_none() {
-                        first_error = Some(e.into());
-                    }
-                }
-                Err(_) => {
-                    error!("Webcam encoder thread panicked");
-                    if first_error.is_none() {
-                        first_error = Some(anyhow::anyhow!("Webcam encoder thread panicked"));
-                    }
-                }
-            }
         }
 
         if let Some(handle) = self.encoder_handle.take() {
@@ -349,20 +274,6 @@ impl RecordingPipeline {
         }
 
         if fatal_reason.is_none() {
-            if let Some(handle) = self.webcam_encoder_handle.as_ref() {
-                if let Ok(event) = handle.health_rx.try_recv() {
-                    match event {
-                        crate::encode::EncoderHealthEvent::Fatal(reason) => {
-                            fatal_reason = Some(format!("Webcam encoder fatal: {}", reason));
-                        }
-                    }
-                } else if handle.thread.is_finished() {
-                    fatal_reason = Some("Webcam encoder thread exited unexpectedly".to_string());
-                }
-            }
-        }
-
-        if fatal_reason.is_none() {
             if let Some(capture) = self.capture.as_ref() {
                 if let Some(reason) = capture.try_recv_fatal() {
                     fatal_reason = Some(format!("Capture fatal: {}", reason));
@@ -388,24 +299,6 @@ impl Drop for RecordingPipeline {
         if !matches!(self.lifecycle, RecordingLifecycle::Idle) {
             drop(self.audio_manager.take());
             drop(self.capture.take());
-            if let Some(mut cap) = self.webcam_capture.take() {
-                cap.stop();
-            }
-            if let Some(handle) = self.webcam_encoder_handle.take() {
-                let crate::encode::EncoderHandle {
-                    thread,
-                    frame_tx,
-                    health_rx: _,
-                    effective_config: _,
-                } = handle;
-                drop(frame_tx);
-
-                match thread.join() {
-                    Ok(Ok(())) => {}
-                    Ok(Err(e)) => warn!("Webcam encoder thread returned error during drop: {}", e),
-                    Err(e) => warn!("Webcam encoder panicked during drop: {:?}", e),
-                }
-            }
             if let Some(handle) = self.encoder_handle.take() {
                 let crate::encode::EncoderHandle {
                     thread,

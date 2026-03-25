@@ -42,13 +42,28 @@ fn aggressively_drop_packets(packets: TrackedSnapshot) {
 /// # Returns
 ///
 /// A `JoinHandle` representing the background operation. It resolves to the `PathBuf` of the saved file.
+/// If set to `1` or `true`, skips gallery thumbnail generation after save (A/B memory diagnosis).
+pub const SKIP_THUMBNAIL_ENV: &str = "LITECLIP_SKIP_THUMBNAIL";
+
+fn thumbnail_enabled_after_save(requested: bool) -> bool {
+    if std::env::var(SKIP_THUMBNAIL_ENV)
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    requested
+}
+
 pub fn spawn_clip_saver(
     buffer: SharedReplayBuffer,
     duration: Duration,
     output_path: PathBuf,
     config: MuxerConfig,
     save_directory: PathBuf,
+    generate_thumbnail_after_save: bool,
 ) -> JoinHandle<Result<PathBuf>> {
+    let generate_thumbnail_after_save = thumbnail_enabled_after_save(generate_thumbnail_after_save);
     tokio::task::spawn_blocking(move || {
         log_save_memory("start", Some(&buffer), None);
         info!(
@@ -264,17 +279,23 @@ pub fn spawn_clip_saver(
             }
         }
 
-        // Generate thumbnail immediately after saving
-        debug!("Generating thumbnail for saved clip");
-        log_save_memory("before thumbnail", None, None);
-        match generate_thumbnail(&final_path, &save_directory) {
-            Ok(thumb_path) => {
-                log_save_memory("after thumbnail", None, None);
-                info!("Thumbnail generated: {:?}", thumb_path);
+        if generate_thumbnail_after_save {
+            debug!("Generating thumbnail for saved clip");
+            log_save_memory("before thumbnail", None, None);
+            match generate_thumbnail(&final_path, &save_directory) {
+                Ok(thumb_path) => {
+                    log_save_memory("after thumbnail", None, None);
+                    info!("Thumbnail generated: {:?}", thumb_path);
+                }
+                Err(e) => {
+                    warn!("Failed to generate thumbnail: {}", e);
+                }
             }
-            Err(e) => {
-                warn!("Failed to generate thumbnail: {}", e);
-            }
+        } else {
+            info!(
+                "Thumbnail skipped (config false or {}=1); compare private vs working set around save",
+                SKIP_THUMBNAIL_ENV
+            );
         }
 
         Ok(final_path)
@@ -373,34 +394,4 @@ pub fn log_save_memory(
     }
 }
 
-#[cfg(target_os = "windows")]
-pub fn process_memory_mb() -> Option<(f64, f64)> {
-    use std::mem::size_of;
-    use windows::Win32::System::ProcessStatus::{
-        K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS_EX,
-    };
-    use windows::Win32::System::Threading::GetCurrentProcess;
-
-    unsafe {
-        let mut counters = PROCESS_MEMORY_COUNTERS_EX::default();
-        if K32GetProcessMemoryInfo(
-            GetCurrentProcess(),
-            &mut counters as *mut _ as *mut _,
-            size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
-        )
-        .as_bool()
-        {
-            return Some((
-                counters.WorkingSetSize as f64 / (1024.0 * 1024.0),
-                counters.PrivateUsage as f64 / (1024.0 * 1024.0),
-            ));
-        }
-    }
-
-    None
-}
-
-#[cfg(not(target_os = "windows"))]
-pub fn process_memory_mb() -> Option<(f64, f64)> {
-    None
-}
+pub use crate::memory_diag::process_memory_mb;

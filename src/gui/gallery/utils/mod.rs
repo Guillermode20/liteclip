@@ -17,7 +17,6 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 pub(super) fn collect_video_paths_impl(
     dir: &Path,
     cache_dir: &Path,
-    webcam_cache_dir: &Path,
     output: &mut Vec<PathBuf>,
 ) {
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -26,11 +25,16 @@ pub(super) fn collect_video_paths_impl(
 
     for entry in entries.flatten() {
         let path = entry.path();
-        if path == cache_dir || path == webcam_cache_dir {
+        let skip_dir = path == cache_dir
+            || path
+                .file_name()
+                .and_then(|n| n.to_str())
+                == Some(".webcam-cache");
+        if skip_dir {
             continue;
         }
         if path.is_dir() {
-            collect_video_paths_impl(&path, cache_dir, webcam_cache_dir, output);
+            collect_video_paths_impl(&path, cache_dir, output);
         } else if path
             .extension()
             .map(|ext| ext.eq_ignore_ascii_case("mp4"))

@@ -25,8 +25,6 @@ pub struct AppState {
     config: Config,
     /// Replay buffer for storing encoded packets.
     buffer: ReplayBuffer,
-    /// Second replay buffer for webcam video when [`Config::video::webcam_enabled`] is set.
-    webcam_buffer: Option<ReplayBuffer>,
     /// Recording pipeline for capture → encode → buffer flow.
     pipeline: RecordingPipeline,
     /// Audio level monitor for GUI visualization.
@@ -60,11 +58,6 @@ impl AppState {
     /// ```
     pub fn new(config: Config) -> Result<Self> {
         let buffer = ReplayBuffer::new(&config)?;
-        let webcam_buffer = if config.video.webcam_enabled {
-            Some(ReplayBuffer::new(&config)?)
-        } else {
-            None
-        };
         let level_monitor = AudioLevelMonitor::new();
         let mut pipeline = RecordingPipeline::with_defaults();
         pipeline.set_level_monitor(level_monitor.clone());
@@ -72,7 +65,6 @@ impl AppState {
         Ok(Self {
             config,
             buffer,
-            webcam_buffer,
             pipeline,
             level_monitor,
             host: None,
@@ -101,8 +93,7 @@ impl AppState {
     ///
     /// Returns an error if pipeline fails to start.
     pub fn start_recording(&mut self) -> Result<()> {
-        let wb = self.webcam_buffer.as_ref();
-        self.pipeline.start(&self.config, &self.buffer, wb)
+        self.pipeline.start(&self.config, &self.buffer)
     }
 
     /// Stops the recording pipeline.
@@ -148,12 +139,8 @@ impl AppState {
     /// Tuple of:
     /// - Clone of the configuration
     /// - Clone of the replay buffer
-    pub fn save_context(&self) -> (Config, ReplayBuffer, Option<ReplayBuffer>) {
-        (
-            self.config.clone(),
-            self.buffer.clone(),
-            self.webcam_buffer.clone(),
-        )
+    pub fn save_context(&self) -> (Config, ReplayBuffer) {
+        (self.config.clone(), self.buffer.clone())
     }
 
     pub fn replay_buffer_stats(&self) -> crate::buffer::BufferStats {
@@ -203,31 +190,15 @@ impl AppState {
             self.config.validate();
 
             self.buffer = ReplayBuffer::new(&self.config)?;
-            self.webcam_buffer = if self.config.video.webcam_enabled {
-                Some(ReplayBuffer::new(&self.config)?)
-            } else {
-                None
-            };
 
-            if let Err(e) =
-                self.pipeline
-                    .start(&self.config, &self.buffer, self.webcam_buffer.as_ref())
-            {
+            if let Err(e) = self.pipeline.start(&self.config, &self.buffer) {
                 error!("Failed to start pipeline with new config: {}", e);
                 error!("Rolling back to previous configuration...");
 
                 self.config = old_config;
                 self.buffer = ReplayBuffer::new(&self.config)?;
-                self.webcam_buffer = if self.config.video.webcam_enabled {
-                    Some(ReplayBuffer::new(&self.config)?)
-                } else {
-                    None
-                };
 
-                match self
-                    .pipeline
-                    .start(&self.config, &self.buffer, self.webcam_buffer.as_ref())
-                {
+                match self.pipeline.start(&self.config, &self.buffer) {
                     Ok(()) => {
                         warn!("Rollback successful - using previous configuration");
                     }

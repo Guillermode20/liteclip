@@ -106,6 +106,23 @@ mod tests {
     }
 
     #[test]
+    fn test_oversized_single_packet_dropped_for_memory_cap() {
+        let mut config = make_config(30, 1);
+        config.advanced.memory_limit_mb = 1;
+        let buffer = LockFreeReplayBuffer::new(&config).unwrap();
+        let cap_bytes =
+            (config.effective_replay_memory_limit_mb() as usize).saturating_mul(1024 * 1024);
+        buffer.push(create_test_packet(0, true, cap_bytes.saturating_mul(2)));
+        let stats = buffer.stats();
+        assert!(
+            stats.total_bytes <= cap_bytes,
+            "total_bytes={} expected <= {}",
+            stats.total_bytes,
+            cap_bytes
+        );
+    }
+
+    #[test]
     fn test_keyframe_seeking() {
         let buffer = LockFreeReplayBuffer::new(&make_config(120, 512)).unwrap();
         for i in 0..30 {

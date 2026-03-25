@@ -52,11 +52,9 @@ pub mod audio;
 pub mod backpressure;
 pub mod dxgi;
 pub mod error;
-pub mod webcam;
 
 pub use dxgi::{DxgiCapture, DxgiCaptureFactory};
 pub use error::{CaptureError, CaptureResult};
-pub use webcam::{list_dshow_video_devices, WebcamCapture};
 
 /// Configuration for screen capture.
 ///

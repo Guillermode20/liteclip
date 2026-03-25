@@ -2,10 +2,10 @@ use eframe::egui;
 
 use super::{
     add_cut_point, estimate_export_bitrates_from_editor, format_compact_duration, format_size_mb,
-    format_timestamp_precise, remove_cut_point, start_export, toggle_editor_playback,
-    upsert_webcam_keyframe, x_to_time, ClipCompressApp, EditorState, EditorUiOutcome,
-    DEFAULT_TARGET_SIZE_MB, EDITOR_SIDEBAR_MIN_WIDTH, EDITOR_SIDEBAR_WIDTH,
-    EDITOR_STACK_BREAKPOINT, SCRUB_FAST_RATE_SECS_PER_SEC, SCRUB_SAMPLE_MIN_DT_SECS,
+    format_timestamp_precise, remove_cut_point, start_export, toggle_editor_playback, x_to_time,
+    ClipCompressApp, EditorState, EditorUiOutcome, DEFAULT_TARGET_SIZE_MB,
+    EDITOR_SIDEBAR_MIN_WIDTH, EDITOR_SIDEBAR_WIDTH, EDITOR_STACK_BREAKPOINT,
+    SCRUB_FAST_RATE_SECS_PER_SEC, SCRUB_SAMPLE_MIN_DT_SECS,
 };
 
 pub(super) fn render_preview_panel_impl(
@@ -31,17 +31,12 @@ pub(super) fn render_preview_panel_impl(
         preview_height = preview_height.min(max_preview_height);
         let preview_size = egui::vec2(available_width, preview_height);
 
-        editor.pip_edit_rect =
-            super::interpolate_norm_rect(editor.current_time_secs, &editor.webcam_layout.keyframes);
-
-        let main_img = if let Some(texture) = &editor.preview_texture {
-            Some(
-                ui.add(
-                    egui::Image::from_texture(texture)
-                        .fit_to_exact_size(preview_size)
-                        .maintain_aspect_ratio(true),
-                ),
-            )
+        if let Some(texture) = &editor.preview_texture {
+            ui.add(
+                egui::Image::from_texture(texture)
+                    .fit_to_exact_size(preview_size)
+                    .maintain_aspect_ratio(true),
+            );
         } else {
             let (rect, _) = ui.allocate_exact_size(preview_size, egui::Sense::hover());
             ui.painter().rect_filled(
@@ -59,72 +54,6 @@ pub(super) fn render_preview_panel_impl(
             if !editor.preview_frame_in_flight {
                 outcome.preview_request = Some(editor.current_time_secs);
             }
-            None
-        };
-
-        if let (Some(img), Some(wtex)) = (main_img, &editor.webcam_texture) {
-            let rect = img.rect;
-            let (x, y, w, h) = editor.pip_edit_rect;
-            let pip_rect = egui::Rect::from_min_size(
-                rect.min
-                    + egui::vec2(
-                        (x * rect.width() as f64) as f32,
-                        (y * rect.height() as f64) as f32,
-                    ),
-                egui::vec2(
-                    (w * rect.width() as f64) as f32,
-                    (h * rect.height() as f64) as f32,
-                ),
-            );
-            ui.put(
-                pip_rect,
-                egui::Image::from_texture(wtex).fit_to_exact_size(pip_rect.size()),
-            );
-            let handle = 12.0_f32;
-            let resize_rect = egui::Rect::from_min_size(
-                pip_rect.max - egui::vec2(handle, handle),
-                egui::vec2(handle, handle),
-            );
-            let resize_id = ui.id().with("webcam_pip_resize");
-            let resize = ui.interact(resize_rect, resize_id, egui::Sense::drag());
-            ui.painter().rect_stroke(
-                resize_rect,
-                egui::CornerRadius::same(2),
-                egui::Stroke::new(1.5, egui::Color32::from_white_alpha(200)),
-                egui::StrokeKind::Inside,
-            );
-            if resize.dragged() {
-                let d = resize.drag_delta();
-                let dw = d.x as f64 / rect.width() as f64;
-                let dh = d.y as f64 / rect.height() as f64;
-                let (mut px, mut py, mut pw, mut ph) = editor.pip_edit_rect;
-                pw = (pw + dw).clamp(0.05, 1.0);
-                ph = (ph + dh).clamp(0.05, 1.0);
-                px = px.clamp(0.0, 1.0 - pw);
-                py = py.clamp(0.0, 1.0 - ph);
-                editor.pip_edit_rect = (px, py, pw, ph);
-                upsert_webcam_keyframe(editor);
-            } else {
-                let pip_id = ui.id().with("webcam_pip");
-                let drag = ui.interact(pip_rect, pip_id, egui::Sense::drag());
-                if drag.dragged() {
-                    let d = drag.drag_delta();
-                    let nx = x + (d.x as f64 / rect.width() as f64);
-                    let ny = y + (d.y as f64 / rect.height() as f64);
-                    editor.pip_edit_rect.0 = nx.clamp(0.0, 1.0 - editor.pip_edit_rect.2);
-                    editor.pip_edit_rect.1 = ny.clamp(0.0, 1.0 - editor.pip_edit_rect.3);
-                    upsert_webcam_keyframe(editor);
-                }
-            }
-            ui.horizontal(|ui| {
-                if ui.button("Keyframe here").clicked() {
-                    upsert_webcam_keyframe(editor);
-                }
-                if ui.button("Save PiP layout").clicked() {
-                    let _ = editor.webcam_layout.save(&editor.webcam_layout_path);
-                    editor.webcam_layout_dirty = false;
-                }
-            });
         }
 
         ui.add_space(6.0);

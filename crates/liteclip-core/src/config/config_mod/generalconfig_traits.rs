@@ -20,6 +20,7 @@ impl Default for GeneralConfig {
             start_minimised: default_true(),
             notifications: default_true(),
             auto_detect_game: default_true(),
+            generate_clip_thumbnail: default_true(),
         }
     }
 }

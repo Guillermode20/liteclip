@@ -108,6 +108,7 @@ pub mod error;
 pub mod ffmpeg_backend;
 pub mod host;
 pub mod hotkey_parse;
+pub mod memory_diag;
 pub mod media;
 pub mod output;
 pub mod paths;

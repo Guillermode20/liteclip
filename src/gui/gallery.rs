@@ -22,9 +22,8 @@ use decode_pipeline::PlaybackController;
 use crate::config::{Config, EncoderType};
 use crate::gui::manager::{show_toast, ToastKind};
 use crate::output::{
-    default_webcam_keyframes, generate_thumbnail, interpolate_norm_rect, probe_video_file,
-    spawn_clip_export, webcam_layout_path, webcam_video_path, ClipExportRequest, ClipExportUpdate,
-    TimeRange, VideoFileMetadata, WebcamExport, WebcamKeyframe, WebcamLayoutFile,
+    generate_thumbnail, probe_video_file, spawn_clip_export, ClipExportRequest, ClipExportUpdate,
+    TimeRange, VideoFileMetadata,
 };
 use crate::platform::AppEvent;
 
@@ -55,8 +54,6 @@ struct VideoEntry {
     size_mb: f64,
     modified: SystemTime,
     metadata: VideoFileMetadata,
-    /// Companion file in `.webcam-cache` when present (same hash scheme as thumbnails).
-    webcam_path: Option<PathBuf>,
 }
 
 struct ThumbnailResult {
@@ -160,13 +157,6 @@ struct EditorState {
     selected_snippet_index: Option<usize>,
     thumbnail_strip: Option<ThumbnailStrip>,
     thumbnail_strip_loading: bool,
-    webcam_playback: Option<PlaybackController>,
-    webcam_texture: Option<egui::TextureHandle>,
-    webcam_layout: WebcamLayoutFile,
-    webcam_layout_path: PathBuf,
-    webcam_layout_dirty: bool,
-    /// Normalized PiP rect being edited (x,y,w,h in 0..1).
-    pip_edit_rect: (f64, f64, f64, f64),
 }
 
 impl EditorState {
@@ -179,17 +169,6 @@ impl EditorState {
             video.metadata.clone(),
             PREVIEW_FRAME_WIDTH,
         );
-        let webcam_layout_path = webcam_layout_path(&video.save_root, &video.path);
-        let webcam_layout =
-            WebcamLayoutFile::load(&webcam_layout_path).unwrap_or_else(|_| WebcamLayoutFile {
-                keyframes: default_webcam_keyframes(),
-            });
-        let webcam_playback = video.webcam_path.as_ref().and_then(|p| {
-            probe_video_file(p)
-                .ok()
-                .map(|m| PlaybackController::new(p.clone(), m, PREVIEW_FRAME_WIDTH / 2))
-        });
-        let pip_edit_rect = interpolate_norm_rect(0.0, &webcam_layout.keyframes);
         Self {
             video,
             current_time_secs: 0.0,
@@ -223,12 +202,6 @@ impl EditorState {
             selected_snippet_index: Some(0),
             thumbnail_strip: None,
             thumbnail_strip_loading: false,
-            webcam_playback,
-            webcam_texture: None,
-            webcam_layout,
-            webcam_layout_path,
-            webcam_layout_dirty: false,
-            pip_edit_rect,
         }
     }
 
@@ -413,12 +386,10 @@ impl ClipCompressApp {
             return;
         }
 
-        let webcam_cache_dir = self.save_directory.join(".webcam-cache");
         let mut paths = Vec::new();
         collect_video_paths(
             &self.save_directory,
             &self.cache_directory,
-            &webcam_cache_dir,
             &mut paths,
         );
         let base_dir = self.save_directory.clone();
@@ -491,9 +462,6 @@ impl ClipCompressApp {
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| "Desktop".to_string());
 
-        let webcam_candidate = webcam_video_path(base_dir, &path);
-        let webcam_path = webcam_candidate.exists().then_some(webcam_candidate);
-
         Ok(VideoEntry {
             path,
             save_root: base_dir.to_path_buf(),
@@ -503,7 +471,6 @@ impl ClipCompressApp {
             size_mb: metadata.len() as f64 / (1024.0 * 1024.0),
             modified: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
             metadata: video_metadata,
-            webcam_path,
         })
     }
 
@@ -527,7 +494,6 @@ impl ClipCompressApp {
             size_mb: metadata.len() as f64 / (1024.0 * 1024.0),
             modified: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
             metadata: video_metadata,
-            webcam_path: None,
         })
     }
 
@@ -786,9 +752,6 @@ impl ClipCompressApp {
         editor.preview_frame_in_flight = true;
         editor.pending_preview_request = None;
         editor.playback.request_preview_frame(timestamp_secs);
-        if let Some(ref mut wp) = editor.webcam_playback {
-            let _ = wp.request_preview_frame(timestamp_secs);
-        }
     }
 
     fn queue_fast_preview_request(&mut self, timestamp_secs: f64) {
@@ -816,9 +779,6 @@ impl ClipCompressApp {
         editor.preview_frame_in_flight = true;
         editor.pending_preview_request = None;
         editor.playback.request_preview_frame_fast(timestamp_secs);
-        if let Some(ref mut wp) = editor.webcam_playback {
-            let _ = wp.request_preview_frame_fast(timestamp_secs);
-        }
     }
 
     fn poll_background_work(&mut self, ctx: &egui::Context) -> Option<f64> {
@@ -860,9 +820,6 @@ impl ClipCompressApp {
 
         if let Some(editor) = self.editor.as_mut() {
             editor.playback.poll();
-            if let Some(ref mut wp) = editor.webcam_playback {
-                wp.poll();
-            }
 
             // Live playback path: drain the frame queue for frames due by now.
             if editor.is_playing {
@@ -882,20 +839,6 @@ impl ClipCompressApp {
                             color_image,
                             egui::TextureOptions::LINEAR,
                         ));
-                    }
-                    if let Some(ref mut wp) = editor.webcam_playback {
-                        if let Some(wimg) = wp.take_playback_frame() {
-                            let ci = color_image_from_rgba(&wimg);
-                            if let Some(t) = &mut editor.webcam_texture {
-                                t.set(ci, egui::TextureOptions::LINEAR);
-                            } else {
-                                editor.webcam_texture = Some(ctx.load_texture(
-                                    "webcam_preview",
-                                    ci,
-                                    egui::TextureOptions::LINEAR,
-                                ));
-                            }
-                        }
                     }
                     editor.preview_frame_in_flight = false;
                     editor.pending_preview_request = None;
@@ -920,20 +863,6 @@ impl ClipCompressApp {
                         color_image,
                         egui::TextureOptions::LINEAR,
                     ));
-                }
-                if let Some(ref mut wp) = editor.webcam_playback {
-                    if let Some(wf) = wp.take_frame() {
-                        let ci = color_image_from_rgba(&wf.image);
-                        if let Some(t) = &mut editor.webcam_texture {
-                            t.set(ci, egui::TextureOptions::LINEAR);
-                        } else {
-                            editor.webcam_texture = Some(ctx.load_texture(
-                                "webcam_preview",
-                                ci,
-                                egui::TextureOptions::LINEAR,
-                            ));
-                        }
-                    }
                 }
                 editor.preview_frame_in_flight = false;
                 editor.error_message = None;
@@ -1004,14 +933,6 @@ impl ClipCompressApp {
                     let thumb_path = self.get_thumb_path(&video.path);
                     if thumb_path.exists() {
                         let _ = std::fs::remove_file(&thumb_path);
-                    }
-                    let wc = webcam_video_path(&video.save_root, &video.path);
-                    if wc.exists() {
-                        let _ = std::fs::remove_file(&wc);
-                    }
-                    let wc_layout = webcam_layout_path(&video.save_root, &video.path);
-                    if wc_layout.exists() {
-                        let _ = std::fs::remove_file(&wc_layout);
                     }
                 }
             }
@@ -1114,39 +1035,9 @@ struct EditorUiOutcome {
 fn collect_video_paths(
     dir: &Path,
     cache_dir: &Path,
-    webcam_cache_dir: &Path,
     output: &mut Vec<PathBuf>,
 ) {
-    utils::collect_video_paths_impl(dir, cache_dir, webcam_cache_dir, output);
-}
-
-fn upsert_webcam_keyframe(editor: &mut EditorState) {
-    let t = editor.current_time_secs;
-    let (x, y, w, h) = editor.pip_edit_rect;
-    if let Some(k) = editor
-        .webcam_layout
-        .keyframes
-        .iter_mut()
-        .find(|k| (k.t_secs - t).abs() < 0.05)
-    {
-        k.x = x;
-        k.y = y;
-        k.w = w;
-        k.h = h;
-    } else {
-        editor.webcam_layout.keyframes.push(WebcamKeyframe {
-            t_secs: t,
-            x,
-            y,
-            w,
-            h,
-        });
-        editor
-            .webcam_layout
-            .keyframes
-            .sort_by(|a, b| a.t_secs.partial_cmp(&b.t_secs).unwrap());
-    }
-    editor.webcam_layout_dirty = true;
+    utils::collect_video_paths_impl(dir, cache_dir, output);
 }
 
 fn toggle_editor_playback(editor: &mut EditorState) {
@@ -1205,11 +1096,6 @@ fn start_export(editor: &mut EditorState) {
         return;
     }
 
-    if editor.video.webcam_path.is_some() {
-        let _ = editor.webcam_layout.save(&editor.webcam_layout_path);
-        editor.webcam_layout_dirty = false;
-    }
-
     let output_path = editor
         .custom_output_path
         .clone()
@@ -1217,10 +1103,6 @@ fn start_export(editor: &mut EditorState) {
     let (progress_tx, progress_rx) = mpsc::channel();
     let cancel_flag = Arc::new(AtomicBool::new(false));
 
-    let webcam = editor.video.webcam_path.clone().map(|path| WebcamExport {
-        path,
-        keyframes: editor.webcam_layout.keyframes.clone(),
-    });
     spawn_clip_export(
         ClipExportRequest {
             input_path: editor.video.path.clone(),
@@ -1231,7 +1113,6 @@ fn start_export(editor: &mut EditorState) {
             use_hardware_acceleration: editor.use_hardware_acceleration,
             preferred_encoder: editor.preferred_encoder,
             metadata: editor.video.metadata.clone(),
-            webcam,
             stream_copy: !editor.target_size_manually_adjusted,
             output_width: if editor.use_auto_resolution {
                 let (w, _h) = editor.effective_output_resolution();
