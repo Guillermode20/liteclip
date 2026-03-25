@@ -43,9 +43,9 @@ pub mod software;
 use self::context::D3d11HardwareContext;
 use super::{EncodedPacket, Encoder, ResolvedEncoderConfig, ResolvedEncoderType, StreamType};
 use crate::encode::EncodeResult;
+use bytes::Bytes;
 use crossbeam::channel::{bounded, Receiver, Sender};
 use ffmpeg::color::{Primaries, Range, Space, TransferCharacteristic};
-use bytes::Bytes;
 use ffmpeg_next as ffmpeg;
 use std::collections::VecDeque;
 #[cfg(windows)]
@@ -270,43 +270,8 @@ impl Encoder for FfmpegEncoder {
         // actually sees, keeping in sync with the encoder's internal GOP state.
         let at_keyframe = gop > 0 && self.encoder_frame_count % gop == 0;
 
-        // GPU duplicate frame optimization DISABLED.
-        // 
-        // The optimization conflicts with the encoder's internal GOP management. When duplicates
-        // are emitted, frame_count advances but encoder_frame_count doesn't, causing keyframe
-        // decisions to diverge from the encoder's actual frame count. This results in missing
-        // keyframes and corrupted video output.
-        //
-        // The encoder has its own GOP setting (set_gop) that expects keyframes at regular
-        // intervals based on frames it receives. We also manually set key_frame=1 for explicit
-        // control. These two mechanisms must stay synchronized, which requires encoder_frame_count
-        // to be used for all keyframe decisions.
-        //
-        // Re-enabling this optimization would require either:
-        // 1. Letting the encoder handle all GOP decisions (remove manual keyframe setting)
-        // 2. Or tracking duplicate state in a way that doesn't affect GOP timing
-        #[cfg(windows)]
-        {
-            if false && can_use_gpu && !at_keyframe {
-                if let Some(d3d) = &frame.d3d11 {
-                    let ptr = Arc::as_ptr(d3d) as usize;
-                    if self.encoder_frame_count >= WARMUP_FRAMES
-                        && self.last_gpu_frame_arc_ptr == Some(ptr)
-                        && !self.last_duplicate_template.is_empty()
-                        && self
-                            .last_duplicate_template
-                            .iter()
-                            .all(|(_, is_key)| !*is_key)
-                    {
-                        self.emit_duplicate_video_packets(frame.timestamp)?;
-                        self.frame_count += 1;
-                        // Note: encoder_frame_count is NOT incremented here since we didn't encode
-                        self.last_gpu_frame_arc_ptr = Some(ptr);
-                        return Ok(());
-                    }
-                }
-            }
-        }
+        // GPU duplicate frame optimization is intentionally disabled due to GOP timing
+        // synchronization requirements between manual keyframe flags and encoder internal state.
 
         self.last_duplicate_template.clear();
 
