@@ -39,6 +39,11 @@ impl SharedReplayBuffer {
         self.inner.clear();
     }
 
+    /// Completely resets the replay buffer including parameter caches.
+    pub fn restart(&self) {
+        self.inner.restart();
+    }
+
     pub fn stats(&self) -> BufferStats {
         self.inner.stats()
     }

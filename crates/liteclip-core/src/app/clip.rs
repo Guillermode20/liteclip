@@ -111,7 +111,11 @@ impl ClipManager {
         let result = handle.await?;
         let final_path = result?;
 
-        info!("Clip saver completed (buffer preserved for continuous replay)");
+        info!("Clip saver completed; restarting replay buffer");
+        // Drop the existing replay contents and restart so subsequent clips
+        // start from a fresh buffer.
+        buffer.restart();
+        info!("Replay buffer restarted");
 
         if let Some(h) = host {
             h.on_clip_saved(&final_path);

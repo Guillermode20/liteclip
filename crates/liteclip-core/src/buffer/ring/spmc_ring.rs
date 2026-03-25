@@ -111,7 +111,9 @@ pub struct SnapshotBytes {
 impl SnapshotBytes {
     fn new(inner: Arc<LockFreeInner>, bytes: usize) -> Self {
         if bytes > 0 {
-            inner.outstanding_snapshot_bytes.fetch_add(bytes, Ordering::Relaxed);
+            inner
+                .outstanding_snapshot_bytes
+                .fetch_add(bytes, Ordering::Relaxed);
         }
         Self { inner, bytes }
     }
@@ -340,7 +342,10 @@ impl LockFreeReplayBuffer {
         // Track pushes since param cache was completed for periodic refresh
         // Check BEFORE cache_parameter_sets to avoid race where we populate and immediately clear
         if inner.param_cache_complete.load(Ordering::Relaxed) {
-            let pushes = inner.param_cache_pushes_since_complete.fetch_add(1, Ordering::Relaxed) + 1;
+            let pushes = inner
+                .param_cache_pushes_since_complete
+                .fetch_add(1, Ordering::Relaxed)
+                + 1;
             // Periodic cache clear every 1000 pushes to prevent stale parameter sets
             // and to handle encoder reconfiguration (resolution changes, etc.)
             if pushes >= 1000 {
@@ -489,8 +494,7 @@ impl LockFreeReplayBuffer {
             }
 
             // Oldest packets are gone but the packet we just wrote (or accounting skew) still exceeds the cap.
-            if stopped_at_head
-                && inner.total_bytes.load(Ordering::Relaxed) > inner.max_memory_bytes
+            if stopped_at_head && inner.total_bytes.load(Ordering::Relaxed) > inner.max_memory_bytes
             {
                 let slot_idx = write_idx & inner.mask;
                 let slot = &inner.slots[slot_idx];
@@ -1136,7 +1140,9 @@ impl LockFreeReplayBuffer {
         inner.total_bytes.store(0, Ordering::Release);
         inner.keyframe_count.store(0, Ordering::Release);
         inner.param_cache_complete.store(false, Ordering::Release);
-        inner.param_cache_pushes_since_complete.store(0, Ordering::Release);
+        inner
+            .param_cache_pushes_since_complete
+            .store(0, Ordering::Release);
         *inner
             .first_video_info
             .lock()
@@ -1152,6 +1158,68 @@ impl LockFreeReplayBuffer {
             cache.hevc_vps.is_some(),
             cache.hevc_sps.is_some(),
             cache.hevc_pps.is_some()
+        );
+    }
+
+    /// Completely resets the buffer and parameter caches.
+    ///
+    /// This differs from `clear()` in that it also clears the cached
+    /// codec parameter sets (SPS/PPS/VPS) so the buffer is effectively
+    /// restarted from a clean state. Useful when the user explicitly
+    /// requests a full replay reset (e.g. after saving a clip and wanting
+    /// a fresh buffer).
+    pub fn restart(&self) {
+        let inner = &self.inner;
+
+        // Log state before restart
+        let bytes_before = inner.total_bytes.load(Ordering::Relaxed);
+        let packets_before = inner
+            .write_idx
+            .load(Ordering::Relaxed)
+            .saturating_sub(inner.evict_frontier.load(Ordering::Relaxed));
+
+        debug!(
+            "Buffer restart START: {} packets, {:.1}MB",
+            packets_before,
+            bytes_before as f64 / 1_048_576.0
+        );
+
+        // Clear all slots (blocking locks to ensure no packet remains)
+        for i in 0..inner.capacity {
+            let slot = &inner.slots[i];
+            let mut packet_guard = slot.packet.lock().unwrap_or_else(|e| e.into_inner());
+            *packet_guard = None;
+        }
+
+        // Reset indexes and stats
+        inner.write_idx.store(0, Ordering::Release);
+        inner.evict_frontier.store(0, Ordering::Release);
+        inner.total_bytes.store(0, Ordering::Release);
+        inner.keyframe_count.store(0, Ordering::Release);
+        inner.param_cache_complete.store(false, Ordering::Release);
+        inner
+            .param_cache_pushes_since_complete
+            .store(0, Ordering::Release);
+        *inner
+            .first_video_info
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+
+        // Clear cached parameter sets as part of a full restart
+        {
+            let mut cache = inner.param_cache.lock().unwrap_or_else(|e| e.into_inner());
+            cache.h264_sps = None;
+            cache.h264_pps = None;
+            cache.hevc_vps = None;
+            cache.hevc_sps = None;
+            cache.hevc_pps = None;
+            cache.codec_kind = CodecKind::H264;
+        }
+
+        debug!(
+            "Buffer restart DONE: cleared {} packets ({:.1}MB), parameter cache cleared",
+            packets_before,
+            bytes_before as f64 / 1_048_576.0
         );
     }
 
@@ -1177,7 +1245,9 @@ impl LockFreeReplayBuffer {
 
         // Reset completion state and push counter
         inner.param_cache_complete.store(false, Ordering::Release);
-        inner.param_cache_pushes_since_complete.store(0, Ordering::Release);
+        inner
+            .param_cache_pushes_since_complete
+            .store(0, Ordering::Release);
 
         // Clear first_video_info so next video packet becomes new reference
         *inner
