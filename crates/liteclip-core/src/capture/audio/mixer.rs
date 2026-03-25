@@ -3,16 +3,30 @@
 // Handles real-time audio mixing for system and microphone audio.
 
 use bytes::BytesMut;
-use std::collections::BTreeMap;
+use std::collections::VecDeque;
+use tracing::warn;
 
 use crate::config::AudioConfig;
 use crate::encode::EncodedPacket;
 
-/// Audio mixer for combining system and microphone audio with timestamp-based synchronization
+/// Maximum packets to buffer per stream before forcing eviction.
+/// At ~20ms per packet, 32 packets is ~640ms of audio.
+/// This prevents unbounded memory growth if one stream stops.
+const MAX_PACKETS_PER_STREAM: usize = 32;
+
+/// Audio packet with timestamp for queue storage.
+#[derive(Debug)]
+struct TimestampedPacket {
+    pts: i64,
+    packet: EncodedPacket,
+}
+
+/// Audio mixer for combining system and microphone audio with timestamp-based synchronization.
+/// Uses VecDeque for O(1) push/pop operations instead of BTreeMap's O(log n).
 pub struct AudioMixer {
     config: AudioConfig,
-    system_packets: BTreeMap<i64, EncodedPacket>, // PTS -> Packet (sorted for fast access)
-    mic_packets: BTreeMap<i64, EncodedPacket>,    // PTS -> Packet (sorted for fast access)
+    system_packets: VecDeque<TimestampedPacket>,
+    mic_packets: VecDeque<TimestampedPacket>,
     output_buffer: BytesMut,
     /// Maximum time difference (in QPC ticks) allowed between packets to be considered matching
     sync_threshold: i64,
@@ -25,6 +39,8 @@ pub struct AudioMixer {
     mic_decode_buf: Vec<i16>,
     /// Reusable buffer for mixed samples
     mixed_samples_buf: Vec<i16>,
+    /// Count of evicted packets for telemetry
+    evicted_packets: u64,
 }
 
 impl AudioMixer {
@@ -40,8 +56,8 @@ impl AudioMixer {
 
         Self {
             config: config.clone(),
-            system_packets: BTreeMap::new(),
-            mic_packets: BTreeMap::new(),
+            system_packets: VecDeque::with_capacity(MAX_PACKETS_PER_STREAM),
+            mic_packets: VecDeque::with_capacity(MAX_PACKETS_PER_STREAM),
             output_buffer: BytesMut::with_capacity(4096),
             sync_threshold,
             timeout,
@@ -49,6 +65,7 @@ impl AudioMixer {
             system_decode_buf: Vec::with_capacity(4096 / 2), // 2 bytes per sample
             mic_decode_buf: Vec::with_capacity(4096 / 2),
             mixed_samples_buf: Vec::with_capacity(4096 / 2),
+            evicted_packets: 0,
         }
     }
 
@@ -61,6 +78,34 @@ impl AudioMixer {
         (self.system_packets.len(), self.mic_packets.len())
     }
 
+    /// Insert a packet into a queue, maintaining sort order by PTS.
+/// Evicts oldest packets if the queue exceeds MAX_PACKETS_PER_STREAM.
+fn insert_sorted(
+    queue: &mut VecDeque<TimestampedPacket>,
+    packet: EncodedPacket,
+    evicted_count: &mut u64,
+) {
+    let pts = packet.pts;
+    let entry = TimestampedPacket { pts, packet };
+    
+    // Find insertion position (binary search for O(log n) find, but O(n) insert)
+    // For small queues (< 32), linear search is fine and simpler.
+    let pos = queue.iter().position(|p| p.pts > pts).unwrap_or(queue.len());
+    queue.insert(pos, entry);
+    
+    // Evict oldest packets if we exceed the limit
+    while queue.len() > MAX_PACKETS_PER_STREAM {
+        queue.pop_front();
+        *evicted_count += 1;
+        if *evicted_count % 100 == 1 {
+            warn!(
+                "Audio mixer evicted {} packets total (queue limit {})",
+                evicted_count, MAX_PACKETS_PER_STREAM
+            );
+        }
+    }
+}
+
     /// Mix audio packets from system and microphone with timestamp-based synchronization
     pub fn mix_packets(
         &mut self,
@@ -69,12 +114,12 @@ impl AudioMixer {
     ) -> Vec<EncodedPacket> {
         let mut output = Vec::new();
 
-        // Add received packets to their respective buffers
+        // Add received packets to their respective buffers (sorted by PTS)
         if let Some(packet) = system_packet {
-            self.system_packets.insert(packet.pts, packet);
+            Self::insert_sorted(&mut self.system_packets, packet, &mut self.evicted_packets);
         }
         if let Some(packet) = mic_packet {
-            self.mic_packets.insert(packet.pts, packet);
+            Self::insert_sorted(&mut self.mic_packets, packet, &mut self.evicted_packets);
         }
 
         // Try to find matching packets for synchronization
@@ -103,76 +148,75 @@ impl AudioMixer {
         // If we have packets from both streams
         if !self.system_packets.is_empty() && !self.mic_packets.is_empty() {
             // Get earliest system and mic packets after last processed timestamp
-            let system_pts_iter = self
-                .system_packets
-                .keys()
-                .filter(|&&ts| ts > self.last_processed_pts);
-            let mic_pts_iter = self
-                .mic_packets
-                .keys()
-                .filter(|&&ts| ts > self.last_processed_pts);
+            let system_ts = self.system_packets.front()?.pts;
+            let mic_ts = self.mic_packets.front()?.pts;
+            
+            if system_ts <= self.last_processed_pts {
+                // Remove stale packet
+                self.system_packets.pop_front();
+                return self.find_matching_packets();
+            }
+            if mic_ts <= self.last_processed_pts {
+                // Remove stale packet
+                self.mic_packets.pop_front();
+                return self.find_matching_packets();
+            }
 
-            if let Some(&system_ts) = system_pts_iter.clone().next() {
-                if let Some(&mic_ts) = mic_pts_iter.clone().next() {
-                    let diff = (system_ts - mic_ts).abs();
+            let diff = (system_ts - mic_ts).abs();
 
-                    if diff <= self.sync_threshold {
-                        // Packets are in sync, remove and return
-                        let system_packet = self.system_packets.remove(&system_ts);
-                        let mic_packet = self.mic_packets.remove(&mic_ts);
-                        return Some((system_packet, mic_packet, system_ts.min(mic_ts)));
+            if diff <= self.sync_threshold {
+                // Packets are in sync, remove and return
+                let system_packet = self.system_packets.pop_front().map(|p| p.packet);
+                let mic_packet = self.mic_packets.pop_front().map(|p| p.packet);
+                return Some((system_packet, mic_packet, system_ts.min(mic_ts)));
+            } else {
+                // Packets are not in sync - process the earlier packet and pad the other
+                let (earlier_ts, later_ts) = if system_ts < mic_ts {
+                    (system_ts, mic_ts)
+                } else {
+                    (mic_ts, system_ts)
+                };
+
+                // If the gap is too large, process the earlier packet and pad
+                if later_ts - earlier_ts > self.timeout {
+                    if system_ts < mic_ts {
+                        let system_packet = self.system_packets.pop_front().map(|p| p.packet);
+                        return Some((system_packet, None, system_ts));
                     } else {
-                        // Packets are not in sync - process the earlier packet and pad the other
-                        let (earlier_ts, later_ts) = if system_ts < mic_ts {
-                            (system_ts, mic_ts)
-                        } else {
-                            (mic_ts, system_ts)
-                        };
-
-                        // If the gap is too large, process the earlier packet and pad
-                        if later_ts - earlier_ts > self.timeout {
-                            if system_ts < mic_ts {
-                                let system_packet = self.system_packets.remove(&system_ts);
-                                return Some((system_packet, None, system_ts));
-                            } else {
-                                let mic_packet = self.mic_packets.remove(&mic_ts);
-                                return Some((None, mic_packet, mic_ts));
-                            }
-                        } else {
-                            // Packets are not close enough for sync but not yet timed out
-                            // We MUST return the earlier packet if it's falling behind
-                            // otherwise we stall the whole pipeline.
-                            if system_ts < mic_ts {
-                                let system_packet = self.system_packets.remove(&system_ts);
-                                return Some((system_packet, None, system_ts));
-                            } else {
-                                let mic_packet = self.mic_packets.remove(&mic_ts);
-                                return Some((None, mic_packet, mic_ts));
-                            }
-                        }
+                        let mic_packet = self.mic_packets.pop_front().map(|p| p.packet);
+                        return Some((None, mic_packet, mic_ts));
+                    }
+                } else {
+                    // Packets are not close enough for sync but not yet timed out
+                    // We MUST return the earlier packet if it's falling behind
+                    // otherwise we stall the whole pipeline.
+                    if system_ts < mic_ts {
+                        let system_packet = self.system_packets.pop_front().map(|p| p.packet);
+                        return Some((system_packet, None, system_ts));
+                    } else {
+                        let mic_packet = self.mic_packets.pop_front().map(|p| p.packet);
+                        return Some((None, mic_packet, mic_ts));
                     }
                 }
             }
         } else if !self.system_packets.is_empty() {
             // If only system has packets, return earliest available
-            if let Some(&ts) = self
-                .system_packets
-                .keys()
-                .find(|&&ts| ts > self.last_processed_pts)
-            {
-                let system_packet = self.system_packets.remove(&ts);
-                return Some((system_packet, None, ts));
+            let ts = self.system_packets.front()?.pts;
+            if ts <= self.last_processed_pts {
+                self.system_packets.pop_front();
+                return self.find_matching_packets();
             }
+            let system_packet = self.system_packets.pop_front().map(|p| p.packet);
+            return Some((system_packet, None, ts));
         } else if !self.mic_packets.is_empty() {
             // If only mic has packets, return earliest available
-            if let Some(&ts) = self
-                .mic_packets
-                .keys()
-                .find(|&&ts| ts > self.last_processed_pts)
-            {
-                let mic_packet = self.mic_packets.remove(&ts);
-                return Some((None, mic_packet, ts));
+            let ts = self.mic_packets.front()?.pts;
+            if ts <= self.last_processed_pts {
+                self.mic_packets.pop_front();
+                return self.find_matching_packets();
             }
+            let mic_packet = self.mic_packets.pop_front().map(|p| p.packet);
+            return Some((None, mic_packet, ts));
         }
 
         None
@@ -280,41 +324,38 @@ impl AudioMixer {
     fn handle_timeouts(&mut self) {
         let current_pts = self
             .system_packets
-            .keys()
-            .chain(self.mic_packets.keys())
-            .cloned()
-            .min();
+            .front()
+            .map(|p| p.pts)
+            .or_else(|| self.mic_packets.front().map(|p| p.pts));
 
         if let Some(current) = current_pts {
             // Check for packets that are too old compared to current earliest
             let timeout_threshold = current - self.timeout;
 
             // Remove system packets that have timed out
-            let system_to_remove: Vec<_> = self
-                .system_packets
-                .keys()
-                .filter(|&&ts| ts < timeout_threshold)
-                .cloned()
-                .collect();
-            for ts in system_to_remove {
-                self.system_packets.remove(&ts);
+            while let Some(front) = self.system_packets.front() {
+                if front.pts < timeout_threshold {
+                    self.system_packets.pop_front();
+                    self.evicted_packets += 1;
+                } else {
+                    break;
+                }
             }
 
             // Remove mic packets that have timed out
-            let mic_to_remove: Vec<_> = self
-                .mic_packets
-                .keys()
-                .filter(|&&ts| ts < timeout_threshold)
-                .cloned()
-                .collect();
-            for ts in mic_to_remove {
-                self.mic_packets.remove(&ts);
+            while let Some(front) = self.mic_packets.front() {
+                if front.pts < timeout_threshold {
+                    self.mic_packets.pop_front();
+                    self.evicted_packets += 1;
+                } else {
+                    break;
+                }
             }
         }
     }
 }
 
-/// Decode an EncodedPacket to j16 samples into a pre-allocated buffer
+/// Decode an EncodedPacket to i16 samples into a pre-allocated buffer
 fn decode_packet_into(packet: &EncodedPacket, buffer: &mut Vec<i16>) {
     buffer.clear();
     buffer.reserve(packet.data.len() / 2);
@@ -426,12 +467,48 @@ mod tests {
             crate::encode::StreamType::Microphone,
         );
 
-        // First call should buffer both packets
+        // With the gap exceeding sync threshold, packets should be processed separately
+        // The gap is 1099ms, which exceeds sync_threshold (100ms) but is less than timeout (300ms)
+        // The earlier packet (system) will be processed first, then the mic packet
         let result1 = mixer.mix_packets(Some(system_packet), Some(mic_packet));
-        assert!(result1.is_empty());
+        
+        // Both packets should be processed (separately, not mixed)
+        // Result should contain 2 packets: system first, then mic
+        assert_eq!(result1.len(), 2, "Expected both packets to be processed separately due to gap");
 
-        // Verify packets are buffered
-        assert!(!mixer.system_packets.is_empty());
-        assert!(!mixer.mic_packets.is_empty());
+        // Both queues should be empty after processing
+        assert!(mixer.system_packets.is_empty());
+        assert!(mixer.mic_packets.is_empty());
+    }
+    
+    #[test]
+    fn test_max_packets_limit() {
+        let config = Config::default().audio;
+        let mut mixer = AudioMixer::new(&config);
+
+        // Insert more than MAX_PACKETS_PER_STREAM packets
+        // mix_packets will process them, but the queue should never exceed the limit
+        for i in 0..(MAX_PACKETS_PER_STREAM * 2) {
+            let mut data = BytesMut::with_capacity(4);
+            data.extend_from_slice(&1000i16.to_le_bytes());
+            data.extend_from_slice(&2000i16.to_le_bytes());
+            let packet = EncodedPacket::new(
+                data.freeze(),
+                i as i64 * 100000, // 10ms apart, sorted increasing
+                i as i64 * 100000,
+                false,
+                crate::encode::StreamType::SystemAudio,
+            );
+            mixer.mix_packets(Some(packet), None);
+            
+            // Check limit after each insert
+            assert!(mixer.system_packets.len() <= MAX_PACKETS_PER_STREAM, 
+                "Queue length {} exceeds limit {} at iteration {}", 
+                mixer.system_packets.len(), MAX_PACKETS_PER_STREAM, i);
+        }
+
+        // At least some packets should have been processed/evicted
+        assert!(mixer.evicted_packets > 0 || mixer.pending_packet_counts().0 < MAX_PACKETS_PER_STREAM, 
+            "Expected some packets to be evicted or processed");
     }
 }

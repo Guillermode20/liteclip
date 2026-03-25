@@ -899,6 +899,7 @@ fn mix_and_encode_audio_chunks(
     drop(pcm_buffer);
     drop(mixed_i16);
     drop(mixed_i32);
+    drop(placements);
 
     // Shrink result to exact size — no extra capacity after encoding completes.
     result.shrink_to_fit();

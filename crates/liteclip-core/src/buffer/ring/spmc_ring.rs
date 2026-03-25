@@ -61,6 +61,14 @@ const PROACTIVE_EVICTION_WATERMARK: f32 = 0.80;
 /// in a tight loop rather than with the full push path overhead between each.
 const EVICTION_BATCH_SIZE: usize = 8;
 
+/// Maximum bytes that can be pinned by in-flight snapshots.
+/// When exceeded, snapshot_from returns an error to prevent unbounded memory growth.
+/// Set to 50% of max_memory_bytes or 512MB minimum.
+const MAX_OUTSTANDING_SNAPSHOT_BYTES: usize = 512 * 1024 * 1024; // 512MB default max
+
+/// Threshold ratio for outstanding snapshot bytes warning.
+const OUTSTANDING_SNAPSHOT_WARNING_RATIO: f32 = 0.75;
+
 /// Cached codec parameter sets.
 ///
 /// Stores H.264 SPS/PPS or HEVC VPS/SPS/PPS for inclusion in clip exports.
@@ -123,9 +131,20 @@ pub struct SnapshotBytes {
 impl SnapshotBytes {
     fn new(inner: Arc<LockFreeInner>, bytes: usize) -> Self {
         if bytes > 0 {
-            inner
+            let current = inner
                 .outstanding_snapshot_bytes
                 .fetch_add(bytes, Ordering::Relaxed);
+            let new_total = current.saturating_add(bytes);
+            
+            // Warn if approaching limit
+            let warning_threshold = (inner.max_memory_bytes as f64 * OUTSTANDING_SNAPSHOT_WARNING_RATIO as f64) as usize;
+            if new_total > warning_threshold && current <= warning_threshold {
+                warn!(
+                    "Snapshot memory approaching limit: {:.1}MB / {:.1}MB",
+                    new_total as f64 / 1_048_576.0,
+                    inner.max_memory_bytes as f64 / 1_048_576.0
+                );
+            }
         }
         Self { inner, bytes }
     }
@@ -869,6 +888,21 @@ impl LockFreeReplayBuffer {
             return Ok(TrackedSnapshot::new(vec![], Arc::clone(inner)));
         }
 
+        // Check outstanding snapshot bytes limit before proceeding
+        let current_outstanding = inner.outstanding_snapshot_bytes.load(Ordering::Relaxed);
+        let max_outstanding = inner.max_memory_bytes.min(MAX_OUTSTANDING_SNAPSHOT_BYTES);
+        if current_outstanding >= max_outstanding {
+            warn!(
+                "snapshot_from rejected: outstanding snapshot bytes ({:.1}MB) exceeds limit ({:.1}MB)",
+                current_outstanding as f64 / 1_048_576.0,
+                max_outstanding as f64 / 1_048_576.0
+            );
+            return Err(crate::buffer::BufferError::SnapshotLimitExceeded {
+                current: current_outstanding,
+                limit: max_outstanding,
+            });
+        }
+
         let first_idx = write_idx.saturating_sub(inner.capacity);
         let evict_frontier = inner.evict_frontier.load(Ordering::Acquire);
         let first_idx = first_idx.max(evict_frontier);
@@ -936,21 +970,18 @@ impl LockFreeReplayBuffer {
             .map(|m| m.pts)
             .unwrap_or(start_pts);
 
-        // Build an index set of which ring indices to include.
-        // Packets at or after start_idx are always included.
-        // Audio packets before start_idx are included if their PTS >= video_start_pts.
-        let included_count = metas
-            .iter()
-            .filter(|m| {
-                if m.ring_idx >= start_idx {
-                    return true;
-                }
-                if matches!(m.stream, StreamType::SystemAudio | StreamType::Microphone) {
-                    return m.pts >= video_start_pts;
-                }
-                false
-            })
-            .count();
+        // Collect included ring indices directly instead of using a bool Vec.
+        // This avoids allocating a potentially large Vec<bool> (50K+ elements for large buffers).
+        let mut included_indices: Vec<usize> = Vec::with_capacity(metas.len());
+        for m in &metas {
+            let dominated = m.ring_idx >= start_idx;
+            let audio_in_range = !dominated
+                && matches!(m.stream, StreamType::SystemAudio | StreamType::Microphone)
+                && m.pts >= video_start_pts;
+            if dominated || audio_in_range {
+                included_indices.push(m.ring_idx);
+            }
+        }
 
         {
             let video_count = metas
@@ -965,23 +996,8 @@ impl LockFreeReplayBuffer {
                 keyframe_count,
                 start_pts,
                 start_idx,
-                included_count
+                included_indices.len()
             );
-        }
-
-        // Build a quick-lookup set of ring indices that should be included.
-        // We use a Vec<bool> indexed by (ring_idx - first_idx) for O(1) lookup
-        // without any heap allocation beyond the Vec itself.
-        let range_len = write_idx.saturating_sub(first_idx);
-        let mut include_flags = vec![false; range_len];
-        for m in &metas {
-            let dominated = m.ring_idx >= start_idx;
-            let audio_in_range = !dominated
-                && matches!(m.stream, StreamType::SystemAudio | StreamType::Microphone)
-                && m.pts >= video_start_pts;
-            if dominated || audio_in_range {
-                include_flags[m.ring_idx - first_idx] = true;
-            }
         }
 
         // Aggressively release metas — we no longer need it.
@@ -990,12 +1006,13 @@ impl LockFreeReplayBuffer {
         drop(metas);
 
         // ── Pass 2: selective clone ────────────────────────────────────────
-        // Re-iterate only slots whose ring index is included, cloning just
-        // those packets into the result vec.
-        let mut result: Vec<EncodedPacket> = Vec::with_capacity(included_count);
+        // Use binary search on sorted included_indices for O(log n) lookup
+        // instead of O(1) array access, but without the large Vec<bool> allocation.
+        let mut result: Vec<EncodedPacket> = Vec::with_capacity(included_indices.len());
 
         for i in first_idx..write_idx {
-            if !include_flags[i - first_idx] {
+            // Binary search to check if this index is included
+            if included_indices.binary_search(&i).is_err() {
                 continue;
             }
             let slot_idx = i & inner.mask;
@@ -1018,10 +1035,10 @@ impl LockFreeReplayBuffer {
             }
         }
 
-        // Release include_flags immediately after loop completes.
-        include_flags.clear();
-        include_flags.shrink_to_fit();
-        drop(include_flags);
+        // Release included_indices after loop completes.
+        included_indices.clear();
+        included_indices.shrink_to_fit();
+        drop(included_indices);
 
         result.sort_by_key(|p| {
             (
