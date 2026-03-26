@@ -25,7 +25,7 @@
 //! use liteclip_replay::gui::{show_settings_gui, init_gui_manager};
 //! use tokio::sync::mpsc::channel;
 //!
-//! // Initialize the GUI manager (call once at startup)
+//! // Initialize the GUI manager lazily before first use.
 //! init_gui_manager();
 //!
 //! // Show settings window (level_monitor is None for testing)

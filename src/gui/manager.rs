@@ -2,12 +2,12 @@ use crate::capture::audio::AudioLevelMonitor;
 use crate::platform::AppEvent;
 use eframe::egui;
 use egui_notify::{Anchor, Toasts};
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::LazyLock;
-use std::sync::Once;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc::Sender as TokioSender;
+use tracing::warn;
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
 
@@ -24,8 +24,14 @@ pub enum ToastKind {
     Warning,
 }
 
-static GUI_TX: LazyLock<Mutex<Option<Sender<GuiMessage>>>> = LazyLock::new(|| Mutex::new(None));
-static GUI_INIT: Once = Once::new();
+#[derive(Default)]
+struct GuiManagerState {
+    tx: Option<Sender<GuiMessage>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+static GUI_STATE: LazyLock<Mutex<GuiManagerState>> =
+    LazyLock::new(|| Mutex::new(GuiManagerState::default()));
 
 const TOAST_WINDOW_SIZE: [f32; 2] = [350.0, 300.0];
 /// When idle, shrink the overlay so it does not block clicks elsewhere (1×1 logical pixel).
@@ -44,40 +50,82 @@ const IDLE_REPAINT_MS: u64 = 100;
 /// and Gallery are spawned as needed from their respective modules, each
 /// running in its own native thread to avoid stalling the recording pipeline.
 pub fn init_gui_manager() {
-    GUI_INIT.call_once(|| {
-        let (tx, rx) = channel();
-        *GUI_TX.lock().unwrap_or_else(|e| e.into_inner()) = Some(tx);
+    with_gui_state(|state| state.ensure_running());
+}
 
-        std::thread::spawn(move || {
-            let pos = get_toast_window_pos_for_size(TOAST_WINDOW_IDLE_SIZE);
+fn spawn_gui_manager_thread(state: &mut GuiManagerState) {
+    let (tx, rx) = channel();
+    state.tx = Some(tx);
 
-            let options = eframe::NativeOptions {
-                renderer: eframe::Renderer::Glow,
-                viewport: egui::ViewportBuilder::default()
-                    .with_transparent(true)
-                    .with_always_on_top()
-                    .with_decorations(false)
-                    .with_taskbar(false)
-                    .with_active(false)
-                    .with_inner_size(TOAST_WINDOW_IDLE_SIZE)
-                    .with_position(pos),
-                event_loop_builder: Some(Box::new(|builder| {
-                    #[cfg(target_os = "windows")]
-                    {
-                        use winit::platform::windows::EventLoopBuilderExtWindows;
-                        builder.with_any_thread(true);
-                    }
-                })),
-                ..Default::default()
-            };
+    state.thread = Some(std::thread::spawn(move || {
+        let pos = get_toast_window_pos_for_size(TOAST_WINDOW_IDLE_SIZE);
 
-            let _ = eframe::run_native(
-                "liteclip_overlay",
-                options,
-                Box::new(|cc| Ok(Box::new(GuiManagerApp::new(cc, rx)))),
-            );
-        });
-    });
+        let options = eframe::NativeOptions {
+            renderer: eframe::Renderer::Glow,
+            viewport: egui::ViewportBuilder::default()
+                .with_transparent(true)
+                .with_always_on_top()
+                .with_decorations(false)
+                .with_taskbar(false)
+                .with_active(false)
+                .with_inner_size(TOAST_WINDOW_IDLE_SIZE)
+                .with_position(pos),
+            event_loop_builder: Some(Box::new(|builder| {
+                #[cfg(target_os = "windows")]
+                {
+                    use winit::platform::windows::EventLoopBuilderExtWindows;
+                    builder.with_any_thread(true);
+                }
+            })),
+            ..Default::default()
+        };
+
+        if let Err(e) = eframe::run_native(
+            "liteclip_overlay",
+            options,
+            Box::new(|cc| Ok(Box::new(GuiManagerApp::new(cc, rx)))),
+        ) {
+            warn!("eframe::run_native failed: {:?}", e);
+        }
+    }));
+}
+
+fn with_gui_state<T>(f: impl FnOnce(&mut GuiManagerState) -> T) -> T {
+    let mut state = GUI_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    f(&mut state)
+}
+
+impl GuiManagerState {
+    fn cleanup_finished_thread(&mut self) {
+        let finished = self
+            .thread
+            .as_ref()
+            .is_some_and(std::thread::JoinHandle::is_finished);
+
+        if !finished {
+            return;
+        }
+
+        if let Some(thread) = self.thread.take() {
+            if let Err(err) = thread.join() {
+                warn!("GUI manager thread panicked: {:?}", err);
+            }
+        }
+
+        self.tx = None;
+    }
+
+    fn ensure_running(&mut self) {
+        self.cleanup_finished_thread();
+
+        if self.thread.is_none() {
+            spawn_gui_manager_thread(self);
+        }
+    }
+
+    fn request_shutdown(&mut self) {
+        self.tx = None;
+    }
 }
 
 fn get_toast_window_pos_for_size(size: [f32; 2]) -> [f32; 2] {
@@ -99,9 +147,32 @@ fn get_toast_window_pos_for_size(size: [f32; 2]) -> [f32; 2] {
 }
 
 pub fn send_gui_message(msg: GuiMessage) {
-    init_gui_manager();
-    if let Some(tx) = GUI_TX.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
-        let _ = tx.send(msg);
+    let mut msg = Some(msg);
+
+    for _ in 0..50 {
+        init_gui_manager();
+
+        let tx = with_gui_state(|state| state.tx.as_ref().cloned());
+        if let Some(tx) = tx {
+            match tx.send(msg.take().expect("GUI message missing during retry")) {
+                Ok(()) => return,
+                Err(err) => {
+                    msg = Some(err.0);
+                    with_gui_state(|state| state.request_shutdown());
+                }
+            }
+        } else {
+            let thread_still_running = with_gui_state(|state| state.thread.is_some());
+            if thread_still_running {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                continue;
+            }
+        }
+    }
+
+    if let Some(message) = msg {
+        warn!("GUI manager unavailable after waiting for restart; dropping message");
+        let _ = message;
     }
 }
 
@@ -110,9 +181,7 @@ pub fn show_toast(kind: ToastKind, message: impl Into<String>) {
 }
 
 pub fn shutdown_gui() {
-    if let Ok(mut guard) = GUI_TX.lock() {
-        *guard = None;
-    }
+    with_gui_state(|state| state.request_shutdown());
 }
 
 struct GuiManagerApp {
@@ -123,6 +192,7 @@ struct GuiManagerApp {
     /// `true` when the viewport uses [`TOAST_WINDOW_SIZE`]; `false` when it is [`TOAST_WINDOW_IDLE_SIZE`].
     overlay_toast_area: bool,
     last_mouse_passthrough: Option<bool>,
+    idle_since: Option<std::time::Instant>,
 }
 
 impl GuiManagerApp {
@@ -135,6 +205,7 @@ impl GuiManagerApp {
             toasts: Toasts::default().with_anchor(Anchor::TopRight),
             overlay_toast_area: false,
             last_mouse_passthrough: None,
+            idle_since: Some(std::time::Instant::now()),
         }
     }
 
@@ -152,6 +223,7 @@ impl GuiManagerApp {
             toasts: Toasts::default().with_anchor(Anchor::TopRight),
             overlay_toast_area: false,
             last_mouse_passthrough: None,
+            idle_since: Some(std::time::Instant::now()),
         }
     }
 
@@ -234,47 +306,55 @@ impl eframe::App for GuiManagerApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        while let Ok(msg) = self.rx.try_recv() {
-            match msg {
-                GuiMessage::ShowSettings(tx, level_monitor) => {
-                    let config = crate::config::Config::load_sync().unwrap_or_default();
-                    *self.settings.lock().unwrap_or_else(|e| e.into_inner()) = Some(
-                        crate::gui::settings::SettingsApp::new(config, tx, level_monitor),
-                    );
-                }
-                GuiMessage::ShowGallery(tx) => {
-                    let config = crate::config::Config::load_sync().unwrap_or_default();
-                    *self.gallery.lock().unwrap_or_else(|e| e.into_inner()) =
-                        Some(crate::gui::gallery::GalleryApp::new(&config, tx));
-                }
-                GuiMessage::Toast(kind, message) => {
-                    match kind {
-                        ToastKind::Success => {
-                            self.toasts
-                                .success(message)
-                                .closable(false)
-                                .duration(Duration::from_secs(3));
-                        }
-                        ToastKind::Error => {
-                            self.toasts
-                                .error(message)
-                                .closable(false)
-                                .duration(Duration::from_secs(5));
-                        }
-                        ToastKind::Info => {
-                            self.toasts
-                                .info(message)
-                                .closable(false)
-                                .duration(Duration::from_secs(3));
-                        }
-                        ToastKind::Warning => {
-                            self.toasts
-                                .warning(message)
-                                .closable(false)
-                                .duration(Duration::from_secs(4));
-                        }
+        let mut disconnected = false;
+        loop {
+            match self.rx.try_recv() {
+                Ok(msg) => match msg {
+                    GuiMessage::ShowSettings(tx, level_monitor) => {
+                        let config = crate::config::Config::load_sync().unwrap_or_default();
+                        *self.settings.lock().unwrap_or_else(|e| e.into_inner()) = Some(
+                            crate::gui::settings::SettingsApp::new(config, tx, level_monitor),
+                        );
                     }
-                    ctx.request_repaint();
+                    GuiMessage::ShowGallery(tx) => {
+                        let config = crate::config::Config::load_sync().unwrap_or_default();
+                        *self.gallery.lock().unwrap_or_else(|e| e.into_inner()) =
+                            Some(crate::gui::gallery::GalleryApp::new(&config, tx));
+                    }
+                    GuiMessage::Toast(kind, message) => {
+                        match kind {
+                            ToastKind::Success => {
+                                self.toasts
+                                    .success(message)
+                                    .closable(false)
+                                    .duration(Duration::from_secs(3));
+                            }
+                            ToastKind::Error => {
+                                self.toasts
+                                    .error(message)
+                                    .closable(false)
+                                    .duration(Duration::from_secs(5));
+                            }
+                            ToastKind::Info => {
+                                self.toasts
+                                    .info(message)
+                                    .closable(false)
+                                    .duration(Duration::from_secs(3));
+                            }
+                            ToastKind::Warning => {
+                                self.toasts
+                                    .warning(message)
+                                    .closable(false)
+                                    .duration(Duration::from_secs(4));
+                            }
+                        }
+                        ctx.request_repaint();
+                    }
+                },
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    disconnected = true;
+                    break;
                 }
             }
         }
@@ -356,5 +436,30 @@ impl eframe::App for GuiManagerApp {
         self.sync_mouse_passthrough(ctx);
         self.sync_overlay_window_size(ctx);
         self.release_idle_resources(ctx);
+
+        let settings_open = self
+            .settings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some();
+        let gallery_open = self
+            .gallery
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some();
+
+        let is_idle = !settings_open && !gallery_open && self.toasts.is_empty();
+
+        if is_idle && self.idle_since.is_none() {
+            self.idle_since = Some(std::time::Instant::now());
+        } else if !is_idle {
+            self.idle_since = None;
+        }
+
+        if disconnected {
+            with_gui_state(|state| state.request_shutdown());
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
     }
 }
