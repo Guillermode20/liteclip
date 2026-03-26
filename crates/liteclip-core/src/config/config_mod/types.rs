@@ -16,9 +16,8 @@ use super::functions::{
     default_mic_volume, default_quality_preset, default_quality_value,
     default_quality_value_for_preset, default_rate_control, default_replay_duration,
     default_resolution, default_save_directory, default_system_volume, default_true,
-    ESTIMATED_MIC_AUDIO_BITRATE_BPS,
-    ESTIMATED_SYSTEM_AUDIO_BITRATE_BPS, MAX_FRAMERATE, MAX_REPLAY_MEMORY_LIMIT_MB,
-    MIN_REPLAY_MEMORY_LIMIT_MB, RECOMMENDED_BUFFER_BASE_OVERHEAD_MB,
+    ESTIMATED_MIC_AUDIO_BITRATE_BPS, ESTIMATED_SYSTEM_AUDIO_BITRATE_BPS, MAX_FRAMERATE,
+    MAX_REPLAY_MEMORY_LIMIT_MB, MIN_REPLAY_MEMORY_LIMIT_MB, RECOMMENDED_BUFFER_BASE_OVERHEAD_MB,
     RECOMMENDED_BUFFER_HEADROOM_PERCENT, REPLAY_MEMORY_LIMIT_AUTO_MB,
 };
 

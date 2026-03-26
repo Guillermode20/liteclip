@@ -67,6 +67,7 @@ STATUS_DLL_NOT_FOUND (0xc0000135).",
 
     let mut copied = 0usize;
     let mut failed = 0usize;
+    let mut skipped = 0usize;
 
     for entry in entries.flatten() {
         let path = entry.path();
@@ -84,6 +85,13 @@ STATUS_DLL_NOT_FOUND (0xc0000135).",
         // Main binary (e.g. liteclip-replay.exe) loads DLLs from target/debug/.
         for dest_dir in [&profile_dir, &deps_dir] {
             let destination = dest_dir.join(&name);
+
+            // Skip if destination exists (avoids warnings when DLL is locked by running process)
+            if destination.exists() {
+                skipped += 1;
+                continue;
+            }
+
             match fs::copy(&path, &destination) {
                 Ok(_) => copied += 1,
                 Err(err) => {
@@ -99,7 +107,7 @@ STATUS_DLL_NOT_FOUND (0xc0000135).",
         }
     }
 
-    if copied == 0 {
+    if copied == 0 && skipped == 0 {
         println!(
             "cargo:warning=liteclip: no .dll files were copied from {}. \
 Add FFmpeg shared libraries there (or set FFMPEG_DIR) to fix 0xc0000135 at startup.",

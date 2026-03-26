@@ -135,11 +135,7 @@ impl RecordingPipeline {
         }
     }
 
-    pub fn start(
-        &mut self,
-        config: &Config,
-        buffer: &ReplayBuffer,
-    ) -> Result<()> {
+    pub fn start(&mut self, config: &Config, buffer: &ReplayBuffer) -> Result<()> {
         if matches!(
             self.lifecycle,
             RecordingLifecycle::Starting

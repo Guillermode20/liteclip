@@ -142,6 +142,7 @@ pub fn run_stream_copy_export_sdk(
         out_idx: usize,
         in_time_base: ffmpeg::Rational,
         out_time_base: ffmpeg::Rational,
+        is_video: bool,
     }
     let mut stream_routes: HashMap<usize, StreamCopyRoute> = HashMap::new();
     for (in_idx, out_idx, should_copy) in &stream_mapping {
@@ -155,12 +156,17 @@ pub fn run_stream_copy_export_sdk(
             .stream(*out_idx)
             .with_context(|| format!("Missing output stream {}", out_idx))?
             .time_base();
+        let is_video = input_ctx
+            .stream(*in_idx)
+            .map(|s| s.parameters().medium() == ffmpeg::media::Type::Video)
+            .unwrap_or(false);
         stream_routes.insert(
             *in_idx,
             StreamCopyRoute {
                 out_idx: *out_idx,
                 in_time_base,
                 out_time_base,
+                is_video,
             },
         );
     }
@@ -183,6 +189,17 @@ pub fn run_stream_copy_export_sdk(
         seek_to_seconds(&mut input_ctx, range.start_secs);
         let mut streams_past_range_end: HashSet<usize> = HashSet::new();
 
+        // Scan forward until we hit a keyframe on each video stream.
+        // This guarantees the output starts with decodable frames even when
+        // the seek lands on a P/B frame whose reference frames are outside
+        // the copied range (which would otherwise produce white/corrupt frames).
+        let mut skipped_streams: HashSet<usize> = stream_routes
+            .iter()
+            .filter(|(_, r)| r.is_video)
+            .map(|(&idx, _)| idx)
+            .collect();
+        let mut keyframe_scan_done = skipped_streams.is_empty();
+
         for (stream, mut packet) in input_ctx.packets() {
             if cancel_flag.load(Ordering::Relaxed) {
                 return Ok(ExportOutcome::Cancelled);
@@ -201,15 +218,27 @@ pub fn run_stream_copy_export_sdk(
                 None => continue,
             };
 
-            // Use PTS for timestamp, fall back to DTS if PTS is missing.
-            // DTS fallback is safe here because: (1) stream copy doesn't decode, so B-frame
-            // reordering doesn't affect our range checks, and (2) the 0.75s buffer past range
-            // end provides ample margin for any DTS/PTS discrepancy.
             let pts_in = match packet.pts().or(packet.dts()) {
                 Some(ts) => ts,
                 None => continue,
             };
             let pts_secs = pts_in as f64 * secs_per_in_tick;
+
+            // Still in pre-keyframe scan — skip non-keyframe video packets on all streams
+            // that haven't yet found their first keyframe.
+            if !keyframe_scan_done && route.is_video {
+                let is_keyframe = packet.is_key();
+                if !is_keyframe {
+                    continue;
+                }
+                // First keyframe found for this stream — done scanning for this stream.
+                skipped_streams.remove(&stream_index);
+
+                // Only mark overall scan done once ALL video streams have found a keyframe.
+                if skipped_streams.is_empty() {
+                    keyframe_scan_done = true;
+                }
+            }
 
             // Once all copied streams are comfortably past the range end, stop this range.
             if pts_secs >= range.end_secs + 0.75 {
@@ -219,6 +248,8 @@ pub fn run_stream_copy_export_sdk(
                 }
                 continue;
             }
+            // Skip packets before the requested start (they were captured to satisfy
+            // keyframe references but are outside the user's trim window).
             if pts_secs < range.start_secs || pts_secs >= range.end_secs {
                 continue;
             }
@@ -303,6 +334,7 @@ pub fn run_stream_copy_export_sdk(
 }
 
 /// Run export attempt using ffmpeg-next filter graphs.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn attempt_export(
     request: &ClipExportRequest,
     output_path: &Path,
@@ -607,6 +639,13 @@ pub(crate) fn attempt_export(
         let mut stop_video = false;
         let mut stop_audio = audio_stream_idx.is_none();
 
+        // Track whether we've found the first keyframe for this range.
+        // After seeking, FFmpeg may land on a P/B frame whose reference frames
+        // are outside the kept range. We must skip frames until we hit a keyframe.
+        let mut found_first_keyframe = false;
+        // Track if the first frame of this range has been encoded (to force a keyframe).
+        let mut first_frame_encoded = false;
+
         // Read packets until we're safely beyond the range end, then flush decoders.
         for (stream, packet) in input_ctx.packets() {
             if cancel_flag.load(Ordering::Relaxed) {
@@ -622,6 +661,17 @@ pub(crate) fn attempt_export(
                         stop_video = true;
                     }
                 }
+
+                // Skip packets until we find a keyframe (for decodable output).
+                // This mirrors the keyframe scanning in stream-copy export.
+                if !found_first_keyframe {
+                    let is_keyframe = packet.is_key();
+                    if !is_keyframe {
+                        continue;
+                    }
+                    found_first_keyframe = true;
+                }
+
                 video_decoder.send_packet(&packet)?;
                 while video_decoder.receive_frame(&mut decoded_video).is_ok() {
                     let pts_secs = decoded_video
@@ -639,8 +689,7 @@ pub(crate) fn attempt_export(
                         continue;
                     }
 
-                    let output_pts_secs =
-                        range_output_start_secs + (pts_secs - range.start_secs);
+                    let output_pts_secs = range_output_start_secs + (pts_secs - range.start_secs);
 
                     let next_frame_time_secs =
                         (next_video_frame_pts as f64) * video_enc_secs_per_tick;
@@ -654,8 +703,20 @@ pub(crate) fn attempt_export(
                         .context("Failed to scale video frame during export")?;
                     scale_elapsed_secs += scale_started_at.elapsed().as_secs_f64();
                     scaled_video.set_pts(Some(next_video_frame_pts));
-                    next_video_frame_pts = next_video_frame_pts
-                        .saturating_add(video_enc_ticks_per_frame.max(1));
+                    next_video_frame_pts =
+                        next_video_frame_pts.saturating_add(video_enc_ticks_per_frame.max(1));
+
+                    // Force a keyframe at the start of each range to ensure
+                    // the output is decodable when concatenating segments.
+                    // This prevents artifacts at segment boundaries.
+                    if !first_frame_encoded {
+                        unsafe {
+                            (*scaled_video.as_mut_ptr()).pict_type =
+                                ffmpeg::picture::Type::I.into();
+                            (*scaled_video.as_mut_ptr()).key_frame = 1;
+                        }
+                        first_frame_encoded = true;
+                    }
 
                     let video_encode_started_at = Instant::now();
                     opened_video_encoder.send_frame(&scaled_video)?;
@@ -766,7 +827,8 @@ pub(crate) fn attempt_export(
                                         fixed_pts.saturating_add(audio_pkt.duration().max(1));
                                 }
                             }
-                            audio_encode_elapsed_secs += audio_encode_started_at.elapsed().as_secs_f64();
+                            audio_encode_elapsed_secs +=
+                                audio_encode_started_at.elapsed().as_secs_f64();
                         }
                     }
                 }
@@ -777,7 +839,8 @@ pub(crate) fn attempt_export(
             }
 
             let now = Instant::now();
-            const MIN_PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+            const MIN_PROGRESS_INTERVAL: std::time::Duration =
+                std::time::Duration::from_millis(100);
             if now.duration_since(last_progress_time) >= MIN_PROGRESS_INTERVAL {
                 last_progress_time = now;
                 let progress = (processed_duration / total_duration_secs).min(1.0) as f32;
@@ -825,8 +888,8 @@ pub(crate) fn attempt_export(
                 .context("Failed to scale video frame during export")?;
             scale_elapsed_secs += scale_started_at.elapsed().as_secs_f64();
             scaled_video.set_pts(Some(next_video_frame_pts));
-            next_video_frame_pts = next_video_frame_pts
-                .saturating_add(video_enc_ticks_per_frame.max(1));
+            next_video_frame_pts =
+                next_video_frame_pts.saturating_add(video_enc_ticks_per_frame.max(1));
             let video_encode_started_at = Instant::now();
             opened_video_encoder.send_frame(&scaled_video)?;
             let mut pkt = ffmpeg::Packet::empty();
@@ -870,7 +933,8 @@ pub(crate) fn attempt_export(
                 if let Some(ref encoder) = opened_audio_encoder {
                     let output_time_base = encoder.time_base();
                     let output_pts = (output_pts_secs * f64::from(output_time_base.denominator())
-                        / f64::from(output_time_base.numerator())) as i64;
+                        / f64::from(output_time_base.numerator()))
+                        as i64;
                     decoded_audio.set_pts(Some(output_pts));
                 }
                 if let Some(ref mut encoder) = opened_audio_encoder {
@@ -885,7 +949,8 @@ pub(crate) fn attempt_export(
                     }
                     let mut audio_pkt = ffmpeg::Packet::empty();
                     while encoder.receive_packet(&mut audio_pkt).is_ok() {
-                        if let (Some(audio_idx), Some(audio_tb)) = (audio_out_idx, audio_out_time_base)
+                        if let (Some(audio_idx), Some(audio_tb)) =
+                            (audio_out_idx, audio_out_time_base)
                         {
                             audio_pkt.rescale_ts(encoder.time_base(), audio_tb);
                             if audio_pkt.pts().is_none() {
@@ -894,10 +959,14 @@ pub(crate) fn attempt_export(
                             if audio_pkt.dts().is_none() {
                                 audio_pkt.set_dts(Some(next_audio_dts));
                             }
-                            if audio_pkt.duration() <= 0 || audio_pkt.duration() == INVALID_DURATION {
+                            if audio_pkt.duration() <= 0 || audio_pkt.duration() == INVALID_DURATION
+                            {
                                 audio_pkt.set_duration(audio_default_duration);
                             }
-                            let fixed_dts = audio_pkt.dts().unwrap_or(next_audio_dts).max(next_audio_dts);
+                            let fixed_dts = audio_pkt
+                                .dts()
+                                .unwrap_or(next_audio_dts)
+                                .max(next_audio_dts);
                             let fixed_pts = audio_pkt.pts().unwrap_or(fixed_dts).max(fixed_dts);
                             audio_pkt.set_dts(Some(fixed_dts));
                             audio_pkt.set_pts(Some(fixed_pts));

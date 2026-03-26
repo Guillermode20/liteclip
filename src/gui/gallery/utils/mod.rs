@@ -14,22 +14,15 @@ use crate::output::{estimate_export_bitrates, VideoFileMetadata};
 #[cfg(all(target_os = "windows", not(feature = "ffmpeg")))]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-pub(super) fn collect_video_paths_impl(
-    dir: &Path,
-    cache_dir: &Path,
-    output: &mut Vec<PathBuf>,
-) {
+pub(super) fn collect_video_paths_impl(dir: &Path, cache_dir: &Path, output: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
 
     for entry in entries.flatten() {
         let path = entry.path();
-        let skip_dir = path == cache_dir
-            || path
-                .file_name()
-                .and_then(|n| n.to_str())
-                == Some(".webcam-cache");
+        let skip_dir =
+            path == cache_dir || path.file_name().and_then(|n| n.to_str()) == Some(".webcam-cache");
         if skip_dir {
             continue;
         }
@@ -413,25 +406,20 @@ fn generate_thumbnail_strip_frames_sdk(
         return Ok(ThumbnailStrip::new(thumbnails, duration_secs));
     }
 
-    let frame_times: Vec<f64> = (1..=THUMBNAIL_STRIP_COUNT)
-        .map(|i| duration_secs * (i as f64) / (THUMBNAIL_STRIP_COUNT + 1) as f64)
-        .collect();
-
-    for (i, time_secs) in frame_times.iter().enumerate() {
+    for i in 1..=THUMBNAIL_STRIP_COUNT {
+        let time_secs = duration_secs * (i as f64) / (THUMBNAIL_STRIP_COUNT + 1) as f64;
         debug!(
             "Extracting thumbnail strip frame {}/{} at {:.2}s",
-            i + 1,
-            THUMBNAIL_STRIP_COUNT,
-            time_secs
+            i, THUMBNAIL_STRIP_COUNT, time_secs
         );
-        match extract_preview_frame(video_path, *time_secs, THUMBNAIL_STRIP_WIDTH) {
+        match extract_preview_frame(video_path, time_secs, THUMBNAIL_STRIP_WIDTH) {
             Ok(frame) => {
-                thumbnails.push((*time_secs, frame));
+                thumbnails.push((time_secs, frame));
             }
             Err(e) => {
                 warn!("Failed to extract frame at {:.2}s: {}", time_secs, e);
                 if let Some(last) = thumbnails.last() {
-                    thumbnails.push((frame_times[i], last.1.clone()));
+                    thumbnails.push((time_secs, last.1.clone()));
                 }
             }
         }

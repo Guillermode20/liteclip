@@ -396,7 +396,8 @@ impl WasapiMicCapture {
                 }
 
                 packet_counter = packet_counter.saturating_add(1);
-                if packet_counter.is_multiple_of(MIC_BUFFER_SHRINK_INTERVAL_PACKETS)
+                if MIC_BUFFER_SHRINK_INTERVAL_PACKETS > 0
+                    && packet_counter % MIC_BUFFER_SHRINK_INTERVAL_PACKETS == 0
                     && audio_buffer.capacity()
                         > max_buffer_size.saturating_mul(MIC_BUFFER_SHRINK_MULTIPLIER)
                 {

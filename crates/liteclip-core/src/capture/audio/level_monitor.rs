@@ -10,16 +10,10 @@ const SMOOTH_ALPHA: f32 = 0.4;
 const METER_FLOOR_DB: f32 = -60.0;
 const METER_DB_RANGE: f32 = 60.0;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct AudioLevels {
     pub level: u8,
     pub peak: u8,
-}
-
-impl Default for AudioLevels {
-    fn default() -> Self {
-        Self { level: 0, peak: 0 }
-    }
 }
 
 #[derive(Debug, Clone)]

@@ -156,11 +156,7 @@ pub fn ffmpeg_executable_path() -> PathBuf {
 }
 
 pub fn remux_fragmented_mp4(input_path: &Path, output_path: &Path, faststart: bool) -> Result<()> {
-    crate::output::sdk_ffmpeg_output::remux_fragmented_mp4(
-        input_path,
-        output_path,
-        faststart,
-    )
+    crate::output::sdk_ffmpeg_output::remux_fragmented_mp4(input_path, output_path, faststart)
 }
 
 /// Generates a thumbnail for a video file using FFmpeg.

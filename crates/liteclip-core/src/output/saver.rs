@@ -143,9 +143,7 @@ pub fn spawn_clip_saver(
 
         // Decodable frame retries
         if !has_decodable_video_frame(&snapshot) {
-            warn!(
-                "Clip snapshot does not yet contain a decodable video frame; retrying briefly"
-            );
+            warn!("Clip snapshot does not yet contain a decodable video frame; retrying briefly");
             for attempt in 1..=5 {
                 // AGGRESSIVE: drop old snapshot before retry
                 aggressively_drop_packets(snapshot);
@@ -160,79 +158,79 @@ pub fn spawn_clip_saver(
                         attempt
                     );
                     break;
-                    }
                 }
             }
+        }
 
-            // Log first video packet info before moving snapshot out
-            {
-                let video_packets: Vec<_> = snapshot
-                    .iter()
-                    .filter(|p| matches!(p.stream, crate::encode::StreamType::Video))
-                    .collect();
-
-                if !video_packets.is_empty() {
-                    let first_vid = video_packets[0];
-                    let first_20_bytes: Vec<String> = first_vid
-                        .data
-                        .iter()
-                        .take(20)
-                        .map(|b| format!("{:02x}", b))
-                        .collect();
-                    info!(
-                        "First video packet: {}B, keyframe={}, first20=[{}]",
-                        first_vid.data.len(),
-                        first_vid.is_keyframe,
-                        first_20_bytes.join(" ")
-                    );
-
-                    let nal_type = hevc_nal_type(first_vid.data.as_ref());
-                    info!("First video packet HEVC NAL type: {:?}", nal_type);
-                }
-            }
-
-            let keyframe_count = snapshot.iter().filter(|p| p.is_keyframe).count();
-            if keyframe_count == 0 {
-                warn!("No keyframes in clip range - video may not be playable");
-            }
-
-            let video_count = snapshot
+        // Log first video packet info before moving snapshot out
+        {
+            let video_packets: Vec<_> = snapshot
                 .iter()
-                .filter(|packet| matches!(packet.stream, crate::encode::StreamType::Video))
-                .count();
-            let audio_count = snapshot.len().saturating_sub(video_count);
+                .filter(|p| matches!(p.stream, crate::encode::StreamType::Video))
+                .collect();
 
-            info!(
-                "Prepared clip packet set: {} video packets, {} audio packets",
-                video_count, audio_count
-            );
+            if !video_packets.is_empty() {
+                let first_vid = video_packets[0];
+                let first_20_bytes: Vec<String> = first_vid
+                    .data
+                    .iter()
+                    .take(20)
+                    .map(|b| format!("{:02x}", b))
+                    .collect();
+                info!(
+                    "First video packet: {}B, keyframe={}, first20=[{}]",
+                    first_vid.data.len(),
+                    first_vid.is_keyframe,
+                    first_20_bytes.join(" ")
+                );
 
-            if video_count == 0 {
-                bail!("No video packets in selected clip range");
+                let nal_type = hevc_nal_type(first_vid.data.as_ref());
+                info!("First video packet HEVC NAL type: {:?}", nal_type);
             }
+        }
 
-            let clip_span_secs = clip_pts_span_seconds(snapshot.as_slice());
+        let keyframe_count = snapshot.iter().filter(|p| p.is_keyframe).count();
+        if keyframe_count == 0 {
+            warn!("No keyframes in clip range - video may not be playable");
+        }
 
-            // ── Phase 2: Mux with aggressive cleanup ──
-            log_save_memory("before mux", None, Some(snapshot.as_slice()));
-            let final_path = Muxer::mux_clip(&output_path, &config, snapshot.as_slice())
-                .context("Failed to finalize MP4")?;
-            log_save_memory("after mux", None, Some(snapshot.as_slice()));
+        let video_count = snapshot
+            .iter()
+            .filter(|packet| matches!(packet.stream, crate::encode::StreamType::Video))
+            .count();
+        let audio_count = snapshot.len().saturating_sub(video_count);
 
-            // AGGRESSIVE: explicitly free all packet data immediately after mux
-            // This drops the TrackedSnapshot, decrementing outstanding_snapshot_bytes
-            aggressively_drop_packets(snapshot);
-            log_save_memory("after packet release", None, None);
+        info!(
+            "Prepared clip packet set: {} video packets, {} audio packets",
+            video_count, audio_count
+        );
 
-            // Release the buffer clone NOW — all needed packets are in the muxed file.
-            drop(buffer);
+        if video_count == 0 {
+            bail!("No video packets in selected clip range");
+        }
+
+        let clip_span_secs = clip_pts_span_seconds(snapshot.as_slice());
+
+        // ── Phase 2: Mux with aggressive cleanup ──
+        log_save_memory("before mux", None, Some(snapshot.as_slice()));
+        let final_path = Muxer::mux_clip(&output_path, &config, snapshot.as_slice())
+            .context("Failed to finalize MP4")?;
+        log_save_memory("after mux", None, Some(snapshot.as_slice()));
+
+        // AGGRESSIVE: explicitly free all packet data immediately after mux
+        // This drops the TrackedSnapshot, decrementing outstanding_snapshot_bytes
+        aggressively_drop_packets(snapshot);
+        log_save_memory("after packet release", None, None);
+
+        // Release the buffer clone NOW — all needed packets are in the muxed file.
+        drop(buffer);
 
         info!(
             "Clip saved successfully: {:?} ({} video packets, {} audio packets, ~{:.1}s)",
             final_path,
             video_count,
             audio_count,
-            clip_span_secs.unwrap_or_else(|| duration.as_secs_f64())
+            clip_span_secs.unwrap_or(duration.as_secs_f64())
         );
 
         // Clean up any leftover fragmented MP4s from prior failed saves.

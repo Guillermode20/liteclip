@@ -189,7 +189,7 @@ impl FfmpegMuxer {
         let min_audio_qpc = audio_packets.iter().map(|packet| packet.pts).min();
 
         let base_qpc = std::iter::once(video_start_qpc)
-            .chain(min_audio_qpc.into_iter())
+            .chain(min_audio_qpc)
             .min()
             .unwrap_or(0);
 
@@ -550,9 +550,8 @@ fn qpc_to_sample_index(delta_qpc: i64) -> usize {
 }
 
 fn is_parameter_set_payload(data: &[u8]) -> bool {
-    match crate::buffer::ring::hevc_nal_type(data) {
-        Some(32 | 33 | 34) => return true,
-        _ => {}
+    if let Some(32..=34) = crate::buffer::ring::hevc_nal_type(data) {
+        return true;
     }
 
     matches!(crate::buffer::ring::h264_nal_type(data), Some(7 | 8))
@@ -792,8 +791,7 @@ fn mix_and_encode_audio_chunks(
             }
         }
 
-        for i in search_idx..placements.len() {
-            let p = &placements[i];
+        for p in placements.iter().skip(search_idx) {
             let p_start = p.start_index;
             if p_start >= chunk_end {
                 break;

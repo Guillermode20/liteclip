@@ -135,6 +135,7 @@ impl FfmpegEncoder {
     }
 
     /// Re-emit the last encoded video bitstream with a new wall-clock PTS (static / duplicate DXGI frame).
+    #[allow(dead_code)]
     fn emit_duplicate_video_packets(&mut self, timestamp: i64) -> EncodeResult<()> {
         for (data, is_keyframe) in &self.last_duplicate_template {
             let mut encoded_packet = EncodedPacket::new(
@@ -304,7 +305,7 @@ impl Encoder for FfmpegEncoder {
                 scaler.run(src_frame, dst_frame)?;
                 Self::apply_bt709_frame_metadata(dst_frame);
                 dst_frame.set_pts(Some(encoder_pts));
-                if gop > 0 && self.frame_count % gop == 0 {
+                if at_keyframe {
                     dst_frame.set_kind(ffmpeg::picture::Type::I);
                 } else {
                     dst_frame.set_kind(ffmpeg::picture::Type::None);

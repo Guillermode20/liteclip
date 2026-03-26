@@ -2,7 +2,6 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 pub(super) const FRAME_POOL_SIZE: usize = 32;
-pub(super) const FRAME_POOL_HARD_LIMIT: usize = 64;
 
 pub(super) struct FramePool {
     buffers: Mutex<VecDeque<Vec<u8>>>,
@@ -96,29 +95,24 @@ impl Drop for PooledBuffer {
 /// This prevents memory leaks in the decode pipeline where many frames are decoded and displayed.
 pub struct PooledRgbaImage {
     image: Option<image::RgbaImage>,
-    width: u32,
-    height: u32,
     pool: Arc<FramePool>,
 }
 
 impl PooledRgbaImage {
     /// Create a new pooled image from a PooledBuffer.
     /// The buffer is taken and wrapped into an RgbaImage.
-    pub(super) fn from_pooled_buffer(buffer: PooledBuffer, width: u32, height: u32) -> Option<Self> {
+    pub(super) fn from_pooled_buffer(
+        buffer: PooledBuffer,
+        width: u32,
+        height: u32,
+    ) -> Option<Self> {
         let pool = Arc::clone(&buffer.pool);
         let vec = buffer.into_inner();
         let image = image::RgbaImage::from_raw(width, height, vec)?;
         Some(Self {
             image: Some(image),
-            width,
-            height,
             pool,
         })
-    }
-
-    /// Access the underlying RgbaImage.
-    pub(super) fn as_image(&self) -> Option<&image::RgbaImage> {
-        self.image.as_ref()
     }
 }
 
@@ -126,7 +120,9 @@ impl std::ops::Deref for PooledRgbaImage {
     type Target = image::RgbaImage;
 
     fn deref(&self) -> &Self::Target {
-        self.image.as_ref().expect("PooledRgbaImage already consumed")
+        self.image
+            .as_ref()
+            .expect("PooledRgbaImage already consumed")
     }
 }
 

@@ -67,7 +67,7 @@ where
         let mut g = arc
             .lock()
             .map_err(|e| anyhow::anyhow!("AppState mutex poisoned: {e}"))?;
-        f(&mut *g)
+        f(&mut g)
     })
     .await
     .map_err(|e| anyhow::anyhow!("AppState blocking task join error: {e}"))?
@@ -84,7 +84,7 @@ where
         let mut g = arc
             .lock()
             .map_err(|e| anyhow::anyhow!("AppState mutex poisoned: {e}"))?;
-        Ok(f(&mut *g))
+        Ok(f(&mut g))
     })
     .await
     .map_err(|e| anyhow::anyhow!("AppState blocking task join error: {e}"))?
@@ -602,7 +602,7 @@ async fn main() -> Result<()> {
 
     // Drop the tokio sender to signal the event bridge to stop
     drop(tokio_tx);
-    
+
     // Join the event bridge thread
     let _ = event_bridge_handle.join();
     info!("Event bridge thread joined");

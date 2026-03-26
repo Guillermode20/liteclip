@@ -43,9 +43,9 @@ pub mod functions;
 pub mod mp4;
 pub mod saver;
 #[cfg(feature = "ffmpeg")]
-pub mod sdk_ffmpeg_output;
-#[cfg(feature = "ffmpeg")]
 pub mod sdk_export;
+#[cfg(feature = "ffmpeg")]
+pub mod sdk_ffmpeg_output;
 pub mod types;
 pub mod video_file;
 

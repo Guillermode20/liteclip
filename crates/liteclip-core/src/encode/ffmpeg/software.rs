@@ -16,10 +16,7 @@ impl FfmpegEncoder {
             .ok_or_else(|| EncodeError::msg(format!("Failed to find encoder: {}", codec_name)))?;
 
         let encoder_ctx = ffmpeg::codec::context::Context::new_with_codec(codec);
-        let mut encoder = encoder_ctx
-            .encoder()
-            .video()
-            .map_err(|e| EncodeError::ffmpeg(e))?;
+        let mut encoder = encoder_ctx.encoder().video().map_err(EncodeError::ffmpeg)?;
 
         let (out_w, out_h) = if self.config.use_native_resolution {
             (width, height)
@@ -73,7 +70,7 @@ impl FfmpegEncoder {
                     out_h,
                     ffmpeg::software::scaling::flag::Flags::POINT,
                 )
-                .map_err(|e| EncodeError::ffmpeg(e))?,
+                .map_err(EncodeError::ffmpeg)?,
             );
             info!(
                 "Native FFmpeg encoder initialized: {} ({}x{}) with NV12 scaling (fast)",
@@ -189,7 +186,7 @@ impl FfmpegEncoder {
                 post_warmup_packets,
                 ratio
             );
-            if ratio < 0.90 || ratio > 1.10 {
+            if !(0.90..=1.10).contains(&ratio) {
                 tracing::warn!(
                     "Unexpected encoder packet/frame ratio {:.2} (frames={}, packets={})",
                     ratio,

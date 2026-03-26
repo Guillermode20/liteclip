@@ -163,16 +163,16 @@ fn handle_editor_shortcuts(
     }
 
     // Undo last cut point (basic undo)
-    if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Z)) {
-        if !editor.cut_points.is_empty() {
-            editor.cut_points.pop();
-            if let Some(selected) = editor.selected_cut_point {
-                if selected >= editor.cut_points.len() {
-                    editor.selected_cut_point = editor.cut_points.len().checked_sub(1);
-                }
+    if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Z))
+        && !editor.cut_points.is_empty()
+    {
+        editor.cut_points.pop();
+        if let Some(selected) = editor.selected_cut_point {
+            if selected >= editor.cut_points.len() {
+                editor.selected_cut_point = editor.cut_points.len().checked_sub(1);
             }
-            outcome.preview_request = Some(editor.current_time_secs);
         }
+        outcome.preview_request = Some(editor.current_time_secs);
     }
 
     if ctx.input(|i| i.key_pressed(egui::Key::Space)) {

@@ -364,13 +364,13 @@ impl Encoder for SoftwareEncoder {
 
                 if self.worker_tx.try_send(item).is_err() {
                     self.dropped_newest_count = self.dropped_newest_count.saturating_add(1);
-                    if self.dropped_newest_count.is_multiple_of(60) {
+                    if self.dropped_newest_count % 60 == 0 {
                         debug!(
                             "Workers saturated, dropped newest={} dropped_oldest={}",
                             self.dropped_newest_count, self.dropped_oldest_count
                         );
                     }
-                } else if dropped_oldest && self.dropped_oldest_count.is_multiple_of(60) {
+                } else if dropped_oldest && self.dropped_oldest_count % 60 == 0 {
                     debug!(
                         "Workers saturated, dropped oldest={} to keep recency",
                         self.dropped_oldest_count

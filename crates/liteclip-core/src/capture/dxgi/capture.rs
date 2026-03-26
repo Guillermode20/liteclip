@@ -894,7 +894,7 @@ impl DxgiCapture {
             let fps_divisor = backpressure.current_fps_divisor();
             if fps_divisor > 0 {
                 adaptive_skip_counter = adaptive_skip_counter.wrapping_add(1);
-                drop_before_process = !adaptive_skip_counter.is_multiple_of(fps_divisor + 1);
+                drop_before_process = adaptive_skip_counter % (fps_divisor + 1) != 0;
             }
             if !drop_before_process && queue_len.saturating_add(1) >= queue_cap {
                 drop_before_process = true;
@@ -960,7 +960,7 @@ impl DxgiCapture {
                     let fps_divisor = backpressure.current_fps_divisor();
                     if fps_divisor > 0 {
                         adaptive_skip_counter = adaptive_skip_counter.wrapping_add(1);
-                        if !adaptive_skip_counter.is_multiple_of(fps_divisor + 1) {
+                        if adaptive_skip_counter % (fps_divisor + 1) != 0 {
                             dropped_count += 1;
                             window_drops += 1;
                             continue;
@@ -1099,7 +1099,8 @@ impl DxgiCapture {
                         p.max_capacity,
                     )
                 });
-                if let Some((working_set_mb, private_mb)) = crate::output::saver::process_memory_mb()
+                if let Some((working_set_mb, private_mb)) =
+                    crate::output::saver::process_memory_mb()
                 {
                     info!(
                         "Memory telemetry [capture]: fps={}, drops={}, duplicates={}, divisor={}, queue={}/{}, nv12={:?}, bgra={:?}, process_working_set_mb={:.1}, process_private_mb={:.1}",

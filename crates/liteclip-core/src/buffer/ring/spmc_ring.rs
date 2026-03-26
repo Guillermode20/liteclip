@@ -135,9 +135,11 @@ impl SnapshotBytes {
                 .outstanding_snapshot_bytes
                 .fetch_add(bytes, Ordering::Relaxed);
             let new_total = current.saturating_add(bytes);
-            
+
             // Warn if approaching limit
-            let warning_threshold = (inner.max_memory_bytes as f64 * OUTSTANDING_SNAPSHOT_WARNING_RATIO as f64) as usize;
+            let warning_threshold = (inner.max_memory_bytes as f64
+                * OUTSTANDING_SNAPSHOT_WARNING_RATIO as f64)
+                as usize;
             if new_total > warning_threshold && current <= warning_threshold {
                 warn!(
                     "Snapshot memory approaching limit: {:.1}MB / {:.1}MB",
@@ -283,7 +285,7 @@ impl LockFreeReplayBuffer {
         let duration = Duration::from_secs(config.general.replay_duration_secs as u64 + 1);
         let effective_memory_limit_mb = config.effective_replay_memory_limit_mb();
         let max_memory_bytes = (effective_memory_limit_mb as usize).saturating_mul(1024 * 1024);
-        let qpc_freq = qpc_frequency().max(1) as i64;
+        let qpc_freq = qpc_frequency().max(1);
         let max_duration_qpc =
             (config.general.replay_duration_secs.max(1) as i64).saturating_mul(qpc_freq);
 
@@ -544,7 +546,8 @@ impl LockFreeReplayBuffer {
                             } else {
                                 trace!(
                                     "Eviction slot empty: evict_frontier={}, slot_idx={}",
-                                    evict, evict_slot_idx
+                                    evict,
+                                    evict_slot_idx
                                 );
                             }
                         }
@@ -564,7 +567,11 @@ impl LockFreeReplayBuffer {
 
                 if eviction_count > 0 {
                     let end_total = inner.total_bytes.load(Ordering::Relaxed);
-                    let eviction_type = if memory_ratio > 1.0 { "hard" } else { "proactive" };
+                    let eviction_type = if memory_ratio > 1.0 {
+                        "hard"
+                    } else {
+                        "proactive"
+                    };
                     debug!(
                         "Buffer {} eviction: {} packets ({} keyframes) removed in batches of {}, {:.1}MB freed, total {:.1}MB -> {:.1}MB / {:.1}MB limit ({:.0}% -> {:.0}%)",
                         eviction_type,
@@ -581,7 +588,8 @@ impl LockFreeReplayBuffer {
                 }
 
                 // Oldest packets are gone but the packet we just wrote (or accounting skew) still exceeds the cap.
-                if stopped_at_head && inner.total_bytes.load(Ordering::Relaxed) > inner.max_memory_bytes
+                if stopped_at_head
+                    && inner.total_bytes.load(Ordering::Relaxed) > inner.max_memory_bytes
                 {
                     let slot_idx = write_idx & inner.mask;
                     let slot = &inner.slots[slot_idx];

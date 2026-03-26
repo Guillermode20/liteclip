@@ -459,7 +459,6 @@ impl eframe::App for GuiManagerApp {
         if disconnected {
             with_gui_state(|state| state.request_shutdown());
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            return;
         }
     }
 }

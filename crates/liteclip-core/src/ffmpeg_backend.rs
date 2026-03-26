@@ -43,13 +43,10 @@ pub fn validate_sdk_runtime() -> Result<(), FfmpegRuntimeError> {
     }
 }
 
-
 /// User-facing validation failures for embedders (no bundling; users install FFmpeg themselves).
 #[derive(Debug, Error)]
 pub enum FfmpegRuntimeError {
-    #[error(
-        "ffmpeg SDK not properly initialized; check FFmpeg DLLs are present"
-    )]
+    #[error("ffmpeg SDK not properly initialized; check FFmpeg DLLs are present")]
     FfmpegSdkMissing,
 }
 

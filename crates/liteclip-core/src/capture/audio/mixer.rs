@@ -79,32 +79,35 @@ impl AudioMixer {
     }
 
     /// Insert a packet into a queue, maintaining sort order by PTS.
-/// Evicts oldest packets if the queue exceeds MAX_PACKETS_PER_STREAM.
-fn insert_sorted(
-    queue: &mut VecDeque<TimestampedPacket>,
-    packet: EncodedPacket,
-    evicted_count: &mut u64,
-) {
-    let pts = packet.pts;
-    let entry = TimestampedPacket { pts, packet };
-    
-    // Find insertion position (binary search for O(log n) find, but O(n) insert)
-    // For small queues (< 32), linear search is fine and simpler.
-    let pos = queue.iter().position(|p| p.pts > pts).unwrap_or(queue.len());
-    queue.insert(pos, entry);
-    
-    // Evict oldest packets if we exceed the limit
-    while queue.len() > MAX_PACKETS_PER_STREAM {
-        queue.pop_front();
-        *evicted_count += 1;
-        if *evicted_count % 100 == 1 {
-            warn!(
-                "Audio mixer evicted {} packets total (queue limit {})",
-                evicted_count, MAX_PACKETS_PER_STREAM
-            );
+    /// Evicts oldest packets if the queue exceeds MAX_PACKETS_PER_STREAM.
+    fn insert_sorted(
+        queue: &mut VecDeque<TimestampedPacket>,
+        packet: EncodedPacket,
+        evicted_count: &mut u64,
+    ) {
+        let pts = packet.pts;
+        let entry = TimestampedPacket { pts, packet };
+
+        // Find insertion position (binary search for O(log n) find, but O(n) insert)
+        // For small queues (< 32), linear search is fine and simpler.
+        let pos = queue
+            .iter()
+            .position(|p| p.pts > pts)
+            .unwrap_or(queue.len());
+        queue.insert(pos, entry);
+
+        // Evict oldest packets if we exceed the limit
+        while queue.len() > MAX_PACKETS_PER_STREAM {
+            queue.pop_front();
+            *evicted_count += 1;
+            if *evicted_count % 100 == 1 {
+                warn!(
+                    "Audio mixer evicted {} packets total (queue limit {})",
+                    evicted_count, MAX_PACKETS_PER_STREAM
+                );
+            }
         }
     }
-}
 
     /// Mix audio packets from system and microphone with timestamp-based synchronization
     pub fn mix_packets(
@@ -150,7 +153,7 @@ fn insert_sorted(
             // Get earliest system and mic packets after last processed timestamp
             let system_ts = self.system_packets.front()?.pts;
             let mic_ts = self.mic_packets.front()?.pts;
-            
+
             if system_ts <= self.last_processed_pts {
                 // Remove stale packet
                 self.system_packets.pop_front();
@@ -471,16 +474,20 @@ mod tests {
         // The gap is 1099ms, which exceeds sync_threshold (100ms) but is less than timeout (300ms)
         // The earlier packet (system) will be processed first, then the mic packet
         let result1 = mixer.mix_packets(Some(system_packet), Some(mic_packet));
-        
+
         // Both packets should be processed (separately, not mixed)
         // Result should contain 2 packets: system first, then mic
-        assert_eq!(result1.len(), 2, "Expected both packets to be processed separately due to gap");
+        assert_eq!(
+            result1.len(),
+            2,
+            "Expected both packets to be processed separately due to gap"
+        );
 
         // Both queues should be empty after processing
         assert!(mixer.system_packets.is_empty());
         assert!(mixer.mic_packets.is_empty());
     }
-    
+
     #[test]
     fn test_max_packets_limit() {
         let config = Config::default().audio;
@@ -500,15 +507,21 @@ mod tests {
                 crate::encode::StreamType::SystemAudio,
             );
             mixer.mix_packets(Some(packet), None);
-            
+
             // Check limit after each insert
-            assert!(mixer.system_packets.len() <= MAX_PACKETS_PER_STREAM, 
-                "Queue length {} exceeds limit {} at iteration {}", 
-                mixer.system_packets.len(), MAX_PACKETS_PER_STREAM, i);
+            assert!(
+                mixer.system_packets.len() <= MAX_PACKETS_PER_STREAM,
+                "Queue length {} exceeds limit {} at iteration {}",
+                mixer.system_packets.len(),
+                MAX_PACKETS_PER_STREAM,
+                i
+            );
         }
 
         // At least some packets should have been processed/evicted
-        assert!(mixer.evicted_packets > 0 || mixer.pending_packet_counts().0 < MAX_PACKETS_PER_STREAM, 
-            "Expected some packets to be evicted or processed");
+        assert!(
+            mixer.evicted_packets > 0 || mixer.pending_packet_counts().0 < MAX_PACKETS_PER_STREAM,
+            "Expected some packets to be evicted or processed"
+        );
     }
 }

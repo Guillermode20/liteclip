@@ -247,7 +247,7 @@ pub(crate) fn normalize_output_fps(fps: f64, fallback: f64) -> f64 {
 pub fn probe_video_file(video_path: &Path) -> Result<VideoFileMetadata> {
     #[cfg(feature = "ffmpeg")]
     {
-        return crate::output::sdk_ffmpeg_output::probe_video_file(video_path);
+        crate::output::sdk_ffmpeg_output::probe_video_file(video_path)
     }
     #[cfg(not(feature = "ffmpeg"))]
     {
@@ -262,11 +262,11 @@ pub fn extract_preview_frame(
 ) -> Result<RgbaImage> {
     #[cfg(feature = "ffmpeg")]
     {
-        return crate::output::sdk_ffmpeg_output::extract_preview_frame(
+        crate::output::sdk_ffmpeg_output::extract_preview_frame(
             video_path,
             timestamp_secs,
             max_width,
-        );
+        )
     }
     #[cfg(not(feature = "ffmpeg"))]
     {
@@ -845,6 +845,7 @@ fn estimate_export_bitrates_for_encoder(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn estimate_export_bitrates_with_fill_ratio(
     target_size_mb: u32,
     output_duration_secs: f64,
@@ -872,6 +873,7 @@ fn estimate_export_bitrates_with_fill_ratio(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn estimate_export_bitrates_with_fill_ratio_and_efficiency(
     target_size_mb: u32,
     output_duration_secs: f64,
@@ -1050,7 +1052,7 @@ fn next_export_video_bitrate_kbps(
         }
     }
 
-    next_video_bitrate_kbps.min(MAX_VIDEO_BITRATE_KBPS).max(100)
+    next_video_bitrate_kbps.clamp(100, MAX_VIDEO_BITRATE_KBPS)
 }
 
 fn estimate_measured_non_video_bytes(
@@ -1157,6 +1159,7 @@ fn build_amf_calibration_request(
     calibration_request
 }
 
+#[allow(clippy::too_many_arguments)]
 fn calibrate_amf_video_bitrate(
     current_video_bitrate_kbps: u32,
     sample_size_bytes: u64,

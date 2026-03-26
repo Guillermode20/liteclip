@@ -256,28 +256,18 @@ pub fn extract_preview_frame(
     for (stream, packet) in ictx.packets() {
         if stream.index() == video_stream_index {
             decoder.send_packet(&packet)?;
-            loop {
-                match decoder.receive_frame(&mut decoded) {
-                    Ok(()) => {
-                        if let Some(img) = consider_frame(&decoded)? {
-                            return Ok(img);
-                        }
-                    }
-                    Err(_) => break,
+            while let Ok(()) = decoder.receive_frame(&mut decoded) {
+                if let Some(img) = consider_frame(&decoded)? {
+                    return Ok(img);
                 }
             }
         }
     }
 
     decoder.send_eof()?;
-    loop {
-        match decoder.receive_frame(&mut decoded) {
-            Ok(()) => {
-                if let Some(img) = consider_frame(&decoded)? {
-                    return Ok(img);
-                }
-            }
-            Err(_) => break,
+    while let Ok(()) = decoder.receive_frame(&mut decoded) {
+        if let Some(img) = consider_frame(&decoded)? {
+            return Ok(img);
         }
     }
 
@@ -312,8 +302,7 @@ fn ffmpeg_frame_to_rgba(frame: &ffmpeg::util::frame::video::Video) -> Result<Rgb
         let dst_off = (y as usize).saturating_mul(row_bytes);
         raw[dst_off..dst_off + n].copy_from_slice(row_src);
     }
-    RgbaImage::from_raw(w, h, raw)
-        .with_context(|| "failed to build RGBA image from decoder frame")
+    RgbaImage::from_raw(w, h, raw).with_context(|| "failed to build RGBA image from decoder frame")
 }
 
 /// Gallery thumbnail at ~1s; same cache path scheme as the CLI implementation.

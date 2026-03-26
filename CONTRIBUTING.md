@@ -232,7 +232,7 @@ mod tests {
 
 ## Pull Request Process
 
-1. **Fork the repository** and create your branch from `main`
+1. **Fork the repository** and create your branch from `master`
 2. **Make your changes** following the code style guidelines
 3. **Add tests** for new functionality
 4. **Update documentation** for changed public APIs
@@ -246,6 +246,23 @@ mod tests {
 6. **Commit your changes** (see [Commit Messages](#commit-messages))
 7. **Push to your fork** and open a pull request
 8. **Address review feedback** promptly
+
+### Pre-commit Hooks
+
+The repository includes a pre-commit hook that automatically runs:
+- `cargo fmt --check` - Ensures code is formatted
+- `cargo clippy -- -D warnings` - Catches lint issues
+
+The hook is located at `.git/hooks/pre-commit`. If you need to bypass it temporarily:
+```bash
+git commit --no-verify
+```
+
+### Documentation
+
+- Update `AGENTS.md` if you change build commands, architecture, or common development tasks
+- Update `CONTRIBUTING.md` if you change development workflow or coding guidelines
+- Update crate-level documentation (`//!` comments) for public API changes
 
 ### PR Title Format
 
@@ -319,13 +336,35 @@ resources and attempt reacquisition instead of crashing.
 
 | Component | Location | Responsibility |
 |-----------|----------|----------------|
-| `AppState` | `app/state.rs` | Central state coordinator |
-| `RecordingPipeline` | `app/pipeline/` | Orchestrates capture → encode → buffer |
-| `ReplayBuffer` | `buffer/ring/` | Lock-free ring buffer for replay storage |
-| `DxgiCapture` | `capture/dxgi/` | DXGI Desktop Duplication screen capture |
-| `AudioCapture` | `capture/audio/` | WASAPI audio capture |
-| `Encoder` | `encode/` | Video encoding abstraction |
-| `PlatformHandle` | `platform/` | Hotkeys, tray, notifications |
+| `ReplayEngine` | `crates/liteclip-core/src/engine.rs` | Facade for embedding, wraps AppState |
+| `AppState` | `crates/liteclip-core/src/app/state.rs` | Central state coordinator |
+| `RecordingPipeline` | `crates/liteclip-core/src/app/pipeline/manager.rs` | Orchestrates capture → encode → buffer |
+| `ReplayBuffer` | `crates/liteclip-core/src/buffer/ring/spmc_ring.rs` | Lock-free SPMC ring buffer |
+| `DxgiCapture` | `crates/liteclip-core/src/capture/dxgi/` | DXGI Desktop Duplication screen capture |
+| `AudioCapture` | `crates/liteclip-core/src/capture/audio/` | WASAPI audio capture (system + mic) |
+| `Encoder` | `crates/liteclip-core/src/encode/` | Video encoding abstraction |
+| `Config` | `crates/liteclip-core/src/config/config_mod/types.rs` | TOML configuration types |
+| `PlatformHandle` | `src/platform/mod.rs` | Hotkeys, tray, notifications |
+| `Gallery` | `src/gui/gallery.rs` | Clip browser and editor UI |
+
+### Workspace Structure
+
+This is a Cargo workspace with two crates:
+
+| Crate | Path | Description |
+|-------|------|-------------|
+| `liteclip-replay` | `./` (root) | GUI application binary |
+| `liteclip-core` | `crates/liteclip-core/` | Reusable engine library |
+
+When working on the core engine, run tests from the workspace root:
+```bash
+cargo test -p liteclip-core
+```
+
+When working on the GUI application:
+```bash
+cargo test -p liteclip-replay
+```
 
 ### Hardware encoders (NVENC / Intel QSV)
 
@@ -333,43 +372,68 @@ Maintainers may not have NVIDIA or Intel GPUs to exercise every path. **Pull req
 
 **Authoritative checklist** (duplicate registry sites are called out in code comments there):
 
-- Hub / overview: [`src/encode/ffmpeg/mod.rs`](src/encode/ffmpeg/mod.rs) (module-level `//!` docs)
-- NVENC implementation: [`src/encode/ffmpeg/nvenc.rs`](src/encode/ffmpeg/nvenc.rs)
-- QSV implementation: [`src/encode/ffmpeg/qsv.rs`](src/encode/ffmpeg/qsv.rs)
-- AMF (reference path many contributors can run): [`src/encode/ffmpeg/amf.rs`](src/encode/ffmpeg/amf.rs)
-- Encoder options: [`src/encode/ffmpeg/options.rs`](src/encode/ffmpeg/options.rs)
-- Codec names + GPU transport: [`src/encode/encoder_mod/types.rs`](src/encode/encoder_mod/types.rs)
-- Probe + auto-detect: [`src/encode/encoder_mod/functions.rs`](src/encode/encoder_mod/functions.rs)
-- Config enum: [`src/config/config_mod/types.rs`](src/config/config_mod/types.rs) (`EncoderType`)
+- Hub / overview: [`crates/liteclip-core/src/encode/ffmpeg/mod.rs`](crates/liteclip-core/src/encode/ffmpeg/mod.rs) (module-level `//!` docs)
+- NVENC implementation: [`crates/liteclip-core/src/encode/ffmpeg/nvenc.rs`](crates/liteclip-core/src/encode/ffmpeg/nvenc.rs)
+- QSV implementation: [`crates/liteclip-core/src/encode/ffmpeg/qsv.rs`](crates/liteclip-core/src/encode/ffmpeg/qsv.rs)
+- AMF (reference path many contributors can run): [`crates/liteclip-core/src/encode/ffmpeg/amf.rs`](crates/liteclip-core/src/encode/ffmpeg/amf.rs)
+- Encoder options: [`crates/liteclip-core/src/encode/ffmpeg/options.rs`](crates/liteclip-core/src/encode/ffmpeg/options.rs)
+- Codec names + GPU transport: [`crates/liteclip-core/src/encode/encoder_mod/types.rs`](crates/liteclip-core/src/encode/encoder_mod/types.rs)
+- Probe + auto-detect: [`crates/liteclip-core/src/encode/encoder_mod/functions.rs`](crates/liteclip-core/src/encode/encoder_mod/functions.rs)
+- Config enum: [`crates/liteclip-core/src/config/config_mod/types.rs`](crates/liteclip-core/src/config/config_mod/types.rs) (`EncoderType`)
 - Settings UI: [`src/gui/settings.rs`](src/gui/settings.rs)
 
 **Manual test:** set the encoder explicitly (not Auto), record a short clip, and confirm logs do not show unexpected CPU fallback for GPU-capable setups.
 
-**Gallery decode** uses generic D3D11VA in [`src/gui/gallery/decode_pipeline.rs`](src/gui/gallery/decode_pipeline.rs)—not per-vendor NVENC/QSV decode; encoding bugs usually belong under `encode/ffmpeg/`.
+**Gallery decode** uses generic D3D11VA in [`src/gui/gallery/decode_pipeline/mod.rs`](src/gui/gallery/decode_pipeline/mod.rs)—not per-vendor NVENC/QSV decode; encoding bugs usually belong under `encode/ffmpeg/`.
+
+### Memory Management
+
+The codebase uses `bytes::Bytes` for zero-copy packet handling. When cloning an `EncodedPacket`, only the reference count is bumped (O(1)), not the underlying video data.
+
+**Key patterns:**
+- `EncodedPacket` stores video/audio data in `Bytes` for cheap cloning
+- `ReplayBuffer` stores packets without copying
+- Snapshots clone packets via `Arc` reference counting
+- Use `Bytes::copy_from_slice()` only when you need an independent copy
+
+### Error Recovery
+
+The pipeline monitors health via `enforce_pipeline_health()`:
+- Capture errors (DXGI access lost) trigger reacquisition
+- Encoder errors propagate to the main loop
+- Fatal errors invoke `CoreHost::on_pipeline_fatal()` if registered
+
+When adding new components, ensure errors are propagated correctly through the health check system.
 
 ### Threading Model
 
 ```
-Main Thread (async runtime)
+Main Thread (Tokio async runtime)
 ├── Event Loop (tokio::select!)
 │   ├── Platform events (hotkeys, tray)
-│   └── Health monitoring
+│   ├── Health monitoring via enforce_pipeline_health()
+│   └── Config I/O
 │
-├── Platform Thread
+├── Platform Thread (dedicated)
 │   ├── Windows message loop
 │   ├── Hotkey handling
 │   └── Tray icon management
 │
-├── Capture Thread
+├── Capture Thread (spawned by pipeline)
 │   ├── DXGI frame acquisition
 │   └── Audio capture
 │
-├── Encode Thread
+├── Encode Thread (spawned by pipeline)
 │   └── Video/audio encoding
 │
-└── Buffer (lock-free)
-    └── SPMC: Single producer (encode), Multiple consumers (save)
+└── Buffer (lock-free SPMC)
+    └── Single producer (encode), Multiple consumers (save)
 ```
+
+**Thread coordination:**
+- Pipeline threads (capture, encode) are spawned by `RecordingPipeline` in `crates/liteclip-core/src/app/pipeline/manager.rs`
+- The main thread uses `tokio::task::spawn_blocking` for blocking operations on `AppState`
+- The buffer is SPMC: single encoder producer, multiple clip-save consumers
 
 ### Error Handling
 
@@ -377,6 +441,33 @@ Main Thread (async runtime)
 - Use `thiserror` for custom error types
 - Propagate errors to `AppState::enforce_pipeline_health()` for recovery
 - Log errors with `tracing`
+
+## Debugging
+
+### Enable Verbose Logging
+
+```powershell
+# PowerShell
+$env:RUST_LOG = "debug,liteclip_core=trace,wgpu=warn,naga=warn"
+cargo run
+```
+
+### Common Issues
+
+**DXGI_ACCESS_LOST errors:** Expected when the desktop switches (UAC, lock screen, secure desktop). The capture thread handles this by releasing and reacquiring. Don't panic on access lost.
+
+**Hardware encoder fallback:** Check logs for "unexpected CPU fallback" messages. Hardware encoders (NVENC/AMF/QSV) fall back to software when unavailable.
+
+**FFmpeg DLL not found:** Ensure FFmpeg 6.0+ shared DLLs are next to the executable or on PATH. Required: `avcodec-*.dll`, `avformat-*.dll`, `avutil-*.dll`, `swscale-*.dll`, `swresample-*.dll`, `avfilter-*.dll`.
+
+**Frame drops:** If the encode thread can't keep up, `BackpressureState` signals capture to drop frames. Check encoder performance with verbose logging.
+
+### Memory Profiling
+
+The codebase includes memory diagnostics. Use:
+- Windows Performance Recorder for heap analysis
+- Visual Studio Diagnostic Tools for memory snapshots
+- Check `crates/liteclip-core/src/memory_diag.rs` for utilities
 
 ## Questions?
 

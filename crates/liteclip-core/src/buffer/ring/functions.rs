@@ -545,15 +545,8 @@ mod tests {
                 let snapshot = buffer2.snapshot().unwrap();
                 // Verify all packets have valid data
                 for packet in snapshot.as_slice() {
-                    assert!(
-                        packet.pts >= 0,
-                        "Invalid PTS in snapshot: {}",
-                        packet.pts
-                    );
-                    assert!(
-                        !packet.data.is_empty(),
-                        "Empty packet data in snapshot"
-                    );
+                    assert!(packet.pts >= 0, "Invalid PTS in snapshot: {}", packet.pts);
+                    assert!(!packet.data.is_empty(), "Empty packet data in snapshot");
                 }
                 thread::sleep(Duration::from_millis(10));
             }

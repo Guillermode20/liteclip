@@ -387,11 +387,7 @@ impl ClipCompressApp {
         }
 
         let mut paths = Vec::new();
-        collect_video_paths(
-            &self.save_directory,
-            &self.cache_directory,
-            &mut paths,
-        );
+        collect_video_paths(&self.save_directory, &self.cache_directory, &mut paths);
         let base_dir = self.save_directory.clone();
 
         let mut entries: Vec<VideoEntry> = paths
@@ -1061,11 +1057,7 @@ struct EditorUiOutcome {
     refresh_browser: bool,
 }
 
-fn collect_video_paths(
-    dir: &Path,
-    cache_dir: &Path,
-    output: &mut Vec<PathBuf>,
-) {
+fn collect_video_paths(dir: &Path, cache_dir: &Path, output: &mut Vec<PathBuf>) {
     utils::collect_video_paths_impl(dir, cache_dir, output);
 }
 

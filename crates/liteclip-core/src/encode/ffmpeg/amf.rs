@@ -90,7 +90,7 @@ impl FfmpegEncoder {
         let mut encoder = ffmpeg::codec::context::Context::new_with_codec(codec)
             .encoder()
             .video()
-            .map_err(|e| EncodeError::ffmpeg(e))?;
+            .map_err(EncodeError::ffmpeg)?;
 
         encoder.set_width(out_w);
         encoder.set_height(out_h);

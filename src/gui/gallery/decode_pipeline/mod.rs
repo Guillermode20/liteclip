@@ -2,7 +2,6 @@ use anyhow::{anyhow, bail, Context, Result};
 use crossbeam::channel::{bounded, Receiver, Sender, TryRecvError, TrySendError};
 use ffmpeg_next as ffmpeg;
 use ffmpeg_next::packet::Mut;
-use image::RgbaImage;
 use rodio::{Sink, Source};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -16,7 +15,7 @@ use crate::output::VideoFileMetadata;
 
 mod frame_pool;
 
-use frame_pool::{FramePool, PooledBuffer, PooledRgbaImage, FRAME_POOL_SIZE};
+use frame_pool::{FramePool, PooledRgbaImage, FRAME_POOL_SIZE};
 
 const FRAME_CHANNEL_CAPACITY: usize = 24;
 const PLAYBACK_QUEUE_DEPTH: usize = 20;
@@ -396,7 +395,7 @@ impl PlaybackController {
                 .playing_since
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            clock.as_ref().map_or(false, |c| c.started_at.is_none())
+            clock.as_ref().is_some_and(|c| c.started_at.is_none())
         };
 
         if queue.is_empty() {
@@ -482,9 +481,7 @@ impl PlaybackController {
             for _ in 0..frames_to_remove - 1 {
                 queue.pop_front();
             }
-            let Some(frame) = queue.pop_front() else {
-                return None;
-            };
+            let frame = queue.pop_front()?;
             self.shared.playback_empty_polls.store(0, Ordering::SeqCst);
             tracing::trace!(
                 "take_playback_frame: wall={:.3}s, pts={:.3}s, {} remaining",
@@ -500,9 +497,7 @@ impl PlaybackController {
         if let Some(front) = queue.front() {
             let ahead_by = front.pts_secs - wall_time_secs;
             if ahead_by <= frame_duration {
-                let Some(frame) = queue.pop_front() else {
-                    return None;
-                };
+                let frame = queue.pop_front()?;
                 self.shared.playback_empty_polls.store(0, Ordering::SeqCst);
                 tracing::trace!(
                     "take_playback_frame: wall={:.3}s, taking early frame pts={:.3}s (ahead by {:.3}s)",
@@ -907,6 +902,7 @@ fn command_kind(cmd: &DecoderCommand) -> &'static str {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn decoder_worker_loop(
     video_path: PathBuf,
     output_width: u32,
@@ -1485,7 +1481,7 @@ impl DecoderSession {
             .video_path
             .parent()
             .map(|p| p.join(".liteclip_cache"))
-            .unwrap_or_else(|| std::env::temp_dir());
+            .unwrap_or_else(std::env::temp_dir);
         cache_dir.join(format!("kf_{:016x}.bin", hasher.finish()))
     }
 
@@ -1579,8 +1575,8 @@ impl DecoderSession {
             let nearest_keyframe = self
                 .keyframe_positions
                 .iter()
-                .filter(|&&k| k <= time_secs)
-                .last()
+                .rev()
+                .find(|&&k| k <= time_secs)
                 .copied();
 
             match nearest_keyframe {
@@ -1700,8 +1696,8 @@ impl DecoderSession {
         unsafe {
             let mut sw_frame = ffmpeg::util::frame::video::Video::new(
                 ffmpeg::format::Pixel::NV12,
-                self.decoded_frame.width() as u32,
-                self.decoded_frame.height() as u32,
+                self.decoded_frame.width(),
+                self.decoded_frame.height(),
             );
 
             let result = ffmpeg::ffi::av_hwframe_transfer_data(
@@ -1840,6 +1836,33 @@ fn decode_audio_track(video_path: &PathBuf) -> Result<AudioBuffer> {
     let mut samples = Vec::new();
     let mut decoded_frame = ffmpeg::util::frame::audio::Audio::empty();
 
+    fn append_packed_i16_samples(dst: &mut Vec<i16>, plane: &[u8], sample_count: usize) {
+        let max_pairs = plane.len() / 2;
+        let n = sample_count.min(max_pairs);
+        if n == 0 {
+            return;
+        }
+
+        let bytes = &plane[..n * 2];
+        let (prefix, aligned, suffix) = unsafe { bytes.align_to::<i16>() };
+        if prefix.is_empty() && suffix.is_empty() && aligned.len() == n {
+            #[cfg(target_endian = "little")]
+            {
+                dst.extend_from_slice(aligned);
+            }
+            #[cfg(target_endian = "big")]
+            {
+                dst.extend(aligned.iter().copied().map(i16::from_le));
+            }
+            return;
+        }
+
+        dst.reserve(n);
+        for chunk in bytes.chunks_exact(2) {
+            dst.push(i16::from_le_bytes([chunk[0], chunk[1]]));
+        }
+    }
+
     for (_, packet) in input.packets() {
         if packet.stream() == audio_stream_idx {
             let _ = decoder.send_packet(&packet);
@@ -1850,10 +1873,7 @@ fn decode_audio_track(video_path: &PathBuf) -> Result<AudioBuffer> {
                     let plane = resampled.data(0);
                     let sample_count = resampled.samples() as usize * resampled.channels() as usize;
 
-                    for i in 0..sample_count {
-                        let bytes = [plane[i * 2], plane[i * 2 + 1]];
-                        samples.push(i16::from_le_bytes(bytes));
-                    }
+                    append_packed_i16_samples(&mut samples, plane, sample_count);
                 }
             }
         }
@@ -1868,10 +1888,7 @@ fn decode_audio_track(video_path: &PathBuf) -> Result<AudioBuffer> {
             let plane = resampled.data(0);
             let sample_count = resampled.samples() as usize * resampled.channels() as usize;
 
-            for i in 0..sample_count {
-                let bytes = [plane[i * 2], plane[i * 2 + 1]];
-                samples.push(i16::from_le_bytes(bytes));
-            }
+            append_packed_i16_samples(&mut samples, plane, sample_count);
         }
     }
 

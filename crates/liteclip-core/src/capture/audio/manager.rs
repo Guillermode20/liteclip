@@ -303,7 +303,8 @@ impl WasapiAudioManager {
                         system_pending, mic_pending
                     );
                 }
-                if let Some((working_set_mb, private_mb)) = crate::output::saver::process_memory_mb()
+                if let Some((working_set_mb, private_mb)) =
+                    crate::output::saver::process_memory_mb()
                 {
                     debug!(
                         "Memory telemetry [audio]: forwarded_total={}, pending_system={}, pending_mic={}, process_working_set_mb={:.1}, process_private_mb={:.1}",

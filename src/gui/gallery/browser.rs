@@ -42,12 +42,11 @@ pub(super) fn render_browser_ui(app: &mut ClipCompressApp, ui: &mut egui::Ui) ->
             if ui
                 .toggle_value(&mut app.selection_mode, "Select...")
                 .clicked()
+                && !app.selection_mode
             {
-                if !app.selection_mode {
-                    app.selected_videos.clear();
-                    app.delete_slider_progress = 0.0;
-                    app.delete_hold_started_at = None;
-                }
+                app.selected_videos.clear();
+                app.delete_slider_progress = 0.0;
+                app.delete_hold_started_at = None;
             }
             let response = egui::ComboBox::from_id_salt("clip_filter_game")
                 .selected_text(&app.filter_game)

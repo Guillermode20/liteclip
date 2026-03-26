@@ -212,7 +212,6 @@ fn probe_encoder_available(encoder_name: &str) -> bool {
     }
 }
 
-
 /// Detect available hardware encoder (HEVC-only)
 ///
 /// Priority order: NVENC → AMF → QSV

@@ -22,8 +22,8 @@
 //!
 //! - **Windows** (DXGI capture, WASAPI audio, D3D11). Other targets may compile in limited
 //!   configurations but are **unsupported**; file issues only for `x86_64-pc-windows-msvc`.
-//! - **FFmpeg SDK (`ffmpeg` feature, default):** Link `ffmpeg-next` against FFmpeg **import libraries** 
-//!   at build time and ship the matching **shared DLLs** next to your executable (or on `PATH`). 
+//! - **FFmpeg SDK (`ffmpeg` feature, default):** Link `ffmpeg-next` against FFmpeg **import libraries**
+//!   at build time and ship the matching **shared DLLs** next to your executable (or on `PATH`).
 //!   Core recording, muxing, thumbnails, and probing use linked libav **without** requiring `ffmpeg.exe`.
 //!
 //! # Tokio and async clip save
@@ -108,8 +108,8 @@ pub mod error;
 pub mod ffmpeg_backend;
 pub mod host;
 pub mod hotkey_parse;
-pub mod memory_diag;
 pub mod media;
+pub mod memory_diag;
 pub mod output;
 pub mod paths;
 pub mod runtime;

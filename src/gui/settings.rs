@@ -418,7 +418,6 @@ impl SettingsApp {
             ui.add(egui::Slider::new(&mut cq_val, 1..=51).text("CQ Level"));
             self.config.video.quality_value = Some(cq_val);
         }
-
     }
 
     fn render_audio_settings(&mut self, ui: &mut egui::Ui) {
@@ -538,11 +537,15 @@ impl SettingsApp {
 
         let estimated_mb = self.config.estimated_replay_storage_mb();
         let recommended_mb = self.config.recommended_replay_memory_limit_mb();
-        let mut auto_memory_limit = self.config.advanced.memory_limit_mb == REPLAY_MEMORY_LIMIT_AUTO_MB;
+        let mut auto_memory_limit =
+            self.config.advanced.memory_limit_mb == REPLAY_MEMORY_LIMIT_AUTO_MB;
         if ui
             .checkbox(
                 &mut auto_memory_limit,
-                format!("Auto replay memory limit (recommended {} MB)", recommended_mb),
+                format!(
+                    "Auto replay memory limit (recommended {} MB)",
+                    recommended_mb
+                ),
             )
             .changed()
         {
