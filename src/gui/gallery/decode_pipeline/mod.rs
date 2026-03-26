@@ -1871,7 +1871,7 @@ fn decode_audio_track(video_path: &PathBuf) -> Result<AudioBuffer> {
                 let mut resampled = ffmpeg::util::frame::audio::Audio::empty();
                 if resampler.run(&decoded_frame, &mut resampled).is_ok() {
                     let plane = resampled.data(0);
-                    let sample_count = resampled.samples() as usize * resampled.channels() as usize;
+                    let sample_count = resampled.samples() * resampled.channels() as usize;
 
                     append_packed_i16_samples(&mut samples, plane, sample_count);
                 }
@@ -1886,7 +1886,7 @@ fn decode_audio_track(video_path: &PathBuf) -> Result<AudioBuffer> {
         let mut resampled = ffmpeg::util::frame::audio::Audio::empty();
         if resampler.run(&decoded_frame, &mut resampled).is_ok() {
             let plane = resampled.data(0);
-            let sample_count = resampled.samples() as usize * resampled.channels() as usize;
+            let sample_count = resampled.samples() * resampled.channels() as usize;
 
             append_packed_i16_samples(&mut samples, plane, sample_count);
         }
