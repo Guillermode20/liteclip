@@ -67,7 +67,10 @@ impl AudioForwardHandle {
             }
 
             // Thread didn't finish within timeout - warn and proceed
-            warn!("Audio forwarding thread did not stop within {} seconds, proceeding with shutdown", JOIN_TIMEOUT.as_secs());
+            warn!(
+                "Audio forwarding thread did not stop within {} seconds, proceeding with shutdown",
+                JOIN_TIMEOUT.as_secs()
+            );
             // We still need to join to avoid leaking the thread handle
             match thread.join() {
                 Ok(()) => {}
@@ -78,7 +81,8 @@ impl AudioForwardHandle {
 
     /// Check if the forwarding thread is still running.
     pub fn is_running(&self) -> bool {
-        self.running.load(Ordering::SeqCst) && self.thread.as_ref().is_some_and(|t| !t.is_finished())
+        self.running.load(Ordering::SeqCst)
+            && self.thread.as_ref().is_some_and(|t| !t.is_finished())
     }
 }
 
@@ -192,7 +196,10 @@ pub fn start_audio_capture(
                 }
                 Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
                     // Channel disconnected - audio manager stopped
-                    debug!("Audio packet channel disconnected, exiting forwarding thread ({})", context_for_thread);
+                    debug!(
+                        "Audio packet channel disconnected, exiting forwarding thread ({})",
+                        context_for_thread
+                    );
                     break;
                 }
             }
@@ -200,8 +207,7 @@ pub fn start_audio_capture(
 
         debug!(
             "Audio forwarding thread stopped after forwarding {} packets ({})",
-            forwarded_packets,
-            context_for_thread
+            forwarded_packets, context_for_thread
         );
     });
 

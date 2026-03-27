@@ -8,7 +8,7 @@ use anyhow::Result;
 use tracing::{error, info, warn};
 
 use super::{
-    audio::{AudioCaptureResult, AudioForwardHandle, start_audio_capture},
+    audio::{start_audio_capture, AudioCaptureResult, AudioForwardHandle},
     lifecycle::RecordingLifecycle,
     video::start_video_pipeline,
 };
