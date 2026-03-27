@@ -1,5 +1,8 @@
 commands:
-  # No build/test commands needed for review mission
-  # Workers use Read and Grep tools for analysis
+  install: cargo fetch
+  build: cargo build --workspace
+  test: cargo test --workspace
+  lint: cargo clippy --workspace -- -D warnings
+  check: cargo check --workspace
 
 services: {}
