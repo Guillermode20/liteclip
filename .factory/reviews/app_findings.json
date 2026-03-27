@@ -1,0 +1,186 @@
+{
+  "module": "app",
+  "review_date": "2026-03-27",
+  "files_reviewed": [
+    "crates/liteclip-core/src/app/mod.rs",
+    "crates/liteclip-core/src/app/state.rs",
+    "crates/liteclip-core/src/app/clip.rs",
+    "crates/liteclip-core/src/app/pipeline/mod.rs",
+    "crates/liteclip-core/src/app/pipeline/manager.rs",
+    "crates/liteclip-core/src/app/pipeline/lifecycle.rs",
+    "crates/liteclip-core/src/app/pipeline/video.rs",
+    "crates/liteclip-core/src/app/pipeline/audio.rs"
+  ],
+  "summary": {
+    "total_findings": 11,
+    "critical": 0,
+    "high": 1,
+    "medium": 4,
+    "low": 3,
+    "info": 3
+  },
+  "findings": [
+    {
+      "severity": "High",
+      "category": "Bug",
+      "file": "crates/liteclip-core/src/app/pipeline/audio.rs",
+      "line": 30,
+      "location": "start_audio_capture() spawning audio forwarding thread",
+      "issue": "Audio forwarding thread is spawned via std::thread::spawn but the JoinHandle is immediately dropped. The thread has no explicit tracking and relies solely on channel closure for termination. If the audio_manager drops before the forwarding thread finishes draining the channel, there's a potential race where packets could be lost.",
+      "impact": "Thread becomes orphaned with no way to verify clean shutdown. During pipeline stop, the audio_manager is dropped which closes the audio_packet_rx sender, but the forwarding thread may still be processing its last batch when WasapiAudioManager::drop is called. The thread will eventually terminate when recv() fails, but there's no guarantee of clean packet drain.",
+      "suggested_fix": "Store the JoinHandle in WasapiAudioManager or return it to RecordingPipeline for proper thread lifecycle tracking. Add explicit shutdown coordination such as a running flag or shutdown channel alongside the packet channel, then join the thread in WasapiAudioManager::drop to ensure all packets are forwarded before termination."
+    },
+    {
+      "severity": "Medium",
+      "category": "Architecture",
+      "file": "crates/liteclip-core/src/app/pipeline/manager.rs",
+      "line": 112,
+      "location": "RecordingPipeline::rollback_startup()",
+      "issue": "rollback_startup() attempts to clean up partially-initialized resources but the order of operations may not be safe. audio_manager is dropped first (line 117), then capture (line 120), then encoder_handle (lines 125-130). However, encoder may still be receiving frames from capture when encoder_handle is dropped.",
+      "impact": "During rollback after a failed encoder spawn, capture is still running and producing frames while encoder thread is being torn down. This could cause frame_tx to fill up and block capture thread temporarily, or frames could be dropped if encoder thread exits early.",
+      "suggested_fix": "Order cleanup more carefully: first drop capture to stop frame production, then drop frame_tx to signal encoder termination, then join encoder thread. This matches the order used in stop() (lines 198-215) which correctly stops capture before encoder."
+    },
+    {
+      "severity": "Medium",
+      "category": "Bug",
+      "file": "crates/liteclip-core/src/app/pipeline/manager.rs",
+      "line": 270,
+      "location": "enforce_health() capture thread finished check",
+      "issue": "When checking if capture thread exited unexpectedly, the code only checks capture.is_capture_thread_finished() but doesn't capture or report the actual exit result (panic payload or error). The fatal_reason message is generic: 'Capture thread exited unexpectedly'.",
+      "impact": "Loss of diagnostic information about why the capture thread failed. Makes debugging difficult when investigating pipeline failures.",
+      "suggestedFix": "If CaptureBackend provides a way to retrieve the thread exit result (e.g., panic message or error), capture and include it in the fatal_reason string. This would help users understand what actually caused the failure."
+    },
+    {
+      "severity": "Medium",
+      "category": "Bug",
+      "file": "crates/liteclip-core/src/app/clip.rs",
+      "line": 60,
+      "location": "ClipManager::save_clip() resolution fallback",
+      "issue": "Uses snapshot_first_packet_resolution().unwrap_or() with a match on config.video.resolution enum to determine fallback dimensions. However, the fallback values may not match the actual encoded video dimensions if the encoder negotiated different settings.",
+      "impact": "If the first packet resolution extraction fails (e.g., corrupt packet header), the muxer uses guessed resolution based on config enum. This could mismatch actual video dimensions, resulting in incorrect aspect ratio in output file.",
+      "suggestedFix": "Store negotiated encoder dimensions in ReplayBuffer metadata (or pass effective encoder resolution through save context) so muxer always uses correct dimensions rather than guessing from config."
+    },
+    {
+      "severity": "Medium",
+      "category": "Architecture",
+      "file": "crates/liteclip-core/src/app/state.rs",
+      "line": 190,
+      "location": "AppState::apply_config() rollback handling",
+      "issue": "If rollback fails after new config is rejected (lines 200-205), the code logs 'CRITICAL: Rollback also failed' but still returns Err with the original error. The pipeline may be in an inconsistent state (stopped, unable to restart with old config).",
+      "impact": "User sees original error message but pipeline is potentially broken. Application could be stuck in a state where recording cannot be started again without manual intervention.",
+      "suggestedFix": "Consider returning a special error type indicating both config rejection and rollback failure. Alternatively, attempt multiple rollback strategies or at minimum set a flag indicating the app is in a degraded state requiring user action."
+    },
+    {
+      "severity": "Low",
+      "category": "Quality",
+      "file": "crates/liteclip-core/src/app/pipeline/manager.rs",
+      "line": 84,
+      "location": "RecordingPipeline::set_level_monitor()",
+      "issue": "level_monitor is stored as Option<AudioLevelMonitor> but cloned on start (line 152) regardless of whether it was set. If set_level_monitor was never called, self.level_monitor.clone() returns None.",
+      "impact": "Audio forwarding thread will receive None for level_monitor, meaning audio levels won't be monitored. This is correct behavior but the design could be clearer.",
+      "suggestedFix": "Document that level_monitor must be set via set_level_monitor() before start() is called for audio level tracking to work. Or provide a builder pattern that makes this relationship explicit."
+    },
+    {
+      "severity": "Low",
+      "category": "Performance",
+      "file": "crates/liteclip-core/src/app/state.rs",
+      "line": 143,
+      "location": "AppState::save_context()",
+      "issue": "Returns (config.clone(), buffer.clone()) where buffer clone involves Arc bump for the inner ring buffer. Config clone is a full struct copy with multiple nested configs.",
+      "impact": "Minor overhead for each save clip call. Config clone is infrequent (only on save), but could be optimized.",
+      "suggestedFix": "Consider passing &Config reference instead of cloning if the async save_clip task can reference the original. However, current design is safe for async since clones are owned by the spawned task."
+    },
+    {
+      "severity": "Low",
+      "category": "Quality",
+      "file": "crates/liteclip-core/src/app/clip.rs",
+      "line": 102,
+      "location": "spawn_clip_saver call",
+      "issue": "spawn_clip_saver returns a JoinHandle that is awaited immediately with handle.await?. This effectively blocks the async context on the clip save operation.",
+      "impact": "While this is the intended behavior (save_clip is async and awaits completion), the design blocks the caller on potentially long muxing operation. For UI responsiveness, callers should spawn save_clip in a background task.",
+      "suggestedFix": "Document clearly that save_clip is blocking in async context and recommend callers use tokio::spawn(save_clip(...)) for non-blocking save. Current design is correct for 'fire and wait' semantics."
+    },
+    {
+      "severity": "Info",
+      "category": "Architecture",
+      "file": "crates/liteclip-core/src/app/pipeline/lifecycle.rs",
+      "line": 1,
+      "location": "RecordingLifecycle enum",
+      "issue": "Clean lifecycle state machine with five states: Idle, Starting, Running, Stopping, Faulted. The Faulted state allows distinguishing between intentional stop and failure-driven stop.",
+      "impact": "Good design - enables proper recovery handling and state-aware behavior.",
+      "suggestedFix": "None - this is a correct state machine pattern."
+    },
+    {
+      "severity": "Info",
+      "category": "Architecture",
+      "file": "crates/liteclip-core/src/app/pipeline/manager.rs",
+      "line": 294,
+      "location": "impl Drop for RecordingPipeline",
+      "issue": "Drop implementation properly stops pipeline by dropping audio_manager, capture, and joining encoder thread. Matches stop() logic for consistency.",
+      "impact": "Ensures clean cleanup even if stop() wasn't called explicitly. Thread resources are properly joined.",
+      "suggestedFix": "None - correct RAII pattern."
+    },
+    {
+      "severity": "Info",
+      "category": "Architecture",
+      "file": "crates/liteclip-core/src/app/state.rs",
+      "line": 103,
+      "location": "enforce_pipeline_health() CoreHost callback",
+      "issue": "Fatal errors invoke CoreHost::on_pipeline_fatal if a host is installed, providing a clean callback pattern for embedder integration.",
+      "impact": "Good integration design - embedders can react to pipeline failures without needing to poll separately.",
+      "suggestedFix": "None - this is well-designed."
+    }
+  ],
+  "positive_patterns": [
+    {
+      "description": "RecordingLifecycle state machine prevents invalid state transitions (e.g., starting when already running)",
+      "files": ["pipeline/manager.rs:83-87", "pipeline/manager.rs:187-189"]
+    },
+    {
+      "description": "Rollback on failed start attempts cleanup before returning error",
+      "files": ["pipeline/manager.rs:112-130"]
+    },
+    {
+      "description": "Config apply with rollback on failure preserves old settings",
+      "files": ["state.rs:183-216"]
+    },
+    {
+      "description": "Encoder thread join in Drop ensures clean shutdown even if stop() not called",
+      "files": ["pipeline/manager.rs:294-310"]
+    },
+    {
+      "description": "Dependency injection via CaptureFactory and EncoderFactory traits enables testing and alternative backends",
+      "files": ["pipeline/manager.rs:30-45"]
+    },
+    {
+      "description": "Audio level monitor is optional and doesn't block pipeline if unavailable",
+      "files": ["pipeline/audio.rs:23-24", "state.rs:61-64"]
+    },
+    {
+      "description": "Buffer restart after clip save ensures fresh buffer for subsequent clips",
+      "files": ["clip.rs:114-117"]
+    }
+  ],
+  "areas_of_concern": [
+    {
+      "description": "Audio forwarding thread lifecycle",
+      "status": "Needs attention - no JoinHandle tracking",
+      "files": ["pipeline/audio.rs"]
+    },
+    {
+      "description": "Pipeline rollback order",
+      "status": "Needs attention - may not stop capture before encoder during rollback",
+      "files": ["pipeline/manager.rs"]
+    },
+    {
+      "description": "Config rollback consistency",
+      "status": "Acceptable - logs critical failure but may leave app in degraded state",
+      "files": ["state.rs"]
+    },
+    {
+      "description": "enforce_health diagnostic info",
+      "status": "Needs attention - loses thread exit details",
+      "files": ["pipeline/manager.rs"]
+    }
+  ]
+}
