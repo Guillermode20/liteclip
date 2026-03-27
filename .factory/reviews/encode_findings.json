@@ -1,0 +1,242 @@
+{
+  "module": "encode",
+  "path": "crates/liteclip-core/src/encode/",
+  "files_reviewed": [
+    "encode/mod.rs",
+    "encode/error.rs",
+    "encode/sw_encoder.rs",
+    "encode/cli_pipe.rs",
+    "encode/encoder_mod/mod.rs",
+    "encode/encoder_mod/types.rs",
+    "encode/encoder_mod/functions.rs",
+    "encode/encoder_mod/encoderconfig_traits.rs",
+    "encode/encoder_mod/encodedpacket_traits.rs",
+    "encode/ffmpeg/mod.rs",
+    "encode/ffmpeg/context.rs",
+    "encode/ffmpeg/nvenc.rs",
+    "encode/ffmpeg/amf.rs",
+    "encode/ffmpeg/qsv.rs",
+    "encode/ffmpeg/software.rs",
+    "encode/ffmpeg/options.rs"
+  ],
+  "findings": [
+    {
+      "id": "ENC-001",
+      "severity": "High",
+      "category": "Bug",
+      "file": "crates/liteclip-core/src/encode/ffmpeg/mod.rs",
+      "location": "Line 272 vs Line 318",
+      "description": "Inconsistent keyframe counting between GPU and CPU paths. The 'at_keyframe' variable uses 'encoder_frame_count' (line 272), but when sending frames directly without a scaler in the CPU path, it incorrectly uses 'self.frame_count' (line 318). This causes keyframes to be inserted at wrong times in the non-scaler CPU path.",
+      "impact": "Keyframes may not align with configured GOP interval, causing potential playback issues and incorrect seeking in recorded clips.",
+      "suggestedFix": "Change line 318 to use 'encoder_frame_count' instead of 'frame_count' for consistency: 'if gop > 0 && self.encoder_frame_count % gop == 0'"
+    },
+    {
+      "id": "ENC-002",
+      "severity": "High",
+      "category": "Bug",
+      "file": "crates/liteclip-core/src/encode/ffmpeg/nvenc.rs",
+      "location": "Line 140",
+      "description": "Hardware encoder keyframe decision uses 'self.frame_count' instead of 'self.encoder_frame_count'. The same issue exists in amf.rs:158 and qsv.rs:203. This contradicts the documented intent that encoder_frame_count tracks 'frames actually sent to the encoder'.",
+      "impact": "Keyframe timing in hardware-encoded streams may drift from configured GOP settings, especially after any dropped frames or GPU duplicate optimization.",
+      "suggestedFix": "Replace 'self.frame_count % gop' with 'self.encoder_frame_count % gop' in all three hardware encoder files (nvenc.rs, amf.rs, qsv.rs) to match the CPU path behavior."
+    },
+    {
+      "id": "ENC-003",
+      "severity": "High",
+      "category": "Architecture",
+      "file": "crates/liteclip-core/src/encode/encoder_mod/functions.rs",
+      "location": "Lines 111-112, 241-242",
+      "description": "No software encoder fallback when hardware encoder is unavailable. The system returns 'NoHardwareForAuto' error when Auto is selected and no hardware encoder is detected. There's no fallback to CPU-based encoding (libx264/libx265), making the recorder unusable on systems without NVENC/AMF/QSV support.",
+      "impact": "Users without supported hardware encoders cannot use the application at all, even if they would accept lower performance from software encoding.",
+      "suggestedFix": "Implement a software encoder fallback option. Either add a software encoder type to ResolvedEncoderType, or provide a clear user message explaining hardware requirements."
+    },
+    {
+      "id": "ENC-004",
+      "severity": "Medium",
+      "category": "Security",
+      "file": "crates/liteclip-core/src/encode/ffmpeg/context.rs",
+      "location": "Lines 174-189",
+      "description": "After calling av_hwframe_get_buffer(), the code directly sets (*hw_frame).data[0] = gpu_frame.texture.as_raw() without validating that the buffer was allocated. While av_hwframe_get_buffer returns an error code that is checked, the data pointers should also be validated.",
+      "impact": "In edge cases where FFmpeg returns success but doesn't allocate the frame properly, this could lead to undefined behavior.",
+      "suggestedFix": "Add validation after get_buffer: if (*hw_frame).data[0].is_null() { return Err(...) }"
+    },
+    {
+      "id": "ENC-005",
+      "severity": "Medium",
+      "category": "Bug",
+      "file": "crates/liteclip-core/src/encode/ffmpeg/context.rs",
+      "location": "Lines 193-195",
+      "description": "Raw pointer dereference in cross-device path: 'let texture_ptr = (*hw_frame).data[0] as *mut ID3D11Texture2D' then 'let dst_texture = &*texture_ptr' without validating the pointer is non-null and points to valid memory.",
+      "impact": "Potential undefined behavior if hw_frame data pointers are not properly initialized.",
+      "suggestedFix": "Add null check before dereferencing: if (*hw_frame).data[0].is_null() { return Err(...) }"
+    },
+    {
+      "id": "ENC-006",
+      "severity": "Medium",
+      "category": "Bug",
+      "file": "crates/liteclip-core/src/encode/ffmpeg/qsv.rs",
+      "location": "Lines 112-120",
+      "description": "In QSV encoder initialization, after creating refs to qsv_device_ctx_ref and qsv_frames_ctx_ref for the encoder, the code immediately unrefs them. If encoder.open_with() fails later, the refs that were already set on the encoder context are not cleaned up.",
+      "impact": "Potential memory leak if encoder initialization fails after setting hw_device_ctx/hw_frames_ctx.",
+      "suggestedFix": "Move the av_buffer_unref calls to after encoder.open_with() succeeds, or ensure proper cleanup on failure path."
+    },
+    {
+      "id": "ENC-007",
+      "severity": "Medium",
+      "category": "Bug",
+      "file": "crates/liteclip-core/src/encode/cli_pipe.rs",
+      "location": "Lines 111-117",
+      "description": "When use_native_resolution is true, config.resolution may be (0, 0), causing init to fail with 'invalid resolution for encoder'. The code should use the actual captured frame resolution rather than the config resolution in native mode.",
+      "impact": "Encoder fails to initialize when use_native_resolution is set and resolution field contains (0, 0).",
+      "suggestedFix": "Pass the actual frame dimensions to init_encoder in native resolution mode, or validate resolution earlier in the config pipeline."
+    },
+    {
+      "id": "ENC-008",
+      "severity": "Medium",
+      "category": "Bug",
+      "file": "crates/liteclip-core/src/encode/ffmpeg/qsv.rs",
+      "location": "Lines 191-198",
+      "description": "av_hwframe_map() failure only returns a generic error message 'Failed to map D3D11 surface to QSV'. The actual FFmpeg error code is included but there's no structured error handling for different failure modes.",
+      "impact": "Debugging QSV issues is difficult as the error message doesn't indicate whether it's a format mismatch, memory issue, or driver problem.",
+      "suggestedFix": "Consider adding more context to the error message or logging the FFmpeg error code for better diagnostics."
+    },
+    {
+      "id": "ENC-009",
+      "severity": "Medium",
+      "category": "Architecture",
+      "file": "crates/liteclip-core/src/encode/ffmpeg/mod.rs",
+      "location": "Line 110",
+      "description": "Packet buffer channel size is 1024. For video packets that can be large (NV12 frames ~14MB each for 1080p), this represents significant potential memory buffering (~14GB worst case), though it is bounded.",
+      "impact": "Large memory usage if encoder produces faster than consumer can process. However, bounded channel prevents unbounded growth.",
+      "suggestedFix": "Consider reducing buffer size or making it configurable. 1024 packets at 60fps is ~17 seconds of buffer which seems excessive."
+    },
+    {
+      "id": "ENC-010",
+      "severity": "Medium",
+      "category": "Architecture",
+      "file": "crates/liteclip-core/src/encode/ffmpeg/mod.rs",
+      "location": "Lines 246-251",
+      "description": "When GPU frame format doesn't match expected format for the encoder, the code logs a warning but continues with CPU fallback. This could mask configuration issues.",
+      "impact": "Users may experience unexpected CPU encoding without clear indication of why GPU encoding failed.",
+      "suggestedFix": "Consider promoting to an error with user-visible notification, or add a metric/counter for fallback events."
+    },
+    {
+      "id": "ENC-011",
+      "severity": "Low",
+      "category": "Security",
+      "file": "crates/liteclip-core/src/encode/ffmpeg/mod.rs",
+      "location": "Line 83",
+      "description": "unsafe impl Send for FfmpegEncoder is required for threading but lacks documented safety invariants.",
+      "impact": "Future modifications could violate the safety assumptions without clear documentation.",
+      "suggestedFix": "Add SAFETY comment documenting why FfmpegEncoder is safe to send across threads (no interior mutability, proper synchronization)."
+    },
+    {
+      "id": "ENC-012",
+      "severity": "Low",
+      "category": "Security",
+      "file": "crates/liteclip-core/src/encode/ffmpeg/context.rs",
+      "location": "Line 39",
+      "description": "unsafe impl Send for D3d11HardwareContext lacks documented safety invariants.",
+      "impact": "Similar to FfmpegEncoder, safety assumptions should be documented.",
+      "suggestedFix": "Add SAFETY comment explaining why D3d11HardwareContext is Send-safe."
+    },
+    {
+      "id": "ENC-013",
+      "severity": "Low",
+      "category": "Quality",
+      "file": "crates/liteclip-core/src/encode/ffmpeg/mod.rs",
+      "location": "Lines 138-153",
+      "description": "emit_duplicate_video_packets() is marked #[allow(dead_code)] but kept in the codebase. The GPU duplicate optimization it was part of is 'intentionally disabled' per comments.",
+      "impact": "Dead code increases maintenance burden and confusion.",
+      "suggestedFix": "Either remove the dead code entirely or document if it's planned to be re-enabled."
+    },
+    {
+      "id": "ENC-014",
+      "severity": "Low",
+      "category": "Quality",
+      "file": "crates/liteclip-core/src/encode/ffmpeg/qsv.rs",
+      "location": "Line 48",
+      "description": "Uses .expect() on CString::new(\"qsv\") with message 'static string'. While this is safe, it's the only .expect() in the encode module (no .unwrap() found).",
+      "impact": "Minor - this is actually safe since 'qsv' contains no null bytes.",
+      "suggestedFix": "Consider using expect with a more descriptive message or using a const CString."
+    },
+    {
+      "id": "ENC-015",
+      "severity": "Info",
+      "category": "Quality",
+      "file": "crates/liteclip-core/src/encode/",
+      "location": "Multiple files",
+      "description": "Good error handling patterns throughout the module. Consistent use of .map_err() and .ok_or_else() for proper error propagation. EncodeError enum provides useful error variants.",
+      "impact": "Positive - errors are properly propagated and handled.",
+      "suggestedFix": "No action needed - this is good practice."
+    },
+    {
+      "id": "ENC-016",
+      "severity": "Info",
+      "category": "Quality",
+      "file": "crates/liteclip-core/src/encode/ffmpeg/context.rs",
+      "location": "Lines 41-57",
+      "description": "Proper Drop implementation for D3d11HardwareContext that correctly frees FFmpeg resources (av_frame_free, av_buffer_unref) with null checks before freeing.",
+      "impact": "Positive - prevents resource leaks.",
+      "suggestedFix": "No action needed - this is good practice."
+    },
+    {
+      "id": "ENC-017",
+      "severity": "Info",
+      "category": "Quality",
+      "file": "crates/liteclip-core/src/encode/encoder_mod/functions.rs",
+      "location": "Lines 259-274",
+      "description": "AMF-specific stability optimizations: automatically raising keyframe interval to 2s minimum and adjusting quality preset for 60fps recordings. Proactive measures to prevent AMF encoder stability issues.",
+      "impact": "Positive - helps ensure stable recording on AMD hardware.",
+      "suggestedFix": "No action needed - good defensive coding."
+    },
+    {
+      "id": "ENC-018",
+      "severity": "Info",
+      "category": "Quality",
+      "file": "crates/liteclip-core/src/encode/sw_encoder.rs",
+      "location": "Lines 408-421",
+      "description": "SoftwareEncoder has proper Drop implementation that cleanly shuts down worker threads by replacing the sender, then joining all workers to surface any panics.",
+      "impact": "Positive - proper cleanup and panic propagation.",
+      "suggestedFix": "No action needed - this is good practice."
+    },
+    {
+      "id": "ENC-019",
+      "severity": "Info",
+      "category": "Performance",
+      "file": "crates/liteclip-core/src/encode/ffmpeg/software.rs",
+      "location": "Lines 98-101, 163",
+      "description": "Packet draining uses Vec::with_capacity(8) and the packet channel, avoiding per-packet allocations in the hot path.",
+      "impact": "Positive - efficient memory usage in the encode loop.",
+      "suggestedFix": "No action needed - this is good practice."
+    }
+  ],
+  "summary": {
+    "total_findings": 19,
+    "by_severity": {
+      "Critical": 0,
+      "High": 3,
+      "Medium": 7,
+      "Low": 4,
+      "Info": 5
+    },
+    "by_category": {
+      "Bug": 7,
+      "Architecture": 3,
+      "Security": 4,
+      "Performance": 1,
+      "Quality": 4
+    }
+  },
+  "key_concerns": [
+    "Keyframe counting inconsistency between frame_count and encoder_frame_count across GPU and CPU encoding paths (ENC-001, ENC-002)",
+    "No software encoder fallback when hardware encoders are unavailable, making the app unusable on systems without NVENC/AMF/QSV (ENC-003)",
+    "Missing NULL pointer validation in FFmpeg hardware frame handling code (ENC-004, ENC-005)"
+  ],
+  "positive_observations": [
+    "Good error handling with proper use of map_err/ok_or_else throughout",
+    "Proper Drop implementations for resource cleanup",
+    "AMF-specific stability optimizations show attention to hardware-specific issues",
+    "No use of .unwrap() in the codebase, only one justified .expect() for static string"
+  ]
+}
