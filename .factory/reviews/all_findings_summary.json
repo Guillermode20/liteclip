@@ -1,0 +1,147 @@
+{
+  "synthesisDate": "2026-03-27",
+  "totalFindings": 173,
+  "deduplicatedFindings": 162,
+  "bySeverity": {
+    "Critical": 0,
+    "High": 17,
+    "Medium": 57,
+    "Low": 45,
+    "Info": 43
+  },
+  "byCategory": {
+    "Bug": 28,
+    "Architecture": 21,
+    "Security": 31,
+    "Performance": 22,
+    "Concurrency": 12,
+    "Quality": 32,
+    "ErrorHandling": 11,
+    "Documentation": 3,
+    "Testing": 1,
+    "Memory": 3
+  },
+  "byModule": {
+    "capture": 12,
+    "encode": 19,
+    "buffer": 15,
+    "output": 20,
+    "gui": 18,
+    "app": 11,
+    "platform": 14,
+    "config": 20,
+    "crossCutSecurity": 31,
+    "crossCutPerformance": 22,
+    "crossCutThreading": 22,
+    "crossCutErrorHandling": 35
+  },
+  "crossCuttingPatterns": [
+    {
+      "pattern": "FFmpeg unsafe blocks lacking SAFETY documentation",
+      "severity": "Systemic",
+      "affectedModules": ["encode", "output", "gui/decode_pipeline"],
+      "count": 15
+    },
+    {
+      "pattern": "Thread join without timeout in Drop implementations",
+      "severity": "Systemic",
+      "affectedModules": ["gui/decode_pipeline", "platform", "app/pipeline"],
+      "count": 6
+    },
+    {
+      "pattern": "Error swallowing via let _ = for critical channel sends",
+      "severity": "Systemic",
+      "affectedModules": ["capture", "encode", "output", "gui"],
+      "count": 12
+    },
+    {
+      "pattern": "Mutex contention in hot paths",
+      "severity": "Systemic",
+      "affectedModules": ["gui/decode_pipeline", "buffer"],
+      "count": 4
+    },
+    {
+      "pattern": "Bytes.clone() zero-copy pattern correctly used",
+      "severity": "Positive",
+      "affectedModules": ["buffer", "capture", "encode", "output"],
+      "count": 8
+    },
+    {
+      "pattern": "Hardware encoder fallback well-implemented",
+      "severity": "Positive",
+      "affectedModules": ["output", "encode"],
+      "count": 2
+    },
+    {
+      "pattern": "DXGI access lost recovery with exponential backoff",
+      "severity": "Positive",
+      "affectedModules": ["capture"],
+      "count": 1
+    },
+    {
+      "pattern": "Pipeline fail-closed health enforcement",
+      "severity": "Positive",
+      "affectedModules": ["app/pipeline"],
+      "count": 1
+    }
+  ],
+  "overlapDeduplication": [
+    {
+      "issue": "Keyframe counting inconsistency in encoder",
+      "originalSources": ["encode_findings.json:ENC-001,ENC-002", "performance_findings.json"],
+      "action": "Kept encode version, merged impact details"
+    },
+    {
+      "issue": "Registry handle leak in autostart",
+      "originalSources": ["platform_findings.json", "security_findings.json"],
+      "action": "Kept platform version with security context"
+    },
+    {
+      "issue": "Scaler unwrap/expect in SDK export",
+      "originalSources": ["output_findings.json", "error_handling_findings.json"],
+      "action": "Kept output version, added error handling context"
+    },
+    {
+      "issue": "Decode pipeline spin loop on full channel",
+      "originalSources": ["gui_findings.json", "threading_findings.json", "performance_findings.json"],
+      "action": "Kept gui version, merged threading implications"
+    },
+    {
+      "issue": "Audio preload memory usage",
+      "originalSources": ["gui_findings.json", "performance_findings.json"],
+      "action": "Kept gui version with performance category"
+    },
+    {
+      "issue": "Config load silent fallback to defaults",
+      "originalSources": ["config_findings.json", "error_handling_findings.json"],
+      "action": "Kept config version"
+    },
+    {
+      "issue": "Save directory path validation missing",
+      "originalSources": ["config_findings.json", "security_findings.json"],
+      "action": "Kept config version with security impact"
+    },
+    {
+      "issue": "Audio forward loop busy-wait",
+      "originalSources": ["threading_findings.json", "error_handling_findings.json"],
+      "action": "Kept threading version"
+    }
+  ],
+  "userReportedIssues": {
+    "originalReport": "some excess cpu and memory usage, some related to the ui",
+    "addressedFindings": [
+      "gui/decode_pipeline: Audio preload memory (full track decoded into memory)",
+      "gui/decode_pipeline: Spin loop with 1ms sleep on full frame channel",
+      "gui/decode_pipeline: Multiple Mutex acquisitions per playback frame",
+      "gui/decode_pipeline: Frame pool allocates ~24-40MB per video editor",
+      "gui: Thread spawning per video (decoder, audio stream, audio preload)",
+      "gui: Export modal 60fps repaint requests"
+    ]
+  },
+  "validationContractAssertions": {
+    "VAL-REPORT-001": "REVIEW_REPORT.md exists with sections for Critical, High, Medium, Low findings",
+    "VAL-REPORT-002": "All findings have file paths and actionable recommendations",
+    "VAL-REPORT-003": "Severity definitions documented, findings appropriately categorized",
+    "VAL-REPORT-004": "Cross-cutting patterns section identifies systemic issues"
+  }
+}
