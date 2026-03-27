@@ -598,7 +598,9 @@ pub(crate) fn attempt_export(
 
         // Recreate decoders after each seek.
         let decoder_setup_started_at = Instant::now();
-        let v_stream = input_ctx.stream(video_stream_idx).unwrap();
+        let v_stream = input_ctx
+            .stream(video_stream_idx)
+            .with_context(|| format!("missing video stream {} after seek", video_stream_idx))?;
         let v_ctx = ffmpeg::codec::context::Context::from_parameters(v_stream.parameters())?;
         let mut video_decoder = v_ctx.decoder().video()?;
         let mut video_scaler = ffmpeg::software::scaling::Context::get(
@@ -615,7 +617,9 @@ pub(crate) fn attempt_export(
         let mut audio_decoder = None;
         let mut audio_resampler = None;
         if let Some(audio_idx) = audio_stream_idx {
-            let a_stream = input_ctx.stream(audio_idx).unwrap();
+            let a_stream = input_ctx
+                .stream(audio_idx)
+                .with_context(|| format!("missing audio stream {} after seek", audio_idx))?;
             let a_ctx = ffmpeg::codec::context::Context::from_parameters(a_stream.parameters())?;
             let decoder = a_ctx.decoder().audio()?;
 

@@ -80,6 +80,12 @@ pub struct FfmpegEncoder {
 
 const WARMUP_FRAMES: i64 = 60;
 
+// SAFETY: FfmpegEncoder is Send because:
+// 1. The encoder runs on a dedicated thread and all state is owned by that thread
+// 2. FFmpeg encoder contexts are thread-safe when used from a single thread
+// 3. The packet channels (Sender/Receiver) are Send-safe (crossbeam channels)
+// 4. The hardware context (D3d11HardwareContext) is only accessed from the encoder thread
+// 5. All shared state uses proper synchronization (atomics for running flag)
 unsafe impl Send for FfmpegEncoder {}
 
 impl FfmpegEncoder {
@@ -99,6 +105,14 @@ impl FfmpegEncoder {
         frame.set_color_transfer_characteristic(TransferCharacteristic::BT709);
     }
 
+    /// Apply BT.709 color metadata to a raw AVFrame pointer.
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure `frame` is a valid, non-null pointer to an AVFrame
+    /// that was allocated by FFmpeg (e.g., via `av_frame_alloc()` or returned
+    /// from an FFmpeg API like `av_hwframe_get_buffer`). The frame must remain
+    /// valid for the duration of this call.
     unsafe fn apply_bt709_raw_frame_metadata(frame: *mut ffmpeg::ffi::AVFrame) {
         (*frame).colorspace = Space::BT709.into();
         (*frame).color_range = Range::MPEG.into();

@@ -203,11 +203,16 @@ pub fn extract_preview_frame(
         let src_w = sw.width().max(1);
         let src_h = sw.height().max(1);
         let target_h = ((src_h as u64 * target_w as u64) / src_w as u64).max(1) as u32;
-        if scaler.is_none()
-            || scaler.as_ref().unwrap().input().format != sw.format()
-            || scaler.as_ref().unwrap().input().width != src_w
-            || scaler.as_ref().unwrap().input().height != src_h
-        {
+        // Check if we need to recreate the scaler (format or size changed)
+        let needs_recreate = match scaler.as_ref() {
+            None => true,
+            Some(s) => {
+                s.input().format != sw.format()
+                    || s.input().width != src_w
+                    || s.input().height != src_h
+            }
+        };
+        if needs_recreate {
             scaler = Some(
                 ffmpeg::software::scaling::Context::get(
                     sw.format(),
@@ -221,9 +226,10 @@ pub fn extract_preview_frame(
                 .context("failed to create scaler for preview")?,
             );
         }
+        // SAFETY: scaler is always initialized above before this line
         scaler
             .as_mut()
-            .expect("scaler")
+            .expect("scaler initialized in needs_recreate block above")
             .run(sw, &mut rgba_frame)
             .context("swscale preview")?;
         ffmpeg_frame_to_rgba(&rgba_frame)

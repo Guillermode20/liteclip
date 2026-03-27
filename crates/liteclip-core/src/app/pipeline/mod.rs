@@ -24,6 +24,8 @@
 //!
 //! - [`RecordingPipeline`] - Main pipeline manager
 //! - [`RecordingLifecycle`] - Lifecycle state enum
+//! - [`AudioForwardHandle`] - Handle for audio forwarding thread lifecycle
+//! - [`AudioCaptureResult`] - Result from starting audio capture
 //!
 //! # Example
 //!
@@ -45,5 +47,6 @@ pub mod lifecycle;
 pub mod manager;
 pub mod video;
 
+pub use audio::{AudioCaptureResult, AudioForwardHandle};
 pub use lifecycle::RecordingLifecycle;
 pub use manager::RecordingPipeline;

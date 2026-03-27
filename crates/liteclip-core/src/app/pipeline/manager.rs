@@ -8,7 +8,9 @@ use anyhow::Result;
 use tracing::{error, info, warn};
 
 use super::{
-    audio::start_audio_capture, lifecycle::RecordingLifecycle, video::start_video_pipeline,
+    audio::{AudioCaptureResult, AudioForwardHandle, start_audio_capture},
+    lifecycle::RecordingLifecycle,
+    video::start_video_pipeline,
 };
 
 /// Recording pipeline manager.
@@ -39,6 +41,8 @@ pub struct RecordingPipeline {
     capture: Option<Box<dyn CaptureBackend>>,
     /// Audio capture manager.
     audio_manager: Option<crate::capture::audio::WasapiAudioManager>,
+    /// Audio forwarding thread handle (for lifecycle management).
+    audio_forward_handle: Option<AudioForwardHandle>,
     /// Current lifecycle state.
     lifecycle: RecordingLifecycle,
     /// Audio level monitor for GUI visualization.
@@ -62,6 +66,7 @@ impl RecordingPipeline {
             encoder_handle: None,
             capture: None,
             audio_manager: None,
+            audio_forward_handle: None,
             lifecycle: RecordingLifecycle::Idle,
             level_monitor: None,
         }
@@ -113,6 +118,10 @@ impl RecordingPipeline {
 
     /// Rolls back startup by cleaning up partially-initialized resources.
     fn rollback_startup(&mut self) {
+        // Stop audio forward thread first
+        if let Some(mut forward_handle) = self.audio_forward_handle.take() {
+            forward_handle.stop();
+        }
         if let Some(audio_manager) = self.audio_manager.take() {
             drop(audio_manager);
         }
@@ -151,9 +160,13 @@ impl RecordingPipeline {
 
         let level_monitor = self.level_monitor.clone();
         match start_audio_capture(config, buffer, "capture mode", level_monitor) {
-            Ok(audio_manager) => {
-                if audio_manager.is_running() {
-                    self.audio_manager = Some(audio_manager);
+            Ok(AudioCaptureResult {
+                manager,
+                forward_handle,
+            }) => {
+                if manager.is_running() {
+                    self.audio_manager = Some(manager);
+                    self.audio_forward_handle = forward_handle;
                 }
             }
             Err(e) => {
@@ -194,6 +207,11 @@ impl RecordingPipeline {
         info!("Recording: stopping pipeline");
         self.lifecycle = RecordingLifecycle::Stopping;
         let mut first_error: Option<anyhow::Error> = None;
+
+        // Stop audio forward thread first (signals shutdown and joins)
+        if let Some(mut forward_handle) = self.audio_forward_handle.take() {
+            forward_handle.stop();
+        }
 
         if let Some(audio_manager) = self.audio_manager.take() {
             drop(audio_manager);
@@ -293,6 +311,10 @@ impl RecordingPipeline {
 impl Drop for RecordingPipeline {
     fn drop(&mut self) {
         if !matches!(self.lifecycle, RecordingLifecycle::Idle) {
+            // Stop audio forward thread first
+            if let Some(mut forward_handle) = self.audio_forward_handle.take() {
+                forward_handle.stop();
+            }
             drop(self.audio_manager.take());
             drop(self.capture.take());
             if let Some(handle) = self.encoder_handle.take() {

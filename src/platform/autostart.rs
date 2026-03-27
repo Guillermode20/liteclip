@@ -54,6 +54,10 @@ pub fn set_autostart(enabled: bool) -> Result<()> {
             let is_installed = exe_path_str.to_lowercase().contains("program files");
 
             if !is_installed {
+                // Close the registry key before early return to prevent handle leak
+                unsafe {
+                    let _ = RegCloseKey(hkey).ok();
+                };
                 info!(
                     "Skipping auto-start setup: not running from installed location (path: {:?})",
                     exe_path

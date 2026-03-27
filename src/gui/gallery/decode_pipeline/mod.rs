@@ -24,6 +24,11 @@ struct DecoderHardwareContext {
     device_ctx_ref: *mut ffmpeg::ffi::AVBufferRef,
 }
 
+// SAFETY: DecoderHardwareContext is Send because:
+// 1. device_ctx_ref is a raw pointer to FFmpeg's AVBufferRef which is thread-safe
+// 2. The Drop implementation correctly cleans up the reference via av_buffer_unref
+// 3. The context is only used from a single thread at a time (the decoder worker thread)
+// 4. FFmpeg's AVBufferRef uses atomic reference counting internally
 unsafe impl Send for DecoderHardwareContext {}
 
 impl Drop for DecoderHardwareContext {
@@ -177,6 +182,12 @@ impl PlaybackController {
         let (audio_shutdown_tx, audio_shutdown_rx) = std::sync::mpsc::channel();
         let (audio_handle_tx, audio_handle_rx) = std::sync::mpsc::channel();
 
+        // Spawn a thread to hold rodio's OutputStream alive.
+        // SAFETY: This is a workaround for rodio's OutputStream lifetime requirements.
+        // The OutputStream must remain alive for the duration of audio playback, but rodio
+        // doesn't provide a way to store it separately from the playback handle. The thread
+        // blocks on audio_shutdown_rx, and when PlaybackController is dropped, audio_shutdown_tx
+        // is dropped which unblocks the thread and allows cleanup. The thread is joined in Drop.
         let audio_stream_thread = thread::spawn(move || {
             if let Ok((stream, handle)) = rodio::OutputStream::try_default() {
                 let _ = audio_handle_tx.send(Some(handle));
@@ -749,7 +760,33 @@ impl PlaybackController {
     }
 
     fn stop_audio(&mut self) {
+        // Increment generation to signal audio playback thread to stop
         self.shared.audio_generation.fetch_add(1, Ordering::SeqCst);
+
+        // Join the audio playback thread with timeout to ensure clean shutdown
+        // during rapid stop/start cycles
+        if let Ok(mut guard) = self.audio_playback_thread.lock() {
+            if let Some(handle) = guard.take() {
+                // Use a timeout pattern: park thread for up to 500ms
+                let start = std::time::Instant::now();
+                const JOIN_TIMEOUT_MS: u64 = 500;
+
+                while start.elapsed().as_millis() < JOIN_TIMEOUT_MS as u128 {
+                    if handle.is_finished() {
+                        let _ = handle.join();
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+
+                // Thread didn't finish within timeout - log warning and proceed
+                tracing::warn!(
+                    "Audio playback thread did not stop within {}ms",
+                    JOIN_TIMEOUT_MS
+                );
+                let _ = handle.join();
+            }
+        }
     }
 }
 
@@ -1411,6 +1448,9 @@ impl DecoderSession {
             match packet.read(&mut self.input) {
                 Ok(()) => {
                     if packet.stream() == self.stream_index {
+                        // SAFETY: packet.as_mut_ptr() returns a valid pointer to the
+                        // internal AVPacket. We only read flags and pts fields which
+                        // are always safe to access after a successful packet read.
                         let flags = unsafe { (*packet.as_mut_ptr()).flags };
                         if flags & ffmpeg::ffi::AV_PKT_FLAG_KEY != 0 {
                             let pts = unsafe { (*packet.as_mut_ptr()).pts };

@@ -36,6 +36,14 @@ pub(super) struct D3d11HardwareContext {
     pub is_shared_device: bool,
 }
 
+// SAFETY: D3d11HardwareContext is Send because:
+// 1. The raw pointers (device_ctx_ref, frames_ctx_ref, reusable_hw_frame) are FFmpeg
+//    resources that are only accessed from the encoder thread
+// 2. ID3D11Device, ID3D11DeviceContext, and ID3D11Fence are COM interfaces that are
+//    thread-safe when used correctly (single-threaded access in our case)
+// 3. The Drop implementation properly cleans up FFmpeg resources via av_buffer_unref
+// 4. cached_shared_textures contains COM references that are properly managed
+// 5. The context is created on and only used from the encoder thread
 unsafe impl Send for D3d11HardwareContext {}
 
 impl Drop for D3d11HardwareContext {
@@ -182,6 +190,13 @@ impl FfmpegEncoder {
             )));
         }
 
+        // Validate that FFmpeg properly allocated the hardware frame
+        if hw_frame.is_null() {
+            return Err(EncodeError::msg(
+                "av_hwframe_get_buffer returned null frame pointer",
+            ));
+        }
+
         // For shared device, use the source texture directly
         (*hw_frame).data[0] = gpu_frame.texture.as_raw() as *mut _;
         (*hw_frame).data[1] = std::ptr::null_mut();
@@ -190,6 +205,13 @@ impl FfmpegEncoder {
 
         if !hw_context.is_shared_device {
             // Cross-device logic (OpenSharedResource + Fence wait)
+            // SAFETY: hw_frame validated above, but data[0] could still be null if FFmpeg
+            // returned success but didn't properly allocate frame data
+            if (*hw_frame).data[0].is_null() {
+                return Err(EncodeError::msg(
+                    "av_hwframe_get_buffer succeeded but data[0] is null",
+                ));
+            }
             let texture_ptr = (*hw_frame).data[0] as *mut ID3D11Texture2D;
             let dst_texture = &*texture_ptr;
             let dest_subresource = (*hw_frame).data[1] as usize as u32;

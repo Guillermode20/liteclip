@@ -73,9 +73,21 @@ pub struct D3d11Frame {
     recycle: Option<D3d11TextureRecycle>,
 }
 
+// SAFETY: D3d11Frame is Send because:
+// 1. ID3D11Texture2D and ID3D11Device are COM interfaces that are thread-safe
+// 2. HANDLE is a simple copyable value (pointer-sized integer)
+// 3. GpuTextureFormat is a simple enum (Copy)
+// 4. The fence values are plain u64 values
+// 5. D3d11TextureRecycle contains Send types (Sender and Option)
+// The frame is passed between capture and encoder threads via Arc
 #[cfg(windows)]
 unsafe impl Send for D3d11Frame {}
 
+// SAFETY: D3d11Frame is Sync because:
+// 1. The frame is wrapped in Arc<D3d11Frame> when shared between threads
+// 2. All fields are either immutable after creation or use interior mutability
+//    via the COM interfaces which have their own thread safety guarantees
+// 3. The recycle mechanism uses channel communication which is thread-safe
 #[cfg(windows)]
 unsafe impl Sync for D3d11Frame {}
 

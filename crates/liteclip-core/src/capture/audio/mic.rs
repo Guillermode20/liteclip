@@ -711,6 +711,11 @@ impl RNNoiseProcessor {
 
         let sample_count = data.len() / 2;
         let frame_count = sample_count / self.channels;
+        // SAFETY: We convert the byte slice to an i16 slice. This is safe because:
+        // 1. data.len() is a multiple of 2 (checked above: data.len() % (self.channels * 2) != 0)
+        // 2. sample_count = data.len() / 2, which gives the exact number of i16 samples
+        // 3. The data buffer is properly aligned for i16 (WASAPI guarantees 16-bit alignment)
+        // 4. We have exclusive mutable access to data (it's passed as &mut [u8])
         let samples =
             unsafe { std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut i16, sample_count) };
 

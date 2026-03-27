@@ -348,6 +348,14 @@ fn write_borrowed_video_packet(
     dts: i64,
     duration: i64,
 ) -> Result<()> {
+    // SAFETY: We create a raw AVPacket on the stack and initialize it with av_init_packet.
+    // The packet.data pointer is cast from the immutable Bytes buffer to *mut u8 because
+    // FFmpeg's API requires mutable pointers. This is safe because:
+    // 1. av_interleaved_write_frame does NOT modify packet data - it only reads the data
+    //    and copies it to the output container.
+    // 2. The Bytes buffer remains valid for the duration of this call because we hold a
+    //    reference to the EncodedPacket.
+    // 3. We zero-initialize the struct and only set the fields we need.
     unsafe {
         let mut raw_packet: ffmpeg::ffi::AVPacket = std::mem::zeroed();
         ffmpeg::ffi::av_init_packet(&mut raw_packet);
@@ -938,6 +946,10 @@ fn write_audio_frame_direct(
     duration: i64,
     _stream_time_base: (i32, i32),
 ) -> Result<()> {
+    // SAFETY: Same pattern as write_borrowed_video_packet. We create a raw AVPacket
+    // on the stack and cast the immutable Bytes data pointer to *mut u8 for FFmpeg.
+    // av_interleaved_write_frame does NOT modify the packet data - it reads and copies
+    // to the output. The Bytes reference remains valid for the duration of this call.
     unsafe {
         let mut raw_packet: ffmpeg::ffi::AVPacket = std::mem::zeroed();
         ffmpeg::ffi::av_init_packet(&mut raw_packet);

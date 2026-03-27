@@ -290,7 +290,52 @@ impl Config {
         self.audio.mic_volume = self.audio.mic_volume.clamp(0, 100);
         // mic_noise_reduction is a simple on/off toggle, no per-parameter clamping required.
 
+        // Validate save_directory for security and correctness
+        self.validate_save_directory();
+
         crate::hotkey_parse::validate_hotkey_config_strings(self);
+    }
+
+    /// Validates the save_directory path for security issues.
+    ///
+    /// Checks for:
+    /// - Path traversal attempts (e.g., ".." components)
+    /// - Non-absolute paths
+    /// - Ensures the path can be converted to a valid PathBuf
+    fn validate_save_directory(&mut self) {
+        use std::path::Path;
+        use tracing::warn;
+
+        let save_dir = &self.general.save_directory;
+        let path = Path::new(save_dir);
+
+        // Check for empty path
+        if save_dir.is_empty() {
+            warn!("Config: save_directory is empty, using default");
+            self.general.save_directory = super::functions::default_save_directory();
+            return;
+        }
+
+        // Check for path traversal attempts
+        for component in path.components() {
+            if matches!(component, std::path::Component::ParentDir) {
+                warn!(
+                    "Config: save_directory contains '..' (path traversal), using default: {}",
+                    save_dir
+                );
+                self.general.save_directory = super::functions::default_save_directory();
+                return;
+            }
+        }
+
+        // Check for absolute path
+        if !path.is_absolute() {
+            warn!(
+                "Config: save_directory is not absolute, using default: {}",
+                save_dir
+            );
+            self.general.save_directory = super::functions::default_save_directory();
+        }
     }
 
     pub fn estimated_replay_storage_bytes(&self) -> usize {
