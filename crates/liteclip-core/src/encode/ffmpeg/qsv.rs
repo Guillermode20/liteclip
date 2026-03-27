@@ -200,7 +200,7 @@ impl FfmpegEncoder {
             }
 
             (*qsv_frame).pts = pts;
-            if gop > 0 && self.frame_count % gop == 0 {
+            if gop > 0 && self.encoder_frame_count % gop == 0 {
                 (*qsv_frame).pict_type = ffmpeg::picture::Type::I.into();
                 (*qsv_frame).key_frame = 1;
             } else {

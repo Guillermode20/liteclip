@@ -155,7 +155,7 @@ impl FfmpegEncoder {
             Self::prepare_hw_frame(hw_context, hw_frame, gpu_frame)?;
 
             (*hw_frame).pts = pts;
-            if gop > 0 && self.frame_count % gop == 0 {
+            if gop > 0 && self.encoder_frame_count % gop == 0 {
                 (*hw_frame).pict_type = ffmpeg::picture::Type::I.into();
                 (*hw_frame).key_frame = 1;
             } else {

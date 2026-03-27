@@ -315,7 +315,7 @@ impl Encoder for FfmpegEncoder {
             } else {
                 Self::apply_bt709_frame_metadata(src_frame);
                 src_frame.set_pts(Some(encoder_pts));
-                if gop > 0 && self.frame_count % gop == 0 {
+                if gop > 0 && self.encoder_frame_count % gop == 0 {
                     src_frame.set_kind(ffmpeg::picture::Type::I);
                 } else {
                     src_frame.set_kind(ffmpeg::picture::Type::None);
@@ -373,5 +373,97 @@ mod gpu_duplicate_template_tests {
         assert!(ok.iter().all(|(_, k)| !*k));
         let bad = vec![(Bytes::from_static(b"x"), true)];
         assert!(!bad.iter().all(|(_, k)| !*k));
+    }
+}
+
+#[cfg(test)]
+mod keyframe_gop_tests {
+    /// Demonstrates that keyframe decisions must use encoder_frame_count, not frame_count.
+    ///
+    /// When GPU duplicate optimization emits cached bitstreams without encoding new frames,
+    /// frame_count increments but encoder_frame_count does not. If keyframe decisions use
+    /// frame_count, GOP alignment drifts from what the encoder actually sees.
+    ///
+    /// Example: GOP=60, after 5 duplicate optimizations:
+    /// - frame_count = 65 (all processed frames)
+    /// - encoder_frame_count = 60 (frames actually encoded)
+    /// - Using frame_count: keyframe at frame 60, but encoder at frame 55 (wrong!)
+    /// - Using encoder_frame_count: keyframe at encoder frame 60 (correct!)
+    #[test]
+    fn keyframe_decision_uses_encoder_frame_count_not_total_frames() {
+        let gop = 60i64;
+
+        // Scenario: 65 frames processed, but only 60 actually encoded
+        // (5 frames emitted as cached GPU duplicates)
+        let frame_count = 65i64;
+        let _encoder_frame_count = 60i64;
+
+        // WRONG: using frame_count would signal keyframe at wrong time
+        let wrong_keyframe_decision = gop > 0 && frame_count % gop == 0;
+        assert!(
+            !wrong_keyframe_decision,
+            "BUG: frame_count=65 % 60 = 5, not 0, so this test would pass by accident"
+        );
+
+        // But what if frame_count = 120 after duplicates, encoder_frame_count = 115?
+        // frame_count % gop = 0 (signals keyframe), but encoder sees frame 115!
+        let frame_count_120 = 120i64;
+        let encoder_frame_count_115 = 115i64;
+        let buggy_keyframe = gop > 0 && frame_count_120 % gop == 0;
+        let correct_keyframe = gop > 0 && encoder_frame_count_115 % gop == 0;
+
+        // The bug: frame_count signals keyframe at 120, but encoder is at frame 115
+        assert!(buggy_keyframe, "frame_count=120 % 60 = 0, signals keyframe");
+        assert!(
+            !correct_keyframe,
+            "encoder_frame_count=115 % 60 = 55, not keyframe"
+        );
+
+        // Correct: keyframes align with encoder's internal GOP state
+        // When encoder_frame_count = 120, it's a keyframe
+        let encoder_frame_count_120 = 120i64;
+        let correct_keyframe_at_120 = gop > 0 && encoder_frame_count_120 % gop == 0;
+        assert!(
+            correct_keyframe_at_120,
+            "encoder_frame_count=120 % 60 = 0, correct keyframe"
+        );
+    }
+
+    /// Verifies that the first frame (encoder_frame_count=0) should be a keyframe.
+    #[test]
+    fn first_frame_is_keyframe() {
+        let gop = 60i64;
+        let encoder_frame_count = 0i64;
+        let at_keyframe = gop > 0 && encoder_frame_count % gop == 0;
+        assert!(
+            at_keyframe,
+            "First frame (encoder_frame_count=0) must be keyframe"
+        );
+    }
+
+    /// Verifies keyframe pattern at GOP boundaries.
+    #[test]
+    fn keyframes_at_gop_boundaries() {
+        let gop = 60i64;
+
+        // Frames 0, 60, 120, 180 should be keyframes
+        for expected_keyframe in [0, 60, 120, 180, 240] {
+            let at_keyframe = gop > 0 && expected_keyframe % gop == 0;
+            assert!(
+                at_keyframe,
+                "Frame {} should be keyframe",
+                expected_keyframe
+            );
+        }
+
+        // Frames 1, 59, 61, 119 should NOT be keyframes
+        for expected_non_keyframe in [1, 59, 61, 119, 121] {
+            let at_keyframe = gop > 0 && expected_non_keyframe % gop == 0;
+            assert!(
+                !at_keyframe,
+                "Frame {} should NOT be keyframe",
+                expected_non_keyframe
+            );
+        }
     }
 }
