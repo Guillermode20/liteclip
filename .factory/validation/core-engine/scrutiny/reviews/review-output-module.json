@@ -1,0 +1,117 @@
+{
+  "featureId": "review-output-module",
+  "reviewedAt": "2026-03-27T18:20:00.000Z",
+  "commitId": "bbc525d",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "Reviewed output module findings file (.factory/reviews/output_findings.json). Found 3 High-severity blocking bugs (unwrap/expect panics in SDK export), 6 valid Medium issues (one finding incorrectly stated missing SAFETY comments - they exist at lines 91/109 in sdk_export.rs), 6 Low quality issues, and 4 positive architecture observations. Worker correctly identified issues with specific file paths and line references.",
+    "issues": [
+      {
+        "file": "crates/liteclip-core/src/output/sdk_export.rs",
+        "line": 601,
+        "severity": "blocking",
+        "description": "Valid finding: .unwrap() on input_ctx.stream(video_stream_idx) could panic if stream indices become invalid after seek operations. Should use .with_context() for graceful error handling."
+      },
+      {
+        "file": "crates/liteclip-core/src/output/sdk_export.rs",
+        "line": 618,
+        "severity": "blocking",
+        "description": "Valid finding: .unwrap() on input_ctx.stream(audio_idx) could panic if audio stream lookup fails after seek. Should use .with_context() for graceful error handling."
+      },
+      {
+        "file": "crates/liteclip-core/src/output/sdk_ffmpeg_output.rs",
+        "line": 207,
+        "severity": "blocking",
+        "description": "Valid finding: Three consecutive .unwrap() calls on scaler.as_ref().unwrap() in condition checks. If scaler becomes None, this panics during thumbnail generation."
+      },
+      {
+        "file": "crates/liteclip-core/src/output/sdk_ffmpeg_output.rs",
+        "line": 226,
+        "severity": "blocking",
+        "description": "Valid finding: .expect(\"scaler\") could panic if scaler initialization silently failed. Should use .context() for error handling."
+      },
+      {
+        "file": ".factory/reviews/output_findings.json",
+        "severity": "non_blocking",
+        "description": "Finding correction needed: The Medium finding 'Unsafe codec_tag clearing needs explicit safety documentation' at lines 95/113 in sdk_export.rs is incorrect. SAFETY comments DO exist at lines 91 and 109. This finding should be removed or marked as resolved."
+      },
+      {
+        "file": "crates/liteclip-core/src/output/sdk_ffmpeg_output.rs",
+        "line": 82,
+        "severity": "non_blocking",
+        "description": "Additional observation not in findings: unsafe block clearing codec_tag at line 82 lacks explicit SAFETY comment (unlike lines 91/109 in sdk_export.rs which have them). Consider adding SAFETY comment for consistency."
+      },
+      {
+        "file": "crates/liteclip-core/src/output/sdk_ffmpeg_output.rs",
+        "line": 284,
+        "severity": "non_blocking",
+        "description": "Additional observation not in findings: unsafe { (*frame.as_ptr()).linesize[0] } at line 284 lacks SAFETY comment documenting why accessing AVFrame internals is safe."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "conventions",
+      "observation": "The codebase partially follows SAFETY comment convention for unsafe blocks (sdk_export.rs has SAFETY comments at lines 91/109), but sdk_ffmpeg_output.rs lacks SAFETY comments at lines 82, 284, and the unsafe fn at line 12. This inconsistency suggests the SAFETY comment pattern is emerging but not yet uniformly applied.",
+      "evidence": "Grep for 'SAFETY:' shows comments at sdk_export.rs:91 and sdk_export.rs:109, but sdk_ffmpeg_output.rs unsafe blocks at lines 12, 82, 284 lack them. AGENTS.md does not explicitly document this convention."
+    },
+    {
+      "area": "knowledge",
+      "observation": "AGENTS.md and architecture.md correctly document the Bytes-based packet handling pattern and memory management (MAX_OUTSTANDING_SNAPSHOT_BYTES: 512MB). No gaps identified - the worker correctly understood the architecture.",
+      "evidence": "architecture.md section on Memory Management documents bytes::Bytes usage and MAX_OUTSTANDING_SNAPSHOT_BYTES. Worker findings reference these patterns correctly."
+    },
+    {
+      "area": "skills",
+      "observation": "Worker followed module-reviewer skill procedure correctly. Used pattern-based grep searches for .unwrap(), .expect(), and unsafe blocks. Produced structured findings JSON with severity categories. Skill feedback shows followedProcedure: true.",
+      "evidence": "Worker-transcripts.jsonl shows workerSessionId 753e3643-ce84-4535-a9e2-bba973dc041a with skillFeedback.followedProcedure: true, deviations: []. Handoff shows findingsFile and findingsCount structure matching skill example."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "blockingIssues": [
+    {
+      "id": "output-panic-stream-lookup-video",
+      "file": "crates/liteclip-core/src/output/sdk_export.rs",
+      "line": 601,
+      "description": "Potential panic from .unwrap() on video stream lookup after seek - could crash during clip export"
+    },
+    {
+      "id": "output-panic-stream-lookup-audio",
+      "file": "crates/liteclip-core/src/output/sdk_export.rs",
+      "line": 618,
+      "description": "Potential panic from .unwrap() on audio stream lookup after seek - could crash during clip export"
+    },
+    {
+      "id": "output-panic-scaler-validation",
+      "file": "crates/liteclip-core/src/output/sdk_ffmpeg_output.rs",
+      "lines": [207, 208, 209],
+      "description": "Potential panic from .unwrap() chain in scaler validation - could crash during thumbnail generation"
+    },
+    {
+      "id": "output-panic-scaler-expect",
+      "file": "crates/liteclip-core/src/output/sdk_ffmpeg_output.rs",
+      "line": 226,
+      "description": "Potential panic from .expect(\"scaler\") - could crash during preview frame extraction"
+    }
+  ],
+  "nonBlockingIssues": [
+    {
+      "id": "output-findings-incorrect-safety-comment",
+      "description": "Medium finding incorrectly stated SAFETY comments missing at sdk_export.rs:95/113 - they exist at lines 91/109"
+    },
+    {
+      "id": "output-unsafe-no-safety-comment-82",
+      "file": "crates/liteclip-core/src/output/sdk_ffmpeg_output.rs",
+      "line": 82,
+      "description": "Missing SAFETY comment for unsafe block clearing codec_tag"
+    },
+    {
+      "id": "output-unsafe-no-safety-comment-284",
+      "file": "crates/liteclip-core/src/output/sdk_ffmpeg_output.rs",
+      "line": 284,
+      "description": "Missing SAFETY comment for unsafe block accessing AVFrame linesize"
+    }
+  ],
+  "summary": "The output module review findings are largely accurate with 4 blocking issues (potential panics from unwrap/expect in SDK export and preview code). One Medium finding about missing SAFETY comments is incorrect - SAFETY comments DO exist at the cited location in sdk_export.rs. Two additional unsafe blocks in sdk_ffmpeg_output.rs lack SAFETY comments and should be documented. The worker correctly followed the module-reviewer skill procedure. The blocking issues (4 potential panics) must be fixed before user testing to prevent application crashes during clip export or thumbnail generation."
+}

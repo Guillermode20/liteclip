@@ -1,0 +1,123 @@
+{
+  "featureId": "review-encode-module",
+  "reviewedAt": "2026-03-27T18:18:00Z",
+  "commitId": "4931222",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "Reviewed 19 findings from encode module review. Verified all findings against actual code. Found 4 blocking issues (keyframe counting bugs affecting GOP timing, no software encoder fallback for systems without hardware encoders, and NULL pointer safety issues in FFmpeg hardware frame handling). Worker correctly identified issues with accurate file/line references. Findings are comprehensive and well-documented.",
+    "issues": [
+      {
+        "file": "crates/liteclip-core/src/encode/ffmpeg/mod.rs",
+        "line": 318,
+        "severity": "blocking",
+        "description": "ENC-001: Inconsistent keyframe counting in CPU non-scaler path. Uses 'self.frame_count % gop' instead of 'self.encoder_frame_count % gop' which is used in GPU path and scaler CPU path. Verified: line 272 uses encoder_frame_count, line 318 uses frame_count. This causes keyframe misalignment in GOP."
+      },
+      {
+        "file": "crates/liteclip-core/src/encode/ffmpeg/nvenc.rs",
+        "line": 140,
+        "severity": "blocking",
+        "description": "ENC-002: Hardware encoders use frame_count instead of encoder_frame_count for keyframe decisions. Verified in nvenc.rs:140, amf.rs:158, qsv.rs:203. This contradicts the documented intent that encoder_frame_count tracks 'frames actually sent to encoder'. Keyframe timing may drift from configured GOP."
+      },
+      {
+        "file": "crates/liteclip-core/src/encode/encoder_mod/functions.rs",
+        "line": 111,
+        "severity": "blocking",
+        "description": "ENC-003: No software encoder fallback when hardware encoder unavailable. System returns NoHardwareForAuto error making app unusable on systems without NVENC/AMF/QSV support. Verified: resolve_encoder_config returns error when Auto detects no hardware."
+      },
+      {
+        "file": "crates/liteclip-core/src/encode/ffmpeg/context.rs",
+        "line": 183,
+        "severity": "blocking",
+        "description": "ENC-004/005: Missing NULL pointer validation after av_hwframe_get_buffer. Code sets (*hw_frame).data[0] = gpu_frame.texture.as_raw() without null check. Cross-device path dereferences texture_ptr without validation. Verified: lines 183-195 have no null checks before pointer operations."
+      },
+      {
+        "file": "crates/liteclip-core/src/encode/ffmpeg/qsv.rs",
+        "line": 115,
+        "severity": "non_blocking",
+        "description": "ENC-006: av_buffer_unref called immediately after setting hw_device_ctx/hw_frames_ctx on encoder. If encoder.open_with() fails, refs already set on encoder context may not be cleaned up properly. Verified: unrefs at lines 115-120 before encoder.open_with()."
+      },
+      {
+        "file": "crates/liteclip-core/src/encode/cli_pipe.rs",
+        "line": 111,
+        "severity": "non_blocking",
+        "description": "ENC-007: use_native_resolution with (0,0) config.resolution causes encoder init failure. Verified: init() returns error for w==0 or h==0."
+      },
+      {
+        "file": "crates/liteclip-core/src/encode/ffmpeg/qsv.rs",
+        "line": 191,
+        "severity": "non_blocking",
+        "description": "ENC-008: av_hwframe_map() failure returns generic error without structured handling for different failure modes. Verified: generic error message at line 191."
+      },
+      {
+        "file": "crates/liteclip-core/src/encode/ffmpeg/mod.rs",
+        "line": 110,
+        "severity": "non_blocking",
+        "description": "ENC-009: Packet buffer channel size 1024 represents ~14GB potential memory for 1080p NV12 frames. Bounded but large. Verified: bounded(1024) at line 110."
+      },
+      {
+        "file": "crates/liteclip-core/src/encode/ffmpeg/mod.rs",
+        "line": 246,
+        "severity": "non_blocking",
+        "description": "ENC-010: GPU format mismatch silently falls back to CPU encoding with only warning log. Could mask configuration issues. Verified: warning log with fallback."
+      },
+      {
+        "file": "crates/liteclip-core/src/encode/ffmpeg/mod.rs",
+        "line": 83,
+        "severity": "non_blocking",
+        "description": "ENC-011: unsafe impl Send for FfmpegEncoder lacks SAFETY comment documenting invariants."
+      },
+      {
+        "file": "crates/liteclip-core/src/encode/ffmpeg/context.rs",
+        "line": 39,
+        "severity": "non_blocking",
+        "description": "ENC-012: unsafe impl Send for D3d11HardwareContext lacks SAFETY comment."
+      },
+      {
+        "file": "crates/liteclip-core/src/encode/ffmpeg/mod.rs",
+        "line": 138,
+        "severity": "non_blocking",
+        "description": "ENC-013: emit_duplicate_video_packets() marked #[allow(dead_code)] - intentionally disabled GPU duplicate optimization. Should document if planned to re-enable or remove."
+      },
+      {
+        "file": "crates/liteclip-core/src/encode/ffmpeg/qsv.rs",
+        "line": 48,
+        "severity": "non_blocking",
+        "description": "ENC-014: CString::new(\"qsv\").expect(\"static string\") - safe but only expect in module. Could use const CString."
+      }
+    ],
+    "positiveFindings": [
+      "ENC-015: Good error handling patterns with map_err/ok_or_else throughout",
+      "ENC-016: Proper Drop implementation for D3d11HardwareContext with null checks",
+      "ENC-017: AMF stability optimizations (keyframe interval adjustments for 60fps)",
+      "ENC-018: SoftwareEncoder Drop cleanly shuts down worker threads",
+      "ENC-019: Packet draining uses Vec::with_capacity for efficient allocations",
+      "No .unwrap() usage found in encode module - only one justified .expect() for static string"
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "conventions",
+      "observation": "The encoder maintains two frame counters (frame_count and encoder_frame_count) with subtle semantic differences. frame_count tracks all processed frames, encoder_frame_count tracks frames actually sent to encoder. This distinction is not documented in AGENTS.md or architecture.md, leading to inconsistent usage across hardware and CPU encoding paths.",
+      "evidence": "ENC-001 and ENC-002 findings show hardware encoders and CPU non-scaler path use frame_count while GPU path and scaler CPU path use encoder_frame_count. Comments in ffmpeg/mod.rs:272 say encoder_frame_count 'matches what the encoder actually sees' but this intent is violated elsewhere."
+    },
+    {
+      "area": "conventions",
+      "observation": "Hardware encoder keyframe decision code pattern is duplicated across nvenc.rs, amf.rs, qsv.rs with identical logic but using wrong counter variable. Project could benefit from centralized keyframe decision helper to prevent drift.",
+      "evidence": "All three hardware encoder files (nvenc.rs:140, amf.rs:158, qsv.rs:203) have identical keyframe logic: 'if gop > 0 && self.frame_count % gop == 0' - should use encoder_frame_count per documented intent."
+    },
+    {
+      "area": "conventions",
+      "observation": "unsafe impl Send for FFmpeg wrapper types (FfmpegEncoder, D3d11HardwareContext) lacks SAFETY comments. This is a project-wide pattern that should be documented as convention.",
+      "evidence": "ffmpeg/mod.rs:83 and context.rs:39 have unsafe impl Send without SAFETY comments explaining thread-safety assumptions."
+    },
+    {
+      "area": "knowledge",
+      "observation": "FFmpeg hardware frame handling pattern: av_hwframe_get_buffer() allocates frame, then data[0] is overwritten with source texture pointer. This pattern assumes FFmpeg's internal allocation is redundant for shared device case. Edge case behavior not documented.",
+      "evidence": "context.rs:183 - (*hw_frame).data[0] = gpu_frame.texture.as_raw() directly overwrites FFmpeg-allocated pointer. For shared device, this is correct but for cross-device requires OpenSharedResource."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Encode module review findings are accurate and comprehensive. Worker correctly identified 4 blocking issues: (1) keyframe counting bug in CPU non-scaler path causing GOP misalignment, (2) keyframe counting bug in all hardware encoders causing GOP timing drift, (3) no software encoder fallback making app unusable without hardware encoder, (4) missing NULL pointer validation in FFmpeg hardware frame setup causing potential crashes. These blocking issues must be fixed before user testing. Worker followed procedure correctly with thorough code reading and pattern-based grep searches. Line number references are accurate (minor offsets due to file changes but verified against actual code). Shared state observations highlight undocumented conventions around frame counting semantics and unsafe Send implementations that should be added to project documentation."
+}

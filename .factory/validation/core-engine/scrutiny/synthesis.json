@@ -1,0 +1,198 @@
+{
+  "milestone": "core-engine",
+  "round": 1,
+  "status": "fail",
+  "validatorsRun": {
+    "test": {
+      "passed": true,
+      "command": "cargo test --workspace",
+      "exitCode": 0,
+      "observation": "83 tests passed in liteclip-core, 11 tests passed in liteclip-replay, 16 doc-tests passed, 1 integration test passed"
+    },
+    "typecheck": {
+      "passed": true,
+      "command": "cargo check --workspace",
+      "exitCode": 0,
+      "observation": "All crates compiled successfully with no type errors"
+    },
+    "lint": {
+      "passed": true,
+      "command": "cargo clippy --workspace -- -D warnings",
+      "exitCode": 0,
+      "observation": "No clippy warnings detected"
+    }
+  },
+  "reviewsSummary": {
+    "total": 4,
+    "passed": 2,
+    "failed": 2,
+    "failedFeatures": ["review-encode-module", "review-output-module"]
+  },
+  "blockingIssues": [
+    {
+      "featureId": "review-encode-module",
+      "id": "ENC-001",
+      "severity": "blocking",
+      "file": "crates/liteclip-core/src/encode/ffmpeg/mod.rs",
+      "line": 318,
+      "description": "Keyframe counting bug in CPU non-scaler path. Uses 'self.frame_count % gop' instead of 'self.encoder_frame_count % gop' which is used in GPU path. This causes keyframe misalignment in GOP timing."
+    },
+    {
+      "featureId": "review-encode-module",
+      "id": "ENC-002",
+      "severity": "blocking",
+      "file": "crates/liteclip-core/src/encode/ffmpeg/nvenc.rs",
+      "line": 140,
+      "description": "Keyframe counting bug in all hardware encoders (nvenc.rs:140, amf.rs:158, qsv.rs:203). Uses 'self.frame_count % gop' instead of 'self.encoder_frame_count % gop'. Keyframe timing drifts from configured GOP interval."
+    },
+    {
+      "featureId": "review-encode-module",
+      "id": "ENC-003",
+      "severity": "blocking",
+      "file": "crates/liteclip-core/src/encode/encoder_mod/functions.rs",
+      "line": 111,
+      "description": "No software encoder fallback when hardware encoder unavailable. Returns 'NoHardwareForAuto' error making app unusable on systems without NVENC/AMF/QSV support. Users cannot use the application at all."
+    },
+    {
+      "featureId": "review-encode-module",
+      "id": "ENC-004",
+      "severity": "blocking",
+      "file": "crates/liteclip-core/src/encode/ffmpeg/context.rs",
+      "line": 183,
+      "description": "Missing NULL pointer validation after av_hwframe_get_buffer. Code sets (*hw_frame).data[0] = gpu_frame.texture.as_raw() without null check. Cross-device path dereferences texture_ptr without validation. Could cause crashes."
+    },
+    {
+      "featureId": "review-output-module",
+      "id": "output-panic-stream-lookup-video",
+      "severity": "blocking",
+      "file": "crates/liteclip-core/src/output/sdk_export.rs",
+      "line": 601,
+      "description": "Potential panic from .unwrap() on video stream lookup after seek. If stream indices become invalid, this would crash during clip export."
+    },
+    {
+      "featureId": "review-output-module",
+      "id": "output-panic-stream-lookup-audio",
+      "severity": "blocking",
+      "file": "crates/liteclip-core/src/output/sdk_export.rs",
+      "line": 618,
+      "description": "Potential panic from .unwrap() on audio stream lookup after seek. If stream indices become invalid, this would crash during clip export."
+    },
+    {
+      "featureId": "review-output-module",
+      "id": "output-panic-scaler-validation",
+      "severity": "blocking",
+      "file": "crates/liteclip-core/src/output/sdk_ffmpeg_output.rs",
+      "lines": [207, 208, 209],
+      "description": "Potential panic from .unwrap() chain in scaler validation. Three consecutive .unwrap() calls on scaler.as_ref().unwrap() could crash during thumbnail generation."
+    },
+    {
+      "featureId": "review-output-module",
+      "id": "output-panic-scaler-expect",
+      "severity": "blocking",
+      "file": "crates/liteclip-core/src/output/sdk_ffmpeg_output.rs",
+      "line": 226,
+      "description": "Potential panic from .expect(\"scaler\") - could crash during preview frame extraction if scaler initialization silently failed."
+    }
+  ],
+  "nonBlockingIssues": [
+    {
+      "featureId": "review-capture-module",
+      "severity": "medium",
+      "description": "QueryPerformanceCounter uses .expect() - quality improvement for defensive coding"
+    },
+    {
+      "featureId": "review-capture-module",
+      "severity": "medium",
+      "description": "Mic initialization uses polling with 2-second timeout - could use blocking channel"
+    },
+    {
+      "featureId": "review-buffer-module",
+      "severity": "medium",
+      "description": "Snapshot try_lock can silently skip packets under contention - documented trade-off"
+    },
+    {
+      "featureId": "review-buffer-module",
+      "severity": "medium",
+      "description": "Memory accounting uses Ordering::Relaxed - intentional for performance"
+    },
+    {
+      "featureId": "review-encode-module",
+      "severity": "medium",
+      "description": "QSV encoder unrefs after setting hw_device_ctx - cleanup path needs review"
+    },
+    {
+      "featureId": "review-encode-module",
+      "severity": "medium",
+      "description": "use_native_resolution with (0,0) causes encoder init failure"
+    },
+    {
+      "featureId": "review-encode-module",
+      "severity": "medium",
+      "description": "GPU format mismatch silently falls back to CPU encoding"
+    },
+    {
+      "featureId": "review-encode-module",
+      "severity": "medium",
+      "description": "Packet buffer channel size 1024 represents large potential memory (~14GB)"
+    },
+    {
+      "featureId": "review-output-module",
+      "severity": "medium",
+      "description": "Unsafe FFmpeg packet manipulation needs explicit SAFETY documentation"
+    },
+    {
+      "featureId": "review-output-module",
+      "severity": "medium",
+      "description": "Move-or-copy lacks atomicity guarantee for final output placement"
+    }
+  ],
+  "appliedUpdates": [
+    {
+      "target": "library",
+      "file": "architecture.md",
+      "description": "Added frame counting semantics (frame_count vs encoder_frame_count), mutex poison recovery pattern, memory ordering strategy, and proactive eviction pattern documentation",
+      "sourceFeature": "synthesis"
+    }
+  ],
+  "suggestedGuidanceUpdates": [
+    {
+      "target": "AGENTS.md",
+      "suggestion": "Add SAFETY comment convention: All unsafe impl Send blocks must have SAFETY comments explaining thread-safety assumptions. Pattern found missing in encode/ffmpeg/mod.rs:83 and context.rs:39.",
+      "evidence": "review-encode-module found unsafe impl Send for FfmpegEncoder and D3d11HardwareContext without SAFETY comments. This pattern is partially followed in sdk_export.rs (SAFETY comments at lines 91/109) but inconsistent.",
+      "isSystemic": true
+    },
+    {
+      "target": "AGENTS.md",
+      "suggestion": "Add SAFETY comment convention: All unsafe blocks must have SAFETY comments documenting why the operation is safe. Pattern partially exists but inconsistently applied across modules.",
+      "evidence": "review-output-module found sdk_ffmpeg_output.rs unsafe blocks at lines 82, 284 lack SAFETY comments while sdk_export.rs has them. Review-encode-module found context.rs:183 unsafe block lacks SAFETY comment.",
+      "isSystemic": true
+    },
+    {
+      "target": "AGENTS.md",
+      "suggestion": "Document mutex poison recovery pattern as project-wide convention: Use unwrap_or_else(|e| e.into_inner()) for mutex poison recovery to prevent cascade failures.",
+      "evidence": "review-buffer-module found this pattern consistently used across 16 locations in spmc_ring.rs. Pattern prevents panic propagation when thread panics while holding mutex.",
+      "isSystemic": true
+    },
+    {
+      "target": "AGENTS.md",
+      "suggestion": "Add guidance on error handling: Avoid .unwrap() and .expect() in code paths that could fail due to external factors (FFmpeg API calls, stream lookups). Use .with_context() for meaningful error messages.",
+      "evidence": "review-encode-module and review-output-module found multiple .unwrap() and .expect() calls that could cause panics. These should be replaced with proper error handling using .context() or .with_context().",
+      "isSystemic": true
+    }
+  ],
+  "rejectedObservations": [
+    {
+      "observation": "RNNoise backlog cap line number was misreported",
+      "reason": "Minor finding discrepancy - finding content is correct, line reference was off but verified during scrutiny review. No action needed."
+    },
+    {
+      "observation": "Hardware encoder code duplication",
+      "reason": "While true, this is a code organization suggestion not a blocking issue. Already documented in findings as non-blocking."
+    },
+    {
+      "observation": "FFmpeg hardware frame handling pattern",
+      "reason": "Already covered by blocking issue ENC-004 which addresses NULL pointer validation. Adding to library would duplicate finding."
+    }
+  ],
+  "previousRound": null
+}

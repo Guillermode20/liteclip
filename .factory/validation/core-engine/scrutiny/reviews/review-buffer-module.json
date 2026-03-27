@@ -1,0 +1,151 @@
+{
+  "featureId": "review-buffer-module",
+  "reviewedAt": "2026-03-27T18:30:00.000Z",
+  "commitId": "5fef78b",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "The buffer module review findings at .factory/reviews/buffer_findings.json are accurate and comprehensive. All 15 findings correctly reference actual code locations in spmc_ring.rs. The findings properly categorize issues by severity and category. The review correctly identifies that the design uses atomic write index + per-slot mutexes (not truly lock-free, which is documented), proactive eviction at 80% watermark, batch eviction, and proper ring wrap handling. No blocking issues found - all Medium/Low issues are intentional design trade-offs with documented rationale.",
+    "issues": []
+  },
+  "findingsValidation": {
+    "BUF-001": {
+      "verified": true,
+      "locationCorrect": true,
+      "severityAppropriate": true,
+      "notes": "Lines 811-848 (snapshot) and 957-1158 (snapshot_from) correctly use try_lock. BUF-001's description is accurate - try_lock can silently skip packets under contention. This is intentional non-blocking behavior documented in module docs (line 19). Severity Medium is appropriate since it could cause incomplete clips under high activity but is mitigated by two-pass approach."
+    },
+    "BUF-002": {
+      "verified": true,
+      "locationCorrect": true,
+      "severityAppropriate": true,
+      "notes": "Lines 421-431 and 515-554 correctly use Ordering::Relaxed for total_bytes and keyframe_count. Finding is accurate - relaxed ordering could cause stale reads but is intentional for performance. Impact assessment is correct: bounded by max_memory_bytes enforcement."
+    },
+    "BUF-003": {
+      "verified": true,
+      "locationCorrect": true,
+      "severityAppropriate": true,
+      "notes": "Lines 382-388 correctly show param_cache_pushes_since_complete counter check before cache_parameter_sets. Finding notes this is safe for single-producer. Low risk is correct - the ordering is confusing but functional."
+    },
+    "BUF-004": {
+      "verified": true,
+      "locationCorrect": true,
+      "severityAppropriate": true,
+      "notes": "Lines 619-658 (evict_packets_older_than) correctly shows duration-based eviction in push path. Low severity is appropriate - mitigated by proactive eviction batching."
+    },
+    "BUF-005": {
+      "verified": true,
+      "locationCorrect": true,
+      "severityAppropriate": true,
+      "notes": "Lines 1453-1463 (stats()) correctly show try_lock on oldest slot with default to 0. Low severity appropriate - informational stats only."
+    },
+    "BUF-006": {
+      "verified": true,
+      "locationCorrect": true,
+      "severityAppropriate": true,
+      "notes": "Lines 1495-1511 (oldest_pts), 1520-1529 (newest_pts), 1538-1549 (first_packet_resolution) all use try_lock returning Option. Accurate - callers must handle None gracefully."
+    },
+    "BUF-007": {
+      "verified": true,
+      "locationCorrect": true,
+      "severityAppropriate": true,
+      "notes": "Lines 1080-1095 use binary_search on sorted Vec for O(log n) lookup. Severity Low appropriate - trade-off avoids large Vec<bool> allocation."
+    },
+    "BUF-008": {
+      "verified": true,
+      "locationCorrect": true,
+      "severityAppropriate": true,
+      "notes": "Module docs (lines 1-50) correctly describe 'SPMC ring addressing with per-slot mutexes'. Architecture assessment is accurate - design choice is sound."
+    },
+    "BUF-009": {
+      "verified": true,
+      "locationCorrect": true,
+      "severityAppropriate": true,
+      "notes": "Lines 441-451 correctly show evict_frontier update after ring wrap. Critical invariant verified by tests test_evict_frontier_updates_after_ring_wrap and test_memory_stays_bounded_during_long_run."
+    },
+    "BUF-010": {
+      "verified": true,
+      "locationCorrect": true,
+      "severityAppropriate": true,
+      "notes": "Lines 41-46 correctly show PROACTIVE_EVICTION_WATERMARK=0.80 and EVICTION_BATCH_SIZE=8. Test test_proactive_eviction_triggers_at_80_percent validates behavior."
+    },
+    "BUF-011": {
+      "verified": true,
+      "locationCorrect": true,
+      "severityAppropriate": true,
+      "notes": "Lines 124-165 (SnapshotBytes) and 168-198 (TrackedSnapshot) correctly implement RAII tracking with MAX_OUTSTANDING_SNAPSHOT_BYTES limit. Excellent memory safety design."
+    },
+    "BUF-012": {
+      "verified": true,
+      "locationCorrect": true,
+      "severityAppropriate": true,
+      "notes": "Lines 85-106 (ParameterCache) and 673-780 (cache_parameter_sets) correctly implement codec header caching with periodic refresh. Tests validate HEVC parameter set handling."
+    },
+    "BUF-013": {
+      "verified": true,
+      "locationCorrect": true,
+      "severityAppropriate": true,
+      "notes": "Throughout file - consistent use of unwrap_or_else(|e| e.into_inner()) for mutex poison recovery. Verified at lines 400, 416, 535, 596, 634, 684, 864, 1172, 1286, 1302, 1304, 1343, 1360, 1364, 1392, 1410. Correct idiomatic Rust."
+    },
+    "BUF-014": {
+      "verified": true,
+      "locationCorrect": true,
+      "severityAppropriate": true,
+      "notes": "functions.rs lines 10-20 correctly show unsafe Windows API call with OnceLock caching. Minimal unsafe, properly scoped."
+    },
+    "BUF-015": {
+      "verified": true,
+      "locationCorrect": true,
+      "severityAppropriate": true,
+      "notes": "functions.rs lines 80-610 (tests module) contains comprehensive tests including memory budget, keyframe seeking, eviction ordering, concurrent operations, ring wrap handling. Test coverage is excellent."
+    }
+  },
+  "blockingIssues": [],
+  "nonBlockingIssues": [
+    {
+      "id": "BUF-001",
+      "description": "Snapshot operations use try_lock which can silently skip packets under contention",
+      "suggestedFix": "Document the trade-off clearly or consider blocking locks with timeout"
+    },
+    {
+      "id": "BUF-002",
+      "description": "Memory accounting uses Ordering::Relaxed throughout - intentional for performance but could cause stale reads",
+      "suggestedFix": "Add documentation explaining the relaxed ordering trade-off"
+    },
+    {
+      "id": "BUF-003",
+      "description": "param_cache counter check happens before cache_parameter_sets - confusing ordering but safe for single-producer",
+      "suggestedFix": "Document single-producer assumption explicitly"
+    },
+    {
+      "id": "BUF-007",
+      "description": "Binary search on included_indices makes snapshot O(n log n) instead of O(n)",
+      "suggestedFix": "Consider HashSet for O(1) lookup, profile to determine optimal approach"
+    }
+  ],
+  "sharedStateObservations": [
+    {
+      "area": "conventions",
+      "observation": "The buffer module consistently uses unwrap_or_else(|e| e.into_inner()) for mutex poison recovery throughout all lock operations. This pattern should be documented in AGENTS.md as the project-wide mutex handling convention.",
+      "evidence": "spmc_ring.rs lines 400, 416, 535, 596, 634, 684, 864, 1172, 1286, 1302, 1304, 1343, 1360, 1364, 1392, 1410 - all use this pattern"
+    },
+    {
+      "area": "conventions",
+      "observation": "The code uses Ordering::Relaxed for performance-critical accounting (total_bytes, keyframe_count) while using Ordering::Release/Acquire for write_idx and evict_frontier to enforce memory boundedness. This ordering strategy should be documented for future developers.",
+      "evidence": "spmc_ring.rs uses Relaxed for accounting (lines 136, 160, 382, 385, 403, 412, 422-430, etc.) and Release/Acquire for critical indices (lines 407, 435, 447, 554, 656, 621, 627, 811, 818, 957, 979, etc.)"
+    },
+    {
+      "area": "knowledge",
+      "observation": "The proactive eviction design with 80% watermark (PROACTIVE_EVICTION_WATERMARK) and batch eviction (EVICTION_BATCH_SIZE=8) is well-designed to prevent mutex storms. This pattern could be documented in AGENTS.md under the memory management section.",
+      "evidence": "spmc_ring.rs lines 41-46 define constants, lines 495-580 implement proactive eviction logic"
+    },
+    {
+      "area": "testing",
+      "observation": "The buffer module has excellent test coverage including concurrent operation tests (test_snapshot_valid_during_concurrent_eviction) and memory boundedness tests. This demonstrates a strong testing pattern for concurrency code.",
+      "evidence": "functions.rs lines 80-610 contain comprehensive tests including memory budget, keyframe seeking, eviction ordering, concurrent operations, ring wrap handling"
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "PASS - The buffer module review findings are accurate, comprehensive, and correctly reference code locations. All 15 findings validated against actual code. No blocking issues found. Medium/Low severity issues are intentional design trade-offs: try_lock in snapshots is documented non-blocking behavior, relaxed ordering is intentional for performance, and eviction timing is acceptable with proactive mitigation. Test coverage is excellent with concurrent operation tests and memory boundedness validation. The design correctly uses atomic write index + per-slot mutexes, proactive eviction at 80% watermark, and proper ring wrap handling to prevent memory leaks. Recommended: document mutex poison recovery pattern and memory ordering strategy in AGENTS.md."
+}
