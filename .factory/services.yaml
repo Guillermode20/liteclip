@@ -1,0 +1,5 @@
+commands:
+  # No build/test commands needed for review mission
+  # Workers use Read and Grep tools for analysis
+
+services: {}

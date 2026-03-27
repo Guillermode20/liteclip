@@ -1,0 +1,259 @@
+{
+  "reviewType": "threading",
+  "reviewDate": "2026-03-27",
+  "scope": "Cross-cutting threading/concurrency patterns across entire codebase",
+  "summary": {
+    "totalFindings": 22,
+    "criticalCount": 0,
+    "highCount": 3,
+    "mediumCount": 9,
+    "lowCount": 7,
+    "infoCount": 3
+  },
+  "systemicPatterns": [
+    "Mutex<Option<JoinHandle<()>>> pattern used consistently for thread lifecycle management across platform, audio, and GUI modules",
+    "AtomicBool for running state with SeqCst ordering in most places, Relaxed in some capture paths - inconsistent but intentional",
+    "Crossbeam channels used throughout for thread communication (bounded/unbounded)",
+    "Poison recovery pattern .unwrap_or_else(|e| e.into_inner()) used extensively for mutex handling",
+    "Arc<Mutex<T>> for shared state between threads is the dominant pattern"
+  ],
+  "findings": [
+    {
+      "severity": "High",
+      "category": "Threading",
+      "file": "src/gui/gallery/decode_pipeline/mod.rs",
+      "lineRange": "54-71, 231-370",
+      "description": "Heavy mutex contention in playback hot path. SharedPlaybackState contains 7 Mutex fields (current_time_secs, playing_since, latest_frame, frame_queue, last_error, audio_buffer) plus 6 atomic fields. PlaybackController methods acquire multiple locks sequentially, potentially causing contention during video playback.",
+      "evidence": "Lines 231-370 show continuous .lock().unwrap_or_else() calls in request_preview_at(), play_from(), and update methods. Each playback frame update touches multiple mutexes.",
+      "suggestedFix": "Consider consolidating related fields into a single Mutex<PlaybackState> struct to reduce lock acquisitions. Alternatively, use RwLock for read-heavy fields like latest_frame and current_time_secs."
+    },
+    {
+      "severity": "High",
+      "category": "Threading",
+      "file": "src/gui/gallery/decode_pipeline/mod.rs",
+      "lineRange": "709-760",
+      "description": "Audio playback state machine relies on audio_generation counter but has a race window. audio_generation is incremented for both 'stop' (line 752) and 'new playback' (line 719). The audio_started_generation check at line 710 could see a stale value if two operations race.",
+      "evidence": "Lines 709-710: if self.shared.audio_started_generation.load(Ordering::SeqCst) == current_audio_generation. Line 719: let generation = self.shared.audio_generation.fetch_add(1, Ordering::SeqCst) + 1. Line 722: .store(generation, Ordering::SeqCst). The store happens after the fetch_add, creating a window.",
+      "suggestedFix": "Use a single atomic for the state machine with explicit states (Idle, Playing(generation), Stopping) instead of two atomics. Or add a Mutex around the generation update sequence."
+    },
+    {
+      "severity": "High",
+      "category": "Threading",
+      "file": "src/gui/gallery/decode_pipeline/mod.rs",
+      "lineRange": "682-692, 728-746",
+      "description": "Audio preload and playback threads spawn without guaranteed cleanup. audio_preload_thread and audio_playback_thread are stored in Mutex<Option<JoinHandle>>, but stop_audio() only increments audio_generation without joining the threads. Drop implementation does join, but if stop/start cycles happen rapidly, old threads may still be running.",
+      "evidence": "Line 752: fn stop_audio just does self.shared.audio_generation.fetch_add(1, Ordering::SeqCst). Lines 692, 746 show error paths that don't clean up threads. Drop at line 746-774 does join but only when PlaybackController is dropped.",
+      "suggestedFix": "In stop_audio(), also take and join the audio_playback_thread handle. Consider a 'stopping' flag that threads check more frequently than the generation counter."
+    },
+    {
+      "severity": "Medium",
+      "category": "Threading",
+      "file": "src/detection/game.rs",
+      "lineRange": "51-52, 64-65, 101-103",
+      "description": "RwLock for detected app uses unwrap() on read() in get_detected_app() which could panic if the lock is poisoned. The write() in the detector thread also uses map().unwrap() pattern.",
+      "evidence": "Line 107: self.detected.read().map(|g| g.clone()).unwrap_or_default() - actually uses unwrap_or_default so safe. But line 101: if let Ok(mut guard) = self.join_handle.lock() handles poison. Line 118 similarly. Actually this is handled correctly.",
+      "suggestedFix": "Actually the code handles this correctly with unwrap_or_default(). Consider documenting why unwrap_or_default is acceptable (empty DetectedApp is valid)."
+    },
+    {
+      "severity": "Medium",
+      "category": "Threading",
+      "file": "crates/liteclip-core/src/buffer/ring/spmc_ring.rs",
+      "lineRange": "253, 399-430, 1284-1295",
+      "description": "Per-slot Mutex for packet storage. The SPMC ring buffer design uses per-slot Mutex<Option<EncodedPacket>> which is correct for the pattern but creates lock acquisition overhead. The push path (line 416) uses blocking lock while snapshot uses try_lock (line 647).",
+      "evidence": "Line 416: let mut packet_guard = slot.packet.lock().unwrap_or_else(|e| e.into_inner()). Line 647 (in evict): if let Ok(packet_guard) = slot.packet.try_lock(). This is intentional - snapshots shouldn't block on push.",
+      "suggestedFix": "This is a deliberate design choice documented in the module docs. No change needed, but ensure documentation explains the tradeoff between global queue lock vs per-slot locks."
+    },
+    {
+      "severity": "Medium",
+      "category": "Threading",
+      "file": "crates/liteclip-core/src/buffer/ring/spmc_ring.rs",
+      "lineRange": "407, 435, 447",
+      "description": "Atomic operations use mixed Ordering semantics. write_idx uses Release on fetch_add (line 407) but Relaxed on load (line 445). evict_frontier uses Release on store (line 447) but Relaxed on load (line 445). This is correct for the SPMC pattern but inconsistent.",
+      "evidence": "Line 407: let write_idx = inner.write_idx.fetch_add(1, Ordering::Release). Line 445: inner.evict_frontier.load(Ordering::Relaxed). Line 447: inner.evict_frontier.store(oldest_valid, Ordering::Release).",
+      "suggestedFix": "Document the ordering choices. The pattern is: producer uses Release to publish, consumer uses Acquire to read. Relaxed loads for stats/logging are fine. Consider defining helper methods with clear names like publish_write_idx() and read_evict_frontier()."
+    },
+    {
+      "severity": "Medium",
+      "category": "Threading",
+      "file": "crates/liteclip-core/src/capture/audio/manager.rs",
+      "lineRange": "53-63, 207-295",
+      "description": "Audio forward loop sleeps with Duration::from_millis(1) when no packets available (line 295), which is a busy-wait pattern. This keeps the thread active even during idle periods.",
+      "evidence": "Line 295: thread::sleep(Duration::from_millis(1)). The loop at line 207 continuously polls with try_recv() and only sleeps if both system and mic channels are empty.",
+      "suggestedFix": "Consider using channel recv_timeout() instead of try_recv() + sleep. This would block until data arrives or timeout. Or use crossbeam's recv() with a select! pattern."
+    },
+    {
+      "severity": "Medium",
+      "category": "Threading",
+      "file": "crates/liteclip-core/src/capture/audio/mic.rs",
+      "lineRange": "63, 92, 164, 257, 266",
+      "description": "noise_thread is stored in Arc<Mutex<Option<JoinHandle<()>>>> passed to capture thread and back. The pattern is complex: created in start(), stored in self.noise_thread, cloned to capture_loop, which passes it to run_noise_thread. Lock acquisition happens in both threads.",
+      "evidence": "Line 92: let noise_thread_handle = Arc::new(Mutex::new(None)). Line 257: let handle = thread::spawn(move || {...}). Line 266: if let Ok(mut guard) = noise_thread_handle.lock() { *guard = Some(handle); }. Stop at line 139: if let Ok(mut guard) = noise_thread_handle.lock() { if let Some(handle) = guard.take() { let _ = handle.join(); } }.",
+      "suggestedFix": "Consider simplifying by having the noise thread signal completion via a channel. The main thread can then join without needing to coordinate through a Mutex."
+    },
+    {
+      "severity": "Medium",
+      "category": "Threading",
+      "file": "crates/liteclip-core/src/capture/dxgi/capture.rs",
+      "lineRange": "890, 1091, 1098",
+      "description": "Capture loop uses Relaxed ordering for running flag (line 890) and texture pool stats. This is intentional for performance but means stop() may not be immediately visible. The stop pattern relies on channel closure to wake the thread.",
+      "evidence": "Line 890: while running.load(Ordering::Relaxed). Lines 1091, 1098: p.total_created.load(std::sync::atomic::Ordering::Relaxed). Stop is via running.store(false) at dxgicapture_traits.rs:44.",
+      "suggestedFix": "Document that Relaxed is sufficient because stop() also closes the frame_tx channel, which breaks the loop. The Relaxed load is just an optimization for the common running case."
+    },
+    {
+      "severity": "Medium",
+      "category": "Threading",
+      "file": "src/main.rs",
+      "lineRange": "60-90, 306",
+      "description": "AppState wrapped in Arc<Mutex<AppState>> with spawn_blocking pattern. This is correct for blocking operations but could lead to contention if multiple operations queue up. The mutex is held for entire operation duration.",
+      "evidence": "Line 306: let app_state = Arc::new(Mutex::new(AppState::new(config.clone())?)). Lines 60-90: spawn_blocking wrapper functions that lock the mutex for the entire operation.",
+      "suggestedFix": "This is the right pattern for synchronous pipeline operations. Consider documenting that pipeline operations (start/stop/save) are designed to be exclusive and blocking."
+    },
+    {
+      "severity": "Medium",
+      "category": "Threading",
+      "file": "src/platform/mod.rs",
+      "lineRange": "89, 98, 132-150",
+      "description": "PlatformHandle stores thread handle in Mutex<Option<JoinHandle<()>>> and implements join() that takes ownership. The drop implementation calls quit() then join(). This is correct but has a subtle issue: if quit() fails (channel disconnected), join() will still wait forever.",
+      "evidence": "Line 132-150: join() implementation that takes handle from Mutex. Drop at lines 148-150 calls quit() then if let Ok(mut guard) = self.thread.lock() { if let Some(handle) = guard.take() { let _ = handle.join(); } }.",
+      "suggestedFix": "Add a timeout to the join() in Drop. If the platform thread doesn't exit within a few seconds, log a warning and proceed. This prevents hangs during shutdown."
+    },
+    {
+      "severity": "Low",
+      "category": "Threading",
+      "file": "src/gui/manager.rs",
+      "lineRange": "33-34, 60-110, 189-204",
+      "description": "GUI_STATE is a LazyLock<Mutex<GuiManagerState>> static, and GuiApp contains Arc<Mutex<Option<SettingsApp>>> and Arc<Mutex<Option<GalleryApp>>>. The nested Option in Mutex creates multiple lock layers for UI state.",
+      "evidence": "Line 33-34: static GUI_STATE: LazyLock<Mutex<GuiManagerState>>. Lines 189-190: settings: Arc<Mutex<Option<SettingsApp>>>, gallery: Arc<Mutex<Option<GalleryApp>>>. Locks acquired at lines 286, 291, 315, 321.",
+      "suggestedFix": "Consider whether the Option inside Mutex is necessary. Could SettingsApp and GalleryApp be created once and stored directly, with a separate 'initialized' flag?"
+    },
+    {
+      "severity": "Low",
+      "category": "Threading",
+      "file": "src/gui/gallery/decode_pipeline/mod.rs",
+      "lineRange": "852",
+      "description": "Decoder worker thread join in Drop waits indefinitely. If decoder is stuck in a long operation, this could delay shutdown.",
+      "evidence": "Line 852: let _ = worker.join(). No timeout on the join.",
+      "suggestedFix": "Add a timeout to the worker join. If decoder doesn't respond to Shutdown command within a few seconds, continue anyway."
+    },
+    {
+      "severity": "Low",
+      "category": "Threading",
+      "file": "crates/liteclip-core/src/capture/audio/level_monitor.rs",
+      "lineRange": "26-31, 44-49, 58-100",
+      "description": "Audio level monitor uses AtomicU32 for all level values with Relaxed ordering. This is fine for telemetry visualization but means levels can be slightly inconsistent (peak without level, etc.).",
+      "evidence": "Lines 26-31: system_level, system_peak, system_smoothed, mic_level, mic_peak, mic_smoothed all AtomicU32. All use Ordering::Relaxed throughout lines 58-100.",
+      "suggestedFix": "Document that Relaxed is acceptable because audio levels are best-effort visualization data. Slight inconsistencies are not user-visible."
+    },
+    {
+      "severity": "Low",
+      "category": "Threading",
+      "file": "crates/liteclip-core/src/capture/backpressure.rs",
+      "lineRange": "18-35, 40-52",
+      "description": "BackpressureState uses AtomicU32 and AtomicBool with Relaxed ordering. fps_divisor and encoder_overloaded are communication flags between capture and encode threads.",
+      "evidence": "Line 40: self.fps_divisor.load(Ordering::Relaxed). Line 48: self.fps_divisor.store(divisor, Ordering::Relaxed). The encode thread sets these, capture thread reads them.",
+      "suggestedFix": "Consider using SeqCst or Acquire/Release for backpressure state. The current Relaxed works because the data flows one direction (encode -> capture) and capture can tolerate slightly stale values."
+    },
+    {
+      "severity": "Low",
+      "category": "Threading",
+      "file": "src/main.rs",
+      "lineRange": "359, 644, 648, 660",
+      "description": "save_in_progress AtomicBool uses SeqCst ordering with compare_exchange for exclusivity. The pattern is correct but the compare_exchange at line 648 could spin if multiple save requests arrive simultaneously.",
+      "evidence": "Line 648: .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst). If this fails, the save is skipped. Line 660 and 705 reset the flag to false.",
+      "suggestedFix": "The current behavior (skip save if one is in progress) is intentional. Consider logging when a save is skipped due to in-progress flag."
+    },
+    {
+      "severity": "Low",
+      "category": "Threading",
+      "file": "crates/liteclip-core/src/app/pipeline/manager.rs",
+      "lineRange": "125-140, 210-220, 305-315",
+      "description": "Pipeline thread joins happen in stop() and Drop. The join is indefinite - if encoder thread is stuck, stop() will hang. However, the encoder thread should respond to channel closure.",
+      "evidence": "Line 130: match thread.join(). Line 215: match thread.join(). Line 307: match thread.join(). All in stop() or enforce_health() paths.",
+      "suggestedFix": "Add a timeout to encoder thread join. Log a warning and continue if timeout expires. The encoder should respond to frame_tx drop within a few hundred milliseconds."
+    },
+    {
+      "severity": "Info",
+      "category": "Threading",
+      "file": "crates/liteclip-core/src/buffer/ring/spmc_ring.rs",
+      "lineRange": "19-22, documentation",
+      "description": "SPMC buffer design is well-documented with clear explanation of the locking model. The proactive eviction at 80% watermark and batch eviction are sophisticated features that reduce mutex storms.",
+      "evidence": "Module documentation lines 1-50 explain the design clearly. PROACTIVE_EVICTION_WATERMARK = 0.80, EVICTION_BATCH_SIZE = 8 constants at lines 66-73.",
+      "suggestedFix": "No change needed. This is good design with clear documentation."
+    },
+    {
+      "severity": "Info",
+      "category": "Threading",
+      "file": "crates/liteclip-core/src/buffer/ring/spmc_ring.rs",
+      "lineRange": "964-979",
+      "description": "Outstanding snapshot bytes tracking prevents OOM when multiple snapshots are in-flight. The MAX_OUTSTANDING_SNAPSHOT_BYTES limit (512MB) provides a safety bound.",
+      "evidence": "Line 964: let current_outstanding = inner.outstanding_snapshot_bytes.load(Ordering::Relaxed). Lines 965-976: check against limit and return SnapshotLimitExceeded error if exceeded.",
+      "suggestedFix": "Good design. Consider making the limit configurable via Config for users with more memory."
+    },
+    {
+      "severity": "Info",
+      "category": "Threading",
+      "file": "src/platform/msg_loop.rs, src/main.rs",
+      "lineRange": "34-35, 331-351",
+      "description": "Event bridge pattern: crossbeam channel -> tokio channel. A dedicated thread (event_bridge_handle) converts events from platform crossbeam channel to tokio mpsc channel. This allows the main async loop to use tokio::select!.",
+      "evidence": "main.rs line 333-351: spawn thread that does blocking_send from crossbeam receiver to tokio sender. The bridge uses blocking_send which is correct for a dedicated thread.",
+      "suggestedFix": "This is a good pattern for integrating crossbeam with tokio. Document why this bridge is needed (Win32 message loop uses crossbeam, main loop uses tokio)."
+    },
+    {
+      "severity": "Medium",
+      "category": "Threading",
+      "file": "src/gui/gallery/decode_pipeline/mod.rs",
+      "lineRange": "177-200",
+      "description": "Audio stream thread is spawned to create rodio OutputStream, then handle is sent via channel. The thread lives for the lifetime of PlaybackController but only holds the stream alive. This is necessary because OutputStream must not be dropped while playing.",
+      "evidence": "Lines 177-200: audio_stream_thread = thread::spawn that creates OutputStream and blocks on shutdown channel. The stream is kept alive in the thread's stack.",
+      "suggestedFix": "This is a workaround for rodio's OutputStream lifetime requirements. Document why this pattern is necessary."
+    },
+    {
+      "severity": "Low",
+      "category": "Threading",
+      "file": "src/gui/gallery.rs",
+      "lineRange": "601, 637, 682, 696",
+      "description": "Four thread::spawn calls in gallery.rs for thumbnail loading and video operations. Threads are not tracked or joined - they run independently until completion or error.",
+      "evidence": "Line 601: spawn for delete_file. Line 637: spawn for load_thumbnail. Line 682: spawn for load_video_metadata. Line 696: spawn for save_trimmed_clip. No join handles stored.",
+      "suggestedFix": "For save operations, consider tracking the join handle to ensure completion before app exit. For thumbnail loads, fire-and-forget is acceptable."
+    }
+  ],
+  "architecturalObservations": {
+    "strengths": [
+      "Consistent use of Arc<Mutex<T>> for shared state across modules",
+      "Poison recovery pattern (.unwrap_or_else(|e| e.into_inner())) used consistently",
+      "Channel-based communication between threads (crossbeam bounded/unbounded)",
+      "AtomicBool running flags with proper lifecycle management",
+      "Drop implementations that clean up threads properly in most cases",
+      "SPMC buffer is well-designed with proactive eviction and memory limits"
+    ],
+    "areasForImprovement": [
+      "Some thread joins lack timeouts, could hang during shutdown",
+      "Mixed Ordering semantics (Relaxed vs SeqCst) could be more clearly documented",
+      "GUI decode pipeline has heavy mutex usage that could be consolidated",
+      "Busy-wait sleep(1ms) patterns could be replaced with channel-based blocking",
+      "Multiple layers of Mutex<Option<T>> create complexity in GUI state"
+    ]
+  },
+  "recommendations": [
+    {
+      "priority": "High",
+      "description": "Add timeouts to all thread.join() calls in Drop implementations to prevent shutdown hangs",
+      "affectedFiles": ["src/gui/gallery/decode_pipeline/mod.rs", "src/platform/mod.rs", "crates/liteclip-core/src/app/pipeline/manager.rs"]
+    },
+    {
+      "priority": "Medium",
+      "description": "Consolidate SharedPlaybackState mutex fields into fewer, larger structs to reduce lock contention",
+      "affectedFiles": ["src/gui/gallery/decode_pipeline/mod.rs"]
+    },
+    {
+      "priority": "Medium",
+      "description": "Document atomic Ordering choices in SPMC buffer and capture modules",
+      "affectedFiles": ["crates/liteclip-core/src/buffer/ring/spmc_ring.rs", "crates/liteclip-core/src/capture/dxgi/capture.rs"]
+    },
+    {
+      "priority": "Low",
+      "description": "Replace busy-wait sleep patterns with channel-based blocking where possible",
+      "affectedFiles": ["crates/liteclip-core/src/capture/audio/manager.rs"]
+    }
+  ]
+}

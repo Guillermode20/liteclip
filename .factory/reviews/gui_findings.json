@@ -1,0 +1,274 @@
+{
+  "module": "gui",
+  "review_date": "2026-03-27",
+  "files_reviewed": [
+    "src/gui/mod.rs",
+    "src/gui/manager.rs",
+    "src/gui/settings.rs",
+    "src/gui/gallery.rs",
+    "src/gui/gallery/types.rs",
+    "src/gui/gallery/browser.rs",
+    "src/gui/gallery/editor.rs",
+    "src/gui/gallery/editor_panels/mod.rs",
+    "src/gui/gallery/utils/mod.rs",
+    "src/gui/gallery/decode_pipeline/mod.rs",
+    "src/gui/gallery/decode_pipeline/frame_pool.rs"
+  ],
+  "summary": {
+    "total_findings": 18,
+    "critical": 0,
+    "high": 1,
+    "medium": 5,
+    "low": 6,
+    "info": 6
+  },
+  "findings": [
+    {
+      "severity": "High",
+      "category": "Architecture",
+      "file": "src/gui/gallery/decode_pipeline/mod.rs",
+      "line": 1,
+      "location": "Entire file (~1943 lines)",
+      "issue": "The decode_pipeline module is excessively large at ~1943 lines, containing multiple concerns: PlaybackController, DecodePipeline, DecoderSession, hardware context management, audio decoding, and worker loop logic.",
+      "impact": "High cognitive load for maintainers, difficult to navigate, mixes threading, FFmpeg interop, audio/video decoding, and state management in one file.",
+      "suggested_fix": "Split into focused modules: playback_controller.rs, decode_pipeline.rs, decoder_session.rs, audio.rs, hardware_context.rs. Each should handle one concern."
+    },
+    {
+      "severity": "Medium",
+      "category": "Performance",
+      "file": "src/gui/gallery/decode_pipeline/mod.rs",
+      "line": 632,
+      "location": "begin_audio_preload()",
+      "issue": "Audio is fully decoded into memory (Arc<Vec<i16>>) when the video is opened, regardless of whether it will be played.",
+      "impact": "For long videos (e.g., 1 hour at 48kHz stereo 16-bit), audio buffer could consume ~345MB of memory. This contributes to the user-reported memory issues.",
+      "suggested_fix": "Consider lazy loading or streaming audio decode on demand. For preview/playback, decode only the visible segment. Alternatively, add a size cap and fallback to on-demand decode."
+    },
+    {
+      "severity": "Medium",
+      "category": "Performance",
+      "file": "src/gui/gallery/decode_pipeline/mod.rs",
+      "line": 1036,
+      "location": "send_playback_frame() spin loop",
+      "issue": "When frame channel is full, the decoder worker spins with thread::sleep(Duration::from_millis(1)) until space is available.",
+      "issue_detail": "Lines 1036-1058: The loop continuously retries try_send with 1ms sleep, which is a busy-wait pattern that can waste CPU cycles.",
+      "impact": "Consumer (UI thread) falling behind causes the decoder thread to burn CPU in a spin loop. This contributes to the user-reported CPU issues.",
+      "suggested_fix": "Use a blocking send or proper condition variable wait instead of polling. The bounded channel is good for backpressure, but the spin-wait defeats the purpose."
+    },
+    {
+      "severity": "Medium",
+      "category": "Performance",
+      "file": "src/gui/gallery/decode_pipeline/mod.rs",
+      "line": 63,
+      "location": "SharedPlaybackState::frame_queue Mutex<VecDeque<TimedFrame>>",
+      "issue": "Frame queue uses a Mutex-protected VecDeque, which is accessed frequently during playback (take_playback_frame, poll, playback position updates).",
+      "impact": "High-frequency Mutex acquisition can cause contention between the UI thread (consumer) and decoder thread (producer). Each frame display involves multiple lock/unlock cycles.",
+      "suggested_fix": "Consider using a lock-free queue (crossbeam queue) or reducing lock scope by batching operations. The current PLAYBACK_QUEUE_DEPTH=20 is reasonable but the Mutex pattern is suboptimal."
+    },
+    {
+      "severity": "Medium",
+      "category": "Performance",
+      "file": "src/gui/gallery/decode_pipeline/frame_pool.rs",
+      "line": 4,
+      "location": "FRAME_POOL_SIZE constant",
+      "issue": "Frame pool size is fixed at 32 buffers, but there's no hard limit - if pool is exhausted, new buffers are allocated without bound.",
+      "impact": "Under memory pressure or if buffers aren't returned promptly, memory can grow unbounded. Each 1080p RGBA buffer is ~8MB, so 32 buffers = 256MB baseline.",
+      "suggested_fix": "Add a hard cap on total_created and emit warnings when exceeded. Consider a smaller default (16) with dynamic expansion based on actual usage."
+    },
+    {
+      "severity": "Medium",
+      "category": "Performance",
+      "file": "src/gui/gallery.rs",
+      "line": 438,
+      "location": "ThumbnailStrip::new()",
+      "issue": "ThumbnailStrip holds THUMBNAIL_STRIP_COUNT=20 decoded RGBA images in memory at 160px width.",
+      "impact": "For a 2-hour video with 160px thumbnails, this could be ~20 * 160*90*4 = ~1.1MB. Not huge, but adds up if multiple editors are open.",
+      "suggested_fix": "Consider lazy loading of thumbnails or storing as JPEG-compressed data. Current design is acceptable for single-video editing but should be documented."
+    },
+    {
+      "severity": "Low",
+      "category": "Quality",
+      "file": "src/gui/gallery/decode_pipeline/mod.rs",
+      "line": 56,
+      "location": "Multiple Mutex<Option<JoinHandle<()>>> fields",
+      "issue": "audio_stream_thread, audio_playback_thread, audio_preload_thread are each wrapped in Mutex<Option<JoinHandle>>. These are only modified during start/stop, not the hot path.",
+      "impact": "Over-engineering for thread handles. Could use simpler Option<JoinHandle> with proper Drop implementation, or even a single thread manager.",
+      "suggested_fix": "Consider consolidating audio thread management into a single AudioThreadManager struct. The Mutex overhead is minor but adds complexity."
+    },
+    {
+      "severity": "Low",
+      "category": "Quality",
+      "file": "src/gui/manager.rs",
+      "line": 157,
+      "location": "send_gui_message() retry loop",
+      "issue": "Uses .expect() in retry loop: tx.send(msg.take().expect(\"GUI message missing during retry\")).",
+      "impact": "If the retry logic has a bug, this would panic. The retry loop has 50 iterations which should be sufficient.",
+      "suggested_fix": "Replace with proper error handling. If message is None (already taken), break from the loop instead of panicking."
+    },
+    {
+      "severity": "Low",
+      "category": "Quality",
+      "file": "src/gui/gallery/decode_pipeline/frame_pool.rs",
+      "line": 125,
+      "location": "PooledRgbaImage::deref()",
+      "issue": "Uses .expect(\"PooledRgbaImage already consumed\") which can panic.",
+      "impact": "If PooledRgbaImage is used after into_inner() or drop, this will panic. The current design prevents this, but it's a potential footgun.",
+      "suggested_fix": "Consider returning Option<&image::RgbaImage> instead of panicking. Document the consume-once semantics clearly."
+    },
+    {
+      "severity": "Low",
+      "category": "Performance",
+      "file": "src/gui/gallery.rs",
+      "line": 590,
+      "location": "schedule_thumbnail_generation()",
+      "issue": "Spawns a new thread for each thumbnail generation without a thread pool.",
+      "impact": "For large clip collections, this could spawn many threads simultaneously. The thumbnails_generating HashSet provides some limiting.",
+      "suggested_fix": "Consider using a thread pool (rayon or dedicated pool) for thumbnail generation to limit concurrent work."
+    },
+    {
+      "severity": "Low",
+      "category": "Performance",
+      "file": "src/gui/gallery.rs",
+      "line": 378,
+      "location": "scan_videos()",
+      "issue": "Uses rayon parallel iterator for video scanning, which is good, but clones the entire VideoEntry when grouping.",
+      "impact": "Minor - video entries are small structs. The parallel iteration benefit outweighs the clone cost.",
+      "suggested_fix": "No change needed - current design is appropriate. Document that scan is parallel for performance."
+    },
+    {
+      "severity": "Info",
+      "category": "Architecture",
+      "file": "src/gui/gallery/decode_pipeline/mod.rs",
+      "line": 27,
+      "location": "unsafe impl Send for DecoderHardwareContext",
+      "issue": "Manual Send implementation for FFmpeg hardware context wrapper.",
+      "impact": "Required for sending D3D11VA context across threads. The safety invariant is that the context is only used on one thread at a time.",
+      "suggested_fix": "None - this is correct. The context is created once and passed to the decoder thread. Document the thread-safety invariant."
+    },
+    {
+      "severity": "Info",
+      "category": "Architecture",
+      "file": "src/gui/gallery/decode_pipeline/mod.rs",
+      "line": 1373,
+      "location": "select_decoder_format()",
+      "issue": "unsafe extern \"C\" function for FFmpeg format selection callback. Properly checks for D3D11 format before falling back.",
+      "impact": "Correct implementation of FFmpeg callback. Falls back gracefully if D3D11VA is unavailable.",
+      "suggested_fix": "None - this is the correct pattern for FFmpeg hardware decode selection."
+    },
+    {
+      "severity": "Info",
+      "category": "Architecture",
+      "file": "src/gui/manager.rs",
+      "line": 428,
+      "location": "request_repaint_after() pattern",
+      "issue": "Uses conditional repaint timing: immediate when windows open, 100ms when idle. This is the correct egui pattern.",
+      "impact": "Prevents unnecessary CPU usage when GUI is idle. The 100ms idle interval is reasonable.",
+      "suggested_fix": "None - this is the recommended pattern for egui applications."
+    },
+    {
+      "severity": "Info",
+      "category": "Architecture",
+      "file": "src/gui/gallery.rs",
+      "line": 983,
+      "location": "should_repaint() logic",
+      "issue": "Properly limits repaints to when there's actual activity (playing, exporting, thumbnails generating, delete hold).",
+      "impact": "Good pattern that prevents unnecessary repaints. The dynamic repaint interval based on playback FPS is well-designed.",
+      "suggested_fix": "None - this is correct. Consider adding a constant for the 80ms default."
+    },
+    {
+      "severity": "Info",
+      "category": "Architecture",
+      "file": "src/gui/gallery/decode_pipeline/mod.rs",
+      "line": 510,
+      "location": "take_playback_frame() frame dropping logic",
+      "issue": "Properly drops stale frames when the playback queue falls behind, with logging at specific thresholds.",
+      "impact": "Prevents memory growth when decoder outpaces display. The empty_polls warning at 60/180 polls helps diagnose issues.",
+      "suggested_fix": "None - this is a good defensive pattern. The drop_bursts tracking is useful for debugging."
+    },
+    {
+      "severity": "Info",
+      "category": "Architecture",
+      "file": "src/gui/gallery/decode_pipeline/frame_pool.rs",
+      "line": 115,
+      "location": "PooledRgbaImage Drop implementation",
+      "issue": "Returns the underlying buffer to the pool on drop, only if size matches expected buffer_size().",
+      "impact": "Prevents returning incorrectly-sized buffers to the pool (e.g., after resize). Good defensive programming.",
+      "suggested_fix": "None - this is correct. Consider logging when buffers are discarded due to size mismatch."
+    },
+    {
+      "severity": "Info",
+      "category": "Performance",
+      "file": "src/gui/settings.rs",
+      "line": 583,
+      "location": "request_repaint_after(33ms) with level_monitor",
+      "issue": "Settings window requests repaint every 33ms when audio level monitor is active for smooth meter animation.",
+      "impact": "Intentional for audio meter animation. The 33ms (~30fps) is appropriate for visual feedback.",
+      "suggested_fix": "None - this is the correct pattern for live UI updates. Could make the interval a named constant."
+    }
+  ],
+  "positive_patterns": [
+    {
+      "description": "Frame pool pattern prevents unbounded memory growth by recycling buffers",
+      "files": ["gallery/decode_pipeline/frame_pool.rs"]
+    },
+    {
+      "description": "Conditional repaint timing prevents unnecessary CPU usage when idle",
+      "files": ["manager.rs", "gallery.rs", "settings.rs"]
+    },
+    {
+      "description": "All threads are properly joined in Drop implementations",
+      "files": ["gallery/decode_pipeline/mod.rs"]
+    },
+    {
+      "description": "Hardware decode with proper fallback to software",
+      "files": ["gallery/decode_pipeline/mod.rs:1336-1344"]
+    },
+    {
+      "description": "Keyframe cache prevents redundant scans on repeated video opens",
+      "files": ["gallery/decode_pipeline/mod.rs:1284-1312"]
+    },
+    {
+      "description": "Proper error handling with error channel from decoder to UI",
+      "files": ["gallery/decode_pipeline/mod.rs"]
+    }
+  ],
+  "areas_of_concern": [
+    {
+      "description": "Memory usage during audio decode",
+      "status": "Medium - Full audio track decoded into memory at open time",
+      "files": ["gallery/decode_pipeline/mod.rs:632-655"]
+    },
+    {
+      "description": "Decoder spin-loop when consumer falls behind",
+      "status": "Medium - Uses 1ms sleep in busy-wait pattern",
+      "files": ["gallery/decode_pipeline/mod.rs:1036-1058"]
+    },
+    {
+      "description": "File size and complexity of decode_pipeline",
+      "status": "High - Should be split into multiple modules",
+      "files": ["gallery/decode_pipeline/mod.rs"]
+    },
+    {
+      "description": "Frame queue Mutex contention",
+      "status": "Low - Acceptable but could be improved with lock-free queue",
+      "files": ["gallery/decode_pipeline/mod.rs:60-66"]
+    }
+  ],
+  "user_reported_issues_analysis": {
+    "cpu_usage": {
+      "potential_causes": [
+        "Decoder spin-loop with 1ms sleep when frame channel is full",
+        "Multiple Mutex acquisitions per frame during playback",
+        "Settings window repaints every 33ms with active audio monitor"
+      ],
+      "recommendation": "Focus on decode_pipeline/mod.rs lines 1036-1058 (spin loop) and 510-562 (take_playback_frame with multiple locks). Consider blocking channel send instead of spin-wait."
+    },
+    "memory_usage": {
+      "potential_causes": [
+        "Full audio track decoded into memory at open time (can be 300+ MB for long videos)",
+        "Frame pool with 32 buffers (~256MB for 1080p)",
+        "Thumbnail strip holding 20 decoded frames"
+      ],
+      "recommendation": "Implement lazy/streaming audio decode. Consider reducing FRAME_POOL_SIZE or making it dynamic. Thumbnail strip memory is acceptable for its use case."
+    }
+  }
+}
