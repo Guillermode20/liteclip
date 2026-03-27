@@ -1,0 +1,47 @@
+{
+  "milestone": "core-dormant",
+  "round": 1,
+  "status": "blocked",
+  "assertionsSummary": {
+    "total": 8,
+    "passed": 0,
+    "failed": 0,
+    "blocked": 8
+  },
+  "passedAssertions": [],
+  "failedAssertions": [],
+  "blockedAssertions": [
+    { "id": "VAL-GUI-001", "blockedBy": "Native Windows GUI surface requires manual Task Manager CPU measurement - no automated tool available" },
+    { "id": "VAL-GUI-002", "blockedBy": "Native Windows GUI surface requires manual video recording timing for toast appearance - no automated tool available" },
+    { "id": "VAL-GUI-003", "blockedBy": "Native Windows GUI surface requires manual stopwatch timing for settings window latency - no automated tool available" },
+    { "id": "VAL-GUI-004", "blockedBy": "Native Windows GUI surface requires manual stopwatch timing for gallery window latency - no automated tool available" },
+    { "id": "VAL-GUI-005", "blockedBy": "Native Windows GUI surface requires manual Task Manager observation for dormancy activation timing - no automated tool available" },
+    { "id": "VAL-GUI-006", "blockedBy": "Native Windows GUI surface requires manual debug log timing analysis for wake-on-message latency - no automated tool available" },
+    { "id": "VAL-GUI-007", "blockedBy": "Native Windows GUI surface requires manual Task Manager memory observation over 5 minutes - no automated tool available" },
+    { "id": "VAL-GUI-008", "blockedBy": "Native Windows GUI surface requires manual stopwatch/video timing for hotkey response - no automated tool available" }
+  ],
+  "appliedUpdates": [],
+  "previousRound": null,
+  "automatedValidationStatus": {
+    "testsPassed": 89,
+    "unitTests": {
+      "test_idle_detection_logic": "passed",
+      "test_conditional_repaint_logic": "passed",
+      "test_dormancy_activation_timing": "passed",
+      "test_grace_period_bounds": "passed",
+      "test_event_loop_proxy_field_exists": "passed",
+      "test_wake_event_structure": "passed"
+    },
+    "lintPassed": true,
+    "typecheckPassed": true,
+    "scrutinyReviewPassed": true
+  },
+  "testingSurfaceAnalysis": {
+    "applicationType": "Native Windows desktop application (egui/winit)",
+    "automatedToolsAvailable": ["agent-browser (web)", "tuistory (terminal/TUI)"],
+    "surfaceCompatibility": "incompatible - neither tool works for native Windows GUI",
+    "requiredManualTools": ["Windows Task Manager", "Video recording (OBS/Game Bar)", "Stopwatch/Timer", "FFprobe", "Debug logs"],
+    "maxConcurrentValidators": 1
+  },
+  "notes": "All assertions in validation-contract.md specify Tool: manual. The native Windows GUI surface cannot be tested with available automated tools (agent-browser, tuistory). This is a known constraint documented in .factory/library/user-testing.md. Manual user testing by a human is required for all VAL-GUI assertions."
+}
