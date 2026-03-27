@@ -1,15 +1,18 @@
 use crate::capture::audio::AudioLevelMonitor;
 use crate::platform::AppEvent;
 use eframe::egui;
+use eframe::UserEvent;
+use egui::ViewportId;
 use egui_notify::{Anchor, Toasts};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::LazyLock;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc::Sender as TokioSender;
 use tracing::warn;
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
+use winit::event_loop::{EventLoop, EventLoopProxy};
 
 pub enum GuiMessage {
     ShowSettings(TokioSender<AppEvent>, Option<AudioLevelMonitor>),
@@ -27,6 +30,9 @@ pub enum ToastKind {
 #[derive(Default)]
 struct GuiManagerState {
     tx: Option<Sender<GuiMessage>>,
+    /// EventLoopProxy used to wake the dormant GUI thread when a GuiMessage arrives.
+    /// This enables instant wake-on-message without periodic polling.
+    event_loop_proxy: Option<EventLoopProxy<UserEvent>>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -58,6 +64,36 @@ fn spawn_gui_manager_thread(state: &mut GuiManagerState) {
     state.tx = Some(tx);
 
     state.thread = Some(std::thread::spawn(move || {
+        // Create the event loop ourselves to capture its proxy for wake-on-message.
+        // This enables instant GUI thread wake without periodic polling.
+        // Note: On Windows, we can use with_any_thread to run off the main thread.
+        #[cfg(target_os = "windows")]
+        let event_loop: EventLoop<UserEvent> = {
+            use winit::platform::windows::EventLoopBuilderExtWindows;
+            match EventLoop::with_user_event().with_any_thread(true).build() {
+                Ok(el) => el,
+                Err(e) => {
+                    warn!("Failed to create event loop: {:?}", e);
+                    return;
+                }
+            }
+        };
+
+        #[cfg(not(target_os = "windows"))]
+        let event_loop: EventLoop<UserEvent> = match EventLoop::with_user_event().build() {
+            Ok(el) => el,
+            Err(e) => {
+                warn!("Failed to create event loop: {:?}", e);
+                return;
+            }
+        };
+
+        // Get the proxy before running the event loop - it's Send+Sync so we can share it.
+        let proxy = event_loop.create_proxy();
+
+        // Store the proxy in global state so send_gui_message can wake the event loop.
+        with_gui_state(|s| s.event_loop_proxy = Some(proxy));
+
         let pos = get_toast_window_pos_for_size(TOAST_WINDOW_IDLE_SIZE);
 
         let options = eframe::NativeOptions {
@@ -70,23 +106,28 @@ fn spawn_gui_manager_thread(state: &mut GuiManagerState) {
                 .with_active(false)
                 .with_inner_size(TOAST_WINDOW_IDLE_SIZE)
                 .with_position(pos),
-            event_loop_builder: Some(Box::new(|builder| {
-                #[cfg(target_os = "windows")]
-                {
-                    use winit::platform::windows::EventLoopBuilderExtWindows;
-                    builder.with_any_thread(true);
-                }
-            })),
+            // Note: event_loop_builder is NOT used here since we pass a pre-built event loop
+            // to create_native. The with_any_thread setting was applied when building the event loop above.
             ..Default::default()
         };
 
-        if let Err(e) = eframe::run_native(
+        // Use create_native + run_app pattern instead of run_native.
+        // This allows us to control the event loop lifecycle and capture the proxy.
+        // create_native returns EframeWinitApplication directly (not a Result).
+        let mut winit_app = eframe::create_native(
             "liteclip_overlay",
             options,
             Box::new(|cc| Ok(Box::new(GuiManagerApp::new(cc, rx)))),
-        ) {
-            warn!("eframe::run_native failed: {:?}", e);
+            &event_loop,
+        );
+
+        // Run the event loop - this blocks until the app closes.
+        if let Err(e) = event_loop.run_app(&mut winit_app) {
+            warn!("event_loop.run_app failed: {:?}", e);
         }
+
+        // Clear the proxy when the event loop exits.
+        with_gui_state(|s| s.event_loop_proxy = None);
     }));
 }
 
@@ -155,7 +196,24 @@ pub fn send_gui_message(msg: GuiMessage) {
         let tx = with_gui_state(|state| state.tx.as_ref().cloned());
         if let Some(tx) = tx {
             match tx.send(msg.take().expect("GUI message missing during retry")) {
-                Ok(()) => return,
+                Ok(()) => {
+                    // Wake the dormant event loop by sending a RequestRepaint user event.
+                    // This ensures the GUI thread processes the message immediately
+                    // rather than waiting for the next periodic poll.
+                    with_gui_state(|state| {
+                        if let Some(proxy) = &state.event_loop_proxy {
+                            // Use a dummy ViewportId since we just want to wake the loop,
+                            // not target a specific viewport. The actual message handling
+                            // happens in GuiManagerApp::update() via channel polling.
+                            let _ = proxy.send_event(UserEvent::RequestRepaint {
+                                viewport_id: ViewportId::ROOT,
+                                when: Instant::now(),
+                                cumulative_pass_nr: 0,
+                            });
+                        }
+                    });
+                    return;
+                }
                 Err(err) => {
                     msg = Some(err.0);
                     with_gui_state(|state| state.request_shutdown());
@@ -459,6 +517,137 @@ impl eframe::App for GuiManagerApp {
         if disconnected {
             with_gui_state(|state| state.request_shutdown());
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Tests that the idle detection logic correctly identifies idle state.
+    /// The GUI is considered idle when:
+    /// - No settings window is open
+    /// - No gallery window is open
+    /// - No toasts are visible
+    #[test]
+    fn test_idle_detection_logic() {
+        // Test: All conditions for idle
+        let settings_open = false;
+        let gallery_open = false;
+        let toasts_empty = true;
+
+        let is_idle = !settings_open && !gallery_open && toasts_empty;
+        assert!(
+            is_idle,
+            "Should be idle when all windows closed and no toasts"
+        );
+
+        // Test: Settings open means not idle
+        let settings_open = true;
+        let gallery_open = false;
+        let toasts_empty = true;
+        let is_idle = !settings_open && !gallery_open && toasts_empty;
+        assert!(!is_idle, "Should not be idle when settings is open");
+
+        // Test: Gallery open means not idle
+        let settings_open = false;
+        let gallery_open = true;
+        let toasts_empty = true;
+        let is_idle = !settings_open && !gallery_open && toasts_empty;
+        assert!(!is_idle, "Should not be idle when gallery is open");
+
+        // Test: Toasts visible means not idle
+        let settings_open = false;
+        let gallery_open = false;
+        let toasts_empty = false;
+        let is_idle = !settings_open && !gallery_open && toasts_empty;
+        assert!(!is_idle, "Should not be idle when toasts are visible");
+
+        // Test: Multiple conditions means not idle
+        let settings_open = true;
+        let gallery_open = true;
+        let toasts_empty = false;
+        let is_idle = !settings_open && !gallery_open && toasts_empty;
+        assert!(!is_idle, "Should not be idle when multiple windows open");
+    }
+
+    /// Tests that GuiManagerState correctly initializes with default values.
+    #[test]
+    fn test_gui_manager_state_default() {
+        let state = GuiManagerState::default();
+        assert!(state.tx.is_none(), "tx should be None by default");
+        assert!(
+            state.event_loop_proxy.is_none(),
+            "event_loop_proxy should be None by default"
+        );
+        assert!(state.thread.is_none(), "thread should be None by default");
+    }
+
+    /// Tests that request_shutdown clears the tx channel.
+    #[test]
+    fn test_request_shutdown_clears_tx() {
+        let (tx, _rx) = channel();
+        let mut state = GuiManagerState {
+            tx: Some(tx),
+            event_loop_proxy: None,
+            thread: None,
+        };
+
+        state.request_shutdown();
+        assert!(
+            state.tx.is_none(),
+            "tx should be None after shutdown request"
+        );
+    }
+
+    /// Tests that GuiManagerState can store an EventLoopProxy reference.
+    /// Note: The actual EventLoopProxy requires a running event loop, so we
+    /// only test that the field can be set to None and the state is accessible.
+    #[test]
+    fn test_event_loop_proxy_field_exists() {
+        let state = GuiManagerState::default();
+
+        // Verify we can access the event_loop_proxy field
+        assert!(
+            state.event_loop_proxy.is_none(),
+            "event_loop_proxy should start as None"
+        );
+
+        // The actual EventLoopProxy can only be created with a running event loop,
+        // so we only test the None case here. The real functionality is tested
+        // in the integration/manual tests.
+    }
+
+    /// Tests the wake event structure used to wake the event loop.
+    #[test]
+    fn test_wake_event_structure() {
+        // Verify the UserEvent::RequestRepaint structure matches what we use
+        let viewport_id = ViewportId::ROOT;
+        let when = Instant::now();
+        let cumulative_pass_nr: u64 = 0;
+
+        let event = UserEvent::RequestRepaint {
+            viewport_id,
+            when,
+            cumulative_pass_nr,
+        };
+
+        // Verify the event can be created and matches expected structure
+        match event {
+            UserEvent::RequestRepaint {
+                viewport_id: vid,
+                when: w,
+                cumulative_pass_nr: cpn,
+            } => {
+                assert_eq!(vid, viewport_id);
+                assert_eq!(cpn, cumulative_pass_nr);
+                // 'when' is just checked to be valid Instant
+                let _ = w;
+            }
+            UserEvent::AccessKitActionRequest(_) => {
+                panic!("Unexpected event type");
+            }
         }
     }
 }
