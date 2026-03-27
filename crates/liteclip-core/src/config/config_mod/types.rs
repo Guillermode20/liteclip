@@ -29,6 +29,9 @@ use super::functions::{
 #[serde(rename_all = "snake_case")]
 pub enum EncoderType {
     /// Automatically select the best available encoder.
+    ///
+    /// Priority order: NVENC → AMF → QSV → Software (libx265).
+    /// Software fallback ensures the app is usable on any system.
     Auto,
     /// NVIDIA NVENC (requires NVIDIA GPU).
     ///
@@ -40,6 +43,11 @@ pub enum EncoderType {
     ///
     /// Encoding implementation: `src/encode/ffmpeg/qsv.rs` (QSV).
     Qsv,
+    /// Software encoder (libx265 HEVC, works on any CPU).
+    ///
+    /// Encoding implementation: `src/encode/ffmpeg/software.rs` (CPU path).
+    /// This encoder uses CPU-only encoding with no GPU frame transport.
+    Software,
 }
 
 /// High-level quality/speed tradeoff for encoder options.

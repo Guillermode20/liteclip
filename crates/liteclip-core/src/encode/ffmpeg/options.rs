@@ -16,6 +16,7 @@ impl FfmpegEncoder {
             ResolvedEncoderType::Nvenc => self.apply_nvenc_options(options, bitrate),
             ResolvedEncoderType::Amf => self.apply_amf_options(options, bitrate),
             ResolvedEncoderType::Qsv => self.apply_qsv_options(options, bitrate),
+            ResolvedEncoderType::Software => self.apply_software_options(options),
         }
 
         Ok(())
@@ -26,6 +27,7 @@ impl FfmpegEncoder {
             ResolvedEncoderType::Nvenc | ResolvedEncoderType::Amf | ResolvedEncoderType::Qsv => {
                 Pixel::NV12
             }
+            ResolvedEncoderType::Software => Pixel::YUV420P,
         }
     }
 
@@ -86,6 +88,29 @@ impl FfmpegEncoder {
         match self.config.rate_control {
             RateControl::Cbr => "cbr",
             RateControl::Vbr | RateControl::Cq => "vbr_latency",
+        }
+    }
+
+    /// libx265 (HEVC software encoder) options.
+    /// Uses ultrafast preset for realtime recording with zerolatency tuning.
+    pub(super) fn apply_software_options(&self, options: &mut ffmpeg_next::Dictionary<'_>) {
+        // Use ultrafast preset for realtime performance
+        options.set("preset", self.software_preset());
+        // Zero latency tuning for realtime encoding
+        options.set("tune", "zerolatency");
+        // No B-frames for simpler playback compatibility
+        options.set("bf", "0");
+        // CRF/CQ mode if rate_control is Cq, otherwise bitrate-based
+        if matches!(self.config.rate_control, RateControl::Cq) {
+            options.set("crf", &self.cq_value().to_string());
+        }
+    }
+
+    pub(super) fn software_preset(&self) -> &'static str {
+        match self.config.quality_preset {
+            QualityPreset::Performance => "ultrafast",
+            QualityPreset::Balanced => "superfast",
+            QualityPreset::Quality => "veryfast",
         }
     }
 }

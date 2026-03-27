@@ -100,6 +100,8 @@ pub enum ResolvedEncoderType {
     Nvenc,
     Amf,
     Qsv,
+    /// Software encoder (libx265 HEVC, CPU-only).
+    Software,
 }
 
 impl ResolvedEncoderType {
@@ -109,6 +111,7 @@ impl ResolvedEncoderType {
             ResolvedEncoderType::Nvenc => "hevc_nvenc",
             ResolvedEncoderType::Amf => "hevc_amf",
             ResolvedEncoderType::Qsv => "hevc_qsv",
+            ResolvedEncoderType::Software => "libx265",
         }
     }
 }
@@ -119,6 +122,7 @@ impl From<ResolvedEncoderType> for crate::config::EncoderType {
             ResolvedEncoderType::Nvenc => Self::Nvenc,
             ResolvedEncoderType::Amf => Self::Amf,
             ResolvedEncoderType::Qsv => Self::Qsv,
+            ResolvedEncoderType::Software => Self::Software,
         }
     }
 }
@@ -162,13 +166,18 @@ impl ResolvedEncoderConfig {
         self.keyframe_interval_secs * self.framerate
     }
 
+    /// Returns true if the encoder supports GPU frame transport (NV12 textures).
+    /// Software encoder returns false as it requires CPU BGRA frames.
     pub fn supports_gpu_frame_transport(&self) -> bool {
-        true
+        !matches!(self.encoder_type, ResolvedEncoderType::Software)
     }
 
     #[cfg(windows)]
     pub fn gpu_texture_format(&self) -> Option<GpuTextureFormat> {
-        Some(GpuTextureFormat::Nv12)
+        match self.encoder_type {
+            ResolvedEncoderType::Software => None,
+            _ => Some(GpuTextureFormat::Nv12),
+        }
     }
 }
 
@@ -254,7 +263,7 @@ impl EncoderConfig {
             crate::config::EncoderType::Nvenc
             | crate::config::EncoderType::Amf
             | crate::config::EncoderType::Qsv => Some(GpuTextureFormat::Nv12),
-            crate::config::EncoderType::Auto => None,
+            crate::config::EncoderType::Software | crate::config::EncoderType::Auto => None,
         }
     }
 }

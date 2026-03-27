@@ -42,7 +42,7 @@ pub mod software;
 
 use self::context::D3d11HardwareContext;
 use super::{EncodedPacket, Encoder, ResolvedEncoderConfig, ResolvedEncoderType, StreamType};
-use crate::encode::EncodeResult;
+use crate::encode::{EncodeError, EncodeResult};
 use bytes::Bytes;
 use crossbeam::channel::{bounded, Receiver, Sender};
 use ffmpeg::color::{Primaries, Range, Space, TransferCharacteristic};
@@ -168,6 +168,10 @@ impl FfmpegEncoder {
             }
             ResolvedEncoderType::Amf => self.init_amf_hardware_encoder(gpu_frame, width, height),
             ResolvedEncoderType::Qsv => self.init_qsv_hardware_encoder(gpu_frame, width, height),
+            // Software encoder doesn't use GPU frames - falls back to CPU path
+            ResolvedEncoderType::Software => Err(EncodeError::msg(
+                "Software encoder cannot use GPU frame transport",
+            )),
         }
     }
 
@@ -182,6 +186,10 @@ impl FfmpegEncoder {
             ResolvedEncoderType::Nvenc => self.encode_nvenc_gpu_frame(frame, gpu_frame, pts, gop),
             ResolvedEncoderType::Amf => self.encode_amf_gpu_frame(frame, gpu_frame, pts, gop),
             ResolvedEncoderType::Qsv => self.encode_qsv_gpu_frame(frame, gpu_frame, pts, gop),
+            // Software encoder should never reach this path - CPU frames only
+            ResolvedEncoderType::Software => Err(EncodeError::msg(
+                "Software encoder cannot encode GPU frames",
+            )),
         }
     }
 

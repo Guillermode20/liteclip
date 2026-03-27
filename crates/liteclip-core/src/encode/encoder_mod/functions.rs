@@ -110,17 +110,26 @@ fn resolve_encoder_config(config: &EncoderConfig) -> EncodeResult<ResolvedEncode
     if resolved.encoder_type == crate::config::EncoderType::Auto {
         let detected_encoder = detect_hardware_encoder();
         if matches!(detected_encoder, HardwareEncoder::None) {
-            return Err(EncodeError::NoHardwareForAuto);
+            // Fallback to software encoder when no hardware encoder is available.
+            // This ensures the app is usable on any system, even without NVENC/AMF/QSV.
+            info!("No hardware encoder detected, falling back to software encoder (libx265)");
+            resolved.encoder_type = crate::config::EncoderType::Software;
+        } else {
+            apply_auto_encoder_selection(&mut resolved, detected_encoder);
+            info!("Auto-detected encoder: {:?}", resolved.encoder_type);
         }
-        apply_auto_encoder_selection(&mut resolved, detected_encoder);
-        info!("Auto-detected encoder: {:?}", resolved.encoder_type);
     }
 
     let ty = match resolved.encoder_type {
         crate::config::EncoderType::Nvenc => ResolvedEncoderType::Nvenc,
         crate::config::EncoderType::Amf => ResolvedEncoderType::Amf,
         crate::config::EncoderType::Qsv => ResolvedEncoderType::Qsv,
-        crate::config::EncoderType::Auto => return Err(EncodeError::NoHardwareForAuto),
+        crate::config::EncoderType::Software => ResolvedEncoderType::Software,
+        crate::config::EncoderType::Auto => {
+            // This should never happen after the Auto handling above,
+            // but provide a safe fallback anyway.
+            ResolvedEncoderType::Software
+        }
     };
 
     ensure_requested_encoder_available(ty)?;
@@ -528,5 +537,117 @@ impl From<HardwareEncoder> for crate::config::EncoderType {
             HardwareEncoder::Qsv => crate::config::EncoderType::Qsv,
             HardwareEncoder::None => crate::config::EncoderType::Auto,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::encode::EncoderConfig;
+
+    /// Tests that when Auto encoder is selected and no hardware encoder is available,
+    /// the system falls back to Software encoder instead of returning an error.
+    /// This ensures the app is usable on any system, even without NVENC/AMF/QSV.
+    #[test]
+    fn test_auto_encoder_fallback_to_software_when_no_hardware() {
+        // Create a config with Auto encoder type
+        let config = EncoderConfig::new(
+            25, // bitrate_mbps
+            60, // framerate
+            (1920, 1080),
+            crate::config::EncoderType::Auto,
+            2, // keyframe_interval_secs
+        );
+
+        // Check if hardware encoder is detected
+        let hw_encoder = detect_hardware_encoder();
+
+        // This should succeed - either using detected hardware encoder or falling back to Software
+        let result = resolve_effective_encoder_config(&config);
+
+        // Should NOT return NoHardwareForAuto error anymore
+        match result {
+            Ok(resolved) => {
+                // If hardware encoder was available, use it
+                // If not, fallback to Software
+                match hw_encoder {
+                    HardwareEncoder::None => {
+                        assert_eq!(
+                            resolved.encoder_type,
+                            ResolvedEncoderType::Software,
+                            "Auto encoder should fallback to Software when no hardware encoder available"
+                        );
+                    }
+                    HardwareEncoder::Nvenc => {
+                        assert_eq!(
+                            resolved.encoder_type,
+                            ResolvedEncoderType::Nvenc,
+                            "Auto encoder should use NVENC when available"
+                        );
+                    }
+                    HardwareEncoder::Amf => {
+                        assert_eq!(
+                            resolved.encoder_type,
+                            ResolvedEncoderType::Amf,
+                            "Auto encoder should use AMF when available"
+                        );
+                    }
+                    HardwareEncoder::Qsv => {
+                        assert_eq!(
+                            resolved.encoder_type,
+                            ResolvedEncoderType::Qsv,
+                            "Auto encoder should use QSV when available"
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                // Should not happen - even without hardware, we should fallback to Software
+                panic!("resolve_effective_encoder_config should not fail: {}", e);
+            }
+        }
+    }
+
+    /// Tests that explicitly selecting Software encoder works correctly.
+    #[test]
+    fn test_explicit_software_encoder_selection() {
+        let config = EncoderConfig::new(
+            25,
+            60,
+            (1920, 1080),
+            crate::config::EncoderType::Software,
+            2,
+        );
+
+        let result = resolve_effective_encoder_config(&config);
+        assert!(
+            result.is_ok(),
+            "Explicit Software encoder selection should work"
+        );
+
+        let resolved = result.unwrap();
+        assert_eq!(
+            resolved.encoder_type,
+            ResolvedEncoderType::Software,
+            "Resolved type should be Software"
+        );
+        assert!(
+            !resolved.supports_gpu_frame_transport(),
+            "Software encoder should not support GPU frame transport"
+        );
+        assert_eq!(
+            resolved.ffmpeg_codec_name(),
+            "libx265",
+            "Software encoder should use libx265 codec"
+        );
+    }
+
+    /// Tests that ResolvedEncoderType::Software codec name is libx265.
+    #[test]
+    fn test_software_encoder_codec_name() {
+        assert_eq!(
+            ResolvedEncoderType::Software.ffmpeg_hevc_codec_name(),
+            "libx265"
+        );
     }
 }

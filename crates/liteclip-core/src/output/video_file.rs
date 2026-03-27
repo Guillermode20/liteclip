@@ -1346,7 +1346,8 @@ fn ordered_hardware_encoder_preferences(preferred: EncoderType) -> Vec<ExportVid
         EncoderType::Nvenc => order.push(ExportVideoEncoder::HevcNvenc),
         EncoderType::Amf => order.push(ExportVideoEncoder::HevcAmf),
         EncoderType::Qsv => order.push(ExportVideoEncoder::HevcQsv),
-        EncoderType::Auto => {}
+        // Software and Auto don't prefer any specific hardware encoder
+        EncoderType::Software | EncoderType::Auto => {}
     }
 
     for encoder in [
