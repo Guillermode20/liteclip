@@ -1,0 +1,359 @@
+{
+  "reviewType": "performance",
+  "reviewer": "cross-cut-reviewer",
+  "timestamp": "2026-03-27T19:00:00Z",
+  "findings": [
+    {
+      "id": "PERF-001",
+      "severity": "Medium",
+      "category": "Memory",
+      "module": "gui/gallery/decode_pipeline",
+      "file": "src/gui/gallery/decode_pipeline/mod.rs",
+      "location": "lines 23-24, frame_pool.rs:15-37",
+      "description": "Frame pool allocates fixed-size RGBA buffers (FRAME_POOL_SIZE=24, each ~640x360x4 bytes ~900KB). With PLAYBACK_QUEUE_DEPTH=20, total memory could be ~40MB per video player. This is user-reported CPU/memory area.",
+      "suggestedFix": "Consider reducing FRAME_POOL_SIZE for lower-resolution previews or using a shared global pool across all PlaybackController instances. Frame pool already has trim_to() method that could be called more aggressively.",
+      "impact": "Each video opened in editor allocates ~24-40MB for frame buffers. Opening multiple videos in succession could accumulate memory."
+    },
+    {
+      "id": "PERF-002",
+      "severity": "Medium",
+      "category": "CPU",
+      "module": "gui/gallery/decode_pipeline",
+      "file": "src/gui/gallery/decode_pipeline/mod.rs",
+      "location": "lines 532-561, poll() method",
+      "description": "PlaybackController.poll() acquires multiple Mutex locks in a loop: frame_queue (line 533), latest_frame (line 553), current_time_secs (line 584), playing_since (line 588). These locks are acquired on every poll iteration which runs during playback.",
+      "suggestedFix": "Consider batching state updates to reduce lock acquisition frequency. Use lock-free patterns where possible (already using AtomicU64 for counters). The current implementation is functional but could cause minor contention during high-frequency polling.",
+      "impact": "Minor CPU overhead during video playback from repeated mutex acquisitions."
+    },
+    {
+      "id": "PERF-003",
+      "severity": "Medium",
+      "category": "Threading",
+      "module": "gui/gallery/decode_pipeline",
+      "file": "src/gui/gallery/decode_pipeline/mod.rs",
+      "location": "lines 191-207, PlaybackController::new",
+      "description": "Audio preload thread spawns for every video opened without reuse. Creates rodio OutputStream per editor session. Thread handles stored in Mutex<Option<JoinHandle>>.",
+      "suggestedFix": "Consider a shared audio output stream across all PlaybackController instances to avoid repeatedly initializing rodio. Audio preload could be deferred until playback starts rather than immediately on video open.",
+      "impact": "Opening videos in editor spawns 3+ threads per video (decoder worker, audio stream, audio preload, audio playback). Thread creation overhead and rodio initialization per video."
+    },
+    {
+      "id": "PERF-004",
+      "severity": "Low",
+      "category": "CPU",
+      "module": "gui/gallery",
+      "file": "src/gui/gallery.rs",
+      "location": "lines 571-587, check_for_new_thumbnails",
+      "description": "Thumbnail check polls every 3 seconds with filesystem checks for up to 3 videos. While throttled, could be optimized.",
+      "suggestedFix": "The 3-second throttle is reasonable. Consider using filesystem events (Windows Change Notifications) instead of polling for cache directory changes.",
+      "impact": "Minor CPU overhead from periodic filesystem polling."
+    },
+    {
+      "id": "PERF-005",
+      "severity": "Low",
+      "category": "Render",
+      "module": "gui/gallery/editor",
+      "file": "src/gui/gallery/editor.rs",
+      "location": "lines 132-133",
+      "description": "Export modal requests repaint every 16ms (~60fps) during export progress display. While this provides smooth progress animation, it's aggressive for a progress bar.",
+      "suggestedFix": "Consider reducing to 33ms (~30fps) for progress display, or only request repaint when progress value changes significantly (>1% delta).",
+      "impact": "Continuous repaint requests during export create unnecessary GPU work for progress bar animation."
+    },
+    {
+      "id": "PERF-006",
+      "severity": "Info",
+      "category": "Render",
+      "module": "gui/gallery",
+      "file": "src/gui/gallery.rs",
+      "location": "lines 975-990, should_repaint",
+      "description": "Repaint scheduling is well-designed with conditional logic: returns true only during playback, pending activity, exports, or thumbnail generation. Uses request_repaint_after with appropriate intervals (8-80ms).",
+      "suggestedFix": "No fix needed - this is a good pattern. The repaint_ms calculation (1000/fps) correctly adapts to video frame rate.",
+      "impact": "Correct implementation prevents unnecessary repaints when idle."
+    },
+    {
+      "id": "PERF-007",
+      "severity": "Medium",
+      "category": "Clone",
+      "module": "buffer/ring",
+      "file": "crates/liteclip-core/src/buffer/ring/spmc_ring.rs",
+      "location": "lines 834, 1099",
+      "description": "Bytes.clone() is used extensively for packet data in snapshot methods. This is documented as O(1) ref-count bump (Arc semantics), which is correct and efficient.",
+      "suggestedFix": "No fix needed - Bytes uses Arc internally so clone() is cheap. The comment at line 822-823 correctly documents this: 'Zero-copy clone: Bytes uses Arc internally'.",
+      "impact": "Correct zero-copy pattern - no memory impact from cloning packet data."
+    },
+    {
+      "id": "PERF-008",
+      "severity": "Medium",
+      "category": "Clone",
+      "module": "gui/gallery",
+      "file": "src/gui/gallery.rs",
+      "location": "lines 168-169, 1129, browser.rs:22",
+      "description": "VideoEntry.clone() used in multiple places (video metadata, filename, path). VideoEntry contains VideoFileMetadata which has nested fields. This is a deep clone of metadata.",
+      "suggestedFix": "Consider using Arc<VideoEntry> for shared video metadata across browser/editor. Editor state could hold Arc reference instead of owned VideoEntry.",
+      "impact": "Cloning VideoEntry with metadata when opening editor duplicates the metadata struct (~200 bytes per video)."
+    },
+    {
+      "id": "PERF-009",
+      "severity": "Low",
+      "category": "Allocation",
+      "module": "gui/gallery",
+      "file": "src/gui/gallery.rs",
+      "location": "lines 177-178, 345, 389, 411, 497",
+      "description": "Vec::new() used without capacity in multiple places where size could be estimated: cut_points (line 177), videos_by_game (line 345), grouped (line 411), cached thumbnails (line 497).",
+      "suggestedFix": "Use Vec::with_capacity() where approximate size is known: grouped could use videos_by_game.len() as initial capacity, cached could estimate based on existing thumbnails.",
+      "impact": "Minor allocation overhead from Vec reallocation as elements are added."
+    },
+    {
+      "id": "PERF-010",
+      "severity": "Medium",
+      "category": "Allocation",
+      "module": "output/mp4",
+      "file": "crates/liteclip-core/src/output/mp4.rs",
+      "location": "lines 774-776",
+      "description": "Three Vec allocations per audio chunk in mix_and_encode_audio: mixed_i32, mixed_i16, pcm_buffer. These are allocated inside the encoding loop.",
+      "suggestedFix": "Reuse buffers across chunks instead of allocating new Vec for each iteration. The function already computes chunk_samples which could be used to preallocate reusable buffers.",
+      "impact": "Memory allocation churn during audio encoding for long videos."
+    },
+    {
+      "id": "PERF-011",
+      "severity": "Info",
+      "category": "Allocation",
+      "module": "encode",
+      "file": "crates/liteclip-core/src/encode/encoder_mod/functions.rs",
+      "location": "lines 333, packet_batch",
+      "description": "Encoder thread uses Vec::with_capacity(256) for packet_batch and MAX_PACKET_BATCH_LEN=32 threshold for flushing. Good pattern with bounded batch size and capacity.",
+      "suggestedFix": "No fix needed - excellent pattern that prevents unbounded growth.",
+      "impact": "Correct implementation limits memory pressure in encoder hot path."
+    },
+    {
+      "id": "PERF-012",
+      "severity": "Info",
+      "category": "Allocation",
+      "module": "capture/audio/mixer",
+      "file": "crates/liteclip-core/src/capture/audio/mixer.rs",
+      "location": "lines 65-67, 118",
+      "description": "AudioMixer preallocates reusable buffers: system_decode_buf, mic_decode_buf, mixed_samples_buf with capacity. output uses BytesMut::with_capacity(4096). Good reuse pattern.",
+      "suggestedFix": "No fix needed - correct implementation of reusable buffers.",
+      "impact": "Correct implementation minimizes allocation in audio mixing hot path."
+    },
+    {
+      "id": "PERF-013",
+      "severity": "Medium",
+      "category": "Allocation",
+      "module": "capture/audio/mic",
+      "file": "crates/liteclip-core/src/capture/audio/mic.rs",
+      "location": "lines 308-320, audio_buffer",
+      "description": "Microphone capture uses BytesMut with shrink logic: audio_buffer shrinks when capacity exceeds max_buffer_size * 4 (MIC_BUFFER_SHRINK_MULTIPLIER) every MIC_BUFFER_SHRINK_INTERVAL_PACKETS.",
+      "suggestedFix": "No fix needed - excellent memory management pattern that prevents buffer growth over time.",
+      "impact": "Correct implementation with periodic shrinking prevents memory bloat."
+    },
+    {
+      "id": "PERF-014",
+      "severity": "Low",
+      "category": "Allocation",
+      "module": "gui/gallery/browser",
+      "file": "src/gui/gallery/browser.rs",
+      "location": "lines 126, 22",
+      "description": "Vec::new() for deleting list and videos.clone() for filtered videos. Videos clone at line 22 creates full Vec of VideoEntry clones.",
+      "suggestedFix": "For filtered videos (line 22), consider using iterator references instead of cloning all videos. For deleting list, capacity could be estimated from selected_videos.len().",
+      "impact": "Minor allocation overhead when filtering/cloning video lists."
+    },
+    {
+      "id": "PERF-015",
+      "severity": "Info",
+      "category": "Threading",
+      "module": "capture/dxgi",
+      "file": "crates/liteclip-core/src/capture/dxgi/capture.rs",
+      "location": "lines 890-920",
+      "description": "Capture loop uses spin-free frame pacing with sleep only (FRAME_PACING_SPIN_WINDOW=0). Good pattern that reduces CPU compared to spin-wait loops.",
+      "suggestedFix": "No fix needed - correct implementation uses sleep-based pacing.",
+      "impact": "Efficient capture loop implementation minimizes CPU overhead."
+    },
+    {
+      "id": "PERF-016",
+      "severity": "Info",
+      "category": "Threading",
+      "module": "encode",
+      "file": "crates/liteclip-core/src/encode/encoder_mod/functions.rs",
+      "location": "lines 381-410, encoder loop",
+      "description": "Encoder loop uses recv_timeout(8ms) and MAX_FRAME_BURST=8 for processing multiple frames. Good pattern that prevents blocking and handles burst frames efficiently.",
+      "suggestedFix": "No fix needed - correct implementation with timeout prevents tight spin loops.",
+      "impact": "Efficient encoder loop with controlled burst handling."
+    },
+    {
+      "id": "PERF-017",
+      "severity": "Medium",
+      "category": "Clone",
+      "module": "capture/dxgi",
+      "file": "crates/liteclip-core/src/capture/dxgi/capture.rs",
+      "location": "lines 917, 976-978",
+      "description": "last_frame.clone() used to duplicate frames for timeout fallback (DXGI has no new desktop update). For D3D11 frames wrapped in Arc, this is O(1). For BGRA frames (Bytes), this is also O(1) due to Bytes Arc semantics.",
+      "suggestedFix": "No fix needed for GPU frames. For CPU frames (Bytes), the comment at lines 975-976 correctly notes Bytes uses Arc semantics.",
+      "impact": "Frame duplication is efficient due to Arc semantics in both D3D11 and Bytes types."
+    },
+    {
+      "id": "PERF-018",
+      "severity": "Low",
+      "category": "HashMap",
+      "module": "output/sdk_export",
+      "file": "crates/liteclip-core/src/output/sdk_export.rs",
+      "location": "lines 147, 180-181, 190",
+      "description": "HashMap::new() without capacity for stream_routes, last_out_dts_by_stream, last_out_pts_by_stream, streams_past_range_end. Typically 2-4 streams (video + audio), so overhead is minimal.",
+      "suggestedFix": "Consider HashMap::with_capacity(4) for stream routing maps since most videos have 2-4 streams. Minor optimization.",
+      "impact": "Minimal impact - small HashMaps with few entries."
+    },
+    {
+      "id": "PERF-019",
+      "severity": "Medium",
+      "category": "Memory",
+      "module": "buffer/ring",
+      "file": "crates/liteclip-core/src/buffer/ring/spmc_ring.rs",
+      "location": "lines 254-255, MAX_OUTSTANDING_SNAPSHOT_BYTES",
+      "description": "512MB limit on outstanding snapshot bytes prevents OOM when saving multiple clips simultaneously. Good safety mechanism.",
+      "suggestedFix": "No fix needed - excellent safety limit that prevents unbounded memory growth during clip saving.",
+      "impact": "Correct implementation prevents memory exhaustion during concurrent clip saves."
+    },
+    {
+      "id": "PERF-020",
+      "severity": "Low",
+      "category": "Collection",
+      "module": "gui/gallery",
+      "file": "src/gui/gallery.rs",
+      "location": "lines 349-361, ClipCompressApp::new",
+      "description": "HashMap::new() for thumbnails without capacity. HashSet::new() for thumbnails_generating and selected_videos. These grow with number of videos.",
+      "suggestedFix": "For thumbnails HashMap, consider estimating capacity from typical video count (~50-200). HashSet for selected_videos typically small so fine.",
+      "impact": "HashMap reallocation as thumbnails are added. Minor overhead."
+    },
+    {
+      "id": "PERF-021",
+      "severity": "Low",
+      "category": "Clone",
+      "module": "gui/settings",
+      "file": "src/gui/settings.rs",
+      "location": "line 217",
+      "description": "self.config.clone() when sending ConfigUpdated event. Config struct contains nested structs (VideoConfig, AudioConfig, etc.) which are cloned.",
+      "suggestedFix": "Config is already wrapped in Arc in event handling (AppEvent::ConfigUpdated(Arc<Config>)), so the clone creates owned Config then Arc wraps it. Could clone directly into Arc::new() to avoid intermediate allocation.",
+      "impact": "Config clone creates ~500 bytes allocation on each config update."
+    },
+    {
+      "id": "PERF-022",
+      "severity": "Info",
+      "category": "Parallel",
+      "module": "gui/gallery",
+      "file": "src/gui/gallery.rs",
+      "location": "lines 391-405, scan_videos",
+      "description": "Video scanning uses rayon parallel iteration (into_par_iter()) for building VideoEntry structs. Good pattern for I/O-bound parallel work.",
+      "suggestedFix": "No fix needed - correct use of parallelism for video metadata extraction.",
+      "impact": "Efficient parallel scanning reduces startup time for video discovery."
+    }
+  ],
+  "systemicPatterns": [
+    {
+      "pattern": "Bytes.clone() is correctly used as zero-copy throughout codebase",
+      "description": "The codebase correctly leverages Bytes' Arc semantics for packet data cloning. Comments explicitly document this (e.g., 'Bytes clone = ref-count bump, O(1)' at encode/sw_encoder.rs:347). This is a good systemic pattern.",
+      "severity": "Info"
+    },
+    {
+      "pattern": "Vec::with_capacity used in hot paths but Vec::new() in UI code",
+      "description": "Core engine (capture, encode, buffer) consistently uses Vec::with_capacity for preallocation. GUI code uses Vec::new() more frequently. This is acceptable since GUI code is not in hot paths, but could be improved.",
+      "severity": "Low"
+    },
+    {
+      "pattern": "Reusable buffers in audio/mixer and audio/mic",
+      "description": "Audio subsystem correctly implements reusable buffers (BytesMut in mixer, decode_buf, mixed_samples_buf) with preallocation and periodic shrinking. Good systemic pattern for hot paths.",
+      "severity": "Info"
+    },
+    {
+      "pattern": "Mutex usage in GUI playback loop",
+      "description": "PlaybackController uses multiple Mutex locks in poll() method which runs during video playback. While functional, this pattern could cause minor contention. Core engine uses lock-free patterns (AtomicU64, SPMC buffer).",
+      "severity": "Medium"
+    },
+    {
+      "pattern": "Thread spawning per video in editor",
+      "description": "Each video opened in editor spawns multiple threads (decoder worker, audio stream, audio preload). Threads are properly joined on drop, but the per-video spawning pattern creates overhead.",
+      "severity": "Medium"
+    },
+    {
+      "pattern": "Repaint scheduling is well-designed",
+      "description": "GUI correctly uses conditional repaint (should_repaint) with appropriate intervals. No render loops or continuous repaint spam detected. Export modal uses 16ms which could be reduced.",
+      "severity": "Info"
+    }
+  ],
+  "userReportedIssues": {
+    "originalReport": "some excess cpu and memory usage, some related to the ui",
+    "analysis": {
+      "memoryFocus": [
+        "Frame pool allocates ~24-40MB per video editor session (PERF-001)",
+        "VideoEntry cloning duplicates metadata when opening editor (PERF-008)",
+        "HashMap/Vec allocations without capacity estimates (PERF-009, PERF-020)"
+      ],
+      "cpuFocus": [
+        "Multiple Mutex acquisitions in playback poll loop (PERF-002)",
+        "Thread spawning overhead per video (PERF-003)",
+        "Thumbnail check filesystem polling (PERF-004)",
+        "Export modal 60fps repaint requests (PERF-005)"
+      ],
+      "overallAssessment": "The user-reported issues appear to stem from: (1) Frame pool memory allocation per video editor (~24-40MB), (2) Thread spawning overhead when opening videos, (3) Mutex contention during playback, and (4) GUI collection allocations without capacity. These are moderate issues that could be optimized but are not severe performance problems."
+    }
+  },
+  "statistics": {
+    "totalFindings": 22,
+    "bySeverity": {
+      "Critical": 0,
+      "High": 0,
+      "Medium": 7,
+      "Low": 8,
+      "Info": 7
+    },
+    "byCategory": {
+      "Memory": 3,
+      "CPU": 3,
+      "Clone": 4,
+      "Allocation": 5,
+      "Threading": 3,
+      "Render": 2,
+      "HashMap": 1,
+      "Collection": 1,
+      "Parallel": 1
+    },
+    "byModule": {
+      "gui/gallery/decode_pipeline": 3,
+      "gui/gallery": 5,
+      "gui/gallery/editor": 1,
+      "gui/gallery/browser": 1,
+      "gui/settings": 1,
+      "buffer/ring": 2,
+      "output/mp4": 1,
+      "output/sdk_export": 1,
+      "encode": 2,
+      "capture/dxgi": 2,
+      "capture/audio/mixer": 1,
+      "capture/audio/mic": 1
+    }
+  },
+  "recommendations": [
+    {
+      "priority": "Medium",
+      "title": "Reduce frame pool memory per video editor",
+      "description": "Frame pool currently allocates 24 RGBA buffers (~900KB each) per PlaybackController. Consider using a global shared pool or reducing pool size for lower-resolution previews.",
+      "affectedFindings": ["PERF-001"]
+    },
+    {
+      "priority": "Medium",
+      "title": "Optimize PlaybackController threading",
+      "description": "Reduce per-video thread spawning by sharing audio output stream and deferring audio preload until playback starts.",
+      "affectedFindings": ["PERF-003"]
+    },
+    {
+      "priority": "Low",
+      "title": "Use Vec::with_capacity in GUI initialization",
+      "description": "Replace Vec::new() with Vec::with_capacity() in GUI code where approximate size can be estimated (video lists, thumbnails cache).",
+      "affectedFindings": ["PERF-009", "PERF-014", "PERF-020"]
+    },
+    {
+      "priority": "Low",
+      "title": "Reduce export modal repaint frequency",
+      "description": "Change export modal repaint from 16ms (60fps) to 33ms (30fps) or repaint only on progress changes.",
+      "affectedFindings": ["PERF-005"]
+    }
+  ]
+}
