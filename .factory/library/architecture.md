@@ -1,117 +1,119 @@
-# LiteClip Recorder Architecture
+# Architecture: GUI Thread CPU Reduction
 
-## Overview
+## System Overview
 
-LiteClip Recorder is a native Windows desktop screen recorder built in Rust. It continuously records in the background using a replay buffer and lets users save clips on demand.
-
-**Architecture Pattern**: Library + Application separation
-- `liteclip-core`: Reusable engine library (capture, encode, buffer, output)
-- `liteclip-replay`: GUI application (platform integration, user interface)
-
-## Data Flow
+LiteClip Replay is a native Windows screen recorder with the following thread architecture:
 
 ```
-Capture (DXGI/WASAPI) → Encode (FFmpeg) → Buffer (SPMC Ring) → Output (MP4)
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           THREAD ARCHITECTURE                                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│   Main Thread (Tokio async runtime)                                          │
+│   ├── Event Loop (tokio::select!)                                            │
+│   │   ├── Platform events from crossbeam channel                             │
+│   │   ├── Health monitoring (enforce_pipeline_health)                        │
+│   │   └── Config I/O                                                         │
+│   │                                                                          │
+│   Platform Thread (std::thread)                                              │
+│   ├── Windows message loop                                                   │
+│   ├── Hotkey handling (global hooks)                                         │
+│   └── Tray icon management                                                   │
+│   │                                                                          │
+│   GUI Thread (std::thread + eframe/winit)                                    │
+│   ├── Overlay window (toasts)                                                │
+│   ├── Settings (deferred viewport)                                           │
+│   └── Gallery (deferred viewport)                                            │
+│   │                                                                          │
+│   Recording Pipeline (spawned by AppState)                                   │
+│   ├── Capture Thread (DXGI Desktop Duplication)                              │
+│   ├── Encode Thread (NVENC/AMF/QSV/SW)                                       │
+│   └── Buffer (lock-free SPMC ring)                                           │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Threading Model
+## GUI Thread Current Behavior
 
-| Thread | Responsibility |
-|--------|---------------|
-| Main Thread | Tokio async runtime, event loop, config I/O, health monitoring |
-| Platform Thread | Windows message loop, hotkey handling, tray icon |
-| Capture Thread | DXGI Desktop Duplication, WASAPI audio capture |
-| Encode Thread | Video/audio encoding to FFmpeg |
+### Event Loop Pattern for EventLoopProxy Capture
 
-## Key Components
-
-### Capture (crates/liteclip-core/src/capture/)
-- **DxgiCapture**: Desktop Duplication API for screen capture
-- **AudioCapture**: WASAPI for system audio (loopback) and microphone
-- **BackpressureState**: Signals capture to drop frames when encode can't keep up
-
-### Encode (crates/liteclip-core/src/encode/)
-- **FfmpegEncoder**: Abstraction over FFmpeg encoding
-- **Hardware encoders**: NVENC (NVIDIA), AMF (AMD), QSV (Intel)
-- **Software fallback**: libx264/libx265 when hardware unavailable
-
-### Buffer (crates/liteclip-core/src/buffer/)
-- **LockFreeReplayBuffer**: SPMC ring buffer with proactive eviction
-- Eviction triggers: duration-based (primary), memory-based (safety)
-- Proactive eviction at 80% watermark to prevent mutex storms
-
-### Output (crates/liteclip-core/src/output/)
-- **FfmpegMuxer**: MP4 container muxing
-- **spawn_clip_saver**: Asynchronous clip saving
-- **SDK export**: Trimmed clip export for gallery
-
-### App/Pipeline (crates/liteclip-core/src/app/)
-- **AppState**: Central state coordinator
-- **RecordingPipeline**: Orchestrates capture → encode → buffer
-- **enforce_pipeline_health**: Detects and recovers from pipeline failures
-
-### GUI (src/gui/)
-- **GuiManager**: egui app wrapper
-- **Gallery**: Clip browser and editor UI
-- **DecodePipeline**: Video decode for preview playback
-- **Settings**: Configuration UI
-
-### Platform (src/platform/)
-- **PlatformHandle**: Hotkeys, tray, autostart
-- **msg_loop**: Windows message pump
-
-## Memory Management
-
-- `bytes::Bytes` for zero-copy packet handling (cheap clone = ref count bump)
-- MAX_OUTSTANDING_SNAPSHOT_BYTES: 512MB max for in-flight snapshots
-- Proactive eviction at 80% watermark
-
-## Key Patterns
-
-### DXGI Access Lost Handling
-When DXGI loses access (UAC, lock screen, secure desktop):
-1. Release desktop duplication
-2. Wait for reacquisition
-3. Retry capture loop
-
-### Hardware Encoder Fallback
-On hardware encoder failure:
-1. Detect failure type
-2. Fall back to software encoding
-3. Log fallback for diagnostics
-
-### Pipeline Health Monitoring
-Main loop polls `enforce_pipeline_health()`:
-1. Check capture thread health
-2. Check encode thread health
-3. If dead, restart pipeline
-4. Notify user of recovery
-
-### Frame Counting Semantics
-The encoder maintains two frame counters with different semantics:
-- `frame_count`: Total frames processed through the encode pipeline
-- `encoder_frame_count`: Frames actually sent to the encoder (excluding duplicates/dropped)
-
-**Important**: Keyframe decisions should use `encoder_frame_count` to ensure GOP alignment matches what the encoder actually sees. Using `frame_count` can cause keyframe timing drift.
-
-### Mutex Poison Recovery Pattern
-Use `unwrap_or_else(|e| e.into_inner())` for mutex poison recovery throughout the codebase. This prevents cascade failures when a thread panics while holding a mutex, allowing other threads to still access the lock.
+**Important:** To capture `EventLoopProxy` for wake-on-message, you must use `eframe::create_native` + `run_app` pattern instead of `eframe::run_native`. The standard `run_native` with `event_loop_builder` callback does NOT expose the proxy because the event loop is built internally.
 
 ```rust
-let slot = self.slots[idx].lock().unwrap_or_else(|e| e.into_inner());
+// Pattern for capturing EventLoopProxy (eframe 0.33.3)
+let native = eframe::create_native(
+    "Overlay",
+    NativeOptions {
+        event_loop_builder: Some(event_loop_builder),
+        with_any_thread: true, // Required for Windows off-main-thread
+        ..
+    },
+    Box::new(|cc| Ok(Box::new(GuiManagerApp::new(cc, initial_state)))),
+)?;
+let proxy = native.event_loop.create_proxy();
+// Store proxy in GuiManagerState before running
+native.run_app(app)?;
 ```
 
-### Memory Ordering Strategy
-- **Relaxed**: Used for performance-critical accounting (total_bytes, keyframe_count) where stale reads are acceptable
-- **Release/Acquire**: Used for critical indices (write_idx, evict_frontier) to enforce memory boundedness invariants
+This pattern was discovered through docs.rs exploration and is essential for any future GUI wake mechanism modifications.
 
-This strategy balances performance with correctness - accounting values may be stale but memory limits are strictly enforced.
+### Problem: Periodic Polling
 
-### Proactive Eviction Design
-The replay buffer uses proactive eviction at 80% watermark (PROACTIVE_EVICTION_WATERMARK) with batch eviction (EVICTION_BATCH_SIZE=8) to prevent mutex storms at 100% memory. This spreads eviction overhead across multiple push operations rather than triggering sudden latency spikes.
+The GUI thread runs with a 1x1 pixel overlay window. Even when truly idle:
+- `request_repaint_after(100ms)` is called every update cycle
+- Event loop polls at 10 Hz even with no visible windows
+- Estimated CPU usage: 0.5-2% from unnecessary polling
 
-## Configuration
+### Code Location
 
-Location: `%APPDATA%\liteclip-replay\liteclip-replay.toml`
+```rust
+// src/gui/manager.rs:430-433
+if show_settings || show_gallery {
+    ctx.request_repaint();
+} else {
+    ctx.request_repaint_after(Duration::from_millis(IDLE_REPAINT_MS)); // 100ms
+}
+```
 
-Types: Config → GeneralConfig, VideoConfig, AudioConfig, HotkeyConfig, AdvancedConfig
+## Solution: Dormant Event Loop
+
+### Approach
+
+1. **Stop periodic repaints when truly idle**: Remove the 100ms timer when no windows/toasts visible
+2. **Use EventLoopProxy for wake-on-message**: When `GuiMessage` arrives, wake the event loop instantly
+3. **Natural dormancy**: winit's `ControlFlow::Wait` makes event loop dormant when no repaints pending
+
+### Thread Communication
+
+```
+┌──────────────┐     GuiMessage      ┌──────────────┐
+│ Platform     │ ──────────────────▶ │ GUI Thread   │
+│ Thread       │                     │ ( dormant)   │
+│              │                     │              │
+│              │     EventLoopProxy  │              │
+│              │ ──────────────────▶ │ Wakes loop   │
+└──────────────┘                     └──────────────┘
+```
+
+### Key Components
+
+| Component | Location | Change Needed |
+|-----------|----------|---------------|
+| `GuiManagerState` | `manager.rs` | Add `EventLoopProxy` field |
+| `spawn_gui_manager_thread` | `manager.rs` | Capture proxy from eframe |
+| `send_gui_message` | `manager.rs` | Send wake event via proxy |
+| `GuiManagerApp::update` | `manager.rs` | Conditional repaint logic |
+| `NativeOptions` | `manager.rs` | Keep `with_any_thread(true)` |
+
+## Invariants
+
+1. **Thread Independence**: GUI thread changes must NOT affect recording pipeline threads
+2. **Wake Latency**: Event loop must wake <50ms after `GuiMessage` arrives
+3. **No Deadlocks**: EventLoopProxy send must not block
+4. **Memory Stability**: No memory growth during idle periods
+
+## Testing Strategy
+
+- **Unit tests**: Idle state detection, conditional repaint logic
+- **Manual tests**: CPU measurement, timing validation (native app limitation)
+- **Regression tests**: Recording pipeline CPU unchanged, hotkey response unchanged

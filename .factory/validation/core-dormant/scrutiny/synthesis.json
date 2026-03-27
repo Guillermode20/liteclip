@@ -1,0 +1,62 @@
+{
+  "milestone": "core-dormant",
+  "round": 1,
+  "status": "pass",
+  "validatorsRun": {
+    "test": { "passed": true, "command": "cargo test --workspace", "exitCode": 0, "testsPassed": 89 },
+    "typecheck": { "passed": true, "command": "cargo check --workspace", "exitCode": 0 },
+    "lint": { "passed": true, "command": "cargo clippy --workspace -- -D warnings", "exitCode": 0 }
+  },
+  "reviewsSummary": {
+    "total": 3,
+    "passed": 3,
+    "failed": 0,
+    "failedFeatures": []
+  },
+  "blockingIssues": [],
+  "nonBlockingIssues": [
+    {
+      "featureId": "eventloop-proxy-wake",
+      "severity": "non_blocking",
+      "file": "src/gui/manager.rs",
+      "line": 216,
+      "description": "The send_event result is discarded with 'let _ ='. While EventLoopProxy::send_event is non-blocking, adding debug logging could help diagnose wake timing issues in production."
+    },
+    {
+      "featureId": "conditional-repaint-dormant",
+      "severity": "non_blocking",
+      "file": "src/gui/manager.rs",
+      "line": 509,
+      "description": "The 'No idle_since set yet' else branch may never execute since idle_since is initialized to Some(Instant::now()) in both GuiManagerApp::new() variants. Defensive branch is reasonable for edge cases."
+    }
+  ],
+  "appliedUpdates": [
+    {
+      "target": "library",
+      "file": ".factory/library/architecture.md",
+      "description": "Added documentation of the create_native+run_app pattern for capturing EventLoopProxy in eframe 0.33.3. This pattern is essential for wake-on-message mechanism and was discovered through docs.rs exploration during implementation.",
+      "sourceFeature": "eventloop-proxy-wake"
+    }
+  ],
+  "suggestedGuidanceUpdates": [],
+  "rejectedObservations": [
+    {
+      "observation": "Worker correctly followed TDD approach as specified in gui-worker SKILL.md",
+      "reason": "already-documented - skill feedback already notes followedProcedure is true"
+    },
+    {
+      "observation": "The gui-worker skill's step 3 'Write Tests First (TDD)' pragmatic approach is acceptable",
+      "reason": "ambiguous - procedural timing nuance, not actionable guidance"
+    },
+    {
+      "observation": "Research files in .factory/research/ contain valuable implementation details",
+      "reason": "already-documented - worker already referenced and used these files"
+    },
+    {
+      "observation": "No convention gaps observed - respects thread boundaries",
+      "reason": "already-documented - AGENTS.md already specifies thread boundaries"
+    }
+  ],
+  "previousRound": null,
+  "notes": "All three features (eventloop-proxy-wake, conditional-repaint-dormant, wake-on-gui-event) passed review. The implementation correctly adds EventLoopProxy wake mechanism with 2-second grace period before dormancy. Unit tests cover idle detection, conditional repaint, grace period bounds, and dormancy timing. Manual user testing validation is required per the validation contract for CPU measurement and timing tests."
+}
