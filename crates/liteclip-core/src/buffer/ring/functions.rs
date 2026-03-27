@@ -587,22 +587,27 @@ mod tests {
         }
     }
 
-    /// Test that no packets are lost during normal operation under memory limit.
+    /// Test that no packets are lost due to memory pressure when operating under the memory limit.
     /// This validates VAL-RING-003.
     #[test]
     fn test_no_frame_drops_under_memory_limit() {
-        // Create buffer with enough memory to hold all packets without eviction
-        let buffer = LockFreeReplayBuffer::new(&make_config(10, 100)).unwrap();
+        // Create buffer with sufficient memory and duration to hold all packets
+        // Packets are 1KB each, 1000 packets = 1MB total
+        // Duration must be long enough to span all packets (use 120s)
+        let buffer = LockFreeReplayBuffer::new(&make_config(120, 100)).unwrap();
 
         let packet_count: usize = 1000;
         for i in 0..packet_count {
+            // Use pts spacing that fits within the duration (1M = 0.1s with 10M QPC freq)
+            // 1000 packets at 0.1s spacing = 100s total, well within 120s duration
             let packet = create_test_packet(i as i64 * 1_000_000, i % 30 == 0, 1024);
             buffer.push(packet);
         }
 
         let snapshot = buffer.snapshot().unwrap();
 
-        // All packets should be present
+        // All packets should be present since total memory (1MB) is well under limit (100MB)
+        // and duration (120s) exceeds the packet span (100s)
         assert_eq!(
             snapshot.len(),
             packet_count,

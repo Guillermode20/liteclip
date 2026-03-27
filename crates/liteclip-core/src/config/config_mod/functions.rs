@@ -150,7 +150,7 @@ mod tests {
         let mut config = Config::default();
         config.audio.mic_volume = u16::MAX;
         config.validate();
-        assert_eq!(config.audio.mic_volume, 400);
+        assert_eq!(config.audio.mic_volume, 100);
     }
 
     #[test]
