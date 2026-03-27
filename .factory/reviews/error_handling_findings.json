@@ -1,0 +1,502 @@
+{
+  "reviewType": "error_handling",
+  "reviewDescription": "Cross-cutting error handling review across entire codebase",
+  "reviewedFiles": [
+    "src/platform/msg_loop.rs",
+    "src/platform/hotkeys.rs",
+    "src/platform/tray.rs",
+    "src/platform/mod.rs",
+    "src/platform/autostart.rs",
+    "src/main.rs",
+    "src/gui/manager.rs",
+    "src/gui/gallery.rs",
+    "src/gui/gallery/decode_pipeline/mod.rs",
+    "src/gui/gallery/decode_pipeline/frame_pool.rs",
+    "src/gui/gallery/utils/mod.rs",
+    "src/detection/game.rs",
+    "crates/liteclip-core/src/capture/dxgi/capture.rs",
+    "crates/liteclip-core/src/capture/dxgi/texture.rs",
+    "crates/liteclip-core/src/capture/dxgi/device.rs",
+    "crates/liteclip-core/src/capture/audio/system.rs",
+    "crates/liteclip-core/src/capture/audio/mic.rs",
+    "crates/liteclip-core/src/capture/audio/device_info.rs",
+    "crates/liteclip-core/src/encode/ffmpeg/mod.rs",
+    "crates/liteclip-core/src/encode/ffmpeg/nvenc.rs",
+    "crates/liteclip-core/src/encode/ffmpeg/amf.rs",
+    "crates/liteclip-core/src/encode/ffmpeg/qsv.rs",
+    "crates/liteclip-core/src/encode/ffmpeg/software.rs",
+    "crates/liteclip-core/src/encode/encoder_mod/functions.rs",
+    "crates/liteclip-core/src/encode/sw_encoder.rs",
+    "crates/liteclip-core/src/encode/cli_pipe.rs",
+    "crates/liteclip-core/src/buffer/ring/spmc_ring.rs",
+    "crates/liteclip-core/src/buffer/ring/functions.rs",
+    "crates/liteclip-core/src/output/video_file.rs",
+    "crates/liteclip-core/src/output/mp4.rs",
+    "crates/liteclip-core/src/output/sdk_ffmpeg_output.rs",
+    "crates/liteclip-core/src/output/sdk_export.rs",
+    "crates/liteclip-core/src/output/saver.rs",
+    "crates/liteclip-core/src/app/state.rs",
+    "crates/liteclip-core/src/app/pipeline/manager.rs",
+    "crates/liteclip-core/src/config/config_mod/functions.rs",
+    "crates/liteclip-core/src/config/config_mod/types.rs",
+    "crates/liteclip-core/src/config/mod.rs",
+    "crates/liteclip-core/src/media/mod.rs",
+    "crates/liteclip-core/src/runtime.rs",
+    "build.rs"
+  ],
+  "findings": [
+    {
+      "severity": "High",
+      "category": "Error Handling",
+      "file": "src/platform/msg_loop.rs",
+      "line": 250,
+      "description": "Hardcoded hotkey parse with .unwrap() - platform fallback hotkey 'Alt+F9' uses unwrap on parse_hotkey result. If the hardcoded string is invalid, this would panic the platform thread.",
+      "suggestedFix": "Consider using expect with a clear message explaining why this hardcoded value should always succeed, or validate at compile time."
+    },
+    {
+      "severity": "High",
+      "category": "Error Handling",
+      "file": "src/platform/msg_loop.rs",
+      "line": 257,
+      "description": "Hardcoded hotkey parse with .unwrap() - platform fallback hotkey 'Ctrl+Shift+S' uses unwrap on parse_hotkey result. Similar risk as Alt+F9 case.",
+      "suggestedFix": "Use expect with descriptive message or compile-time validation."
+    },
+    {
+      "severity": "High",
+      "category": "Error Handling",
+      "file": "src/platform/hotkeys.rs",
+      "line": 199,
+      "description": "Hotkey::from_str with .unwrap() - fallback hotkey registration uses unwrap. If the string format is invalid, registration thread would panic.",
+      "suggestedFix": "Use expect with message explaining fallback hotkey should always parse correctly."
+    },
+    {
+      "severity": "Medium",
+      "category": "Error Handling",
+      "file": "crates/liteclip-core/src/output/sdk_ffmpeg_output.rs",
+      "lines": [207, 208, 209],
+      "description": "Chained .unwrap() calls on scaler.as_ref().unwrap() - three consecutive unwrap calls checking scaler properties. If scaler is None, this would panic during output processing.",
+      "suggestedFix": "Use pattern matching or if-let to safely handle scaler presence, with proper error propagation via bail! or return Err."
+    },
+    {
+      "severity": "Medium",
+      "category": "Error Handling",
+      "file": "crates/liteclip-core/src/output/sdk_export.rs",
+      "line": 601,
+      "description": ".unwrap() on stream lookup - video stream lookup by index uses unwrap. If stream index is invalid (corrupted file), this would panic.",
+      "suggestedFix": "Use ok_or_else to convert None to error with context about the stream index and file."
+    },
+    {
+      "severity": "Medium",
+      "category": "Error Handling",
+      "file": "crates/liteclip-core/src/output/sdk_export.rs",
+      "line": 618,
+      "description": ".unwrap() on audio stream lookup - similar to video stream case, audio stream by index uses unwrap.",
+      "suggestedFix": "Use ok_or_else with descriptive error message about the missing audio stream."
+    },
+    {
+      "severity": "Low",
+      "category": "Error Handling",
+      "file": "crates/liteclip-core/src/output/sdk_ffmpeg_output.rs",
+      "line": 226,
+      "description": ".expect('scaler') - scaler creation uses expect but message is minimal. Better than unwrap but could be more descriptive.",
+      "suggestedFix": "Expand expect message to explain context: 'scaler should exist after successful init with format conversion'"
+    },
+    {
+      "severity": "Low",
+      "category": "Error Handling",
+      "file": "crates/liteclip-core/src/capture/dxgi/capture.rs",
+      "line": 146,
+      "description": ".expect('QueryPerformanceCounter should never fail') - QPC call uses expect. This is appropriate since QPC is documented to never fail on supported Windows.",
+      "suggestedFix": "No fix needed - this is a correct use of expect for a documented invariant."
+    },
+    {
+      "severity": "Low",
+      "category": "Error Handling",
+      "file": "src/gui/gallery/decode_pipeline/frame_pool.rs",
+      "line": 125,
+      "description": ".expect('PooledRgbaImage already consumed') - pool item consumption uses expect. This is an internal invariant violation detection.",
+      "suggestedFix": "Consider returning Result instead if this can occur from external misuse, but current design is acceptable for internal API contract."
+    },
+    {
+      "severity": "Medium",
+      "category": "Error Swallowing",
+      "file": "src/gui/gallery/decode_pipeline/mod.rs",
+      "lines": [364, 365, 366],
+      "description": "let _ = pattern on mutex lock failures - three consecutive 'let _ = self.shared.*.lock().map(...)' patterns. Lock poisoning is silently ignored, which could mask thread panic.",
+      "suggestedFix": "Handle lock poisoning explicitly - either log the error, or if lock poisoning indicates panic, propagate appropriately."
+    },
+    {
+      "severity": "Medium",
+      "category": "Error Swallowing",
+      "file": "src/gui/gallery/decode_pipeline/mod.rs",
+      "lines": [764, 769, 774, 852],
+      "description": "let _ = handle.join() - thread join results are silently discarded. Thread panics during decode pipeline cleanup are not surfaced.",
+      "suggestedFix": "Log join errors or consider surfacing thread panic to user via error channel."
+    },
+    {
+      "severity": "Medium",
+      "category": "Error Swallowing",
+      "file": "src/main.rs",
+      "lines": [353, 397, 400, 500, 520, 526],
+      "description": "let _ = platform_handle.update_recording_state(...) - multiple locations where tray icon update errors are silently ignored. Tray icon update failures are not surfaced.",
+      "suggestedFix": "At minimum log these failures for debugging; tray icon state mismatches could confuse users."
+    },
+    {
+      "severity": "Medium",
+      "category": "Error Swallowing",
+      "file": "src/platform/mod.rs",
+      "lines": [147, 150],
+      "description": "let _ = self.quit() and let _ = handle.join() - platform thread cleanup errors silently ignored. Quit and thread join failures during shutdown are not surfaced.",
+      "suggestedFix": "Log cleanup errors during shutdown; panics in platform thread should be surfaced."
+    },
+    {
+      "severity": "Medium",
+      "category": "Error Swallowing",
+      "file": "crates/liteclip-core/src/encode/encoder_mod/functions.rs",
+      "lines": [317, 325, 408],
+      "description": "let _ = health_tx.try_send(...) - encoder health event send failures silently ignored. If health channel is full/disconnected, fatal error notification is lost.",
+      "suggestedFix": "Health channel failures indicate serious state corruption; log or panic when critical health events cannot be sent."
+    },
+    {
+      "severity": "Medium",
+      "category": "Error Swallowing",
+      "file": "crates/liteclip-core/src/capture/dxgi/capture.rs",
+      "lines": [869, 877, 1011],
+      "description": "let _ = fatal_tx.try_send(...) - capture fatal error notifications use try_send with result discarded. If channel is full, fatal error is lost.",
+      "suggestedFix": "Fatal errors should always be communicated; consider blocking send or panic if channel cannot accept fatal message."
+    },
+    {
+      "severity": "Low",
+      "category": "Error Swallowing",
+      "file": "crates/liteclip-core/src/output/video_file.rs",
+      "lines": [286, 289, 298],
+      "description": "let _ = progress_tx.send(...) - export progress notifications silently ignored. Progress channel failures during export are not surfaced.",
+      "suggestedFix": "Log progress send failures; user won't see progress but export continues, so this is acceptable but could be improved."
+    },
+    {
+      "severity": "Low",
+      "category": "Error Swallowing",
+      "file": "crates/liteclip-core/src/output/sdk_export.rs",
+      "lines": [43, 307, 352, 847],
+      "description": "let _ = progress_tx.send(ClipExportUpdate::Progress...) - SDK export progress updates silently ignored.",
+      "suggestedFix": "Similar to video_file.rs - logging would help debugging but export continues successfully."
+    },
+    {
+      "severity": "Info",
+      "category": "Error Swallowing",
+      "file": "crates/liteclip-core/src/output/video_file.rs",
+      "lines": [434, 456, 459, 484, 787, 1434, 1444],
+      "description": "let _ = std::fs::remove_file/remove_dir_all(...) - cleanup file removal errors silently ignored. This is intentional cleanup behavior; failures are expected to be common.",
+      "suggestedFix": "This is appropriate for cleanup operations where failure should not affect primary outcome."
+    },
+    {
+      "severity": "Info",
+      "category": "Error Swallowing",
+      "file": "src/gui/gallery.rs",
+      "line": 952,
+      "description": "let _ = std::fs::remove_file(&thumb_path) - thumbnail cleanup silently ignored. Intentional cleanup behavior.",
+      "suggestedFix": "No fix needed - cleanup failures are expected and should not affect user experience."
+    },
+    {
+      "severity": "Medium",
+      "category": "Error Swallowing",
+      "file": "crates/liteclip-core/src/output/sdk_ffmpeg_output.rs",
+      "line": 186,
+      "description": "let _ = ictx.seek(ts, ..) - seek result silently ignored during video export. Seek failures could cause incorrect frame extraction.",
+      "suggestedFix": "Check seek result; log warning if seek fails as this affects output quality."
+    },
+    {
+      "severity": "Medium",
+      "category": "Error Swallowing",
+      "file": "crates/liteclip-core/src/output/sdk_export.rs",
+      "line": 25,
+      "description": "let _ = input_ctx.seek(ts, ..) - SDK export seek result silently ignored. Same concern as sdk_ffmpeg_output.rs.",
+      "suggestedFix": "Check seek result and handle errors appropriately."
+    },
+    {
+      "severity": "Low",
+      "category": ".ok() Usage",
+      "file": "src/platform/tray.rs",
+      "lines": [50, 51, 52, 53, 54, 55],
+      "description": "Menu .append() calls using .ok() - tray menu item additions silently ignore failures. Tray menu creation failures result in incomplete menu.",
+      "suggestedFix": "Log failed menu item additions; user will see incomplete menu but app continues."
+    },
+    {
+      "severity": "Medium",
+      "category": ".ok() Usage",
+      "file": "src/platform/autostart.rs",
+      "lines": [45, 78, 109],
+      "description": "Windows registry API calls using .ok() - RegOpenKeyExW, RegSetValueExW, RegCloseKey errors silently converted to Option. Autostart registration failures are not surfaced to user.",
+      "suggestedFix": "Log registry operation failures; autostart failure is non-critical but user may want to know."
+    },
+    {
+      "severity": "Medium",
+      "category": ".ok() Usage",
+      "file": "crates/liteclip-core/src/capture/dxgi/texture.rs",
+      "lines": [55, 100, 132, 155, 190, 382],
+      "description": "Multiple D3D11 API calls using .ok() - texture creation, copy, and GPU operations silently ignore failures. GPU operation failures are logged via warn but not propagated.",
+      "suggestedFix": "For critical texture operations, propagate errors via Result; for optional operations, current pattern is acceptable."
+    },
+    {
+      "severity": "Medium",
+      "category": ".ok() Usage",
+      "file": "crates/liteclip-core/src/capture/dxgi/capture.rs",
+      "lines": [674, 693, 783],
+      "description": "ReleaseFrame().ok() - DXGI frame release errors silently ignored. Frame release failure could accumulate resources.",
+      "suggestedFix": "Log ReleaseFrame failures for debugging; resource accumulation could affect performance."
+    },
+    {
+      "severity": "Medium",
+      "category": ".ok() Usage",
+      "file": "crates/liteclip-core/src/capture/audio/system.rs",
+      "line": 333,
+      "description": "CoInitializeEx().ok() - COM initialization failure silently ignored. Audio capture thread may fail if COM is not initialized.",
+      "suggestedFix": "COM initialization failure should be propagated as audio capture cannot work without it."
+    },
+    {
+      "severity": "Low",
+      "category": ".ok() Usage",
+      "file": "crates/liteclip-core/src/capture/audio/mic.rs",
+      "line": 473,
+      "description": "CoInitializeEx result handled via .ok()? - pattern returns Option. This is combined with ? operator, so failure propagates correctly.",
+      "suggestedFix": "Pattern is correct - failure returns None which propagates as error."
+    },
+    {
+      "severity": "Medium",
+      "category": ".ok() Usage",
+      "file": "crates/liteclip-core/src/capture/audio/device_info.rs",
+      "lines": [18, 19, 20, 28, 29],
+      "description": "WASAPI device property access via .ok()? - chained .ok()? pattern for device info retrieval. Combined with ? operator so errors propagate.",
+      "suggestedFix": "Pattern is correct for chained optional operations - error propagates via ?."
+    },
+    {
+      "severity": "Low",
+      "category": ".ok() Usage",
+      "file": "crates/liteclip-core/src/encode/ffmpeg/mod.rs",
+      "line": 342,
+      "description": "encoder.send_eof().ok() - EOF send during flush silently ignored. Flush is cleanup operation; failure is logged elsewhere.",
+      "suggestedFix": "Acceptable for cleanup operation; flush continues with partial data."
+    },
+    {
+      "severity": "High",
+      "category": "Recovery Logic",
+      "file": "crates/liteclip-core/src/capture/dxgi/capture.rs",
+      "lines": [884-1014],
+      "description": "DXGI access lost handling - CORRECT IMPLEMENTATION. DXGI_ERROR_ACCESS_LOST triggers reinitialization with exponential backoff (100ms to 5000ms max). Error count tracking with max_errors=10 threshold. Proper handling of secure desktop/UAC scenarios.",
+      "analysisNotes": "This is a well-implemented recovery pattern. The code detects access lost, logs warning, attempts reinit with backoff, and tracks consecutive errors. After 10 consecutive failures, stops capture and reports fatal error."
+    },
+    {
+      "severity": "High",
+      "category": "Recovery Logic",
+      "file": "crates/liteclip-core/src/app/pipeline/manager.rs",
+      "lines": [188-234],
+      "description": "Pipeline health enforcement - CORRECT IMPLEMENTATION. enforce_health() polls encoder and capture for fatal errors. On fatal detection: logs error, transitions to Faulted state, calls stop() for clean shutdown, returns fatal reason to caller. Fail-closed pattern prevents silent failures.",
+      "analysisNotes": "Proper fail-closed behavior - pipeline is stopped on any component failure, ensuring no partial recording state persists."
+    },
+    {
+      "severity": "High",
+      "category": "Recovery Logic",
+      "file": "crates/liteclip-core/src/app/state.rs",
+      "lines": [170-224],
+      "description": "Config change rollback - CORRECT IMPLEMENTATION. apply_config() saves old config before restart, validates new config, attempts restart. On failure: rolls back to old config, recreates buffer, restarts with old settings, returns error. CRITICAL rollback failure is logged but not propagated as error.",
+      "analysisNotes": "Rollback logic is comprehensive but double-failure case (rollback also fails) is logged as error but not returned as Result. App may be in inconsistent state after rollback failure."
+    },
+    {
+      "severity": "Medium",
+      "category": "Recovery Logic",
+      "file": "crates/liteclip-core/src/app/state.rs",
+      "lines": [203-206],
+      "description": "Rollback failure handling incomplete - when both new config start and rollback start fail, only error is logged. AppState may be in broken state (no recording, stale buffer).",
+      "suggestedFix": "Return a special error type indicating 'rollback also failed' so caller can decide to show critical error or attempt full restart."
+    },
+    {
+      "severity": "High",
+      "category": "Recovery Logic",
+      "file": "crates/liteclip-core/src/output/video_file.rs",
+      "lines": [1415-1430],
+      "description": "Hardware encoder fallback - CORRECT IMPLEMENTATION. should_fallback_to_software_encoder() detects NVENC/AMF/QSV runtime failures and switches to libx265. Fallback triggers during calibration and export phases.",
+      "analysisNotes": "Comprehensive fallback detection covering driver errors, initialization failures, and runtime errors. Allows export to complete even if hardware encoder fails mid-process."
+    },
+    {
+      "severity": "High",
+      "category": "Recovery Logic",
+      "file": "crates/liteclip-core/src/encode/encoder_mod/functions.rs",
+      "lines": [295-330],
+      "description": "Encoder error tolerance - consecutive encode errors tracked with MAX_CONSECUTIVE_ENCODE_ERRORS=8 threshold. Individual errors logged but don't stop encoder immediately. After threshold, fatal health event sent and encoder stops.",
+      "analysisNotes": "Good balance between resilience (tolerating transient errors) and safety (stopping after consistent failure pattern)."
+    },
+    {
+      "severity": "Medium",
+      "category": "Recovery Logic",
+      "file": "crates/liteclip-core/src/encode/encoder_mod/functions.rs",
+      "lines": [275-280],
+      "description": "Encoder initialization failure handling - init failure sends fatal health event and returns error. Good pattern for critical startup failures.",
+      "suggestedFix": "Pattern is correct - initialization failures are immediately fatal."
+    },
+    {
+      "severity": "Medium",
+      "category": "Error Propagation",
+      "file": "crates/liteclip-core/src/encode/ffmpeg/software.rs",
+      "lines": [16, 32, 76],
+      "description": "Encoder lookup uses ok_or_else - correct pattern converting None to EncodeError. Good error propagation pattern for encoder availability.",
+      "analysisNotes": "Positive example - proper use of ok_or_else with descriptive error messages."
+    },
+    {
+      "severity": "Medium",
+      "category": "Error Propagation",
+      "file": "crates/liteclip-core/src/encode/cli_pipe.rs",
+      "lines": [51, 142, 146],
+      "description": "CLI pipe encoder uses ok_or_else for codec lookup and state validation. Good pattern for required resource errors.",
+      "analysisNotes": "Positive example - proper error propagation for required resources."
+    },
+    {
+      "severity": "Medium",
+      "category": "Error Propagation",
+      "file": "src/gui/gallery/decode_pipeline/mod.rs",
+      "lines": [1811, 1815],
+      "description": "Audio stream lookup uses ok_or_else with descriptive error. Good pattern for stream access.",
+      "analysisNotes": "Positive example - proper use of ok_or_else for stream validation."
+    },
+    {
+      "severity": "Info",
+      "category": "Test Code",
+      "file": "crates/liteclip-core/src/buffer/ring/functions.rs",
+      "description": "Multiple .unwrap() and .expect() calls in test code - these are acceptable in test context where failures should be obvious and immediate.",
+      "analysisNotes": "Test code appropriately uses unwrap/expect for clarity. No production risk."
+    },
+    {
+      "severity": "Info",
+      "category": "Doc Examples",
+      "file": "Multiple files (config/mod.rs, capture/dxgi/mod.rs, buffer/ring/spmc_ring.rs, etc.)",
+      "description": ".unwrap() in doc example code blocks - these are in 'no_run' or 'ignore' doc examples and don't affect production.",
+      "analysisNotes": "Doc examples appropriately use unwrap for clarity. No production risk."
+    },
+    {
+      "severity": "Info",
+      "category": "Build Script",
+      "file": "build.rs",
+      "lines": [128, 137, 141, 144, 153, 172, 174],
+      "description": ".expect() and .unwrap() in build.rs - build script uses expect/unwrap for icon generation and shader compilation. Build failures should stop compilation.",
+      "analysisNotes": "Build script appropriately uses expect for critical operations. Build failure is desired outcome if resources missing."
+    }
+  ],
+  "systemicPatterns": [
+    {
+      "pattern": "let _ = channel send",
+      "description": "Critical health/fatal events sent via try_send with results discarded. If channel is full or disconnected, critical error notifications are lost. This pattern appears in capture (fatal_tx), encoder (health_tx), and export (progress_tx).",
+      "locations": [
+        "capture/dxgi/capture.rs:869,877,1011",
+        "encode/encoder_mod/functions.rs:317,325,408",
+        "output/video_file.rs:286,289,298"
+      ],
+      "impact": "High - lost notifications can mask critical failures"
+    },
+    {
+      "pattern": "let _ = mutex lock",
+      "description": "Mutex lock poisoning is silently ignored via let _ = lock.map(...). If a thread panics while holding the lock, the lock becomes poisoned and subsequent access returns Err. This is silently discarded.",
+      "locations": [
+        "gui/gallery/decode_pipeline/mod.rs:364,365,366,759"
+      ],
+      "impact": "Medium - thread panics during lock holding are masked"
+    },
+    {
+      "pattern": "let _ = thread join",
+      "description": "Thread join results are silently discarded during cleanup. Panics in worker threads are not surfaced to caller or user.",
+      "locations": [
+        "main.rs:607",
+        "platform/mod.rs:150",
+        "gui/gallery/decode_pipeline/mod.rs:764,769,774,852",
+        "detection/game.rs:120",
+        "capture/audio/mic.rs:136,141"
+      ],
+      "impact": "Medium - thread panics are silently swallowed during cleanup"
+    },
+    {
+      "pattern": ".ok() on Windows API",
+      "description": "Windows API calls frequently use .ok() to convert HRESULT errors to Option, which silently discards failures. Common in DXGI, WASAPI, and registry operations.",
+      "locations": [
+        "platform/autostart.rs:45,78,109",
+        "capture/dxgi/texture.rs:55,100,132,155,190,382",
+        "capture/dxgi/capture.rs:674,693,783",
+        "capture/audio/system.rs:333"
+      ],
+      "impact": "Medium - Windows API failures are silently ignored, may cause partial functionality"
+    },
+    {
+      "pattern": "Hardcoded string unwrap",
+      "description": "Hardcoded hotkey strings use unwrap on parse, assuming hardcoded values are always valid. While likely true, adds risk if strings are modified incorrectly.",
+      "locations": [
+        "platform/msg_loop.rs:250,257",
+        "platform/hotkeys.rs:199"
+      ],
+      "impact": "Low - hardcoded values are trusted but could fail on modification"
+    },
+    {
+      "pattern": "Proper DXGI recovery",
+      "description": "POSITIVE: DXGI access lost handling is well-implemented with exponential backoff, error counting, and proper reinit flow.",
+      "locations": ["capture/dxgi/capture.rs:884-1014"],
+      "impact": "Reference pattern for recovery logic"
+    },
+    {
+      "pattern": "Proper hardware encoder fallback",
+      "description": "POSITIVE: Hardware encoder failures trigger automatic fallback to software encoding. should_fallback_to_software_encoder covers multiple failure modes.",
+      "locations": ["output/video_file.rs:1415-1430"],
+      "impact": "Reference pattern for graceful degradation"
+    },
+    {
+      "pattern": "Proper pipeline health enforcement",
+      "description": "POSITIVE: Pipeline uses fail-closed pattern - any component failure triggers clean shutdown and state transition to Faulted.",
+      "locations": ["app/pipeline/manager.rs:188-234"],
+      "impact": "Reference pattern for fail-closed behavior"
+    },
+    {
+      "pattern": "ok_or_else for required resources",
+      "description": "POSITIVE: Encoder and stream lookups use ok_or_else with descriptive errors. Good pattern for required resources.",
+      "locations": [
+        "encode/ffmpeg/software.rs:16",
+        "encode/ffmpeg/nvenc.rs:30",
+        "encode/ffmpeg/amf.rs:76",
+        "encode/cli_pipe.rs:51,142,146",
+        "gui/gallery/decode_pipeline/mod.rs:1811,1815"
+      ],
+      "impact": "Reference pattern for error propagation"
+    }
+  ],
+  "summary": {
+    "totalFindings": 35,
+    "severityDistribution": {
+      "Critical": 0,
+      "High": 6,
+      "Medium": 18,
+      "Low": 7,
+      "Info": 4
+    },
+    "categoryDistribution": {
+      "Error Handling": 9,
+      "Error Swallowing": 11,
+      ".ok() Usage": 9,
+      "Recovery Logic": 7,
+      "Error Propagation": 3,
+      "Test Code": 1,
+      "Doc Examples": 1,
+      "Build Script": 1
+    },
+    "keyStrengths": [
+      "No panic! usage in production code",
+      "Well-implemented DXGI access lost recovery with backoff",
+      "Hardware encoder fallback covers multiple failure modes",
+      "Pipeline fail-closed pattern prevents silent failures",
+      "Encoder consecutive error tolerance before fatal shutdown",
+      "Config rollback on failed restart attempts"
+    ],
+    "keyWeaknesses": [
+      "Critical health/fatal events can be lost if channels full",
+      "Thread panics during cleanup are silently swallowed",
+      "Mutex lock poisoning is silently ignored",
+      "Windows API failures frequently ignored via .ok()",
+      "Hardcoded hotkey strings use risky unwrap",
+      "Rollback double-failure case not surfaced to caller"
+    ]
+  },
+  "validationContract": "VAL-CROSS-004"
+}
