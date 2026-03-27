@@ -1,0 +1,343 @@
+{
+  "crossCutArea": "security",
+  "reviewScope": "Entire codebase (src/, crates/liteclip-core/src/)",
+  "patternsSearched": [
+    "unsafe blocks",
+    "FFmpeg raw pointer operations",
+    "NULL pointer handling",
+    "from_raw_parts/from_raw_parts_mut",
+    "input validation (config, paths)",
+    "registry operations",
+    "resource cleanup (Drop implementations)"
+  ],
+  "systemicPatterns": [
+    "FFmpeg unsafe blocks generally have documented safety invariants via SAFETY comments",
+    "NULL pointer checks are consistently used before dereferencing FFmpeg raw pointers",
+    "Drop implementations properly clean up FFmpeg resources (av_buffer_unref, av_frame_free)",
+    "Config validation clamps values to safe ranges but doesn't sanitize strings/paths",
+    "Windows registry operations properly check for installed location before enabling autostart",
+    "Audio slice conversions using from_raw_parts rely on correct sample_count calculations"
+  ],
+  "findings": [
+    {
+      "severity": "High",
+      "category": "Security",
+      "title": "Unsafe FFmpeg frame manipulation without explicit safety comment",
+      "file": "crates/liteclip-core/src/encode/ffmpeg/mod.rs",
+      "location": "apply_bt709_raw_frame_metadata() line 102",
+      "issue": "The unsafe function apply_bt709_raw_frame_metadata() directly dereferences a raw AVFrame pointer without a documented safety invariant comment. While the pointer is expected to be valid (passed from internal code), the safety precondition should be explicitly documented.",
+      "impact": "Potential memory corruption if NULL or invalid pointer is passed",
+      "suggestedFix": "Add a SAFETY comment documenting the precondition: 'Caller must ensure frame is a valid, non-null AVFrame pointer from a properly initialized FFmpeg context.'"
+    },
+    {
+      "severity": "High",
+      "category": "Security",
+      "title": "Raw pointer cast in MP4 muxing without bounds verification",
+      "file": "crates/liteclip-core/src/output/mp4.rs",
+      "location": "write_borrowed_video_packet() line 354",
+      "issue": "packet.data.as_ptr() is cast to *mut u8 and assigned to raw_packet.data. The packet.data is a Bytes reference, but the FFmpeg API expects mutable access. While Bytes is read-only, the cast to *mut violates Rust's mutability guarantees and could lead to undefined behavior if FFmpeg modifies the buffer.",
+      "impact": "Undefined behavior if FFmpeg modifies the packet data buffer that Rust treats as immutable",
+      "suggestedFix": "Document the safety invariant that FFmpeg av_interleaved_write_frame does not modify packet.data for muxing operations (verified in FFmpeg documentation). Consider using a mutable buffer copy if modification is possible."
+    },
+    {
+      "severity": "High",
+      "category": "Security",
+      "title": "Raw pointer cast in audio frame muxing",
+      "file": "crates/liteclip-core/src/output/mp4.rs",
+      "location": "write_audio_frame_direct() line 944",
+      "issue": "Same issue as write_borrowed_video_packet: data.as_ptr() cast to *mut u8 for FFmpeg packet. The Bytes buffer is immutable but cast to mutable pointer.",
+      "impact": "Undefined behavior if FFmpeg modifies the audio packet data",
+      "suggestedFix": "Same as above: document safety invariant or use mutable buffer copy."
+    },
+    {
+      "severity": "Medium",
+      "category": "Security",
+      "title": "from_raw_parts_mut without length invariant documentation",
+      "file": "crates/liteclip-core/src/capture/audio/mic.rs",
+      "location": "RNNoiseProcessor::process() line 715",
+      "issue": "Unsafe slice creation via from_raw_parts_mut(data.as_mut_ptr() as *mut i16, sample_count) where sample_count = data.len() / 2. The safety invariant relies on data.len() % (channels * 2) == 0 being checked earlier, but the calculation assumes 2-byte samples. If data is not properly aligned or has wrong length, this could create an invalid slice.",
+      "impact": "Memory safety violation if sample_count calculation is incorrect",
+      "suggestedFix": "Add explicit SAFETY comment: 'sample_count is calculated as data.len()/2 because audio samples are 16-bit (2 bytes). The precondition check data.len() % (channels * 2) == 0 ensures valid frame alignment.'"
+    },
+    {
+      "severity": "Medium",
+      "category": "Security",
+      "title": "Multiple from_raw_parts calls in RNNoise tests without alignment checks",
+      "file": "crates/liteclip-core/src/capture/audio/mic.rs",
+      "location": "Test functions lines 906, 919, 936, 963, 1000",
+      "issue": "Test code uses unsafe { std::slice::from_raw_parts(data.as_ptr() as *const i16, data.len() / 2) } multiple times. While this is test code, the pattern should be consistent with production code's safety checks. The tests assume data has correct length but don't verify alignment.",
+      "impact": "Test could crash or produce incorrect results with malformed input",
+      "suggestedFix": "Test-only code, but ensure test inputs are always properly sized. Could add debug assertions for alignment."
+    },
+    {
+      "severity": "Medium",
+      "category": "Security",
+      "title": "FFmpeg hardware context pointer arithmetic without bounds check",
+      "file": "src/gui/gallery/decode_pipeline/mod.rs",
+      "location": "select_decoder_format() line 1378",
+      "issue": "The unsafe extern C function iterates through pixel formats using fmt = fmt.add(1) until NULL or PIX_FMT_NONE. This relies on the FFmpeg-provided array being properly terminated. If FFmpeg provides an unterminated array, this could read past valid memory.",
+      "impact": "Out-of-bounds read if FFmpeg provides malformed format list",
+      "suggestedFix": "Add a maximum iteration limit (e.g., 64 formats) as a safety bound. FFmpeg typically has < 20 pixel formats, so this is reasonable."
+    },
+    {
+      "severity": "Medium",
+      "category": "Security",
+      "title": "Registry value written from user-controlled executable path",
+      "file": "src/platform/autostart.rs",
+      "location": "set_autostart() line 67-74",
+      "issue": "The current executable path from std::env::current_exe() is written to the registry. While there's a check for 'program files' location, this check is based on string matching and could be bypassed by unusual install paths. The path is not validated for special characters or length limits.",
+      "impact": "Registry could contain malformed or excessively long paths",
+      "suggestedFix": "Validate the path length (< 260 chars for Windows) and ensure it contains only valid path characters before writing to registry."
+    },
+    {
+      "severity": "Medium",
+      "category": "Security",
+      "title": "Save directory path from config not validated for traversal attacks",
+      "file": "crates/liteclip-core/src/output/saver.rs",
+      "location": "spawn_clip_saver() line 63",
+      "issue": "save_directory is taken from config.general.save_directory (a user-configurable string). It's converted to PathBuf but not validated for path traversal (e.g., containing '..') or absolute path requirement. A malicious config could save clips outside intended directories.",
+      "impact": "Clips could be saved to arbitrary filesystem locations if config is manipulated",
+      "suggestedFix": "Validate save_directory: ensure it's absolute, doesn't contain '..' components, and is within expected locations (e.g., Videos folder or user-specified safe directories)."
+    },
+    {
+      "severity": "Medium",
+      "category": "Security",
+      "title": "save_directory not canonicalized before use",
+      "file": "src/gui/gallery.rs",
+      "location": "Gallery::new() line 336-337",
+      "issue": "save_directory is created from config.general.save_directory string but not canonicalized. This could lead to issues if the path contains symlinks, relative components, or doesn't exist.",
+      "impact": "File operations could fail or operate on unexpected paths",
+      "suggestedFix": "Canonicalize save_directory during initialization or validate it exists and is accessible."
+    },
+    {
+      "severity": "Medium",
+      "category": "Security",
+      "title": "FFmpeg packet flags read via raw pointer dereference",
+      "file": "src/gui/gallery/decode_pipeline/mod.rs",
+      "location": "scan_keyframes() lines 1414-1416",
+      "issue": "Direct dereference of (*packet.as_mut_ptr()).flags and (*packet.as_mut_ptr()).pts. The packet is obtained from FFmpeg's packet.read() which should return a valid packet, but no NULL check is performed before dereference.",
+      "impact": "Potential NULL pointer dereference if packet allocation fails",
+      "suggestedFix": "Add null check: let pkt_ptr = packet.as_mut_ptr(); if pkt_ptr.is_null() { continue; }"
+    },
+    {
+      "severity": "Medium",
+      "category": "Security",
+      "title": "FFmpeg codec context dereference without null check",
+      "file": "src/gui/gallery/decode_pipeline/mod.rs",
+      "location": "set_skip_frame_mode() line 1682",
+      "issue": "Codec context is dereferenced via (*codec_ctx).skip_frame = skip_mode. While there's a null check at line 1683, the assignment happens inside unsafe without explicit safety documentation.",
+      "impact": "NULL pointer dereference if codec_ctx is null",
+      "suggestedFix": "The null check exists at 1683, but add SAFETY comment documenting the invariant."
+    },
+    {
+      "severity": "Medium",
+      "category": "Security",
+      "title": "FFmpeg frames context pointer dereference without bounds check",
+      "file": "crates/liteclip-core/src/encode/ffmpeg/context.rs",
+      "location": "create_hw_frames_ctx_with_pool_size() line 148",
+      "issue": "Direct dereference of (*frames_ctx).format and (*frames_ctx).sw_format. The frames_ctx pointer is obtained from av_hwframe_ctx_alloc which can return NULL, and is checked at line 142. However, subsequent field accesses should also have safety comments.",
+      "impact": "Memory safety if frames_ctx is somehow corrupted",
+      "suggestedFix": "Add SAFETY comment after NULL check documenting that frames_ctx is valid for the duration of the unsafe block."
+    },
+    {
+      "severity": "Medium",
+      "category": "Security",
+      "title": "D3D11 hardware frame data pointers set to null_mut without bounds validation",
+      "file": "crates/liteclip-core/src/encode/ffmpeg/context.rs",
+      "location": "prepare_hw_frame() lines 186-189",
+      "issue": "hw_frame.data[1..3] are set to std::ptr::null_mut(). This is correct for NV12/D3D11 frames where only data[0] contains the texture pointer, but the safety invariant should be documented.",
+      "impact": "If FFmpeg unexpectedly reads these null pointers, undefined behavior could occur",
+      "suggestedFix": "Add SAFETY comment: 'For D3D11/NV12 frames, only data[0] is used (texture pointer). data[1..3] must be NULL per FFmpeg D3D11VA convention.'"
+    },
+    {
+      "severity": "Medium",
+      "category": "Security",
+      "title": "D3D11 mapped resource pData used without null fallback",
+      "file": "crates/liteclip-core/src/capture/dxgi/capture.rs",
+      "location": "CPU fallback copy line 730",
+      "issue": "mapped.pData.is_null() is checked at line 730, but the code falls through if null without explicit handling. The check is followed by a copy operation that could proceed with invalid data.",
+      "impact": "Potential null pointer dereference in CPU fallback path",
+      "suggestedFix": "Ensure the null check at 730 properly skips or handles the copy operation. The current code appears to handle this but should have explicit error return for null pData."
+    },
+    {
+      "severity": "Low",
+      "category": "Security",
+      "title": "Unsafe impl Send for FFmpeg encoder without documentation",
+      "file": "crates/liteclip-core/src/encode/ffmpeg/mod.rs",
+      "location": "line 83",
+      "issue": "unsafe impl Send for FfmpegEncoder{} is declared without documentation explaining why this is safe. FFmpeg contexts are generally not thread-safe, but the implementation appears to use proper synchronization.",
+      "impact": "If threads access encoder concurrently without proper locking, undefined behavior",
+      "suggestedFix": "Add SAFETY comment explaining that FfmpegEncoder uses internal synchronization or single-threaded access pattern."
+    },
+    {
+      "severity": "Low",
+      "category": "Security",
+      "title": "Unsafe impl Send/Sync for D3d11Frame without documentation",
+      "file": "crates/liteclip-core/src/media/mod.rs",
+      "location": "lines 77-80",
+      "issue": "unsafe impl Send for D3d11Frame{} and unsafe impl Sync for D3d11Frame{} without safety justification. D3D11 resources have specific threading requirements.",
+      "impact": "Potential thread safety violation if D3D11 device/context is accessed from wrong thread",
+      "suggestedFix": "Add SAFETY comment explaining D3D11 multithread protection is enabled (see enable_multithread_protection in capture.rs)."
+    },
+    {
+      "severity": "Low",
+      "category": "Security",
+      "title": "Unsafe impl Send for D3d11HardwareContext",
+      "file": "crates/liteclip-core/src/encode/ffmpeg/context.rs",
+      "location": "line 39",
+      "issue": "unsafe impl Send for D3d11HardwareContext{} without documentation. The context contains FFmpeg and D3D11 resources that require careful threading.",
+      "impact": "Same as above - thread safety concerns",
+      "suggestedFix": "Document the threading model and multithread protection usage."
+    },
+    {
+      "severity": "Low",
+      "category": "Security",
+      "title": "Unsafe impl Send for DecoderHardwareContext",
+      "file": "src/gui/gallery/decode_pipeline/mod.rs",
+      "location": "line 27",
+      "issue": "unsafe impl Send for DecoderHardwareContext{} without safety justification. FFmpeg hardware contexts have threading implications.",
+      "impact": "Thread safety violation if used incorrectly",
+      "suggestedFix": "Add SAFETY comment about decoder thread usage."
+    },
+    {
+      "severity": "Low",
+      "category": "Security",
+      "title": "Game detection uses unsafe Windows API without full error handling",
+      "file": "src/detection/game.rs",
+      "location": "detect_foreground_app() line 127-129",
+      "issue": "Unsafe Windows API calls for window/process detection. hwnd.0.is_null() is checked but other error conditions (e.g., process_id == 0) are handled by returning None rather than logging errors.",
+      "impact": "Silent failures in game detection could hide issues",
+      "suggestedFix": "Consider logging when detection fails for debugging purposes, though None return is appropriate."
+    },
+    {
+      "severity": "Low",
+      "category": "Security",
+      "title": "Windows message loop unsafe blocks lack explicit safety comments",
+      "file": "src/platform/msg_loop.rs",
+      "location": "Multiple lines 75, 164, 174, 176, 199, 202",
+      "issue": "Multiple unsafe blocks for Windows API calls (RegisterClassW, CreateWindowExW, etc.) without SAFETY comments. While these are standard Windows API patterns, documenting the safety assumptions would improve maintainability.",
+      "impact": "No immediate issue, but lack of documentation makes maintenance harder",
+      "suggestedFix": "Add SAFETY comments for Windows API unsafe blocks explaining that they follow standard Win32 patterns with properly initialized structures."
+    },
+    {
+      "severity": "Low",
+      "category": "Security",
+      "title": "Timer resolution change without error handling for failure",
+      "file": "src/main.rs",
+      "location": "TimerResolutionGuard lines 134, 152",
+      "issue": "timeBeginPeriod/timeEndPeriod are called without checking the result. While these are non-critical timing functions, failure could indicate system issues.",
+      "impact": "Timer precision may not be as expected",
+      "suggestedFix": "Consider logging if result != TIMERR_NOERROR, though this is informational not security."
+    },
+    {
+      "severity": "Low",
+      "category": "Security",
+      "title": "std::mem::zeroed for AVPacket initialization",
+      "file": "crates/liteclip-core/src/output/mp4.rs",
+      "location": "lines 351, 941",
+      "issue": "ffmpeg::ffi::AVPacket is initialized with std::mem::zeroed() before av_init_packet(). While av_init_packet() is supposed to properly initialize it, zeroing first is redundant but safe. Modern FFmpeg recommends av_packet_alloc() instead.",
+      "impact": "No immediate issue, but deprecated pattern",
+      "suggestedFix": "Consider using av_packet_alloc()/av_packet_free() pattern for cleaner resource management."
+    },
+    {
+      "severity": "Info",
+      "category": "Security",
+      "title": "Good pattern: SAFETY comments exist for codec_tag clearing",
+      "file": "crates/liteclip-core/src/output/sdk_export.rs",
+      "location": "lines 95-96, 113-114",
+      "issue": "The unsafe blocks clearing codec_tag have proper SAFETY comments explaining why this is safe: 'Clear codec_tag to prevent FFmpeg from attempting to convert between container-specific codec tags. The parameters are immediately overwritten by set_parameters() below.'",
+      "impact": "This is a positive pattern that should be followed elsewhere",
+      "suggestedFix": "Use this as a template for other unsafe blocks in FFmpeg code."
+    },
+    {
+      "severity": "Info",
+      "category": "Security",
+      "title": "Good pattern: NULL checks before FFmpeg resource cleanup",
+      "file": "crates/liteclip-core/src/encode/ffmpeg/context.rs",
+      "location": "Drop for D3d11HardwareContext lines 48-54",
+      "issue": "Proper NULL checks before calling av_frame_free and av_buffer_unref. This is the correct cleanup pattern.",
+      "impact": "Positive pattern - prevents double-free or invalid-free",
+      "suggestedFix": "None - this is correct and should be used as reference."
+    },
+    {
+      "severity": "Info",
+      "category": "Security",
+      "title": "Good pattern: Proper Drop implementations for FFmpeg resources",
+      "file": "src/gui/gallery/decode_pipeline/mod.rs",
+      "location": "Drop for DecoderHardwareContext line 31",
+      "issue": "Proper cleanup with null check before av_buffer_unref.",
+      "impact": "Positive pattern",
+      "suggestedFix": "None."
+    },
+    {
+      "severity": "Info",
+      "category": "Security",
+      "title": "Good pattern: Config validation clamps values",
+      "file": "crates/liteclip-core/src/config/config_mod/types.rs",
+      "location": "Config::validate() implementation",
+      "issue": "Configuration validation properly clamps numeric values (framerate, bitrate, memory limits) to safe ranges. This prevents unreasonable values.",
+      "impact": "Positive pattern preventing numeric overflow or resource exhaustion",
+      "suggestedFix": "Consider extending validation to string/path fields as mentioned in other findings."
+    },
+    {
+      "severity": "Info",
+      "category": "Security",
+      "title": "Good pattern: Autostart restricted to installed locations",
+      "file": "src/platform/autostart.rs",
+      "location": "set_autostart() lines 54-58",
+      "issue": "Autostart registry write is skipped if exe_path doesn't contain 'program files'. This prevents portable/untrusted installations from auto-starting.",
+      "impact": "Positive security pattern",
+      "suggestedFix": "Could strengthen with more robust path validation, but current check is reasonable."
+    },
+    {
+      "severity": "Info",
+      "category": "Security",
+      "title": "Good pattern: DXGI shared handles properly closed in Drop",
+      "file": "crates/liteclip-core/src/media/mod.rs",
+      "location": "Drop for D3d11TexturePoolItem line 45",
+      "issue": "Shared HANDLEs are properly closed via CloseHandle, preventing resource leaks.",
+      "impact": "Positive pattern for Windows kernel object cleanup",
+      "suggestedFix": "None."
+    },
+    {
+      "severity": "Info",
+      "category": "Security",
+      "title": "WASAPI audio capture properly validates data_ptr",
+      "file": "crates/liteclip-core/src/capture/audio/system.rs",
+      "location": "line 237",
+      "issue": "data_ptr.is_null() check before copy_nonoverlapping. Also checks for silent buffer flag.",
+      "impact": "Positive pattern preventing null pointer copy",
+      "suggestedFix": "None."
+    },
+    {
+      "severity": "Info",
+      "category": "Security",
+      "title": "WASAPI mic capture properly validates data_ptr",
+      "file": "crates/liteclip-core/src/capture/audio/mic.rs",
+      "location": "line 330",
+      "issue": "Similar pattern: !silent && !data_ptr.is_null() check before buffer copy.",
+      "impact": "Positive pattern",
+      "suggestedFix": "None."
+    }
+  ],
+  "summary": {
+    "totalFindings": 31,
+    "bySeverity": {
+      "Critical": 0,
+      "High": 3,
+      "Medium": 11,
+      "Low": 8,
+      "Info": 9
+    },
+    "byCategory": {
+      "Security": 31
+    }
+  },
+  "recommendations": [
+    "Add SAFETY comments to all unsafe blocks following the pattern in sdk_export.rs",
+    "Validate save_directory path for traversal attacks and canonicalize before use",
+    "Consider bounds limits for FFmpeg format array iteration",
+    "Document threading safety for unsafe impl Send/Sync declarations",
+    "Use av_packet_alloc() instead of std::mem::zeroed() for modern FFmpeg pattern"
+  ]
+}
