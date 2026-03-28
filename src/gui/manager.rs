@@ -62,7 +62,32 @@ const DORMANT_GRACE_PERIOD_MS: u64 = 2000;
 /// and Gallery are spawned as needed from their respective modules, each
 /// running in its own native thread to avoid stalling the recording pipeline.
 pub fn init_gui_manager() {
+    wait_for_gui_shutdown_if_needed();
     with_gui_state(|state| state.ensure_running());
+}
+
+/// Waits for a previously-requested GUI shutdown to complete so that
+/// `ensure_running` can spawn a fresh thread.  Acquires the global lock
+/// briefly on each poll to avoid holding it during the sleep.
+fn wait_for_gui_shutdown_if_needed() {
+    for _ in 0..50 {
+        let still_shutting_down = with_gui_state(|state| {
+            state.cleanup_finished_thread();
+            // Thread alive + no sender = shutdown in progress
+            state.thread.is_some() && state.tx.is_none()
+        });
+        if !still_shutting_down {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    // Timeout: abandon the old thread handle so a new one can be spawned.
+    warn!("GUI thread did not finish shutdown within 500ms; abandoning handle");
+    with_gui_state(|state| {
+        state.thread = None;
+        state.tx = None;
+        state.event_loop_proxy = None;
+    });
 }
 
 fn spawn_gui_manager_thread(state: &mut GuiManagerState) {
@@ -173,7 +198,16 @@ impl GuiManagerState {
 
     fn request_shutdown(&mut self) {
         self.tx = None;
-        self.event_loop_proxy = None;
+        // Wake the event loop so it can detect the channel disconnect
+        // and close gracefully.  Must happen AFTER dropping tx so that
+        // the next try_recv sees Disconnected.
+        if let Some(proxy) = self.event_loop_proxy.take() {
+            let _ = proxy.send_event(UserEvent::RequestRepaint {
+                viewport_id: ViewportId::ROOT,
+                when: Instant::now(),
+                cumulative_pass_nr: 0,
+            });
+        }
     }
 }
 
@@ -282,6 +316,7 @@ pub fn send_gui_message(msg: GuiMessage) {
                 }
             }
         } else {
+            wait_for_gui_shutdown_if_needed();
             with_gui_state(|state| state.ensure_running());
             let thread_still_running = with_gui_state(|state| state.thread.is_some());
             if thread_still_running && attempt + 1 < 10 {
