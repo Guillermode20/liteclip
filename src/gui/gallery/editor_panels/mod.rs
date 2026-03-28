@@ -3,9 +3,9 @@ use eframe::egui;
 use super::{
     add_cut_point, estimate_export_bitrates_from_editor, format_compact_duration, format_size_mb,
     format_timestamp_precise, remove_cut_point, start_export, toggle_editor_playback, x_to_time,
-    ClipCompressApp, EditorState, EditorUiOutcome, DEFAULT_TARGET_SIZE_MB,
-    EDITOR_SIDEBAR_MIN_WIDTH, EDITOR_SIDEBAR_WIDTH, EDITOR_STACK_BREAKPOINT,
-    SCRUB_FAST_RATE_SECS_PER_SEC, SCRUB_SAMPLE_MIN_DT_SECS,
+    EditorState, EditorUiOutcome, DEFAULT_TARGET_SIZE_MB, EDITOR_SIDEBAR_MIN_WIDTH,
+    EDITOR_SIDEBAR_WIDTH, EDITOR_STACK_BREAKPOINT, SCRUB_FAST_RATE_SECS_PER_SEC,
+    SCRUB_SAMPLE_MIN_DT_SECS,
 };
 
 pub(super) fn render_preview_panel_impl(

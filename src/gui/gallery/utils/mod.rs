@@ -384,6 +384,7 @@ pub(super) fn x_to_time_impl(rect: egui::Rect, x: f32, duration_secs: f64) -> f6
     duration_secs * f64::from(ratio)
 }
 
+#[allow(dead_code)]
 pub(super) fn generate_thumbnail_strip_frames_impl(
     video_path: &Path,
     duration_secs: f64,
@@ -393,6 +394,7 @@ pub(super) fn generate_thumbnail_strip_frames_impl(
 }
 
 #[cfg(feature = "ffmpeg")]
+#[allow(dead_code)]
 fn generate_thumbnail_strip_frames_sdk(
     video_path: &Path,
     duration_secs: f64,

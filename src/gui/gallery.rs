@@ -96,19 +96,20 @@ struct ExportState {
     message: String,
 }
 
-const THUMBNAIL_STRIP_COUNT: usize = 20;
-const THUMBNAIL_STRIP_WIDTH: u32 = 160;
+pub(super) const THUMBNAIL_STRIP_COUNT: usize = 20;
+pub(super) const THUMBNAIL_STRIP_WIDTH: u32 = 160;
 
-struct ThumbnailStrip {
-    thumbnails: Vec<(f64, RgbaImage)>,
+pub(super) struct ThumbnailStrip {
+    pub(super) thumbnails: Vec<(f64, RgbaImage)>,
 }
 
 impl ThumbnailStrip {
-    fn new(thumbnails: Vec<(f64, RgbaImage)>, _duration_secs: f64) -> Self {
+    pub(super) fn new(thumbnails: Vec<(f64, RgbaImage)>, _duration_secs: f64) -> Self {
         Self { thumbnails }
     }
 
-    fn nearest(&self, time_secs: f64) -> Option<&RgbaImage> {
+    #[allow(dead_code)]
+    pub(super) fn nearest(&self, time_secs: f64) -> Option<&RgbaImage> {
         if self.thumbnails.is_empty() {
             return None;
         }
@@ -314,6 +315,7 @@ pub struct ClipCompressApp {
     thumbnails_generating: HashSet<PathBuf>,
     thumbnail_tx: Sender<ThumbnailResult>,
     thumbnail_rx: Receiver<ThumbnailResult>,
+    #[allow(dead_code)]
     thumbnail_strip_tx: Sender<ThumbnailStripResult>,
     thumbnail_strip_rx: Receiver<ThumbnailStripResult>,
     dialog_tx: Sender<DialogResult>,
@@ -531,23 +533,6 @@ impl ClipCompressApp {
         self.thumbnails.insert(video_path, texture);
     }
 
-    fn set_preview_texture_from_image(
-        editor: &mut EditorState,
-        ctx: &egui::Context,
-        image: RgbaImage,
-    ) {
-        let color_image = color_image_from_rgba(&image);
-        if let Some(texture) = &mut editor.preview_texture {
-            texture.set(color_image, egui::TextureOptions::LINEAR);
-        } else {
-            editor.preview_texture = Some(ctx.load_texture(
-                format!("preview:{}", editor.video.filename),
-                color_image,
-                egui::TextureOptions::LINEAR,
-            ));
-        }
-    }
-
     /// Check for newly generated thumbnails for videos that don't have them yet
     /// Called periodically to detect thumbnails created after initial scan
     fn check_for_new_thumbnails(&mut self, ctx: &egui::Context) {
@@ -614,40 +599,6 @@ impl ClipCompressApp {
                 Err(err) => ThumbnailResult {
                     video_path,
                     image: None,
-                    error: Some(format!("{err:#}")),
-                },
-            };
-            let _ = tx.send(message);
-        });
-    }
-
-    fn generate_thumbnail_strip(&mut self) {
-        let Some(editor) = self.editor.as_mut() else {
-            return;
-        };
-
-        if editor.thumbnail_strip.is_some() || editor.thumbnail_strip_loading {
-            return;
-        }
-
-        editor.thumbnail_strip_loading = true;
-
-        let video_path = editor.video.path.clone();
-        let duration_secs = editor.video.metadata.duration_secs;
-        let has_audio = editor.video.metadata.has_audio;
-        let tx = self.thumbnail_strip_tx.clone();
-
-        std::thread::spawn(move || {
-            let result = generate_thumbnail_strip_frames(&video_path, duration_secs, has_audio);
-            let message = match result {
-                Ok(strip) => ThumbnailStripResult {
-                    video_path,
-                    strip: Some(strip),
-                    error: None,
-                },
-                Err(err) => ThumbnailStripResult {
-                    video_path,
-                    strip: None,
                     error: Some(format!("{err:#}")),
                 },
             };
@@ -1393,14 +1344,7 @@ fn x_to_time(rect: egui::Rect, x: f32, duration_secs: f64) -> f64 {
     utils::x_to_time_impl(rect, x, duration_secs)
 }
 
-fn generate_thumbnail_strip_frames(
-    video_path: &Path,
-    duration_secs: f64,
-    _has_audio: bool,
-) -> anyhow::Result<ThumbnailStrip> {
-    utils::generate_thumbnail_strip_frames_impl(video_path, duration_secs, _has_audio)
-}
-
+#[allow(clippy::too_many_arguments)]
 fn should_repaint_gallery(
     delete_hold_active: bool,
     browser_thumbnail_work_active: bool,
