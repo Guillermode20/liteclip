@@ -579,8 +579,8 @@ impl eframe::App for SettingsApp {
         let mut _dummy = true;
         self.render(ctx, &mut _dummy);
 
-        if self.level_monitor.is_some() {
-            ctx.request_repaint_after(std::time::Duration::from_millis(33));
+        if self.level_monitor.is_some() && self.current_tab == SettingsTab::Audio {
+            ctx.request_repaint_after(std::time::Duration::from_millis(66));
         }
     }
 }

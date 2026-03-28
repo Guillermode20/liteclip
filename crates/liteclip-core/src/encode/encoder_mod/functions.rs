@@ -349,6 +349,9 @@ pub fn spawn_encoder_with_receiver(
             let mut last_packet_flush = Instant::now();
             let mut last_mem_diag = Instant::now();
             const MEM_DIAG_INTERVAL: Duration = Duration::from_secs(30);
+            let frame_recv_timeout = Duration::from_millis(
+                (1000u64 / u64::from(thread_config.framerate.max(1))).clamp(8, 16),
+            );
 
             fn flush_packet_batch(
                 buffer: &crate::buffer::ring::SharedReplayBuffer,
@@ -401,7 +404,7 @@ pub fn spawn_encoder_with_receiver(
                         &mut flush_batches,
                         &mut last_packet_flush,
                     ));
-                match frame_rx.recv_timeout(std::time::Duration::from_millis(8)) {
+                match frame_rx.recv_timeout(frame_recv_timeout) {
                     Ok(frame) => {
                         let mut encode_one =
                             |frame: crate::media::CapturedFrame| -> EncodeResult<()> {

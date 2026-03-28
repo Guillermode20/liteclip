@@ -43,6 +43,7 @@ const TOAST_WINDOW_SIZE: [f32; 2] = [350.0, 300.0];
 /// When idle, shrink the overlay so it does not block clicks elsewhere (1×1 logical pixel).
 const TOAST_WINDOW_IDLE_SIZE: [f32; 2] = [1.0, 1.0];
 const TOAST_WINDOW_MARGIN: [f32; 2] = [20.0, 20.0];
+const VISIBLE_WINDOW_REPAINT_MS: u64 = 100;
 /// Repaint interval when there are toasts or windows visible (active state).
 const ACTIVE_REPAINT_MS: u64 = 100;
 /// Grace period before entering dormant state after becoming idle.
@@ -159,6 +160,7 @@ impl GuiManagerState {
         }
 
         self.tx = None;
+        self.event_loop_proxy = None;
     }
 
     fn ensure_running(&mut self) {
@@ -171,6 +173,7 @@ impl GuiManagerState {
 
     fn request_shutdown(&mut self) {
         self.tx = None;
+        self.event_loop_proxy = None;
     }
 }
 
@@ -192,11 +195,59 @@ fn get_toast_window_pos_for_size(size: [f32; 2]) -> [f32; 2] {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct GuiActivityState {
+    settings_open: bool,
+    settings_visible: bool,
+    gallery_open: bool,
+    gallery_visible: bool,
+    has_toasts: bool,
+}
+
+impl GuiActivityState {
+    fn has_visible_windows(self) -> bool {
+        self.settings_visible || self.gallery_visible
+    }
+
+    fn is_truly_idle(self) -> bool {
+        !self.settings_open && !self.gallery_open && !self.has_toasts
+    }
+}
+
+fn viewport_is_showing(is_open: bool, visible: Option<bool>) -> bool {
+    is_open && visible.unwrap_or(true)
+}
+
+fn current_viewport_is_showing(ctx: &egui::Context) -> bool {
+    ctx.input(|i| {
+        let viewport = i.viewport();
+        !viewport.minimized.unwrap_or(false)
+    })
+}
+
+fn should_request_repaint(activity: GuiActivityState, idle_since: Option<Instant>, now: Instant) -> bool {
+    if activity.has_visible_windows() || activity.has_toasts {
+        return true;
+    }
+
+    if !activity.is_truly_idle() {
+        return false;
+    }
+
+    match idle_since {
+        Some(idle_since) => {
+            now.duration_since(idle_since) < Duration::from_millis(DORMANT_GRACE_PERIOD_MS)
+        }
+        None => true,
+    }
+}
+
 pub fn send_gui_message(msg: GuiMessage) {
     let mut msg = Some(msg);
 
-    for _ in 0..50 {
-        init_gui_manager();
+    init_gui_manager();
+
+    for attempt in 0..10 {
 
         let tx = with_gui_state(|state| state.tx.as_ref().cloned());
         if let Some(tx) = tx {
@@ -222,13 +273,16 @@ pub fn send_gui_message(msg: GuiMessage) {
                 Err(err) => {
                     msg = Some(err.0);
                     with_gui_state(|state| state.request_shutdown());
+                    if attempt + 1 < 10 {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
                 }
             }
         } else {
+            with_gui_state(|state| state.ensure_running());
             let thread_still_running = with_gui_state(|state| state.thread.is_some());
-            if thread_still_running {
+            if thread_still_running && attempt + 1 < 10 {
                 std::thread::sleep(std::time::Duration::from_millis(10));
-                continue;
             }
         }
     }
@@ -250,7 +304,9 @@ pub fn shutdown_gui() {
 struct GuiManagerApp {
     rx: Receiver<GuiMessage>,
     settings: Arc<Mutex<Option<crate::gui::settings::SettingsApp>>>,
+    settings_visibility: Arc<Mutex<Option<bool>>>,
     gallery: Arc<Mutex<Option<crate::gui::gallery::GalleryApp>>>,
+    gallery_visibility: Arc<Mutex<Option<bool>>>,
     toasts: Toasts,
     /// `true` when the viewport uses [`TOAST_WINDOW_SIZE`]; `false` when it is [`TOAST_WINDOW_IDLE_SIZE`].
     overlay_toast_area: bool,
@@ -264,7 +320,9 @@ impl GuiManagerApp {
         Self {
             rx,
             settings: Arc::new(Mutex::new(None)),
+            settings_visibility: Arc::new(Mutex::new(None)),
             gallery: Arc::new(Mutex::new(None)),
+            gallery_visibility: Arc::new(Mutex::new(None)),
             toasts: Toasts::default().with_anchor(Anchor::TopRight),
             overlay_toast_area: false,
             last_mouse_passthrough: None,
@@ -340,6 +398,41 @@ impl GuiManagerApp {
         ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(should_passthrough));
     }
 
+    fn set_viewport_visibility(slot: &Arc<Mutex<Option<bool>>>, visible: Option<bool>) {
+        *slot.lock().unwrap_or_else(|e| e.into_inner()) = visible;
+    }
+
+    fn viewport_visibility(slot: &Arc<Mutex<Option<bool>>>) -> Option<bool> {
+        *slot.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn activity_state(&self) -> GuiActivityState {
+        let settings_open = self
+            .settings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some();
+        let gallery_open = self
+            .gallery
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some();
+
+        GuiActivityState {
+            settings_open,
+            settings_visible: viewport_is_showing(
+                settings_open,
+                Self::viewport_visibility(&self.settings_visibility),
+            ),
+            gallery_open,
+            gallery_visible: viewport_is_showing(
+                gallery_open,
+                Self::viewport_visibility(&self.gallery_visibility),
+            ),
+            has_toasts: !self.toasts.is_empty(),
+        }
+    }
+
     fn release_idle_resources(&mut self, ctx: &egui::Context) {
         if !self.toasts.is_empty() {
             return;
@@ -378,11 +471,13 @@ impl eframe::App for GuiManagerApp {
                         *self.settings.lock().unwrap_or_else(|e| e.into_inner()) = Some(
                             crate::gui::settings::SettingsApp::new(config, tx, level_monitor),
                         );
+                        Self::set_viewport_visibility(&self.settings_visibility, None);
                     }
                     GuiMessage::ShowGallery(tx) => {
                         let config = crate::config::Config::load_sync().unwrap_or_default();
                         *self.gallery.lock().unwrap_or_else(|e| e.into_inner()) =
                             Some(crate::gui::gallery::GalleryApp::new(&config, tx));
+                        Self::set_viewport_visibility(&self.gallery_visibility, None);
                     }
                     GuiMessage::Toast(kind, message) => {
                         match kind {
@@ -432,6 +527,7 @@ impl eframe::App for GuiManagerApp {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .is_some();
+        let settings_visibility = self.settings_visibility.clone();
         if show_settings {
             ctx.show_viewport_deferred(
                 egui::ViewportId::from_hash_of("settings"),
@@ -449,13 +545,22 @@ impl eframe::App for GuiManagerApp {
                     if let Some(settings) = lock.as_mut() {
                         let mut is_open = true;
                         settings.update(ctx, &mut is_open);
+                        GuiManagerApp::set_viewport_visibility(
+                            &settings_visibility,
+                            Some(current_viewport_is_showing(ctx)),
+                        );
                         if !is_open || ctx.input(|i| i.viewport().close_requested()) {
                             settings.release_resources();
                             *lock = None;
+                            GuiManagerApp::set_viewport_visibility(&settings_visibility, None);
                         }
+                    } else {
+                        GuiManagerApp::set_viewport_visibility(&settings_visibility, None);
                     }
                 },
             );
+        } else {
+            Self::set_viewport_visibility(&self.settings_visibility, None);
         }
 
         let gallery_clone = self.gallery.clone();
@@ -463,6 +568,7 @@ impl eframe::App for GuiManagerApp {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .is_some();
+        let gallery_visibility = self.gallery_visibility.clone();
         if show_gallery {
             ctx.show_viewport_deferred(
                 egui::ViewportId::from_hash_of("gallery"),
@@ -480,31 +586,30 @@ impl eframe::App for GuiManagerApp {
                     if let Some(gallery) = lock.as_mut() {
                         let mut is_open = true;
                         gallery.update(ctx, &mut is_open);
+                        GuiManagerApp::set_viewport_visibility(
+                            &gallery_visibility,
+                            Some(current_viewport_is_showing(ctx)),
+                        );
                         if ctx.input(|i| i.viewport().close_requested()) {
                             gallery.release_all_gui_resources();
                             *lock = None;
+                            GuiManagerApp::set_viewport_visibility(&gallery_visibility, None);
                         }
+                    } else {
+                        GuiManagerApp::set_viewport_visibility(&gallery_visibility, None);
                     }
                 },
             );
+        } else {
+            Self::set_viewport_visibility(&self.gallery_visibility, None);
         }
 
-        if show_settings || show_gallery {
-            ctx.request_repaint();
-        } else if !self.toasts.is_empty() {
-            // Keep polling while toasts are visible for animation/dismissal
-            ctx.request_repaint_after(Duration::from_millis(ACTIVE_REPAINT_MS));
-        } else if let Some(idle_since) = self.idle_since {
-            // Grace period before entering dormant state
-            // This allows toast fade-out animations to complete smoothly
-            let elapsed = idle_since.elapsed();
-            if elapsed < Duration::from_millis(DORMANT_GRACE_PERIOD_MS) {
-                ctx.request_repaint_after(Duration::from_millis(ACTIVE_REPAINT_MS));
-            }
-            // After grace period: no repaint requested -> event loop becomes dormant
-            // Wake will happen via EventLoopProxy when GuiMessage arrives (see send_gui_message)
-        } else {
-            // No idle_since set yet (initial state) - keep polling briefly
+        let now = Instant::now();
+        let activity_state = self.activity_state();
+
+        if activity_state.has_visible_windows() {
+            ctx.request_repaint_after(Duration::from_millis(VISIBLE_WINDOW_REPAINT_MS));
+        } else if should_request_repaint(activity_state, self.idle_since, now) {
             ctx.request_repaint_after(Duration::from_millis(ACTIVE_REPAINT_MS));
         }
 
@@ -513,28 +618,18 @@ impl eframe::App for GuiManagerApp {
         self.sync_overlay_window_size(ctx);
         self.release_idle_resources(ctx);
 
-        let settings_open = self
-            .settings
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_some();
-        let gallery_open = self
-            .gallery
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_some();
+        let activity_state = self.activity_state();
 
-        let is_idle = !settings_open && !gallery_open && self.toasts.is_empty();
-
-        if is_idle && self.idle_since.is_none() {
-            self.idle_since = Some(std::time::Instant::now());
-        } else if !is_idle {
+        if activity_state.is_truly_idle() {
+            self.idle_since.get_or_insert(now);
+        } else {
             self.idle_since = None;
         }
 
         if disconnected {
             with_gui_state(|state| state.request_shutdown());
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
         }
     }
 }
@@ -550,44 +645,82 @@ mod tests {
     /// - No toasts are visible
     #[test]
     fn test_idle_detection_logic() {
-        // Test: All conditions for idle
-        let settings_open = false;
-        let gallery_open = false;
-        let toasts_empty = true;
-
-        let is_idle = !settings_open && !gallery_open && toasts_empty;
+        let is_idle = GuiActivityState {
+            settings_open: false,
+            settings_visible: false,
+            gallery_open: false,
+            gallery_visible: false,
+            has_toasts: false,
+        }
+        .is_truly_idle();
         assert!(
             is_idle,
             "Should be idle when all windows closed and no toasts"
         );
 
-        // Test: Settings open means not idle
-        let settings_open = true;
-        let gallery_open = false;
-        let toasts_empty = true;
-        let is_idle = !settings_open && !gallery_open && toasts_empty;
+        let is_idle = GuiActivityState {
+            settings_open: true,
+            settings_visible: false,
+            gallery_open: false,
+            gallery_visible: false,
+            has_toasts: false,
+        }
+        .is_truly_idle();
         assert!(!is_idle, "Should not be idle when settings is open");
 
-        // Test: Gallery open means not idle
-        let settings_open = false;
-        let gallery_open = true;
-        let toasts_empty = true;
-        let is_idle = !settings_open && !gallery_open && toasts_empty;
+        let is_idle = GuiActivityState {
+            settings_open: false,
+            settings_visible: false,
+            gallery_open: true,
+            gallery_visible: false,
+            has_toasts: false,
+        }
+        .is_truly_idle();
         assert!(!is_idle, "Should not be idle when gallery is open");
 
-        // Test: Toasts visible means not idle
-        let settings_open = false;
-        let gallery_open = false;
-        let toasts_empty = false;
-        let is_idle = !settings_open && !gallery_open && toasts_empty;
+        let is_idle = GuiActivityState {
+            settings_open: false,
+            settings_visible: false,
+            gallery_open: false,
+            gallery_visible: false,
+            has_toasts: true,
+        }
+        .is_truly_idle();
         assert!(!is_idle, "Should not be idle when toasts are visible");
 
-        // Test: Multiple conditions means not idle
-        let settings_open = true;
-        let gallery_open = true;
-        let toasts_empty = false;
-        let is_idle = !settings_open && !gallery_open && toasts_empty;
+        let is_idle = GuiActivityState {
+            settings_open: true,
+            settings_visible: true,
+            gallery_open: true,
+            gallery_visible: true,
+            has_toasts: true,
+        }
+        .is_truly_idle();
         assert!(!is_idle, "Should not be idle when multiple windows open");
+    }
+
+    #[test]
+    fn test_hidden_windows_do_not_count_as_visible_activity() {
+        let activity = GuiActivityState {
+            settings_open: true,
+            settings_visible: false,
+            gallery_open: false,
+            gallery_visible: false,
+            has_toasts: false,
+        };
+
+        assert!(
+            !activity.has_visible_windows(),
+            "Minimized or hidden settings window should not count as visible activity"
+        );
+        assert!(
+            !activity.is_truly_idle(),
+            "Open-but-hidden window should preserve state and avoid full shutdown"
+        );
+        assert!(
+            !should_request_repaint(activity, None, Instant::now()),
+            "Open-but-hidden windows should let the GUI thread park without repaint polling"
+        );
     }
 
     /// Tests that GuiManagerState correctly initializes with default values.
@@ -677,59 +810,125 @@ mod tests {
     /// - Stop repaint requests when truly idle after grace period expires
     #[test]
     fn test_conditional_repaint_logic() {
-        // Test: Settings visible -> should request repaint
-        let show_settings = true;
-        let show_gallery = false;
-        let _toasts_empty = true; // Not used in this assertion
-        let _idle_since: Option<Instant> = None; // Not used in this assertion
+        let now = Instant::now();
 
-        let should_repaint_now = show_settings || show_gallery;
+        let should_repaint_now = should_request_repaint(
+            GuiActivityState {
+                settings_open: true,
+                settings_visible: true,
+                gallery_open: false,
+                gallery_visible: false,
+                has_toasts: false,
+            },
+            None,
+            now,
+        );
         assert!(
             should_repaint_now,
             "Should request immediate repaint when settings visible"
         );
 
-        // Test: Gallery visible -> should request repaint
-        let _show_settings = false;
-        let show_gallery = true;
-        let should_repaint_now = _show_settings || show_gallery;
+        let should_repaint_now = should_request_repaint(
+            GuiActivityState {
+                settings_open: false,
+                settings_visible: false,
+                gallery_open: true,
+                gallery_visible: true,
+                has_toasts: false,
+            },
+            None,
+            now,
+        );
         assert!(
             should_repaint_now,
             "Should request immediate repaint when gallery visible"
         );
 
-        // Test: Toasts visible -> should request periodic repaint
-        let _show_settings = false;
-        let _show_gallery = false;
-        let toasts_empty = false;
-        let should_periodic_for_toasts = !toasts_empty;
+        let should_periodic_for_toasts = should_request_repaint(
+            GuiActivityState {
+                settings_open: false,
+                settings_visible: false,
+                gallery_open: false,
+                gallery_visible: false,
+                has_toasts: true,
+            },
+            Some(now),
+            now,
+        );
         assert!(
             should_periodic_for_toasts,
             "Should request periodic repaint when toasts visible"
         );
 
-        // Test: Truly idle but within grace period -> should request periodic repaint
-        let _show_settings = false;
-        let _show_gallery = false;
-        let _toasts_empty = true;
-        let idle_since = Some(Instant::now());
-        let grace_period = Duration::from_millis(DORMANT_GRACE_PERIOD_MS);
-        let elapsed = idle_since.map(|t| t.elapsed()).unwrap_or_default();
-        let within_grace_period = elapsed < grace_period;
+        let idle_since = Some(now - Duration::from_millis(DORMANT_GRACE_PERIOD_MS / 2));
+        let within_grace_period = should_request_repaint(
+            GuiActivityState {
+                settings_open: false,
+                settings_visible: false,
+                gallery_open: false,
+                gallery_visible: false,
+                has_toasts: false,
+            },
+            idle_since,
+            now,
+        );
         assert!(
             within_grace_period,
-            "Should be within grace period immediately after becoming idle"
+            "Should keep repainting briefly after becoming idle"
         );
 
-        // Test: Truly idle after grace period -> should NOT request repaint (dormant)
-        // We simulate this by checking the logic would NOT request repaint
-        let truly_idle = !_show_settings && !_show_gallery && _toasts_empty;
-        let has_idle_since = idle_since.is_some();
-        // In the actual code, if elapsed > grace_period, no repaint is requested
-        // This test verifies the conditions that lead to dormancy
+        let dormant_idle_since = Some(now - Duration::from_millis(DORMANT_GRACE_PERIOD_MS + 1));
+        let should_stay_dormant = !should_request_repaint(
+            GuiActivityState {
+                settings_open: false,
+                settings_visible: false,
+                gallery_open: false,
+                gallery_visible: false,
+                has_toasts: false,
+            },
+            dormant_idle_since,
+            now,
+        );
         assert!(
-            truly_idle && has_idle_since,
-            "Truly idle state should have idle_since set"
+            should_stay_dormant,
+            "Should stop repainting once the idle grace period expires"
+        );
+    }
+
+    #[test]
+    fn test_idle_does_not_request_gui_manager_shutdown() {
+        let now = Instant::now();
+
+        let open_but_hidden = GuiActivityState {
+            settings_open: true,
+            settings_visible: false,
+            gallery_open: false,
+            gallery_visible: false,
+            has_toasts: false,
+        };
+        assert!(
+            !open_but_hidden.is_truly_idle(),
+            "Open-but-hidden windows should preserve GUI manager state"
+        );
+
+        let truly_idle = GuiActivityState {
+            settings_open: false,
+            settings_visible: false,
+            gallery_open: false,
+            gallery_visible: false,
+            has_toasts: false,
+        };
+        assert!(
+            truly_idle.is_truly_idle(),
+            "No windows or toasts should be considered truly idle"
+        );
+        assert!(
+            !should_request_repaint(
+                truly_idle,
+                Some(now - Duration::from_millis(DORMANT_GRACE_PERIOD_MS + 1)),
+                now,
+            ),
+            "A truly idle GUI manager should go dormant without destroying the event loop"
         );
     }
 
@@ -769,6 +968,24 @@ mod tests {
         assert!(
             active_repaint_ms <= max_interval_ms,
             "Active repaint interval should be at most 200ms ({ACTIVE_REPAINT_MS}ms is too long)"
+        );
+    }
+
+    /// Tests that the visible window repaint interval is reasonable for smooth UI.
+    /// The interval should be short enough for responsive UI (typically 33-200ms).
+    #[test]
+    fn test_visible_window_repaint_interval_bounds() {
+        let visible_repaint_ms = VISIBLE_WINDOW_REPAINT_MS;
+        let min_interval_ms = 33;
+        let max_interval_ms = 200;
+
+        assert!(
+            visible_repaint_ms >= min_interval_ms,
+            "Visible window repaint interval should be at least 33ms ({VISIBLE_WINDOW_REPAINT_MS}ms is too short)"
+        );
+        assert!(
+            visible_repaint_ms <= max_interval_ms,
+            "Visible window repaint interval should be at most 200ms ({VISIBLE_WINDOW_REPAINT_MS}ms is too long)"
         );
     }
 

@@ -160,6 +160,38 @@ pub fn calculate_levels_stereo(samples: &[i16]) -> (f32, f32) {
     (level_left.min(1.0) as f32, level_right.min(1.0) as f32)
 }
 
+pub fn calculate_levels_stereo_bytes(samples: &[u8]) -> (f32, f32) {
+    let mut chunks = samples.chunks_exact(4);
+    if chunks.len() == 0 {
+        return (0.0, 0.0);
+    }
+
+    let mut sum_left: f64 = 0.0;
+    let mut sum_right: f64 = 0.0;
+    let mut count: usize = 0;
+
+    for chunk in &mut chunks {
+        let left = i16::from_le_bytes([chunk[0], chunk[1]]);
+        let right = i16::from_le_bytes([chunk[2], chunk[3]]);
+        sum_left += (left as f64).powi(2);
+        sum_right += (right as f64).powi(2);
+        count += 1;
+    }
+
+    if count == 0 {
+        return (0.0, 0.0);
+    }
+
+    let rms_left = (sum_left / count as f64).sqrt();
+    let rms_right = (sum_right / count as f64).sqrt();
+    let max_val = 32768.0f64;
+
+    let level_left = rms_left / max_val;
+    let level_right = rms_right / max_val;
+
+    (level_left.min(1.0) as f32, level_right.min(1.0) as f32)
+}
+
 pub fn calculate_levels_mono(samples: &[i16]) -> (f32, f32) {
     if samples.is_empty() {
         return (0.0, 0.0);
@@ -205,5 +237,17 @@ mod tests {
 
         let levels = monitor.get_system_levels();
         assert_eq!(levels.peak, 0);
+    }
+
+    #[test]
+    fn test_calculate_levels_stereo_bytes_matches_samples() {
+        let samples = [1000i16, -2000, 3000, -4000, 5000, -6000, 7000, -8000];
+        let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+
+        let from_samples = calculate_levels_stereo(&samples);
+        let from_bytes = calculate_levels_stereo_bytes(&bytes);
+
+        assert!((from_samples.0 - from_bytes.0).abs() < 0.0001);
+        assert!((from_samples.1 - from_bytes.1).abs() < 0.0001);
     }
 }

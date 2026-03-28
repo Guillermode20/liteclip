@@ -11,7 +11,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tracing::{debug, error, warn};
 
-use crate::capture::audio::level_monitor::{calculate_levels_stereo, AudioLevelMonitor};
+use crate::capture::audio::level_monitor::{calculate_levels_stereo_bytes, AudioLevelMonitor};
 use crate::capture::audio::mic::WasapiMicConfig;
 use crate::capture::audio::mixer::AudioMixer;
 use crate::capture::audio::system::WasapiSystemConfig;
@@ -188,6 +188,20 @@ impl WasapiAudioManager {
         }
     }
 
+    fn update_system_monitor(level_monitor: Option<&AudioLevelMonitor>, packet: &EncodedPacket) {
+        if let Some(monitor) = level_monitor {
+            let (left, right) = calculate_levels_stereo_bytes(packet.data.as_ref());
+            monitor.update_system_levels(left, right);
+        }
+    }
+
+    fn update_mic_monitor(level_monitor: Option<&AudioLevelMonitor>, packet: &EncodedPacket) {
+        if let Some(monitor) = level_monitor {
+            let (left, right) = calculate_levels_stereo_bytes(packet.data.as_ref());
+            monitor.update_mic_levels(left, right);
+        }
+    }
+
     fn forward_loop(
         running: Arc<AtomicBool>,
         packet_tx: Sender<EncodedPacket>,
@@ -203,6 +217,7 @@ impl WasapiAudioManager {
         let mut forwarded_total: u64 = 0;
         let mut last_peak_decay = Instant::now();
         let mut last_telemetry = Instant::now();
+        let wait_timeout = Duration::from_millis(20);
 
         while running.load(Ordering::SeqCst) {
             while let Ok(new_config) = config_update_rx.try_recv() {
@@ -218,15 +233,7 @@ impl WasapiAudioManager {
                 if let Some(rx) = system_rx.as_ref() {
                     match rx.try_recv() {
                         Ok(packet) => {
-                            if let Some(ref monitor) = level_monitor {
-                                let samples: Vec<i16> = packet
-                                    .data
-                                    .chunks_exact(2)
-                                    .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
-                                    .collect();
-                                let (left, right) = calculate_levels_stereo(&samples);
-                                monitor.update_system_levels(left, right);
-                            }
+                            Self::update_system_monitor(level_monitor.as_ref(), &packet);
                             system_packet = Some(packet);
                         }
                         Err(TryRecvError::Empty) => {}
@@ -243,15 +250,7 @@ impl WasapiAudioManager {
                 if let Some(rx) = mic_rx.as_ref() {
                     match rx.try_recv() {
                         Ok(packet) => {
-                            if let Some(ref monitor) = level_monitor {
-                                let samples: Vec<i16> = packet
-                                    .data
-                                    .chunks_exact(2)
-                                    .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
-                                    .collect();
-                                let (left, right) = calculate_levels_stereo(&samples);
-                                monitor.update_mic_levels(left, right);
-                            }
+                            Self::update_mic_monitor(level_monitor.as_ref(), &packet);
                             mic_packet = Some(packet);
                         }
                         Err(TryRecvError::Empty) => {}
@@ -291,8 +290,90 @@ impl WasapiAudioManager {
                     }
                 }
             } else {
-                // No packets available, sleep briefly
-                thread::sleep(Duration::from_millis(1));
+                match (system_rx.as_ref(), mic_rx.as_ref()) {
+                    (Some(system), Some(mic)) => {
+                        crossbeam::channel::select! {
+                            recv(config_update_rx) -> msg => {
+                                if let Ok(new_config) = msg {
+                                    mixer.update_config(&new_config);
+                                    debug!("Audio mixer config updated");
+                                }
+                            }
+                            recv(system) -> msg => {
+                                match msg {
+                                    Ok(packet) => {
+                                        Self::update_system_monitor(level_monitor.as_ref(), &packet);
+                                        system_packet = Some(packet);
+                                    }
+                                    Err(_) => {
+                                        warn!("System audio capture channel disconnected");
+                                        system_disconnected = true;
+                                    }
+                                }
+                            }
+                            recv(mic) -> msg => {
+                                match msg {
+                                    Ok(packet) => {
+                                        Self::update_mic_monitor(level_monitor.as_ref(), &packet);
+                                        mic_packet = Some(packet);
+                                    }
+                                    Err(_) => {
+                                        warn!("Microphone capture channel disconnected");
+                                        mic_disconnected = true;
+                                    }
+                                }
+                            }
+                            default(wait_timeout) => {}
+                        }
+                    }
+                    (Some(system), None) => {
+                        crossbeam::channel::select! {
+                            recv(config_update_rx) -> msg => {
+                                if let Ok(new_config) = msg {
+                                    mixer.update_config(&new_config);
+                                    debug!("Audio mixer config updated");
+                                }
+                            }
+                            recv(system) -> msg => {
+                                match msg {
+                                    Ok(packet) => {
+                                        Self::update_system_monitor(level_monitor.as_ref(), &packet);
+                                        system_packet = Some(packet);
+                                    }
+                                    Err(_) => {
+                                        warn!("System audio capture channel disconnected");
+                                        system_disconnected = true;
+                                    }
+                                }
+                            }
+                            default(wait_timeout) => {}
+                        }
+                    }
+                    (None, Some(mic)) => {
+                        crossbeam::channel::select! {
+                            recv(config_update_rx) -> msg => {
+                                if let Ok(new_config) = msg {
+                                    mixer.update_config(&new_config);
+                                    debug!("Audio mixer config updated");
+                                }
+                            }
+                            recv(mic) -> msg => {
+                                match msg {
+                                    Ok(packet) => {
+                                        Self::update_mic_monitor(level_monitor.as_ref(), &packet);
+                                        mic_packet = Some(packet);
+                                    }
+                                    Err(_) => {
+                                        warn!("Microphone capture channel disconnected");
+                                        mic_disconnected = true;
+                                    }
+                                }
+                            }
+                            default(wait_timeout) => {}
+                        }
+                    }
+                    (None, None) => {}
+                }
             }
 
             if last_telemetry.elapsed() >= Duration::from_secs(30) {

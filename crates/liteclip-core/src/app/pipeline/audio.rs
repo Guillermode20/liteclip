@@ -156,7 +156,7 @@ pub fn start_audio_capture(
         let mut packet_batch = Vec::with_capacity(32);
 
         // Use recv_timeout to periodically check running flag
-        const RECV_TIMEOUT: Duration = Duration::from_millis(100);
+        const RECV_TIMEOUT: Duration = Duration::from_millis(250);
 
         while running_clone.load(Ordering::SeqCst) {
             // Use recv_timeout so we can periodically check the running flag

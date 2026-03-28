@@ -828,11 +828,6 @@ impl DxgiCapture {
     ) {
         Self::set_capture_thread_priority();
 
-        // Use high-resolution timer for precise sleep on Windows
-        unsafe {
-            let _ = windows::Win32::Media::timeBeginPeriod(1);
-        }
-
         info!("DXGI capture thread started: {} FPS", config.target_fps);
         let perform_cpu_readback = config.perform_cpu_readback;
         #[cfg(windows)]
@@ -1147,10 +1142,6 @@ impl DxgiCapture {
             if std::time::Instant::now() > next_frame_time + frame_period {
                 next_frame_time = std::time::Instant::now() + frame_period;
             }
-        }
-
-        unsafe {
-            let _ = windows::Win32::Media::timeEndPeriod(1);
         }
 
         info!(
