@@ -273,18 +273,7 @@ fn render_timeline(ui: &mut egui::Ui, editor: &mut EditorState, outcome: &mut Ed
                     }
                 } else if response.dragged() {
                     if is_fast_scrub {
-                        if let Some(strip) = &editor.thumbnail_strip {
-                            if let Some(thumb) = strip.nearest(editor.current_time_secs).cloned() {
-                                ClipCompressApp::set_preview_texture_from_image(
-                                    editor,
-                                    ui.ctx(),
-                                    thumb,
-                                );
-                            }
-                            outcome.fast_preview_request = Some(editor.current_time_secs);
-                        } else {
-                            outcome.fast_preview_request = Some(editor.current_time_secs);
-                        }
+                        outcome.fast_preview_request = Some(editor.current_time_secs);
                     } else {
                         outcome.preview_request = Some(editor.current_time_secs);
                     }

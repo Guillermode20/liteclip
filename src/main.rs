@@ -358,8 +358,9 @@ async fn main() -> Result<()> {
     let mut should_restart = false;
     let save_in_progress = Arc::new(AtomicBool::new(false));
     let mut last_pipeline_memory_telemetry = std::time::Instant::now();
+    // Health check interval increased to 1000ms to reduce CPU overhead
     let mut pipeline_health_interval =
-        tokio::time::interval(tokio::time::Duration::from_millis(500));
+        tokio::time::interval(tokio::time::Duration::from_millis(1000));
     pipeline_health_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     // Main event loop
@@ -412,7 +413,10 @@ async fn main() -> Result<()> {
                                             }
                                             liteclip_replay::platform::HotkeyAction::OpenGallery => {
                                                 info!("Hotkey: open gallery");
-                                                liteclip_replay::gui::show_gallery_gui(tokio_tx.clone());
+                                                liteclip_replay::gui::show_gallery_gui(
+                                                    tokio_tx.clone(),
+                                                    config.clone(),
+                                                );
                                             }
                                         }
                                     }
@@ -448,6 +452,7 @@ async fn main() -> Result<()> {
                                                          liteclip_replay::gui::show_settings_gui(
                                                              tokio_tx.clone(),
                                                              Some(level_monitor),
+                                                             config.clone(),
                                                          );
                                                      }
                                                      Err(e) => error!("Failed to read app state for settings: {}", e),
@@ -455,7 +460,10 @@ async fn main() -> Result<()> {
                                              }
                                              liteclip_replay::platform::TrayEvent::OpenGallery => {
                                                  info!("Tray: Open Gallery selected");
-                                                 liteclip_replay::gui::show_gallery_gui(tokio_tx.clone());
+                                                 liteclip_replay::gui::show_gallery_gui(
+                                                     tokio_tx.clone(),
+                                                     config.clone(),
+                                                 );
                                              }
                                             _ => {
                                                 // Other tray events are not used (StartRecording, StopRecording,
@@ -475,8 +483,9 @@ async fn main() -> Result<()> {
                                     liteclip_replay::platform::AppEvent::ConfigUpdated(new_config) => {
                                         info!("ConfigUpdated event received from settings GUI");
                                         let cfg = (*new_config).clone();
+                                        let cfg_for_apply = cfg.clone();
                                         match app_state_blocking_try(&app_state, move |s| {
-                                            let needs_hotkey_reregister = s.apply_config(cfg)?;
+                                            let needs_hotkey_reregister = s.apply_config(cfg_for_apply)?;
                                             s.config().save_sync()?;
                                             Ok(needs_hotkey_reregister)
                                         })
@@ -500,6 +509,7 @@ async fn main() -> Result<()> {
                                                     }
                                                 }
                                                 let _ = platform_handle.update_recording_state(true);
+                                                config = cfg;
                                             }
                                             Err(e) => {
                                                 error!("Failed to apply config: {}", e);

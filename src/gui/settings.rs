@@ -9,10 +9,15 @@ use crate::config::{
 };
 use crate::platform::AppEvent;
 
-pub fn show_settings_gui(event_tx: Sender<AppEvent>, level_monitor: Option<AudioLevelMonitor>) {
+pub fn show_settings_gui(
+    event_tx: Sender<AppEvent>,
+    level_monitor: Option<AudioLevelMonitor>,
+    config: Config,
+) {
     crate::gui::manager::send_gui_message(crate::gui::manager::GuiMessage::ShowSettings(
         event_tx,
         level_monitor,
+        config,
     ));
 }
 
@@ -580,7 +585,9 @@ impl eframe::App for SettingsApp {
         self.render(ctx, &mut _dummy);
 
         if self.level_monitor.is_some() && self.current_tab == SettingsTab::Audio {
-            ctx.request_repaint_after(std::time::Duration::from_millis(66));
+            // Increased from 66ms to 100ms to reduce CPU usage
+            // Audio level visualization is still smooth at 10fps
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
     }
 }

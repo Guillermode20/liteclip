@@ -144,7 +144,7 @@ pub fn run_stream_copy_export_sdk(
         out_time_base: ffmpeg::Rational,
         is_video: bool,
     }
-    let mut stream_routes: HashMap<usize, StreamCopyRoute> = HashMap::new();
+    let mut stream_routes: HashMap<usize, StreamCopyRoute> = HashMap::with_capacity(4);
     for (in_idx, out_idx, should_copy) in &stream_mapping {
         if !*should_copy || *out_idx == usize::MAX {
             continue;
@@ -177,8 +177,8 @@ pub fn run_stream_copy_export_sdk(
     let mut processed_duration: f64 = 0.0;
     let mut output_cursor_secs = 0.0f64;
 
-    let mut last_out_dts_by_stream: HashMap<usize, i64> = HashMap::new();
-    let mut last_out_pts_by_stream: HashMap<usize, i64> = HashMap::new();
+    let mut last_out_dts_by_stream: HashMap<usize, i64> = HashMap::with_capacity(4);
+    let mut last_out_pts_by_stream: HashMap<usize, i64> = HashMap::with_capacity(4);
     for (range_index, range) in request.keep_ranges.iter().enumerate() {
         if cancel_flag.load(Ordering::Relaxed) {
             return Ok(ExportOutcome::Cancelled);

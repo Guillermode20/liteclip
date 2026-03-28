@@ -2,7 +2,8 @@ use anyhow::Context;
 use eframe::egui;
 use image::RgbaImage;
 use rayon::prelude::*;
-use std::collections::{HashMap, HashSet};
+use rustc_hash::FxHashMap;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -40,8 +41,10 @@ const EDITOR_STACK_BREAKPOINT: f32 = 960.0;
 const EDITOR_SMALL_SEEK_SECS: f64 = 1.0;
 const EDITOR_LARGE_SEEK_SECS: f64 = 5.0;
 
-pub fn show_gallery_gui(event_tx: TokioSender<AppEvent>) {
-    crate::gui::manager::send_gui_message(crate::gui::manager::GuiMessage::ShowGallery(event_tx));
+pub fn show_gallery_gui(event_tx: TokioSender<AppEvent>, config: Config) {
+    crate::gui::manager::send_gui_message(crate::gui::manager::GuiMessage::ShowGallery(
+        event_tx, config,
+    ));
 }
 
 #[derive(Clone)]
@@ -307,7 +310,7 @@ pub struct ClipCompressApp {
     filter_game: String,
     loaded: bool,
     scan_error: Option<String>,
-    thumbnails: HashMap<PathBuf, egui::TextureHandle>,
+    thumbnails: FxHashMap<PathBuf, egui::TextureHandle>,
     thumbnails_generating: HashSet<PathBuf>,
     thumbnail_tx: Sender<ThumbnailResult>,
     thumbnail_rx: Receiver<ThumbnailResult>,
@@ -346,7 +349,7 @@ impl ClipCompressApp {
             filter_game: ALL_GAMES_FILTER.to_string(),
             loaded: false,
             scan_error: None,
-            thumbnails: HashMap::new(),
+            thumbnails: FxHashMap::default(),
             thumbnails_generating: HashSet::new(),
             thumbnail_tx,
             thumbnail_rx,
@@ -386,7 +389,7 @@ impl ClipCompressApp {
             return;
         }
 
-        let mut paths = Vec::new();
+        let mut paths = Vec::with_capacity(256);
         collect_video_paths(&self.save_directory, &self.cache_directory, &mut paths);
         let base_dir = self.save_directory.clone();
 
@@ -408,7 +411,7 @@ impl ClipCompressApp {
                 .then_with(|| a.filename.cmp(&b.filename))
         });
 
-        let mut grouped: Vec<(String, Vec<VideoEntry>)> = Vec::new();
+        let mut grouped: Vec<(String, Vec<VideoEntry>)> = Vec::with_capacity(16);
         for entry in entries {
             if let Some((game, videos)) = grouped.last_mut() {
                 if *game == entry.game {
@@ -992,23 +995,43 @@ impl ClipCompressApp {
     }
 
     fn should_repaint(&self) -> bool {
-        if self.delete_hold_started_at.is_some() {
-            return true;
-        }
-        if !self.thumbnails_generating.is_empty() {
-            return true;
-        }
-        let Some(editor) = self.editor.as_ref() else {
-            return false;
-        };
-        editor.is_playing || editor.playback.has_pending_activity() || editor.has_active_export()
+        let (
+            editor_is_playing,
+            preview_frame_in_flight,
+            thumbnail_strip_loading,
+            playback_pending_activity,
+            export_active,
+        ) = self
+            .editor
+            .as_ref()
+            .map(|editor| {
+                (
+                    editor.is_playing,
+                    editor.preview_frame_in_flight,
+                    editor.thumbnail_strip_loading,
+                    editor.playback.has_pending_activity(),
+                    editor.has_active_export(),
+                )
+            })
+            .unwrap_or((false, false, false, false, false));
+
+        should_repaint_gallery(
+            self.delete_hold_started_at.is_some(),
+            !self.thumbnails_generating.is_empty(),
+            self.import_dialog_pending,
+            self.save_dialog_pending,
+            editor_is_playing,
+            preview_frame_in_flight,
+            thumbnail_strip_loading,
+            playback_pending_activity,
+            export_active,
+        )
     }
 
     fn open_editor(&mut self, video: VideoEntry) {
         info!("Opening Clip & Compress editor for {:?}", video.path);
         self.unload_browser_thumbnails();
         self.editor = Some(EditorState::new(video, self.preferred_export_encoder));
-        self.generate_thumbnail_strip();
     }
 
     fn render_browser(&mut self, ui: &mut egui::Ui) -> BrowserUiOutcome {
@@ -1378,6 +1401,28 @@ fn generate_thumbnail_strip_frames(
     utils::generate_thumbnail_strip_frames_impl(video_path, duration_secs, _has_audio)
 }
 
+fn should_repaint_gallery(
+    delete_hold_active: bool,
+    browser_thumbnail_work_active: bool,
+    import_dialog_pending: bool,
+    save_dialog_pending: bool,
+    editor_is_playing: bool,
+    preview_frame_in_flight: bool,
+    thumbnail_strip_loading: bool,
+    playback_pending_activity: bool,
+    export_active: bool,
+) -> bool {
+    delete_hold_active
+        || browser_thumbnail_work_active
+        || import_dialog_pending
+        || save_dialog_pending
+        || editor_is_playing
+        || preview_frame_in_flight
+        || thumbnail_strip_loading
+        || playback_pending_activity
+        || export_active
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1404,5 +1449,45 @@ mod tests {
         let next_time =
             clamp_to_enabled_playback_time(7.5, 30.0, &[5.0, 20.0], &[true, false, true]);
         assert!((next_time - 20.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn gallery_repaint_stays_idle_when_editor_is_paused() {
+        assert!(
+            !should_repaint_gallery(false, false, false, false, false, false, false, false, false),
+            "Paused gallery/editor should not keep repainting without active work"
+        );
+    }
+
+    #[test]
+    fn gallery_repaint_runs_for_live_editor_work() {
+        assert!(should_repaint_gallery(
+            false, false, false, false, true, false, false, false, false
+        ));
+        assert!(should_repaint_gallery(
+            false, false, false, false, false, true, false, false, false
+        ));
+        assert!(should_repaint_gallery(
+            false, false, false, false, false, false, true, false, false
+        ));
+        assert!(should_repaint_gallery(
+            false, false, false, false, false, false, false, true, false
+        ));
+        assert!(should_repaint_gallery(
+            false, false, false, false, false, false, false, false, true
+        ));
+    }
+
+    #[test]
+    fn gallery_repaint_runs_for_background_results_that_need_polling() {
+        assert!(should_repaint_gallery(
+            false, true, false, false, false, false, false, false, false
+        ));
+        assert!(should_repaint_gallery(
+            false, false, true, false, false, false, false, false, false
+        ));
+        assert!(should_repaint_gallery(
+            false, false, false, true, false, false, false, false, false
+        ));
     }
 }

@@ -583,7 +583,7 @@ fn compute_audio_placements<'a>(
     base_qpc: i64,
 ) -> Vec<AudioPacketPlacement<'a>> {
     let mut stream_next_indices: std::collections::HashMap<u8, usize> =
-        std::collections::HashMap::new();
+        std::collections::HashMap::with_capacity(2);
     let mut ordered_audio_packets: Vec<&EncodedPacket> = audio_packets.to_vec();
     ordered_audio_packets.sort_by_key(|packet| (audio_stream_id(packet), packet.pts));
 
