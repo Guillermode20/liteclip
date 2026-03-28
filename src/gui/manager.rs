@@ -225,7 +225,11 @@ fn current_viewport_is_showing(ctx: &egui::Context) -> bool {
     })
 }
 
-fn should_request_repaint(activity: GuiActivityState, idle_since: Option<Instant>, now: Instant) -> bool {
+fn should_request_repaint(
+    activity: GuiActivityState,
+    idle_since: Option<Instant>,
+    now: Instant,
+) -> bool {
     if activity.has_visible_windows() || activity.has_toasts {
         return true;
     }
@@ -248,7 +252,6 @@ pub fn send_gui_message(msg: GuiMessage) {
     init_gui_manager();
 
     for attempt in 0..10 {
-
         let tx = with_gui_state(|state| state.tx.as_ref().cloned());
         if let Some(tx) = tx {
             match tx.send(msg.take().expect("GUI message missing during retry")) {
@@ -629,7 +632,6 @@ impl eframe::App for GuiManagerApp {
         if disconnected {
             with_gui_state(|state| state.request_shutdown());
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            return;
         }
     }
 }
