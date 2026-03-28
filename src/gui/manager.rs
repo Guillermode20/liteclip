@@ -31,7 +31,7 @@ pub enum ToastKind {
 struct GuiManagerState {
     tx: Option<Sender<GuiMessage>>,
     /// EventLoopProxy used to wake the dormant GUI thread when a GuiMessage arrives.
-    /// This enables instant wake-on-message without periodic polling.
+    /// Enables instant wake-on-message without periodic polling.
     event_loop_proxy: Option<EventLoopProxy<UserEvent>>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -47,47 +47,27 @@ const VISIBLE_WINDOW_REPAINT_MS: u64 = 100;
 /// Repaint interval when there are toasts or windows visible (active state).
 const ACTIVE_REPAINT_MS: u64 = 100;
 /// Grace period before entering dormant state after becoming idle.
-/// This allows toast fade-out animations to complete smoothly.
-/// Event loop becomes dormant (ControlFlow::Wait) after this period.
+/// Allows toast fade-out animations to complete smoothly.
+/// After this period, event loop enters true dormant state (no repaints).
 const DORMANT_GRACE_PERIOD_MS: u64 = 2000;
 /// GUI Manager for the application.
 ///
-/// Handles the centralized display of toasts and oversees the creation
-/// of main GUI windows (Settings and Gallery).
+/// Handles centralized display of toasts and manages Settings/Gallery windows.
+///
+/// # Architecture
+///
+/// Uses the **dormant EventLoop pattern**: one thread runs for the entire app lifetime.
+/// The EventLoop never dies - it just becomes dormant (ControlFlow::Wait) when idle.
+/// Windows (Settings/Gallery) are created/destroyed inside `Option` fields, which is
+/// fully supported by winit. This avoids the forbidden EventLoop recreation that
+/// would cause `RecreationAttempt` panic.
 ///
 /// # Threading
 ///
-/// The GUI manager initializes a dedicated background thread for the `egui`
-/// overlay which manages notifications (toasts). Other windows like Settings
-/// and Gallery are spawned as needed from their respective modules, each
-/// running in its own native thread to avoid stalling the recording pipeline.
+/// - GUI thread: Dormant when idle, wakes instantly via EventLoopProxy on messages
+/// - Settings/Gallery: Viewports created within the same event loop (deferred viewports)
 pub fn init_gui_manager() {
-    wait_for_gui_shutdown_if_needed();
     with_gui_state(|state| state.ensure_running());
-}
-
-/// Waits for a previously-requested GUI shutdown to complete so that
-/// `ensure_running` can spawn a fresh thread.  Acquires the global lock
-/// briefly on each poll to avoid holding it during the sleep.
-fn wait_for_gui_shutdown_if_needed() {
-    for _ in 0..50 {
-        let still_shutting_down = with_gui_state(|state| {
-            state.cleanup_finished_thread();
-            // Thread alive + no sender = shutdown in progress
-            state.thread.is_some() && state.tx.is_none()
-        });
-        if !still_shutting_down {
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    // Timeout: abandon the old thread handle so a new one can be spawned.
-    warn!("GUI thread did not finish shutdown within 500ms; abandoning handle");
-    with_gui_state(|state| {
-        state.thread = None;
-        state.tx = None;
-        state.event_loop_proxy = None;
-    });
 }
 
 fn spawn_gui_manager_thread(state: &mut GuiManagerState) {
@@ -168,45 +148,9 @@ fn with_gui_state<T>(f: impl FnOnce(&mut GuiManagerState) -> T) -> T {
 }
 
 impl GuiManagerState {
-    fn cleanup_finished_thread(&mut self) {
-        let finished = self
-            .thread
-            .as_ref()
-            .is_some_and(std::thread::JoinHandle::is_finished);
-
-        if !finished {
-            return;
-        }
-
-        if let Some(thread) = self.thread.take() {
-            if let Err(err) = thread.join() {
-                warn!("GUI manager thread panicked: {:?}", err);
-            }
-        }
-
-        self.tx = None;
-        self.event_loop_proxy = None;
-    }
-
     fn ensure_running(&mut self) {
-        self.cleanup_finished_thread();
-
         if self.thread.is_none() {
             spawn_gui_manager_thread(self);
-        }
-    }
-
-    fn request_shutdown(&mut self) {
-        self.tx = None;
-        // Wake the event loop so it can detect the channel disconnect
-        // and close gracefully.  Must happen AFTER dropping tx so that
-        // the next try_recv sees Disconnected.
-        if let Some(proxy) = self.event_loop_proxy.take() {
-            let _ = proxy.send_event(UserEvent::RequestRepaint {
-                viewport_id: ViewportId::ROOT,
-                when: Instant::now(),
-                cumulative_pass_nr: 0,
-            });
         }
     }
 }
@@ -281,53 +225,28 @@ fn should_request_repaint(
 }
 
 pub fn send_gui_message(msg: GuiMessage) {
-    let mut msg = Some(msg);
-
     init_gui_manager();
 
-    for attempt in 0..10 {
-        let tx = with_gui_state(|state| state.tx.as_ref().cloned());
-        if let Some(tx) = tx {
-            match tx.send(msg.take().expect("GUI message missing during retry")) {
-                Ok(()) => {
-                    // Wake the dormant event loop by sending a RequestRepaint user event.
-                    // This ensures the GUI thread processes the message immediately
-                    // rather than waiting for the next periodic poll.
-                    with_gui_state(|state| {
-                        if let Some(proxy) = &state.event_loop_proxy {
-                            // Use a dummy ViewportId since we just want to wake the loop,
-                            // not target a specific viewport. The actual message handling
-                            // happens in GuiManagerApp::update() via channel polling.
-                            let _ = proxy.send_event(UserEvent::RequestRepaint {
-                                viewport_id: ViewportId::ROOT,
-                                when: Instant::now(),
-                                cumulative_pass_nr: 0,
-                            });
-                        }
-                    });
-                    return;
-                }
-                Err(err) => {
-                    msg = Some(err.0);
-                    with_gui_state(|state| state.request_shutdown());
-                    if attempt + 1 < 10 {
-                        std::thread::sleep(std::time::Duration::from_millis(10));
-                    }
-                }
-            }
+    let tx = with_gui_state(|state| state.tx.as_ref().cloned());
+    if let Some(tx) = tx {
+        if tx.send(msg).is_err() {
+            warn!("GUI manager channel closed - message dropped");
         } else {
-            wait_for_gui_shutdown_if_needed();
-            with_gui_state(|state| state.ensure_running());
-            let thread_still_running = with_gui_state(|state| state.thread.is_some());
-            if thread_still_running && attempt + 1 < 10 {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
+            // Wake the dormant event loop instantly via proxy.
+            // The GUI thread is dormant (ControlFlow::Wait) and will wake
+            // immediately to process this message without polling.
+            with_gui_state(|state| {
+                if let Some(proxy) = &state.event_loop_proxy {
+                    let _ = proxy.send_event(UserEvent::RequestRepaint {
+                        viewport_id: ViewportId::ROOT,
+                        when: Instant::now(),
+                        cumulative_pass_nr: 0,
+                    });
+                }
+            });
         }
-    }
-
-    if let Some(message) = msg {
-        warn!("GUI manager unavailable after waiting for restart; dropping message");
-        let _ = message;
+    } else {
+        warn!("GUI manager not initialized - message dropped");
     }
 }
 
@@ -336,7 +255,14 @@ pub fn show_toast(kind: ToastKind, message: impl Into<String>) {
 }
 
 pub fn shutdown_gui() {
-    with_gui_state(|state| state.request_shutdown());
+    // Signal the GUI thread to close by dropping the sender.
+    // The GUI thread will detect Disconnected and close gracefully.
+    // Note: The thread continues running in dormant state until app exit.
+    // The EventLoop is never recreated - it just waits forever after closing windows.
+    with_gui_state(|state| {
+        state.tx = None;
+        state.event_loop_proxy = None;
+    });
 }
 
 struct GuiManagerApp {
@@ -665,7 +591,8 @@ impl eframe::App for GuiManagerApp {
         }
 
         if disconnected {
-            with_gui_state(|state| state.request_shutdown());
+            // Channel closed - close the overlay window but keep event loop alive.
+            // The thread will remain dormant until app termination.
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
     }
@@ -770,23 +697,6 @@ mod tests {
             "event_loop_proxy should be None by default"
         );
         assert!(state.thread.is_none(), "thread should be None by default");
-    }
-
-    /// Tests that request_shutdown clears the tx channel.
-    #[test]
-    fn test_request_shutdown_clears_tx() {
-        let (tx, _rx) = channel();
-        let mut state = GuiManagerState {
-            tx: Some(tx),
-            event_loop_proxy: None,
-            thread: None,
-        };
-
-        state.request_shutdown();
-        assert!(
-            state.tx.is_none(),
-            "tx should be None after shutdown request"
-        );
     }
 
     /// Tests that GuiManagerState can store an EventLoopProxy reference.
