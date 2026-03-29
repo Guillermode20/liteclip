@@ -17,7 +17,10 @@ mod frame_pool;
 
 use frame_pool::{FramePool, PooledRgbaImage, FRAME_POOL_SIZE};
 
-const FRAME_CHANNEL_CAPACITY: usize = 24;
+/// Frame channel capacity for decoder-to-UI communication.
+/// Reduced from 24 to 12 frames (~0.4s at 30fps) to minimize memory overhead
+/// while still providing smooth playback. Lower values enable faster stop/seek feedback.
+const FRAME_CHANNEL_CAPACITY: usize = 12;
 const PLAYBACK_QUEUE_DEPTH: usize = 20;
 
 struct DecoderHardwareContext {
@@ -750,7 +753,9 @@ impl PlaybackController {
                 if sink.empty() {
                     break;
                 }
-                thread::sleep(Duration::from_millis(20));
+                // Sleep for 50ms instead of 20ms to reduce CPU wake-ups
+                // while still maintaining responsive audio control
+                thread::sleep(Duration::from_millis(50));
             }
             drop(sink);
         });

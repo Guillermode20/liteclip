@@ -80,11 +80,12 @@ impl WasapiMicCapture {
 
     /// Start microphone capture
     pub fn start(&mut self, config: WasapiMicConfig) -> Result<()> {
-        if self.running.load(Ordering::SeqCst) {
+        // Relaxed ordering is sufficient for simple start/stop flags
+        if self.running.load(Ordering::Relaxed) {
             return Ok(());
         }
 
-        self.running.store(true, Ordering::SeqCst);
+        self.running.store(true, Ordering::Relaxed);
         let running = self.running.clone();
         let initialized = self.initialized.clone();
         let packet_tx = self.packet_tx.clone();
@@ -102,7 +103,7 @@ impl WasapiMicCapture {
                 noise_thread_handle_clone,
             ) {
                 error!("Microphone capture loop error: {:?}", e);
-                running.store(false, Ordering::SeqCst);
+                running.store(false, Ordering::Relaxed);
             }
         });
 
@@ -111,7 +112,7 @@ impl WasapiMicCapture {
 
         // Wait for initialization to complete or fail
         let mut attempts = 0;
-        while !self.initialized.load(Ordering::SeqCst) && self.running.load(Ordering::SeqCst) {
+        while !self.initialized.load(Ordering::Relaxed) && self.running.load(Ordering::Relaxed) {
             thread::sleep(Duration::from_millis(50));
             attempts += 1;
             if attempts > 40 {
@@ -122,7 +123,7 @@ impl WasapiMicCapture {
             }
         }
 
-        if !self.running.load(Ordering::SeqCst) {
+        if !self.running.load(Ordering::Relaxed) {
             return Err(anyhow::anyhow!("Microphone capture failed to start"));
         }
 
@@ -131,7 +132,8 @@ impl WasapiMicCapture {
 
     /// Stop microphone capture
     pub fn stop(&mut self) {
-        self.running.store(false, Ordering::SeqCst);
+        // Relaxed ordering is sufficient - no data synchronization needed for stop flag
+        self.running.store(false, Ordering::Relaxed);
         if let Some(handle) = self.capture_thread.take() {
             let _ = handle.join();
         }
@@ -287,7 +289,8 @@ impl WasapiMicCapture {
         let mut audio_buffer = BytesMut::with_capacity(max_buffer_size);
         let mut packet_counter: u64 = 0;
 
-        while running.load(Ordering::SeqCst) {
+        // Relaxed ordering is sufficient for simple stop flag checks
+        while running.load(Ordering::Relaxed) {
             let mut packet_frames = unsafe { capture_client.GetNextPacketSize() }?;
 
             if packet_frames == 0 {
@@ -377,7 +380,7 @@ impl WasapiMicCapture {
                         silent,
                     };
                     if tx.send(raw).is_err() {
-                        running.store(false, Ordering::SeqCst);
+                        running.store(false, Ordering::Relaxed);
                         break;
                     }
                 } else {
@@ -389,7 +392,7 @@ impl WasapiMicCapture {
                         StreamType::Microphone,
                     );
                     if packet_tx.send(packet).is_err() {
-                        running.store(false, Ordering::SeqCst);
+                        running.store(false, Ordering::Relaxed);
                         break;
                     }
                     processed_samples.fetch_add(frame_count as u64, Ordering::Relaxed);

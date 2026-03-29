@@ -24,19 +24,24 @@ pub enum EncoderHealthEvent {
 /// # Thread Safety
 ///
 /// The `data` field is cheaply cloneable via `Bytes`.
+///
+/// # Memory Layout
+///
+/// Fields are ordered by size to minimize padding waste (largest to smallest).
+/// Total size: 64 bytes on 64-bit platforms.
 #[derive(Clone)]
 pub struct EncodedPacket {
-    /// Reference-counted byte buffer (cheap clone).
+    /// Reference-counted byte buffer (cheap clone) - 24 bytes
     pub data: Bytes,
-    /// Presentation timestamp (QPC-based, 10MHz units).
+    /// Presentation timestamp (QPC-based, 10MHz units) - 8 bytes
     pub pts: i64,
-    /// Decode timestamp.
+    /// Decode timestamp - 8 bytes
     pub dts: i64,
-    /// True if this is a keyframe (IDR frame for video).
-    pub is_keyframe: bool,
-    /// Stream type (video or audio).
+    /// Stream type (video or audio) - 1 byte + 7 padding
     pub stream: StreamType,
-    /// Optional frame resolution for raw video payloads.
+    /// True if this is a keyframe (IDR frame for video) - 1 byte
+    pub is_keyframe: bool,
+    /// Optional frame resolution for raw video payloads - 16 bytes (Option<(u32,u32)>)
     pub resolution: Option<(u32, u32)>,
 }
 
@@ -61,8 +66,8 @@ impl EncodedPacket {
             data: data.into(),
             pts,
             dts,
-            is_keyframe,
             stream,
+            is_keyframe,
             resolution: None,
         }
     }

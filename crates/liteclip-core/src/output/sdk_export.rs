@@ -297,13 +297,18 @@ pub fn run_stream_copy_export_sdk(
                 .write_interleaved(&mut output_ctx)
                 .with_context(|| "Failed writing packet during stream copy")?;
 
-            // Progress reporting
+            // Progress reporting - use structured logging to avoid format! allocations in hot path
             let now = Instant::now();
             const MIN_PROGRESS_INTERVAL: std::time::Duration =
                 std::time::Duration::from_millis(100);
             if now.duration_since(last_progress_time) >= MIN_PROGRESS_INTERVAL {
                 last_progress_time = now;
                 let progress = (processed_duration / total_duration_secs).min(1.0) as f32;
+                tracing::debug!(
+                    processed_duration_secs = processed_duration,
+                    progress_pct = progress * 100.0,
+                    "Stream copy progress"
+                );
                 let _ = progress_tx.send(ClipExportUpdate::Progress {
                     phase: ClipExportPhase::Preparing,
                     fraction: progress,

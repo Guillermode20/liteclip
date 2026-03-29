@@ -48,7 +48,8 @@ const TOAST_WINDOW_SIZE: [f32; 2] = [350.0, 300.0];
 const TOAST_WINDOW_IDLE_SIZE: [f32; 2] = [1.0, 1.0];
 const TOAST_WINDOW_MARGIN: [f32; 2] = [20.0, 20.0];
 /// Repaint interval when there are toasts or windows visible (active state).
-const ACTIVE_REPAINT_MS: u64 = 100;
+/// Increased from 100ms to 250ms to reduce CPU overhead during idle animations.
+const ACTIVE_REPAINT_MS: u64 = 250;
 /// Grace period before entering dormant state after becoming idle.
 /// Allows toast fade-out animations to complete smoothly.
 /// After this period, event loop enters true dormant state (no repaints).
@@ -811,12 +812,13 @@ mod tests {
     }
 
     /// Tests that the active repaint interval is reasonable for smooth UI.
-    /// The interval should be short enough for responsive UI (typically 50-200ms).
+    /// The interval should be short enough for responsive UI (typically 50-250ms).
+    /// Increased from 200ms to 250ms to reduce CPU overhead during idle animations.
     #[test]
     fn test_active_repaint_interval_bounds() {
         let active_repaint_ms = ACTIVE_REPAINT_MS;
         let min_interval_ms = 16; // ~60fps minimum
-        let max_interval_ms = 200; // 200ms maximum for smooth animations
+        let max_interval_ms = 250; // 250ms maximum to reduce CPU overhead
 
         assert!(
             active_repaint_ms >= min_interval_ms,
@@ -824,7 +826,7 @@ mod tests {
         );
         assert!(
             active_repaint_ms <= max_interval_ms,
-            "Active repaint interval should be at most 200ms ({ACTIVE_REPAINT_MS}ms is too long)"
+            "Active repaint interval should be at most 250ms ({ACTIVE_REPAINT_MS}ms is too long)"
         );
     }
 

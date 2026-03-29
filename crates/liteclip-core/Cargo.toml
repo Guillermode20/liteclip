@@ -50,6 +50,8 @@ chrono = "0.4"
 windows-core = "0.58"
 ffmpeg-next = { version = "7.1.0", default-features = false, features = ["codec", "format", "filter", "software-scaling", "software-resampling", "device"], optional = true }
 nnnoiseless = "0.5.2"
+parking_lot = "0.12"
+memchr = "2"
 
 [[example]]
 name = "minimal_engine"

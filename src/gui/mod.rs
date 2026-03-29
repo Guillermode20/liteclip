@@ -23,6 +23,7 @@
 //!
 //! ```no_run
 //! use liteclip_replay::gui::{show_settings_gui, init_gui_manager};
+//! use liteclip_core::config::Config;
 //! use tokio::sync::mpsc::channel;
 //!
 //! // Initialize the GUI manager lazily before first use.
@@ -30,7 +31,8 @@
 //!
 //! // Show settings window (level_monitor is None for testing)
 //! let (tx, rx) = channel(1);
-//! show_settings_gui(tx, None);
+//! let config = Config::default();
+//! show_settings_gui(tx, None, config);
 //! ```
 
 pub mod manager;

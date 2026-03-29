@@ -250,13 +250,13 @@ struct LockFreeInner {
 
 #[repr(align(64))]
 struct Slot {
-    packet: std::sync::Mutex<Option<EncodedPacket>>,
+    packet: parking_lot::Mutex<Option<EncodedPacket>>,
 }
 
 impl Slot {
     fn new() -> Self {
         Self {
-            packet: std::sync::Mutex::new(None),
+            packet: parking_lot::Mutex::new(None),
         }
     }
 }
@@ -404,7 +404,7 @@ impl LockFreeReplayBuffer {
             }
         }
 
-        let write_idx = inner.write_idx.fetch_add(1, Ordering::Release);
+        let write_idx = inner.write_idx.fetch_add(1, Ordering::Relaxed);
         let slot_idx = write_idx & inner.mask;
         let slot = &inner.slots[slot_idx];
 
@@ -413,21 +413,23 @@ impl LockFreeReplayBuffer {
 
         // Track old packet for memory accounting - now includes new packet accounting inside lock
         let old_packet_size = {
-            let mut packet_guard = slot.packet.lock().unwrap_or_else(|e| e.into_inner());
+            let mut packet_guard = slot.packet.lock();
             let old = packet_guard.take();
             let old_size = old.as_ref().map(|p| p.data.len()).unwrap_or(0);
             let old_was_keyframe = old.as_ref().map(|p| p.is_keyframe).unwrap_or(false);
             *packet_guard = Some(packet);
-            // Account for new packet bytes immediately, inside the lock
-            inner.total_bytes.fetch_add(packet_size, Ordering::Relaxed);
+            // Account for new packet bytes immediately, inside the lock.
+            // Use Release ordering to "publish" the packet write to other threads.
+            inner.total_bytes.fetch_add(packet_size, Ordering::Release);
             if old.is_some() {
-                inner.total_bytes.fetch_sub(old_size, Ordering::Relaxed);
+                // Release ordering ensures the packet removal is visible before counter update
+                inner.total_bytes.fetch_sub(old_size, Ordering::Release);
                 if old_was_keyframe {
-                    inner.keyframe_count.fetch_sub(1, Ordering::Relaxed);
+                    inner.keyframe_count.fetch_sub(1, Ordering::Release);
                 }
             }
             if is_keyframe {
-                inner.keyframe_count.fetch_add(1, Ordering::Relaxed);
+                inner.keyframe_count.fetch_add(1, Ordering::Release);
             }
             old_size
         };
@@ -488,7 +490,8 @@ impl LockFreeReplayBuffer {
         // Batch eviction acquires multiple slot locks in a tight loop to reduce
         // contention compared to one-by-one eviction with full push path overhead.
         if inner.max_memory_bytes > 0 {
-            let current_total = inner.total_bytes.load(Ordering::Relaxed);
+            // Use Acquire ordering to see latest writes from producer thread
+            let current_total = inner.total_bytes.load(Ordering::Acquire);
             let memory_ratio = current_total as f32 / inner.max_memory_bytes as f32;
 
             // Determine if we need eviction and how aggressively
@@ -511,8 +514,8 @@ impl LockFreeReplayBuffer {
                 };
                 let target_bytes = (inner.max_memory_bytes as f32 * target_ratio) as usize;
 
-                // Batch eviction loop
-                while inner.total_bytes.load(Ordering::Relaxed) > target_bytes {
+                // Batch eviction loop - Acquire to see latest counter updates
+                while inner.total_bytes.load(Ordering::Acquire) > target_bytes {
                     // Collect a batch of slots to evict
                     let mut batch_evicted = 0usize;
 
@@ -532,12 +535,13 @@ impl LockFreeReplayBuffer {
 
                         // Acquire lock and evict packet
                         {
-                            let mut guard = slot.packet.lock().unwrap_or_else(|e| e.into_inner());
+                            let mut guard = slot.packet.lock();
                             if let Some(old) = guard.take() {
                                 let old_len = old.data.len();
-                                inner.total_bytes.fetch_sub(old_len, Ordering::Relaxed);
+                                // Release ordering ensures packet removal is visible before counter update
+                                inner.total_bytes.fetch_sub(old_len, Ordering::Release);
                                 if old.is_keyframe {
-                                    inner.keyframe_count.fetch_sub(1, Ordering::Relaxed);
+                                    inner.keyframe_count.fetch_sub(1, Ordering::Release);
                                     evicted_keyframes += 1;
                                 }
                                 evicted_bytes += old_len;
@@ -589,16 +593,17 @@ impl LockFreeReplayBuffer {
 
                 // Oldest packets are gone but the packet we just wrote (or accounting skew) still exceeds the cap.
                 if stopped_at_head
-                    && inner.total_bytes.load(Ordering::Relaxed) > inner.max_memory_bytes
+                    && inner.total_bytes.load(Ordering::Acquire) > inner.max_memory_bytes
                 {
                     let slot_idx = write_idx & inner.mask;
                     let slot = &inner.slots[slot_idx];
-                    let mut guard = slot.packet.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut guard = slot.packet.lock();
                     if let Some(removed) = guard.take() {
                         let rm = removed.data.len();
-                        inner.total_bytes.fetch_sub(rm, Ordering::Relaxed);
+                        // Release ordering ensures packet removal is visible before counter update
+                        inner.total_bytes.fetch_sub(rm, Ordering::Release);
                         if removed.is_keyframe {
-                            inner.keyframe_count.fetch_sub(1, Ordering::Relaxed);
+                            inner.keyframe_count.fetch_sub(1, Ordering::Release);
                         }
                         warn!(
                             "Buffer: dropped newest packet ({:.1}KB) to enforce memory cap {:.1}MB",
@@ -631,7 +636,7 @@ impl LockFreeReplayBuffer {
 
             let slot_idx = evict & inner.mask;
             let slot = &inner.slots[slot_idx];
-            let mut guard = slot.packet.lock().unwrap_or_else(|e| e.into_inner());
+            let mut guard = slot.packet.lock();
 
             let should_evict = match guard.as_ref() {
                 Some(packet) => packet.pts < cutoff_pts,
@@ -644,9 +649,10 @@ impl LockFreeReplayBuffer {
 
             if let Some(old) = guard.take() {
                 let old_len = old.data.len();
-                inner.total_bytes.fetch_sub(old_len, Ordering::Relaxed);
+                // Release ordering ensures packet removal is visible before counter update
+                inner.total_bytes.fetch_sub(old_len, Ordering::Release);
                 if old.is_keyframe {
-                    inner.keyframe_count.fetch_sub(1, Ordering::Relaxed);
+                    inner.keyframe_count.fetch_sub(1, Ordering::Release);
                     duration_evicted_keyframes += 1;
                 }
                 duration_evicted_bytes += old_len;
@@ -825,7 +831,7 @@ impl LockFreeReplayBuffer {
             let slot_idx = i & inner.mask;
             let slot = &inner.slots[slot_idx];
 
-            if let Ok(packet_guard) = slot.packet.try_lock() {
+            if let Some(packet_guard) = slot.packet.try_lock() {
                 if let Some(ref packet) = *packet_guard {
                     // Zero-copy clone: Bytes uses Arc internally, so clone() just bumps
                     // the refcount. Ring eviction still works because the slot is cleared
@@ -1010,7 +1016,7 @@ impl LockFreeReplayBuffer {
             let slot_idx = i & inner.mask;
             let slot = &inner.slots[slot_idx];
 
-            if let Ok(packet_guard) = slot.packet.try_lock() {
+            if let Some(packet_guard) = slot.packet.try_lock() {
                 if let Some(ref packet) = *packet_guard {
                     if packet.is_keyframe {
                         if packet.pts >= start_pts && first_keyframe_at_or_after.is_none() {
@@ -1078,8 +1084,8 @@ impl LockFreeReplayBuffer {
         drop(metas);
 
         // ── Pass 2: selective clone ────────────────────────────────────────
-        // Use binary search on sorted included_indices for O(log n) lookup
-        // instead of O(1) array access, but without the large Vec<bool> allocation.
+        // Use a sorted included_indices Vec for O(log n) lookup without large allocation
+        // The Vec is already sorted from construction since we iterate in order
         let mut result: Vec<EncodedPacket> = Vec::with_capacity(included_indices.len());
 
         for i in first_idx..write_idx {
@@ -1090,7 +1096,7 @@ impl LockFreeReplayBuffer {
             let slot_idx = i & inner.mask;
             let slot = &inner.slots[slot_idx];
 
-            if let Ok(packet_guard) = slot.packet.try_lock() {
+            if let Some(packet_guard) = slot.packet.try_lock() {
                 if let Some(ref packet) = *packet_guard {
                     // Zero-copy clone: Bytes uses Arc internally, so clone() just bumps
                     // the refcount. Ring eviction still works because the slot is cleared
@@ -1283,7 +1289,7 @@ impl LockFreeReplayBuffer {
             let slot = &inner.slots[i];
             // Use blocking lock with poison recovery — try_lock could silently
             // skip slots if a snapshot consumer holds the lock, leaking packets.
-            let mut packet_guard = slot.packet.lock().unwrap_or_else(|e| e.into_inner());
+            let mut packet_guard = slot.packet.lock();
             *packet_guard = None;
         }
 
@@ -1340,7 +1346,7 @@ impl LockFreeReplayBuffer {
         // Clear all slots (blocking locks to ensure no packet remains)
         for i in 0..inner.capacity {
             let slot = &inner.slots[i];
-            let mut packet_guard = slot.packet.lock().unwrap_or_else(|e| e.into_inner());
+            let mut packet_guard = slot.packet.lock();
             *packet_guard = None;
         }
 
@@ -1423,8 +1429,9 @@ impl LockFreeReplayBuffer {
     pub fn stats(&self) -> BufferStats {
         let inner = &self.inner;
         let write_idx = inner.write_idx.load(Ordering::Acquire);
-        let total_bytes = inner.total_bytes.load(Ordering::Relaxed);
-        let keyframe_count = inner.keyframe_count.load(Ordering::Relaxed);
+        // Acquire ordering ensures we see latest counter values from producer thread
+        let total_bytes = inner.total_bytes.load(Ordering::Acquire);
+        let keyframe_count = inner.keyframe_count.load(Ordering::Acquire);
         let evict_frontier = inner.evict_frontier.load(Ordering::Acquire);
         let actual_start = write_idx.saturating_sub(inner.capacity).max(evict_frontier);
 
@@ -1452,7 +1459,7 @@ impl LockFreeReplayBuffer {
         let duration_secs = if write_idx >= 2 {
             // Read actual oldest packet's PTS from its slot (evict_frontier aware).
             let oldest_slot = &inner.slots[actual_start & inner.mask];
-            let oldest_pts = if let Ok(g) = oldest_slot.packet.try_lock() {
+            let oldest_pts = if let Some(g) = oldest_slot.packet.try_lock() {
                 g.as_ref().map(|p| p.pts).unwrap_or(0)
             } else {
                 0
@@ -1508,7 +1515,7 @@ impl LockFreeReplayBuffer {
         let slot_idx = oldest_idx & inner.mask;
         let slot = &inner.slots[slot_idx];
 
-        if let Ok(packet_guard) = slot.packet.try_lock() {
+        if let Some(packet_guard) = slot.packet.try_lock() {
             packet_guard.as_ref().map(|p| p.pts)
         } else {
             None
@@ -1526,7 +1533,7 @@ impl LockFreeReplayBuffer {
         let slot_idx = newest_idx & inner.mask;
         let slot = &inner.slots[slot_idx];
 
-        if let Ok(packet_guard) = slot.packet.try_lock() {
+        if let Some(packet_guard) = slot.packet.try_lock() {
             packet_guard.as_ref().map(|p| p.pts)
         } else {
             None
@@ -1546,7 +1553,7 @@ impl LockFreeReplayBuffer {
         let slot_idx = start_idx & inner.mask;
         let slot = &inner.slots[slot_idx];
 
-        if let Ok(packet_guard) = slot.packet.try_lock() {
+        if let Some(packet_guard) = slot.packet.try_lock() {
             packet_guard.as_ref().and_then(|p| p.resolution)
         } else {
             None

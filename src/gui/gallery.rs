@@ -538,8 +538,9 @@ impl ClipCompressApp {
     fn check_for_new_thumbnails(&mut self, ctx: &egui::Context) {
         let now = Instant::now();
 
-        // Only check every 3 seconds to avoid excessive polling
-        if now.duration_since(self.last_thumbnail_check) < Duration::from_secs(3) {
+        // Only check every 5 seconds to avoid excessive polling
+        // Reduced from 3 seconds since thumbnails are generated asynchronously
+        if now.duration_since(self.last_thumbnail_check) < Duration::from_secs(5) {
             return;
         }
 

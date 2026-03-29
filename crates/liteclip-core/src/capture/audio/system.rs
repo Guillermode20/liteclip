@@ -73,11 +73,11 @@ impl WasapiSystemCapture {
 
     /// Start capturing system audio
     pub fn start(&mut self, config: WasapiSystemConfig) -> Result<()> {
-        if self.running.load(Ordering::SeqCst) {
+        if self.running.load(Ordering::Relaxed) {
             return Ok(());
         }
 
-        self.running.store(true, Ordering::SeqCst);
+        self.running.store(true, Ordering::Relaxed);
 
         let running = Arc::clone(&self.running);
         let packet_tx = self.packet_tx.clone();
@@ -96,7 +96,8 @@ impl WasapiSystemCapture {
 
     /// Stop capturing system audio
     pub fn stop(&mut self) {
-        self.running.store(false, Ordering::SeqCst);
+        // Relaxed ordering is sufficient for a simple stop flag - no data synchronization needed
+        self.running.store(false, Ordering::Relaxed);
         if let Some(handle) = self.capture_thread.take() {
             if handle.join().is_err() {
                 error!("System audio capture thread panicked");
@@ -197,7 +198,8 @@ impl WasapiSystemCapture {
         let max_buffer_size = (config.sample_rate as usize / 10) * block_align as usize;
         let mut audio_buffer = BytesMut::with_capacity(max_buffer_size);
 
-        while running.load(Ordering::SeqCst) {
+        // Relaxed ordering is sufficient - we're just checking a stop flag
+        while running.load(Ordering::Relaxed) {
             let mut packet_frames = unsafe { capture_client.GetNextPacketSize() }
                 .context("IAudioCaptureClient::GetNextPacketSize failed")?;
 
@@ -262,7 +264,7 @@ impl WasapiSystemCapture {
                 );
 
                 if packet_tx.send(packet).is_err() {
-                    running.store(false, Ordering::SeqCst);
+                    running.store(false, Ordering::Relaxed);
                     break;
                 }
 

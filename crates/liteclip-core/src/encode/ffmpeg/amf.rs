@@ -11,10 +11,32 @@ use crate::encode::{EncodeError, EncodeResult};
 
 use super::FfmpegEncoder;
 
+/// Helper to write integer to stack buffer without heap allocation.
+#[inline]
+fn write_int_to_buffer<'a>(mut val: usize, buf: &'a mut [u8; 16]) -> &'a str {
+    if val == 0 {
+        buf[0] = b'0';
+        return unsafe { std::str::from_utf8_unchecked(&buf[..1]) };
+    }
+    
+    let mut pos = 15;
+    while val > 0 {
+        buf[pos] = b'0' + (val % 10) as u8;
+        val /= 10;
+        pos -= 1;
+    }
+    
+    unsafe { std::str::from_utf8_unchecked(&buf[pos + 1..]) }
+}
+
 impl FfmpegEncoder {
     pub(super) fn apply_amf_options(&self, options: &mut ffmpeg::Dictionary<'_>, bitrate: usize) {
-        let bitrate_bps = bitrate.to_string();
-        let peak_bitrate_bps = self.peak_bitrate_bps().to_string();
+        let mut bitrate_str = [0u8; 16];
+        let bitrate_bps = write_int_to_buffer(bitrate, &mut bitrate_str);
+        
+        let mut peak_str = [0u8; 16];
+        let peak_bitrate_bps = write_int_to_buffer(self.peak_bitrate_bps(), &mut peak_str);
+        
         let (
             preanalysis,
             vbaq,
@@ -52,17 +74,19 @@ impl FfmpegEncoder {
         options.set("min_qp_p", "18");
         options.set("max_qp_p", "48");
         options.set("profile_tier", "high");
-        options.set("b", &bitrate_bps);
-        options.set("max_bitrate", &peak_bitrate_bps);
-        options.set("maxrate", &peak_bitrate_bps);
-        options.set("bufsize", &bitrate_bps);
+        options.set("b", bitrate_bps);
+        options.set("max_bitrate", peak_bitrate_bps);
+        options.set("maxrate", peak_bitrate_bps);
+        options.set("bufsize", bitrate_bps);
 
         if matches!(self.config.rate_control, RateControl::Cbr) {
-            options.set("minrate", &bitrate_bps);
+            options.set("minrate", bitrate_bps);
         }
 
         if matches!(self.config.rate_control, RateControl::Cq) {
-            options.set("qvbr_quality_level", &self.cq_value().to_string());
+            let mut cq_str = [0u8; 16];
+            let cq_val = write_int_to_buffer(self.cq_value() as usize, &mut cq_str);
+            options.set("qvbr_quality_level", cq_val);
         }
     }
 
