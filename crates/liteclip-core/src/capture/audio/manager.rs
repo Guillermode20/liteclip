@@ -1,5 +1,4 @@
 /// WASAPI audio manager that coordinates system and microphone capture with mixing.
-
 use anyhow::Result;
 
 use crossbeam::channel::{Receiver, Sender, TryRecvError};

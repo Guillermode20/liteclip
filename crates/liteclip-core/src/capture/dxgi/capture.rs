@@ -685,7 +685,7 @@ impl DxgiCapture {
                         gpu_texture_format,
                     )?;
                     state.duplication.ReleaseFrame().ok();
-                    return Ok(CaptureOutcome::Frame(frame));
+                    Ok(CaptureOutcome::Frame(frame))
                 }
                 Err(e) if e.code().0 == DXGI_ERROR_WAIT_TIMEOUT.0 => Ok(CaptureOutcome::Timeout),
                 Err(e) if e.code().0 == DXGI_ERROR_ACCESS_LOST.0 => {
