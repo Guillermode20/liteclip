@@ -76,10 +76,7 @@ pub struct CaptureConfig {
     pub target_fps: u32,
     /// Display output index to capture (0 = primary monitor).
     pub output_index: u32,
-    /// Whether to perform CPU readback of GPU textures.
-    /// Required for software encoders; optional for hardware encoders.
-    pub perform_cpu_readback: bool,
-    /// Preferred GPU texture format when CPU readback is disabled.
+    /// Preferred GPU texture format for hardware encoder transport.
     #[cfg(windows)]
     pub gpu_texture_format: GpuTextureFormat,
     /// Target resolution for captured frames.
@@ -92,7 +89,6 @@ impl Default for CaptureConfig {
         Self {
             target_fps: 60,
             output_index: 0,
-            perform_cpu_readback: true,
             #[cfg(windows)]
             gpu_texture_format: GpuTextureFormat::Nv12,
             target_resolution: None,
@@ -106,7 +102,6 @@ impl From<&crate::config::Config> for CaptureConfig {
         Self {
             target_fps: config.video.framerate,
             output_index: config.advanced.gpu_index,
-            perform_cpu_readback: config.advanced.use_cpu_readback,
             #[cfg(windows)]
             gpu_texture_format: GpuTextureFormat::Nv12,
             target_resolution,

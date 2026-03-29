@@ -1,6 +1,4 @@
-//! WASAPI Audio Manager
-//!
-//! Coordinates system and microphone audio capture with mixing.
+/// WASAPI audio manager that coordinates system and microphone capture with mixing.
 
 use anyhow::Result;
 

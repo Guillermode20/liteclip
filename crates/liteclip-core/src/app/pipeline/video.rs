@@ -47,7 +47,6 @@ pub fn start_video_pipeline(
             "GPU transport enabled: encoder={:?}, output={}, format={:?}",
             encoder_config.encoder_type, capture_config.output_index, requested_gpu_format
         );
-        capture_config.perform_cpu_readback = false;
         #[cfg(windows)]
         if let Some(gpu_texture_format) = requested_gpu_format {
             capture_config.gpu_texture_format = gpu_texture_format;
@@ -58,7 +57,6 @@ pub fn start_video_pipeline(
             "GPU transport not available: encoder {:?} does not support GPU frame transport, using CPU readback",
             encoder_config.encoder_type
         );
-        capture_config.perform_cpu_readback = true;
         encoder_config.use_cpu_readback = true;
     }
 

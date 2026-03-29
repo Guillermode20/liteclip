@@ -25,41 +25,6 @@ use super::capture::DxgiCaptureState;
 use super::DxgiCapture;
 
 impl DxgiCapture {
-    /// Create or resize staging texture for frame readback (full desktop resolution).
-    pub(super) fn ensure_staging_texture(state: &mut DxgiCaptureState) -> Result<()> {
-        unsafe {
-            if state.staging_texture.is_some() {
-                return Ok(());
-            }
-            let (width, height) = (state.frame_width, state.frame_height);
-            let desc = windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE2D_DESC {
-                Width: width,
-                Height: height,
-                MipLevels: 1,
-                ArraySize: 1,
-                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC {
-                    Count: 1,
-                    Quality: 0,
-                },
-                Usage: windows::Win32::Graphics::Direct3D11::D3D11_USAGE_STAGING,
-                BindFlags: 0,
-                CPUAccessFlags: windows::Win32::Graphics::Direct3D11::D3D11_CPU_ACCESS_READ.0
-                    as u32,
-                MiscFlags: 0,
-            };
-            let mut texture = None;
-            state
-                .d3d_device
-                .CreateTexture2D(&desc, None, Some(&mut texture))
-                .ok()
-                .context("Failed to create staging texture")?;
-            state.staging_texture = texture;
-            debug!("Created staging texture: {}x{}", width, height);
-            Ok(())
-        }
-    }
-
     pub(super) fn source_texture_for_frame(
         state: &DxgiCaptureState,
         captured_texture: &ID3D11Texture2D,

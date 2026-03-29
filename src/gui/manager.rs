@@ -47,29 +47,15 @@ const TOAST_WINDOW_SIZE: [f32; 2] = [350.0, 300.0];
 /// When idle, shrink the overlay so it does not block clicks elsewhere (1×1 logical pixel).
 const TOAST_WINDOW_IDLE_SIZE: [f32; 2] = [1.0, 1.0];
 const TOAST_WINDOW_MARGIN: [f32; 2] = [20.0, 20.0];
-/// Repaint interval when there are toasts or windows visible (active state).
-/// Increased from 100ms to 250ms to reduce CPU overhead during idle animations.
-const ACTIVE_REPAINT_MS: u64 = 250;
-/// Grace period before entering dormant state after becoming idle.
-/// Allows toast fade-out animations to complete smoothly.
-/// After this period, event loop enters true dormant state (no repaints).
-const DORMANT_GRACE_PERIOD_MS: u64 = 1000;
 /// GUI Manager for the application.
 ///
-/// Handles centralized display of toasts and manages Settings/Gallery windows.
+/// Uses a completely dormant EventLoop pattern: the event loop only wakes on:
+/// - User input (mouse/keyboard events via winit)
+/// - Explicit proxy wake events (GuiMessage arrives)
+/// - Toast animation completion callbacks
 ///
-/// # Architecture
-///
-/// Uses the **dormant EventLoop pattern**: one thread runs for the entire app lifetime.
-/// The EventLoop never dies - it just becomes dormant (ControlFlow::Wait) when idle.
-/// Windows (Settings/Gallery) are created/destroyed inside `Option` fields, which is
-/// fully supported by winit. This avoids the forbidden EventLoop recreation that
-/// would cause `RecreationAttempt` panic.
-///
-/// # Threading
-///
-/// - GUI thread: Dormant when idle, wakes instantly via EventLoopProxy on messages
-/// - Settings/Gallery: Viewports created within the same event loop (deferred viewports)
+/// No periodic polling occurs when idle. This achieves near-zero CPU usage
+/// when the application is in the background with no active UI.
 pub fn init_gui_manager() {
     with_gui_state(|state| state.ensure_running());
 }
@@ -187,27 +173,6 @@ struct GuiActivityState {
 impl GuiActivityState {
     fn is_truly_idle(self) -> bool {
         !self.settings_open && !self.gallery_open && !self.has_toasts
-    }
-}
-
-fn should_request_repaint(
-    activity: GuiActivityState,
-    idle_since: Option<Instant>,
-    now: Instant,
-) -> bool {
-    if activity.has_toasts {
-        return true;
-    }
-
-    if !activity.is_truly_idle() {
-        return false;
-    }
-
-    match idle_since {
-        Some(idle_since) => {
-            now.duration_since(idle_since) < Duration::from_millis(DORMANT_GRACE_PERIOD_MS)
-        }
-        None => true,
     }
 }
 
@@ -514,9 +479,9 @@ impl eframe::App for GuiManagerApp {
         let now = Instant::now();
         let activity_state = self.activity_state();
 
-        if should_request_repaint(activity_state, self.idle_since, now) {
-            ctx.request_repaint_after(Duration::from_millis(ACTIVE_REPAINT_MS));
-        }
+        // With true dormancy, we never request periodic repaints.
+        // The event loop naturally wakes on input events and proxy messages.
+        let _ = (activity_state, now); // Silence unused warnings for now
 
         self.toasts.show(ctx);
         self.sync_mouse_passthrough(ctx);
@@ -594,24 +559,6 @@ mod tests {
         assert!(!is_idle, "Should not be idle when multiple windows open");
     }
 
-    #[test]
-    fn test_hidden_windows_do_not_count_as_visible_activity() {
-        let activity = GuiActivityState {
-            settings_open: true,
-            gallery_open: false,
-            has_toasts: false,
-        };
-
-        assert!(
-            !activity.is_truly_idle(),
-            "Open-but-hidden window should preserve state and avoid full shutdown"
-        );
-        assert!(
-            !should_request_repaint(activity, None, Instant::now()),
-            "Open-but-hidden windows should let the GUI thread park without repaint polling"
-        );
-    }
-
     /// Tests that GuiManagerState correctly initializes with default values.
     #[test]
     fn test_gui_manager_state_default() {
@@ -672,178 +619,5 @@ mod tests {
                 panic!("Unexpected event type");
             }
         }
-    }
-
-    /// Tests the conditional repaint logic for determining whether to request repaints.
-    /// The logic follows these rules:
-    /// - Child windows do not force root repaint polling by themselves
-    /// - Request periodic repaint when toasts are visible (for animation)
-    /// - Request periodic repaint during grace period after becoming idle
-    /// - Stop repaint requests when truly idle after grace period expires
-    #[test]
-    fn test_conditional_repaint_logic() {
-        let now = Instant::now();
-
-        let visible_settings_do_not_force_root_repaint = should_request_repaint(
-            GuiActivityState {
-                settings_open: true,
-                gallery_open: false,
-                has_toasts: false,
-            },
-            None,
-            now,
-        );
-        assert!(
-            !visible_settings_do_not_force_root_repaint,
-            "Visible settings should repaint via their own viewport, not root polling"
-        );
-
-        let visible_gallery_do_not_force_root_repaint = should_request_repaint(
-            GuiActivityState {
-                settings_open: false,
-                gallery_open: true,
-                has_toasts: false,
-            },
-            None,
-            now,
-        );
-        assert!(
-            !visible_gallery_do_not_force_root_repaint,
-            "Visible gallery should repaint via its own viewport, not root polling"
-        );
-
-        let should_periodic_for_toasts = should_request_repaint(
-            GuiActivityState {
-                settings_open: false,
-                gallery_open: false,
-                has_toasts: true,
-            },
-            Some(now),
-            now,
-        );
-        assert!(
-            should_periodic_for_toasts,
-            "Should request periodic repaint when toasts visible"
-        );
-
-        let idle_since = Some(now - Duration::from_millis(DORMANT_GRACE_PERIOD_MS / 2));
-        let within_grace_period = should_request_repaint(
-            GuiActivityState {
-                settings_open: false,
-                gallery_open: false,
-                has_toasts: false,
-            },
-            idle_since,
-            now,
-        );
-        assert!(
-            within_grace_period,
-            "Should keep repainting briefly after becoming idle"
-        );
-
-        let dormant_idle_since = Some(now - Duration::from_millis(DORMANT_GRACE_PERIOD_MS + 1));
-        let should_stay_dormant = !should_request_repaint(
-            GuiActivityState {
-                settings_open: false,
-                gallery_open: false,
-                has_toasts: false,
-            },
-            dormant_idle_since,
-            now,
-        );
-        assert!(
-            should_stay_dormant,
-            "Should stop repainting once the idle grace period expires"
-        );
-    }
-
-    #[test]
-    fn test_idle_does_not_request_gui_manager_shutdown() {
-        let now = Instant::now();
-
-        let open_but_hidden = GuiActivityState {
-            settings_open: true,
-            gallery_open: false,
-            has_toasts: false,
-        };
-        assert!(
-            !open_but_hidden.is_truly_idle(),
-            "Open-but-hidden windows should preserve GUI manager state"
-        );
-
-        let truly_idle = GuiActivityState {
-            settings_open: false,
-            gallery_open: false,
-            has_toasts: false,
-        };
-        assert!(
-            truly_idle.is_truly_idle(),
-            "No windows or toasts should be considered truly idle"
-        );
-        assert!(
-            !should_request_repaint(
-                truly_idle,
-                Some(now - Duration::from_millis(DORMANT_GRACE_PERIOD_MS + 1)),
-                now,
-            ),
-            "A truly idle GUI manager should go dormant without destroying the event loop"
-        );
-    }
-
-    /// Tests that the grace period constant is within acceptable bounds.
-    /// The grace period should be long enough for toast fade-out animations
-    /// to complete (typically 1-3 seconds), but short enough to quickly
-    /// enter dormant state and reduce CPU usage.
-    #[test]
-    fn test_grace_period_bounds() {
-        // Grace period should be between 1 and 3 seconds
-        let grace_period_ms = DORMANT_GRACE_PERIOD_MS;
-        let min_grace_ms = 1000; // 1 second minimum
-        let max_grace_ms = 3000; // 3 seconds maximum
-
-        assert!(
-            grace_period_ms >= min_grace_ms,
-            "Grace period should be at least 1 second ({DORMANT_GRACE_PERIOD_MS}ms is too short)"
-        );
-        assert!(
-            grace_period_ms <= max_grace_ms,
-            "Grace period should be at most 3 seconds ({DORMANT_GRACE_PERIOD_MS}ms is too long)"
-        );
-    }
-
-    /// Tests that the active repaint interval is reasonable for smooth UI.
-    /// The interval should be short enough for responsive UI (typically 50-250ms).
-    /// Increased from 200ms to 250ms to reduce CPU overhead during idle animations.
-    #[test]
-    fn test_active_repaint_interval_bounds() {
-        let active_repaint_ms = ACTIVE_REPAINT_MS;
-        let min_interval_ms = 16; // ~60fps minimum
-        let max_interval_ms = 250; // 250ms maximum to reduce CPU overhead
-
-        assert!(
-            active_repaint_ms >= min_interval_ms,
-            "Active repaint interval should be at least 16ms ({ACTIVE_REPAINT_MS}ms is too short)"
-        );
-        assert!(
-            active_repaint_ms <= max_interval_ms,
-            "Active repaint interval should be at most 250ms ({ACTIVE_REPAINT_MS}ms is too long)"
-        );
-    }
-
-    /// Tests the dormancy activation timing meets the validation contract.
-    /// According to VAL-GUI-005, CPU usage should drop within 3 seconds of idle.
-    /// Our grace period + active repaint cycle should achieve this.
-    #[test]
-    fn test_dormancy_activation_timing() {
-        // Dormancy should activate within 3 seconds (VAL-GUI-005)
-        let max_activation_time_ms = 3000;
-
-        // Worst case: grace period + one extra repaint cycle before dormancy
-        let worst_case_activation_ms = DORMANT_GRACE_PERIOD_MS + ACTIVE_REPAINT_MS;
-
-        assert!(
-            worst_case_activation_ms <= max_activation_time_ms,
-            "Dormancy should activate within 3 seconds (worst case: {worst_case_activation_ms}ms > {max_activation_time_ms}ms)"
-        );
     }
 }

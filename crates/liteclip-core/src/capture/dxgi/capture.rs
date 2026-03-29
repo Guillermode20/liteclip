@@ -4,7 +4,7 @@ use crate::capture::{
     backpressure::BackpressureState, CaptureConfig, CapturedFrame, D3d11TexturePoolItem,
 };
 use anyhow::{bail, Context, Result};
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use crossbeam::channel::{bounded, Receiver, Sender};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -14,9 +14,9 @@ use tracing::{debug, error, info, warn};
 use windows::Win32::Foundation::{CloseHandle, BOOL, HANDLE};
 use windows::Win32::Graphics::Direct3D11::{
     ID3D11Device, ID3D11Device5, ID3D11DeviceContext, ID3D11Fence, ID3D11Multithread,
-    ID3D11Resource, ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoDevice, ID3D11VideoProcessor,
-    ID3D11VideoProcessorEnumerator, D3D11_FENCE_FLAG_SHARED, D3D11_MAPPED_SUBRESOURCE,
-    D3D11_MAP_READ, D3D11_VIDEO_PROCESSOR_COLOR_SPACE, D3D11_VIDEO_PROCESSOR_CONTENT_DESC,
+    ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoDevice, ID3D11VideoProcessor,
+    ID3D11VideoProcessorEnumerator, D3D11_FENCE_FLAG_SHARED, D3D11_VIDEO_PROCESSOR_COLOR_SPACE,
+    D3D11_VIDEO_PROCESSOR_CONTENT_DESC,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_RATIONAL,
@@ -88,15 +88,16 @@ impl BgraTexturePool {
     }
 }
 
+/// Low-power mode FPS for adaptive capture rate when scene is static
+const LOW_POWER_FPS: u32 = 5;
+
 /// DXGI capture state (desktop resolution capture; resize to configured output is done in the encoder).
 pub(super) struct DxgiCaptureState {
     pub(super) d3d_device: ID3D11Device,
     pub(super) d3d_context: ID3D11DeviceContext,
     pub(super) duplication: windows::Win32::Graphics::Dxgi::IDXGIOutputDuplication,
-    pub(super) staging_texture: Option<ID3D11Texture2D>,
     pub(super) frame_width: u32,
     pub(super) frame_height: u32,
-    pub(super) native_buffer: BytesMut,
     pub(super) bgra_pool: Option<BgraTexturePool>,
     pub(super) nv12_pool: Option<Nv12TexturePool>,
     pub(super) video_device: Option<ID3D11VideoDevice>,
@@ -377,10 +378,6 @@ impl DxgiCaptureState {
             };
 
             // Staging / CPU readback uses full desktop resolution; encoder scales to target.
-            let buffer_size = (frame_width * frame_height * 4) as usize;
-            let mut native_buffer = BytesMut::with_capacity(buffer_size);
-            native_buffer.resize(buffer_size, 0);
-
             if needs_scaling {
                 info!(
                     "DXGI capture initialized (encoder-side scaling): {}x{} -> {}x{}",
@@ -394,10 +391,8 @@ impl DxgiCaptureState {
                 d3d_device,
                 d3d_context,
                 duplication,
-                staging_texture: None,
                 frame_width,
                 frame_height,
-                native_buffer,
                 bgra_pool: Some(bgra_pool),
                 nv12_pool,
                 video_device,
@@ -651,12 +646,11 @@ impl DxgiCapture {
         nv12_conversion_capable
     }
 
-    /// Capture a single frame
+    /// Capture a single frame (GPU-only path)
     fn capture_frame(
         state: &mut DxgiCaptureState,
         timeout_ms: u32,
         drop_before_process: bool,
-        perform_cpu_readback: bool,
         #[cfg(windows)] gpu_texture_format: crate::capture::GpuTextureFormat,
         _target_resolution: Option<(u32, u32)>,
     ) -> Result<CaptureOutcome> {
@@ -683,114 +677,15 @@ impl DxgiCapture {
                         .cast()
                         .context("Failed to cast resource to texture")?;
 
-                    if !perform_cpu_readback {
-                        let frame = DxgiCapture::capture_gpu_frame(
-                            state,
-                            &captured_texture,
-                            timestamp,
-                            gpu_texture_format,
-                        )?;
-                        state.duplication.ReleaseFrame().ok();
-                        return Ok(CaptureOutcome::Frame(frame));
-                    }
-
-                    Self::ensure_staging_texture(state)?;
-                    if let Some(ref staging) = state.staging_texture {
-                        let staging_resource: ID3D11Resource = staging
-                            .cast()
-                            .context("Failed to cast staging texture to resource")?;
-
-                        let (source_texture, resolution) =
-                            DxgiCapture::source_texture_for_frame(state, &captured_texture, None)?;
-                        let source_resource: ID3D11Resource = source_texture
-                            .cast()
-                            .context("Failed to cast source texture to resource")?;
-
-                        state
-                            .d3d_context
-                            .CopyResource(Some(&staging_resource), Some(&source_resource));
-
-                        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-                        state
-                            .d3d_context
-                            .Map(
-                                Some(&staging_resource),
-                                0,
-                                D3D11_MAP_READ,
-                                0,
-                                Some(&mut mapped as *mut D3D11_MAPPED_SUBRESOURCE),
-                            )
-                            .ok()
-                            .context("Failed to map staging texture for readback")?;
-
-                        let read_w = resolution.0 as usize;
-                        let read_h = resolution.1 as usize;
-                        let src_row_bytes = read_w * 4;
-                        let src_pitch = mapped.RowPitch as usize;
-                        if mapped.pData.is_null() {
-                            state.d3d_context.Unmap(Some(&staging_resource), 0);
-                            bail!("Mapped staging texture has null data pointer");
-                        }
-                        let total_src_bytes = (read_h.saturating_sub(1))
-                            .checked_mul(src_pitch)
-                            .and_then(|v| v.checked_add(src_row_bytes));
-                        if total_src_bytes.is_none()
-                            || total_src_bytes.unwrap() > isize::MAX as usize
-                        {
-                            state.d3d_context.Unmap(Some(&staging_resource), 0);
-                            bail!(
-                                "Frame dimensions too large for safe copy: {}x{}, pitch={}",
-                                read_w,
-                                read_h,
-                                src_pitch
-                            );
-                        }
-                        let src_ptr = mapped.pData as *const u8;
-                        let total_bytes = src_row_bytes * read_h;
-                        state.native_buffer.resize(total_bytes, 0);
-
-                        if src_pitch == src_row_bytes {
-                            std::ptr::copy_nonoverlapping(
-                                src_ptr,
-                                state.native_buffer.as_mut_ptr(),
-                                total_bytes,
-                            );
-                        } else {
-                            let dst_ptr = state.native_buffer.as_mut_ptr();
-                            let mut src_row_offset = 0;
-                            let mut dst_row_offset = 0;
-                            for _row in 0..read_h {
-                                std::ptr::copy_nonoverlapping(
-                                    src_ptr.add(src_row_offset),
-                                    dst_ptr.add(dst_row_offset),
-                                    src_row_bytes,
-                                );
-                                src_row_offset += src_pitch;
-                                dst_row_offset += src_row_bytes;
-                            }
-                        }
-
-                        let bgra = state.native_buffer.split_to(total_bytes).freeze();
-
-                        // Keep a small headroom but shed unusually large retained allocations.
-                        if state.native_buffer.capacity() > total_bytes.saturating_mul(2) {
-                            state.native_buffer = BytesMut::with_capacity(total_bytes);
-                        } else {
-                            state.native_buffer.reserve(total_bytes);
-                        }
-
-                        state.d3d_context.Unmap(Some(&staging_resource), 0);
-                        state.duplication.ReleaseFrame().ok();
-
-                        let frame = CapturedFrame {
-                            bgra,
-                            d3d11: None,
-                            timestamp,
-                            resolution: (read_w as u32, read_h as u32),
-                        };
-                        return Ok(CaptureOutcome::Frame(frame));
-                    }
-                    bail!("Staging texture unavailable for CPU readback")
+                    // GPU-only capture path - always use GPU frames
+                    let frame = DxgiCapture::capture_gpu_frame(
+                        state,
+                        &captured_texture,
+                        timestamp,
+                        gpu_texture_format,
+                    )?;
+                    state.duplication.ReleaseFrame().ok();
+                    return Ok(CaptureOutcome::Frame(frame));
                 }
                 Err(e) if e.code().0 == DXGI_ERROR_WAIT_TIMEOUT.0 => Ok(CaptureOutcome::Timeout),
                 Err(e) if e.code().0 == DXGI_ERROR_ACCESS_LOST.0 => {
@@ -828,8 +723,10 @@ impl DxgiCapture {
     ) {
         Self::set_capture_thread_priority();
 
-        info!("DXGI capture thread started: {} FPS", config.target_fps);
-        let perform_cpu_readback = config.perform_cpu_readback;
+        info!(
+            "DXGI capture thread started: {} FPS (GPU-only mode)",
+            config.target_fps
+        );
         #[cfg(windows)]
         let gpu_texture_format = config.gpu_texture_format;
         let target_resolution = config.target_resolution;
@@ -880,8 +777,15 @@ impl DxgiCapture {
         const DROP_LOG_INTERVAL: u64 = 300;
         // No final spin: sleep only, to reduce CPU (slightly looser pacing).
         const FRAME_PACING_SPIN_WINDOW: Duration = Duration::from_micros(0);
-        let frame_period = Duration::from_nanos(1_000_000_000u64 / base_fps as u64);
+        let mut frame_period = Duration::from_nanos(1_000_000_000u64 / base_fps as u64);
         let mut next_frame_time = std::time::Instant::now();
+
+        // Adaptive capture rate: scene change detection
+        let mut last_present_qpc: i64 = 0;
+        let _consecutive_static_frames: u32 = 0;
+        let low_power_frame_period = Duration::from_nanos(1_000_000_000u64 / LOW_POWER_FPS as u64);
+        let mut is_low_power_mode = false;
+
         while running.load(Ordering::Relaxed) {
             let mut drop_before_process = false;
             let queue_len = frame_tx.len() as u32;
@@ -894,11 +798,72 @@ impl DxgiCapture {
             if !drop_before_process && queue_len.saturating_add(1) >= queue_cap {
                 drop_before_process = true;
             }
+
+            // Check for scene changes when in low-power mode
+            let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
+            if is_low_power_mode {
+                // Peek at frame info without acquiring
+                let hr = unsafe {
+                    state.duplication.AcquireNextFrame(
+                        1, // 1ms timeout for quick check
+                        &mut frame_info,
+                        &mut None,
+                    )
+                };
+
+                if hr.is_ok() {
+                    let current_present_qpc = frame_info.LastPresentTime;
+                    let is_new_content =
+                        current_present_qpc != last_present_qpc && current_present_qpc != 0;
+
+                    unsafe { state.duplication.ReleaseFrame().ok() };
+
+                    if is_new_content {
+                        // Scene changed, exit low-power mode
+                        is_low_power_mode = false;
+                        last_present_qpc = current_present_qpc;
+                        frame_period = Duration::from_nanos(1_000_000_000u64 / base_fps as u64);
+                        info!(
+                            "Adaptive capture: resumed full-rate capture (scene change detected)"
+                        );
+                    } else {
+                        // Still static, continue low-power mode
+                        // Send duplicate frame to maintain timing
+                        if let Some(ref last) = last_frame {
+                            if backpressure.is_encoder_overloaded() || frame_tx.is_full() {
+                                // Encoder busy, skip this frame
+                            } else {
+                                let frame = CapturedFrame {
+                                    bgra: if last.d3d11.is_some() {
+                                        Bytes::new()
+                                    } else {
+                                        last.bgra.clone()
+                                    },
+                                    d3d11: last.d3d11.clone(),
+                                    timestamp: Self::get_qpc_timestamp(),
+                                    resolution: last.resolution,
+                                };
+                                if frame_tx.try_send(frame).is_ok() {
+                                    duplicated_count += 1;
+                                    window_duplicates += 1;
+                                    frame_count += 1;
+                                    window_frames += 1;
+                                }
+                            }
+                        }
+
+                        // Sleep for low-power interval
+                        std::thread::sleep(low_power_frame_period);
+                        next_frame_time = std::time::Instant::now() + low_power_frame_period;
+                        continue;
+                    }
+                }
+            }
+
             match Self::capture_frame(
                 &mut state,
                 timeout_ms,
                 drop_before_process,
-                perform_cpu_readback,
                 #[cfg(windows)]
                 gpu_texture_format,
                 target_resolution,
