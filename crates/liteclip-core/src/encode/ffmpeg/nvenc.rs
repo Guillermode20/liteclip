@@ -22,20 +22,20 @@ use super::FfmpegEncoder;
 /// Helper to write integer to stack buffer without heap allocation.
 /// Returns a &str slice of the written digits.
 #[inline]
-fn write_int_to_buffer<'a>(mut val: usize, buf: &'a mut [u8; 16]) -> &'a str {
+fn write_int_to_buffer(mut val: usize, buf: &mut [u8; 16]) -> &str {
     if val == 0 {
         buf[0] = b'0';
         // SAFETY: We just wrote a valid ASCII byte
         return unsafe { std::str::from_utf8_unchecked(&buf[..1]) };
     }
-    
+
     let mut pos = 15;
     while val > 0 {
         buf[pos] = b'0' + (val % 10) as u8;
         val /= 10;
         pos -= 1;
     }
-    
+
     // SAFETY: We only wrote ASCII digits
     unsafe { std::str::from_utf8_unchecked(&buf[pos + 1..]) }
 }
@@ -113,7 +113,7 @@ impl FfmpegEncoder {
         // bitrate fits in i32 range, so max 11 digits
         let mut bitrate_str = [0u8; 16];
         let bitrate_bps = write_int_to_buffer(bitrate, &mut bitrate_str);
-        
+
         let mut peak_str = [0u8; 16];
         let peak_bitrate_bps = write_int_to_buffer(self.peak_bitrate_bps(), &mut peak_str);
 
