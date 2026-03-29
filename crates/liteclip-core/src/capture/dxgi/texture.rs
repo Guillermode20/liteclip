@@ -347,6 +347,8 @@ impl DxgiCapture {
                 .ok()
                 .context("VideoProcessorBlt failed")?;
 
+            // Always use GPU fence for non-blocking synchronization
+            // Fallback to Flush only if fence is unavailable (should not happen on Win10+)
             if let Some(ref sync_fence) = state.nv12_sync_fence {
                 state.nv12_fence_value += 1;
                 let ctx4: ID3D11DeviceContext4 = state
@@ -356,6 +358,8 @@ impl DxgiCapture {
                 ctx4.Signal(sync_fence, state.nv12_fence_value)
                     .context("Failed to signal NV12 sync fence")?;
             } else {
+                // Log warning when falling back to Flush - this causes CPU stalls
+                warn!("NV12 sync fence unavailable, falling back to Flush() - this may cause input latency");
                 state.d3d_context.Flush();
             }
 
@@ -387,6 +391,7 @@ impl DxgiCapture {
                     .d3d_context
                     .CopyResource(Some(&output_resource), Some(&source_resource));
 
+                // Always use GPU fence for non-blocking synchronization
                 if let Some(ref sync_fence) = state.bgra_sync_fence {
                     state.bgra_fence_value += 1;
                     let ctx4: ID3D11DeviceContext4 = state
@@ -396,6 +401,8 @@ impl DxgiCapture {
                     ctx4.Signal(sync_fence, state.bgra_fence_value)
                         .context("Failed to signal BGRA sync fence")?;
                 } else {
+                    // Log warning when falling back to Flush - this causes CPU stalls
+                    warn!("BGRA sync fence unavailable, falling back to Flush() - this may cause input latency");
                     state.d3d_context.Flush();
                 }
             }

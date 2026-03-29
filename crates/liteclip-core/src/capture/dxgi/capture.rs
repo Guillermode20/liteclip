@@ -775,8 +775,9 @@ impl DxgiCapture {
         let mut log_counter = 0u64;
         const LOG_INTERVAL: u64 = 1800; // Log every 1800 frames (~30s at 60fps)
         const DROP_LOG_INTERVAL: u64 = 300;
-        // No final spin: sleep only, to reduce CPU (slightly looser pacing).
-        const FRAME_PACING_SPIN_WINDOW: Duration = Duration::from_micros(0);
+        // Use spin-wait for last 1.5ms for more precise frame timing
+        // This reduces jitter caused by Windows sleep granularity (1-15ms)
+        const FRAME_PACING_SPIN_WINDOW: Duration = Duration::from_micros(1500);
         let mut frame_period = Duration::from_nanos(1_000_000_000u64 / base_fps as u64);
         let mut next_frame_time = std::time::Instant::now();
 
@@ -1124,12 +1125,15 @@ impl DxgiCapture {
         #[cfg(windows)]
         {
             use windows::Win32::System::Threading::{
-                GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_ABOVE_NORMAL,
+                GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_NORMAL,
             };
             unsafe {
-                if let Err(e) = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL)
-                {
-                    warn!("Failed to raise capture thread priority: {}", e);
+                // Use NORMAL priority to avoid competing with game
+                // Game typically runs at HIGH or TIME_CRITICAL
+                if let Err(e) = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL) {
+                    warn!("Failed to set capture thread priority: {}", e);
+                } else {
+                    debug!("Capture thread priority set to NORMAL");
                 }
             }
         }

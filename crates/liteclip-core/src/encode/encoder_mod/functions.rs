@@ -9,9 +9,7 @@ use ffmpeg_next::format::Pixel;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 #[cfg(windows)]
-use windows::Win32::System::Threading::{
-    GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_ABOVE_NORMAL,
-};
+use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority};
 
 use super::types::{
     EncodedPacket, EncoderConfig, EncoderHandle, EncoderHealthEvent, HardwareEncoder,
@@ -145,9 +143,13 @@ pub fn resolve_effective_encoder_config(
 fn set_encoder_thread_priority() {
     #[cfg(windows)]
     {
+        use windows::Win32::System::Threading::THREAD_PRIORITY_BELOW_NORMAL;
         unsafe {
-            if let Err(e) = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL) {
-                warn!("Failed to raise encoder thread priority: {}", e);
+            // Use BELOW_NORMAL priority to ensure encoder never competes with game
+            if let Err(e) = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL) {
+                warn!("Failed to set encoder thread priority: {}", e);
+            } else {
+                debug!("Encoder thread priority set to BELOW_NORMAL");
             }
         }
     }
