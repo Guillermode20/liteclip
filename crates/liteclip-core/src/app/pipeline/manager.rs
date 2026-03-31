@@ -297,6 +297,22 @@ impl RecordingPipeline {
             }
         }
 
+        if fatal_reason.is_none() {
+            if let Some(forward_handle) = self.audio_forward_handle.as_ref() {
+                if !forward_handle.is_running() {
+                    fatal_reason = Some("Audio forwarding thread exited unexpectedly".to_string());
+                }
+            }
+        }
+
+        if fatal_reason.is_none() {
+            if let Some(audio_manager) = self.audio_manager.as_ref() {
+                if !audio_manager.is_running() {
+                    fatal_reason = Some("Audio manager stopped unexpectedly".to_string());
+                }
+            }
+        }
+
         if let Some(reason) = fatal_reason {
             error!("Fail-closed transition: {}", reason);
             self.lifecycle = RecordingLifecycle::Faulted;

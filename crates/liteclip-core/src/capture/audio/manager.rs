@@ -98,14 +98,19 @@ impl WasapiAudioManager {
             };
 
             if let Err(e) = mic_capture.start(mic_config) {
-                if let Some(mut system_capture) = self.system_capture.take() {
-                    system_capture.stop();
+                if self.system_capture.is_some() {
+                    warn!(
+                        "Microphone capture failed to start ({}); continuing with system audio only",
+                        e
+                    );
+                } else {
+                    self.running.store(false, Ordering::SeqCst);
+                    return Err(e);
                 }
-                self.running.store(false, Ordering::SeqCst);
-                return Err(e);
+            } else {
+                self.mic_capture = Some(mic_capture);
+                debug!("Microphone audio capture started");
             }
-            self.mic_capture = Some(mic_capture);
-            debug!("Microphone audio capture started");
         }
 
         let mut system_rx = self
@@ -140,7 +145,10 @@ impl WasapiAudioManager {
 
     /// Stop audio capture
     pub fn stop(&mut self) {
-        if !self.running.load(Ordering::SeqCst) {
+        let has_active_resources = self.system_capture.is_some()
+            || self.mic_capture.is_some()
+            || self.forward_thread.is_some();
+        if !self.running.load(Ordering::SeqCst) && !has_active_resources {
             return;
         }
 
@@ -172,6 +180,11 @@ impl WasapiAudioManager {
     /// Check if audio capture is running
     pub fn is_running(&self) -> bool {
         self.running.load(Ordering::SeqCst)
+            && self
+                .forward_thread
+                .as_ref()
+                .map(|thread| !thread.is_finished())
+                .unwrap_or(true)
     }
 
     /// Update audio configuration at runtime
@@ -216,7 +229,7 @@ impl WasapiAudioManager {
         let mut last_telemetry = Instant::now();
         let wait_timeout = Duration::from_millis(20);
 
-        while running.load(Ordering::SeqCst) {
+        'forward: while running.load(Ordering::SeqCst) {
             while let Ok(new_config) = config_update_rx.try_recv() {
                 mixer.update_config(&new_config);
                 debug!("Audio mixer config updated");
@@ -289,7 +302,8 @@ impl WasapiAudioManager {
                     }
                     if packet_tx.send(mixed_packet).is_err() {
                         warn!("Audio manager output channel disconnected while forwarding mixed audio");
-                        break;
+                        running.store(false, Ordering::SeqCst);
+                        break 'forward;
                     }
                     forwarded_total = forwarded_total.saturating_add(1);
 
@@ -427,6 +441,8 @@ impl WasapiAudioManager {
                 break;
             }
         }
+
+        running.store(false, Ordering::SeqCst);
 
         debug!(
             "Audio forward loop ended: {} total packets forwarded",

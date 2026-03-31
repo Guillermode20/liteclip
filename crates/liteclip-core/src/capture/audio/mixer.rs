@@ -91,12 +91,15 @@ impl AudioMixer {
         let pts = packet.pts;
         let entry = TimestampedPacket { pts, packet };
 
-        // Find insertion position (binary search for O(log n) find, but O(n) insert)
-        // For small queues (< 32), linear search is fine and simpler.
-        let pos = queue
-            .iter()
-            .position(|p| p.pts > pts)
-            .unwrap_or(queue.len());
+        // Find insertion position with binary search over the contiguous slice.
+        // Insert remains O(n) for VecDeque, but lookup is O(log n).
+        let pos = {
+            let slice = queue.make_contiguous();
+            match slice.binary_search_by_key(&pts, |p| p.pts) {
+                Ok(index) => index,
+                Err(index) => index,
+            }
+        };
         queue.insert(pos, entry);
 
         // Evict oldest packets if we exceed the limit
@@ -263,7 +266,7 @@ impl AudioMixer {
 
         // Calculate gains
         let system_gain = (self.config.system_volume as f32 / 100.0).clamp(0.0, 2.0);
-        let mic_gain = (self.config.mic_volume as f32 / 100.0).clamp(0.0, 1.0);
+        let mic_gain = (self.config.mic_volume as f32 / 100.0).clamp(0.0, 2.0);
         let master_gain = (self.config.master_volume as f32 / 100.0).clamp(0.0, 2.0);
 
         // Calculate balance (stereo only)

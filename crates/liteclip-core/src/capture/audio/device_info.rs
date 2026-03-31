@@ -5,10 +5,12 @@
 use tracing::{info, warn};
 use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
 use windows::Win32::Media::Audio::{
-    eCapture, eRender, IMMDevice, IMMDeviceEnumerator, DEVICE_STATE_ACTIVE,
+    eCapture, eRender, IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator, DEVICE_STATE_ACTIVE,
 };
 use windows::Win32::System::Com::StructuredStorage::PropVariantToBSTR;
-use windows::Win32::System::Com::STGM;
+use windows::Win32::System::Com::{
+    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED, STGM,
+};
 
 /// Get the friendly name of a WASAPI audio device.
 ///
@@ -63,6 +65,55 @@ pub fn log_all_capture_devices(enumerator: &IMMDeviceEnumerator) {
             warn!("Failed to enumerate capture devices: {}", e);
         }
     }
+}
+
+/// List active capture devices as `(display_name, endpoint_id)` tuples.
+///
+/// Always includes a synthetic default option as the first entry:
+/// `("System Default", "default")`.
+pub fn list_capture_devices() -> Vec<(String, String)> {
+    let mut devices = vec![("System Default".to_string(), "default".to_string())];
+
+    let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+    if hr.is_err() {
+        warn!(
+            "Failed to initialize COM while listing capture devices: {:?}",
+            hr
+        );
+        return devices;
+    }
+    let initialized_by_us = hr.is_ok();
+
+    let result = (|| -> windows::core::Result<()> {
+        let enumerator: IMMDeviceEnumerator =
+            unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }?;
+        let collection = unsafe { enumerator.EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE) }?;
+        let count = unsafe { collection.GetCount() }?;
+
+        for i in 0..count {
+            let device = unsafe { collection.Item(i) }?;
+            let name = get_device_friendly_name(&device).unwrap_or_else(|| "<unknown>".to_string());
+            let id = get_device_id(&device).unwrap_or_else(|| "<no id>".to_string());
+
+            if id != "<no id>" {
+                devices.push((name, id));
+            }
+        }
+
+        Ok(())
+    })();
+
+    if let Err(e) = result {
+        warn!("Failed to list capture devices: {}", e);
+    }
+
+    if initialized_by_us {
+        unsafe {
+            CoUninitialize();
+        }
+    }
+
+    devices
 }
 
 /// Enumerate and log all active audio render (output/loopback) devices.

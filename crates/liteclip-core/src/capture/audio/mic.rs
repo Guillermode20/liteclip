@@ -56,6 +56,7 @@ impl Default for WasapiMicConfig {
 pub struct WasapiMicCapture {
     running: Arc<AtomicBool>,
     initialized: Arc<AtomicBool>,
+    last_error: Arc<Mutex<Option<String>>>,
     packet_tx: Sender<EncodedPacket>,
     packet_rx: Receiver<EncodedPacket>,
     processed_samples: Arc<AtomicU64>,
@@ -70,6 +71,7 @@ impl WasapiMicCapture {
         Ok(Self {
             running: Arc::new(AtomicBool::new(false)),
             initialized: Arc::new(AtomicBool::new(false)),
+            last_error: Arc::new(Mutex::new(None)),
             packet_tx,
             packet_rx,
             processed_samples: Arc::new(AtomicU64::new(0)),
@@ -85,25 +87,68 @@ impl WasapiMicCapture {
             return Ok(());
         }
 
+        self.initialized.store(false, Ordering::SeqCst);
+        if let Ok(mut guard) = self.last_error.lock() {
+            *guard = None;
+        }
+
+        let startup_device_label = config
+            .device_id
+            .clone()
+            .unwrap_or_else(|| "default".to_string());
+
         self.running.store(true, Ordering::Relaxed);
         let running = self.running.clone();
         let initialized = self.initialized.clone();
+        let last_error = self.last_error.clone();
         let packet_tx = self.packet_tx.clone();
         let processed_samples = self.processed_samples.clone();
         let noise_thread_handle = Arc::new(Mutex::new(None));
         let noise_thread_handle_clone = noise_thread_handle.clone();
 
         let handle = thread::spawn(move || {
-            if let Err(e) = Self::capture_loop(
-                config,
-                running.clone(),
-                initialized,
-                packet_tx,
-                processed_samples,
-                noise_thread_handle_clone,
-            ) {
-                error!("Microphone capture loop error: {:?}", e);
-                running.store(false, Ordering::Relaxed);
+            let mut restart_attempt = 0u32;
+
+            while running.load(Ordering::Relaxed) {
+                match Self::capture_loop(
+                    config.clone(),
+                    running.clone(),
+                    initialized.clone(),
+                    packet_tx.clone(),
+                    processed_samples.clone(),
+                    noise_thread_handle_clone.clone(),
+                ) {
+                    Ok(()) => break,
+                    Err(e) => {
+                        let error_text = format!("{:#}", e);
+                        if let Ok(mut guard) = last_error.lock() {
+                            *guard = Some(error_text.clone());
+                        }
+
+                        if !running.load(Ordering::Relaxed) {
+                            break;
+                        }
+
+                        restart_attempt = restart_attempt.saturating_add(1);
+                        if restart_attempt > MIC_RECOVERY_MAX_ATTEMPTS {
+                            error!(
+                                "Microphone capture loop exhausted recovery attempts ({}): {}",
+                                MIC_RECOVERY_MAX_ATTEMPTS, error_text
+                            );
+                            running.store(false, Ordering::Relaxed);
+                            break;
+                        }
+
+                        let backoff_ms = (MIC_RECOVERY_BASE_BACKOFF_MS
+                            .saturating_mul(restart_attempt as u64))
+                        .min(MIC_RECOVERY_MAX_BACKOFF_MS);
+                        warn!(
+                            "Microphone capture loop failed (attempt {}/{}), retrying in {} ms: {}",
+                            restart_attempt, MIC_RECOVERY_MAX_ATTEMPTS, backoff_ms, error_text
+                        );
+                        thread::sleep(Duration::from_millis(backoff_ms));
+                    }
+                }
             }
         });
 
@@ -113,18 +158,41 @@ impl WasapiMicCapture {
         // Wait for initialization to complete or fail
         let mut attempts = 0;
         while !self.initialized.load(Ordering::Relaxed) && self.running.load(Ordering::Relaxed) {
-            thread::sleep(Duration::from_millis(50));
+            thread::sleep(Duration::from_millis(MIC_STARTUP_WAIT_INTERVAL_MS));
             attempts += 1;
-            if attempts > 40 {
-                // 2 seconds
-                return Err(anyhow::anyhow!(
-                    "Microphone capture initialization timed out"
-                ));
+            if attempts > MIC_STARTUP_TIMEOUT_ATTEMPTS {
+                let detail = self
+                    .last_error
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.clone())
+                    .unwrap_or_else(|| "no detailed capture error was reported".to_string());
+                let err = anyhow::anyhow!(
+                    "Microphone capture initialization timed out for device '{}' after {} ms: {}",
+                    startup_device_label,
+                    MIC_STARTUP_TIMEOUT_ATTEMPTS
+                        .saturating_mul(MIC_STARTUP_WAIT_INTERVAL_MS as u32),
+                    detail
+                );
+                self.stop();
+                return Err(err);
             }
         }
 
         if !self.running.load(Ordering::Relaxed) {
-            return Err(anyhow::anyhow!("Microphone capture failed to start"));
+            let detail = self
+                .last_error
+                .lock()
+                .ok()
+                .and_then(|g| g.clone())
+                .unwrap_or_else(|| "no detailed capture error was reported".to_string());
+            let err = anyhow::anyhow!(
+                "Microphone capture failed to start for device '{}': {}",
+                startup_device_label,
+                detail
+            );
+            self.stop();
+            return Err(err);
         }
 
         Ok(())
@@ -143,6 +211,9 @@ impl WasapiMicCapture {
                     let _ = handle.join();
                 }
             }
+        }
+        if let Ok(mut guard) = self.last_error.lock() {
+            *guard = None;
         }
         self.initialized.store(false, Ordering::SeqCst);
     }
@@ -175,8 +246,19 @@ impl WasapiMicCapture {
             Some(id) => {
                 let mut id_wide: Vec<u16> = id.encode_utf16().collect();
                 id_wide.push(0);
-                unsafe { enumerator.GetDevice(windows::core::PCWSTR(id_wide.as_ptr())) }
-                    .context("Failed to get microphone device by ID")?
+                match unsafe { enumerator.GetDevice(windows::core::PCWSTR(id_wide.as_ptr())) } {
+                    Ok(device) => device,
+                    Err(e) => {
+                        warn!(
+                            "Requested microphone device '{}' not available ({}); falling back to default capture endpoint",
+                            id, e
+                        );
+                        crate::capture::audio::device_info::log_all_capture_devices(&enumerator);
+                        unsafe { enumerator.GetDefaultAudioEndpoint(eCapture, eConsole) }.context(
+                            "Failed to get fallback default microphone device after specific endpoint lookup failed",
+                        )?
+                    }
+                }
             }
             None => unsafe { enumerator.GetDefaultAudioEndpoint(eCapture, eConsole) }
                 .context("Failed to get default microphone device")?,
@@ -268,6 +350,9 @@ impl WasapiMicCapture {
                 let mut guard = noise_thread_handle
                     .lock()
                     .expect("noise_thread_handle mutex poisoned");
+                if let Some(old_handle) = guard.take() {
+                    let _ = old_handle.join();
+                }
                 *guard = Some(handle);
                 Some(tx)
             } else {
@@ -285,6 +370,10 @@ impl WasapiMicCapture {
         let mut total_frames: u64 = 0;
         let mut capture_discontinuities: u64 = 0;
         let mut timestamp_errors: u64 = 0;
+        let mut blocked_noise_enqueues: u64 = 0;
+        let mut last_valid_qpc: Option<u64> = None;
+        let mut last_valid_total_frames: u64 = 0;
+        let mut last_emitted_pts = start_qpc;
 
         let max_buffer_size = (config.sample_rate as usize / 10) * block_align as usize;
         let mut audio_buffer = BytesMut::with_capacity(max_buffer_size);
@@ -345,8 +434,7 @@ impl WasapiMicCapture {
 
                 if flags & (AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY.0 as u32) != 0 {
                     capture_discontinuities = capture_discontinuities.saturating_add(1);
-                    // Skip warning for first discontinuity (common at startup)
-                    if capture_discontinuities > 1 && capture_discontinuities % 100 == 0 {
+                    if capture_discontinuities == 1 || capture_discontinuities % 10 == 0 {
                         warn!(
                             "Microphone capture discontinuity detected (count={})",
                             capture_discontinuities
@@ -358,7 +446,7 @@ impl WasapiMicCapture {
                     flags & (AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR.0 as u32) != 0;
                 if has_timestamp_error {
                     timestamp_errors = timestamp_errors.saturating_add(1);
-                    if timestamp_errors == 1 || timestamp_errors % 100 == 0 {
+                    if timestamp_errors == 1 || timestamp_errors % 10 == 0 {
                         warn!(
                             "Microphone capture timestamp error detected; using frame-derived timing (count={})",
                             timestamp_errors
@@ -366,11 +454,22 @@ impl WasapiMicCapture {
                     }
                 }
 
-                let pts = if !has_timestamp_error && qpc_position > 0 {
+                let mut pts = if !has_timestamp_error && qpc_position > 0 {
+                    last_valid_qpc = Some(qpc_position);
+                    last_valid_total_frames = total_frames;
                     qpc_position.min(i64::MAX as u64) as i64
+                } else if let Some(anchor_qpc) = last_valid_qpc {
+                    let frames_since_anchor = total_frames.saturating_sub(last_valid_total_frames);
+                    anchor_qpc.min(i64::MAX as u64) as i64
+                        + ((frames_since_anchor as f64 / sample_rate) * qpc_freq) as i64
                 } else {
                     start_qpc + ((total_frames as f64 / sample_rate) * qpc_freq) as i64
                 };
+
+                if pts <= last_emitted_pts {
+                    pts = last_emitted_pts.saturating_add(1);
+                }
+                last_emitted_pts = pts;
                 total_frames = total_frames.saturating_add(frame_count as u64);
 
                 if let Some(ref tx) = noise_tx {
@@ -380,9 +479,22 @@ impl WasapiMicCapture {
                         frame_count,
                         silent,
                     };
+                    let enqueue_started = std::time::Instant::now();
                     if tx.send(raw).is_err() {
                         running.store(false, Ordering::Relaxed);
                         break;
+                    }
+
+                    let enqueue_wait = enqueue_started.elapsed();
+                    if enqueue_wait >= Duration::from_millis(5) {
+                        blocked_noise_enqueues = blocked_noise_enqueues.saturating_add(1);
+                        if blocked_noise_enqueues == 1 || blocked_noise_enqueues % 50 == 0 {
+                            warn!(
+                                "RNNoise input queue congested: capture waited {} ms to enqueue (count={})",
+                                enqueue_wait.as_millis(),
+                                blocked_noise_enqueues
+                            );
+                        }
                     }
                 } else {
                     let packet = EncodedPacket::new(
@@ -528,6 +640,11 @@ const MIC_BUFFER_SHRINK_INTERVAL_PACKETS: u64 = 1024;
 const MIC_BUFFER_SHRINK_MULTIPLIER: usize = 2;
 const RNNOISE_QUEUE_BASE_CAPACITY: usize = AUDIO_FRAME_SIZE * 16;
 const RNNOISE_QUEUE_SHRINK_THRESHOLD: usize = AUDIO_FRAME_SIZE * 64;
+const MIC_STARTUP_WAIT_INTERVAL_MS: u64 = 50;
+const MIC_STARTUP_TIMEOUT_ATTEMPTS: u32 = 120;
+const MIC_RECOVERY_MAX_ATTEMPTS: u32 = 8;
+const MIC_RECOVERY_BASE_BACKOFF_MS: u64 = 250;
+const MIC_RECOVERY_MAX_BACKOFF_MS: u64 = 2_000;
 
 struct RawMicFrame {
     data: BytesMut,
@@ -543,24 +660,45 @@ fn run_noise_thread(
     running: Arc<AtomicBool>,
     processed_samples: Arc<AtomicU64>,
 ) {
+    set_noise_thread_priority();
+
     let mut last_log = std::time::Instant::now();
     let mut packets: u32 = 0;
+    let mut total_process_time = Duration::ZERO;
+    let mut max_process_time = Duration::ZERO;
+
     loop {
         match raw_rx.recv_timeout(Duration::from_millis(200)) {
             Ok(mut frame) => {
+                let process_start = std::time::Instant::now();
                 if !frame.silent {
                     processor.process(&mut frame.data);
                 }
+                let process_elapsed = process_start.elapsed();
+                total_process_time += process_elapsed;
+                if process_elapsed > max_process_time {
+                    max_process_time = process_elapsed;
+                }
+
                 packets += 1;
                 if last_log.elapsed() >= Duration::from_secs(5) {
+                    let avg_proc_us = if packets > 0 {
+                        (total_process_time.as_micros() / packets as u128) as u64
+                    } else {
+                        0
+                    };
                     tracing::info!(
-                        "RNNoise: {} pkts/5s | gate={:.3} presence={:.3} hold={}",
+                        "RNNoise: {} pkts/5s | gate={:.3} presence={:.3} hold={} avg_proc={}us max_proc={}us",
                         packets,
                         processor.gate_gain,
                         processor.speech_presence,
                         processor.hold_counter,
+                        avg_proc_us,
+                        max_process_time.as_micros(),
                     );
                     packets = 0;
+                    total_process_time = Duration::ZERO;
+                    max_process_time = Duration::ZERO;
                     last_log = std::time::Instant::now();
                 }
                 let frozen = frame.data.freeze();
@@ -581,6 +719,21 @@ fn run_noise_thread(
     }
 }
 
+fn set_noise_thread_priority() {
+    #[cfg(windows)]
+    {
+        use windows::Win32::System::Threading::{
+            GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_ABOVE_NORMAL,
+        };
+
+        unsafe {
+            if let Err(e) = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL) {
+                warn!("Failed to set RNNoise thread priority: {}", e);
+            }
+        }
+    }
+}
+
 struct RNNoiseProcessor {
     channels: usize,
     /// Single RNNoise pass — chaining two passes doubles CPU cost without quality gain.
@@ -589,7 +742,6 @@ struct RNNoiseProcessor {
     in_head: usize,
     out_buf: Vec<f32>,
     out_head: usize,
-    discard_warmup_frame: bool,
     /// Discord-style adaptive noise gate state
     gate_gain: f32,
     /// Smoothed speech probability for adaptive behavior
@@ -650,7 +802,6 @@ impl RNNoiseProcessor {
             in_head: 0,
             out_buf,
             out_head: 0,
-            discard_warmup_frame: true,
             gate_gain: Self::GATE_MAX_GAIN,
             speech_presence: 0.0,
             hold_counter: 0,
@@ -805,18 +956,14 @@ impl RNNoiseProcessor {
 
             self.update_adaptive_gate(speech_prob);
 
-            if self.discard_warmup_frame {
-                self.discard_warmup_frame = false;
-            } else {
-                // Apply adaptive gate gain to denoised output
-                if self.gate_gain < 0.999 {
-                    let g = self.gate_gain;
-                    for s in self.frame_out.iter_mut() {
-                        *s *= g;
-                    }
+            // Apply adaptive gate gain to denoised output
+            if self.gate_gain < 0.999 {
+                let g = self.gate_gain;
+                for s in self.frame_out.iter_mut() {
+                    *s *= g;
                 }
-                self.out_buf.extend_from_slice(self.frame_out.as_slice());
             }
+            self.out_buf.extend_from_slice(self.frame_out.as_slice());
 
             self.in_head += AUDIO_FRAME_SIZE;
         }
@@ -833,7 +980,6 @@ impl RNNoiseProcessor {
 
         // For remaining frames with no denoised output yet, we leave original as is.
         // HP filter is already applied to input but only for RNNoise queue.
-        // Passthrough is only at the start of the stream (warmup).
     }
 
     /// Discord-style adaptive noise gate.

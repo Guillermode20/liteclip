@@ -287,7 +287,7 @@ impl Config {
         self.audio.balance = self.audio.balance.clamp(-100, 100);
         self.audio.master_volume = self.audio.master_volume.clamp(0, 200);
         self.audio.system_volume = self.audio.system_volume.clamp(0, 200);
-        self.audio.mic_volume = self.audio.mic_volume.clamp(0, 100);
+        self.audio.mic_volume = self.audio.mic_volume.clamp(0, 200);
         // mic_noise_reduction is a simple on/off toggle, no per-parameter clamping required.
 
         // Validate save_directory for security and correctness

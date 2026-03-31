@@ -146,6 +146,7 @@ pub struct SettingsApp {
     pub save_status: Option<String>,
     hotkey_errors: HotkeyValidationErrors,
     level_monitor: Option<AudioLevelMonitor>,
+    mic_devices: Vec<(String, String)>,
     current_tab: SettingsTab,
 }
 
@@ -155,12 +156,15 @@ impl SettingsApp {
         event_tx: Sender<AppEvent>,
         level_monitor: Option<AudioLevelMonitor>,
     ) -> Self {
+        let mic_devices = crate::capture::audio::device_info::list_capture_devices();
+
         Self {
             config,
             event_tx,
             save_status: None,
             hotkey_errors: HotkeyValidationErrors::default(),
             level_monitor,
+            mic_devices,
             current_tab: SettingsTab::default(),
         }
     }
@@ -454,10 +458,41 @@ impl SettingsApp {
 
         ui.horizontal(|ui| {
             ui.label("Device:");
-            ui.text_edit_singleline(&mut self.config.audio.mic_device);
+            let selected_device_name = self
+                .mic_devices
+                .iter()
+                .find(|(_, id)| id == &self.config.audio.mic_device)
+                .map(|(name, _)| name.clone())
+                .unwrap_or_else(|| "Unavailable device (will fallback to default)".to_string());
+
+            egui::ComboBox::from_id_salt("mic_device_combo")
+                .selected_text(selected_device_name)
+                .show_ui(ui, |ui| {
+                    for (name, id) in &self.mic_devices {
+                        ui.selectable_value(&mut self.config.audio.mic_device, id.clone(), name);
+                    }
+                });
+
+            if ui.button("Refresh").clicked() {
+                self.mic_devices = crate::capture::audio::device_info::list_capture_devices();
+            }
         });
 
-        ui.add(egui::Slider::new(&mut self.config.audio.mic_volume, 0..=100).text("Mic Volume %"));
+        if !self
+            .mic_devices
+            .iter()
+            .any(|(_, id)| id == &self.config.audio.mic_device)
+        {
+            ui.label(
+                egui::RichText::new(
+                    "Selected microphone endpoint is unavailable; runtime capture will fallback to system default.",
+                )
+                .small()
+                .weak(),
+            );
+        }
+
+        ui.add(egui::Slider::new(&mut self.config.audio.mic_volume, 0..=200).text("Mic Volume %"));
         ui.checkbox(
             &mut self.config.audio.mic_noise_reduction,
             "Reduce mic background hiss",
