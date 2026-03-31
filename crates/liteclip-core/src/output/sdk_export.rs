@@ -189,16 +189,17 @@ pub fn run_stream_copy_export_sdk(
         seek_to_seconds(&mut input_ctx, range.start_secs);
         let mut streams_past_range_end: HashSet<usize> = HashSet::new();
 
-        // Scan forward until we hit a keyframe on each video stream.
-        // This guarantees the output starts with decodable frames even when
-        // the seek lands on a P/B frame whose reference frames are outside
-        // the copied range (which would otherwise produce white/corrupt frames).
-        let mut skipped_streams: HashSet<usize> = stream_routes
+        // Scan forward until we hit a keyframe at/after the requested range start
+        // on each video stream. We must not "unlock" on a keyframe that is before
+        // range.start_secs and then drop pre-start packets, because that leaves the
+        // first in-range frames without their reference chain and can produce
+        // white/corrupt leading frames in stream-copy output.
+        let mut pending_range_start_keyframes: HashSet<usize> = stream_routes
             .iter()
             .filter(|(_, r)| r.is_video)
             .map(|(&idx, _)| idx)
             .collect();
-        let mut keyframe_scan_done = skipped_streams.is_empty();
+        let mut keyframe_scan_done = pending_range_start_keyframes.is_empty();
 
         for (stream, mut packet) in input_ctx.packets() {
             if cancel_flag.load(Ordering::Relaxed) {
@@ -224,19 +225,17 @@ pub fn run_stream_copy_export_sdk(
             };
             let pts_secs = pts_in as f64 * secs_per_in_tick;
 
-            // Still in pre-keyframe scan — skip non-keyframe video packets on all streams
-            // that haven't yet found their first keyframe.
-            if !keyframe_scan_done && route.is_video {
-                let is_keyframe = packet.is_key();
-                if !is_keyframe {
-                    continue;
+            // While finding start keyframes, drop packets from all streams.
+            // This keeps A/V aligned to the actual video decode start point.
+            if !keyframe_scan_done {
+                if route.is_video && packet.is_key() && pts_secs >= range.start_secs {
+                    pending_range_start_keyframes.remove(&stream_index);
+                    if pending_range_start_keyframes.is_empty() {
+                        keyframe_scan_done = true;
+                    }
                 }
-                // First keyframe found for this stream — done scanning for this stream.
-                skipped_streams.remove(&stream_index);
-
-                // Only mark overall scan done once ALL video streams have found a keyframe.
-                if skipped_streams.is_empty() {
-                    keyframe_scan_done = true;
+                if !keyframe_scan_done {
+                    continue;
                 }
             }
 
