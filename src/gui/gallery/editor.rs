@@ -129,9 +129,8 @@ fn render_export_modal(
             });
         });
 
-    // Request animation for progress updates - every 50ms (~20fps)
-    // Reduced from 33ms to reduce CPU usage while maintaining smooth progress visuals
-    ctx.request_repaint_after(std::time::Duration::from_millis(50));
+    // Request progress animation updates at ~10fps to reduce idle CPU while exporting.
+    ctx.request_repaint_after(std::time::Duration::from_millis(100));
 
     outcome
 }

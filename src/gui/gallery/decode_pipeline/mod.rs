@@ -1,5 +1,5 @@
 use anyhow::{anyhow, bail, Context, Result};
-use crossbeam::channel::{bounded, Receiver, Sender, TryRecvError, TrySendError};
+use crossbeam::channel::{bounded, Receiver, Sender, TryRecvError};
 use ffmpeg_next as ffmpeg;
 use ffmpeg_next::packet::Mut;
 use rodio::{Sink, Source};
@@ -896,39 +896,45 @@ impl Drop for DecodePipeline {
     }
 }
 
+/// Result of attempting to send a playback frame.
+/// Returns Ok(None) if frame was sent successfully.
+/// Returns Ok(Some((command, frame))) if a command arrived while waiting; the frame is NOT sent.
+enum SendFrameOutcome {
+    Sent,
+    CommandArrived {
+        command: DecoderCommand,
+        unsent_frame: DecoderFrame,
+    },
+}
+
 fn send_playback_frame(
     command_rx: &Receiver<DecoderCommand>,
     frame_tx: &Sender<DecoderFrame>,
     frame: DecoderFrame,
-) -> Result<Option<DecoderCommand>> {
-    let mut pending_frame = frame;
-    loop {
-        match frame_tx.try_send(pending_frame) {
-            Ok(()) => {
-                return Ok(None);
+) -> Result<SendFrameOutcome> {
+    crossbeam::channel::select! {
+        send(frame_tx, frame) -> send_result => {
+            match send_result {
+                Ok(()) => Ok(SendFrameOutcome::Sent),
+                Err(crossbeam::channel::SendError(_)) => {
+                    bail!("Playback frame channel disconnected");
+                }
             }
-            Err(TrySendError::Disconnected(_)) => {
-                bail!("Playback frame channel disconnected");
-            }
-            Err(TrySendError::Full(returned_frame)) => {
-                pending_frame = returned_frame;
-                match command_rx.try_recv() {
-                    Ok(command @ DecoderCommand::Shutdown)
-                    | Ok(command @ DecoderCommand::Stop)
-                    | Ok(command @ DecoderCommand::Preview { .. })
-                    | Ok(command @ DecoderCommand::Playback { .. }) => {
-                        tracing::debug!(
-                            "send_playback_frame: received command during spin: {:?}",
-                            command_kind(&command)
-                        );
-                        return Ok(Some(command));
-                    }
-                    Err(TryRecvError::Disconnected) => {
-                        bail!("Decoder command channel disconnected");
-                    }
-                    Err(TryRecvError::Empty) => {
-                        thread::sleep(Duration::from_millis(1));
-                    }
+        }
+        recv(command_rx) -> command_result => {
+            match command_result {
+                Ok(command @ DecoderCommand::Shutdown)
+                | Ok(command @ DecoderCommand::Stop)
+                | Ok(command @ DecoderCommand::Preview { .. })
+                | Ok(command @ DecoderCommand::Playback { .. }) => {
+                    tracing::debug!(
+                        "send_playback_frame: received command while waiting to send frame: {:?}",
+                        command_kind(&command)
+                    );
+                    Ok(SendFrameOutcome::CommandArrived { command, unsent_frame: frame })
+                }
+                Err(_) => {
+                    bail!("Decoder command channel disconnected");
                 }
             }
         }
@@ -1181,67 +1187,83 @@ fn decoder_worker_loop(
                                 image,
                             };
                             match send_playback_frame(&command_rx, &frame_tx, frame) {
-                                Ok(None) => {}
-                                Ok(Some(DecoderCommand::Shutdown)) => {
-                                    tracing::info!(
-                                        "Playback {} shutdown during send after {} frames",
-                                        active_request_id,
-                                        frame_count
-                                    );
-                                    return;
-                                }
-                                Ok(Some(DecoderCommand::Stop)) => {
-                                    break 'playback;
-                                }
-                                Ok(Some(DecoderCommand::Preview {
-                                    request_id,
-                                    time_secs,
-                                })) => {
-                                    if let Err(err) = session.seek_to(time_secs) {
-                                        let _ = error_tx.send(DecoderError {
+                                Ok(SendFrameOutcome::Sent) => {}
+                                Ok(SendFrameOutcome::CommandArrived {
+                                    command,
+                                    unsent_frame,
+                                }) => {
+                                    match command {
+                                        DecoderCommand::Shutdown => {
+                                            tracing::info!(
+                                                "Playback {} shutdown during send after {} frames",
+                                                active_request_id,
+                                                frame_count
+                                            );
+                                            return;
+                                        }
+                                        DecoderCommand::Stop => {
+                                            // Frame intentionally dropped - stopping playback
+                                            break 'playback;
+                                        }
+                                        DecoderCommand::Preview {
                                             request_id,
-                                            message: format!("Preview seek failed: {err:#}"),
-                                        });
-                                    } else {
-                                        match session.decode_next_image() {
-                                            Ok(Some((pts_secs, image))) => {
-                                                let _ = frame_tx.send(DecoderFrame {
-                                                    request_id,
-                                                    kind: DecoderFrameKind::Preview,
-                                                    pts_secs,
-                                                    image,
-                                                });
-                                            }
-                                            Ok(None) => {
-                                                let _ = error_tx.send(DecoderError {
-                                                    request_id,
-                                                    message: "No preview frame could be decoded"
-                                                        .to_string(),
-                                                });
-                                            }
-                                            Err(err) => {
+                                            time_secs,
+                                        } => {
+                                            // Frame intentionally dropped - switching to preview mode
+                                            if let Err(err) = session.seek_to(time_secs) {
                                                 let _ = error_tx.send(DecoderError {
                                                     request_id,
                                                     message: format!(
-                                                        "Preview decode failed: {err:#}"
+                                                        "Preview seek failed: {err:#}"
                                                     ),
                                                 });
+                                            } else {
+                                                match session.decode_next_image() {
+                                                    Ok(Some((pts_secs, image))) => {
+                                                        let _ = frame_tx.send(DecoderFrame {
+                                                            request_id,
+                                                            kind: DecoderFrameKind::Preview,
+                                                            pts_secs,
+                                                            image,
+                                                        });
+                                                    }
+                                                    Ok(None) => {
+                                                        let _ = error_tx.send(DecoderError {
+                                                            request_id,
+                                                            message:
+                                                                "No preview frame could be decoded"
+                                                                    .to_string(),
+                                                        });
+                                                    }
+                                                    Err(err) => {
+                                                        let _ = error_tx.send(DecoderError {
+                                                            request_id,
+                                                            message: format!(
+                                                                "Preview decode failed: {err:#}"
+                                                            ),
+                                                        });
+                                                    }
+                                                }
+                                            }
+                                            break 'playback;
+                                        }
+                                        DecoderCommand::Playback {
+                                            request_id,
+                                            time_secs,
+                                        } => {
+                                            // Try to send the unsent frame before seeking to new position
+                                            let _ = frame_tx.send(unsent_frame);
+                                            active_request_id = request_id;
+                                            if let Err(err) = session.seek_to(time_secs) {
+                                                let _ = error_tx.send(DecoderError {
+                                                    request_id,
+                                                    message: format!(
+                                                        "Playback seek failed: {err:#}"
+                                                    ),
+                                                });
+                                                break 'playback;
                                             }
                                         }
-                                    }
-                                    break 'playback;
-                                }
-                                Ok(Some(DecoderCommand::Playback {
-                                    request_id,
-                                    time_secs,
-                                })) => {
-                                    active_request_id = request_id;
-                                    if let Err(err) = session.seek_to(time_secs) {
-                                        let _ = error_tx.send(DecoderError {
-                                            request_id,
-                                            message: format!("Playback seek failed: {err:#}"),
-                                        });
-                                        break 'playback;
                                     }
                                 }
                                 Err(err) => {

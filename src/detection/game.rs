@@ -84,12 +84,34 @@ impl GameDetector {
 
         let handle = thread::spawn(move || {
             debug!("Game detector thread started");
+            let mut last_hwnd: HWND = HWND::default();
+            let mut last_detected: Option<DetectedApp> = None;
+            let mut iteration: u64 = 0;
+            // Force re-detection every 60 iterations (~30 seconds) to handle HWND reuse
+            const FORCE_REFRESH_INTERVAL: u64 = 60;
 
             while running.load(Ordering::SeqCst) {
-                if let Some(app) = detect_foreground_app() {
-                    if let Ok(mut g) = detected.write() {
-                        *g = app;
+                iteration = iteration.wrapping_add(1);
+                let force_refresh = iteration % FORCE_REFRESH_INTERVAL == 0;
+
+                let hwnd = unsafe { GetForegroundWindow() };
+                if !hwnd.0.is_null() {
+                    if hwnd == last_hwnd && !force_refresh {
+                        if let Some(app) = last_detected.as_ref() {
+                            if let Ok(mut g) = detected.write() {
+                                *g = app.clone();
+                            }
+                        }
+                    } else if let Some(app) = detect_foreground_app_from_hwnd(hwnd) {
+                        if let Ok(mut g) = detected.write() {
+                            *g = app.clone();
+                        }
+                        last_detected = Some(app);
+                        last_hwnd = hwnd;
                     }
+                } else {
+                    last_hwnd = HWND::default();
+                    last_detected = None;
                 }
 
                 thread::sleep(Duration::from_millis(500));
@@ -123,9 +145,8 @@ impl Drop for GameDetector {
     }
 }
 
-fn detect_foreground_app() -> Option<DetectedApp> {
+fn detect_foreground_app_from_hwnd(hwnd: HWND) -> Option<DetectedApp> {
     unsafe {
-        let hwnd = GetForegroundWindow();
         if hwnd.0.is_null() {
             return None;
         }

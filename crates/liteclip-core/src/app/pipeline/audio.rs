@@ -24,16 +24,23 @@ use tracing::{debug, info, warn};
 pub struct AudioForwardHandle {
     /// Thread handle for the forwarding loop
     thread: Option<JoinHandle<()>>,
-    /// Shutdown signal - set to false to stop the thread
+    /// Tracks whether the forwarding thread is expected to be alive
     running: Arc<AtomicBool>,
+    /// Shutdown notifier to wake the forwarding thread immediately
+    shutdown_tx: Option<crossbeam::channel::Sender<()>>,
 }
 
 impl AudioForwardHandle {
     /// Creates a new audio forward handle.
-    fn new(thread: JoinHandle<()>, running: Arc<AtomicBool>) -> Self {
+    fn new(
+        thread: JoinHandle<()>,
+        running: Arc<AtomicBool>,
+        shutdown_tx: crossbeam::channel::Sender<()>,
+    ) -> Self {
         Self {
             thread: Some(thread),
             running,
+            shutdown_tx: Some(shutdown_tx),
         }
     }
 
@@ -47,6 +54,7 @@ impl AudioForwardHandle {
 
         // Signal shutdown
         self.running.store(false, Ordering::SeqCst);
+        self.shutdown_tx.take();
         debug!("Signaling audio forwarding thread to stop");
 
         // Join with timeout to prevent indefinite hangs
@@ -147,22 +155,31 @@ pub fn start_audio_capture(
     let context_label = context.to_string();
     let context_for_thread = context_label.clone();
 
-    // Shutdown coordination flag
+    // Shutdown coordination
     let running = Arc::new(AtomicBool::new(true));
     let running_clone = Arc::clone(&running);
+    let (shutdown_tx, shutdown_rx) = crossbeam::channel::bounded::<()>(1);
 
     let thread = std::thread::spawn(move || {
         let mut forwarded_packets = 0u64;
         let mut packet_batch = Vec::with_capacity(32);
 
-        // Use recv_timeout to periodically check running flag
-        // Increased to 1000ms to reduce CPU wake frequency during recording
-        const RECV_TIMEOUT: Duration = Duration::from_millis(1000);
-
         while running_clone.load(Ordering::SeqCst) {
-            // Use recv_timeout so we can periodically check the running flag
-            match audio_packet_rx.recv_timeout(RECV_TIMEOUT) {
-                Ok(packet) => {
+            crossbeam::channel::select! {
+                recv(shutdown_rx) -> _ => {
+                    break;
+                }
+                recv(audio_packet_rx) -> recv_result => {
+                    let packet = match recv_result {
+                        Ok(packet) => packet,
+                        Err(_) => {
+                            debug!(
+                                "Audio packet channel disconnected, exiting forwarding thread ({})",
+                                context_for_thread
+                            );
+                            break;
+                        }
+                    };
                     packet_batch.push(packet);
                     forwarded_packets = forwarded_packets.saturating_add(1);
 
@@ -177,7 +194,7 @@ pub fn start_audio_capture(
                         }
                     }
 
-                    buffer_clone.push_batch(packet_batch.drain(..));
+                    buffer_clone.push_batch(std::mem::take(&mut packet_batch).into_iter());
 
                     if forwarded_packets <= 32 {
                         debug!(
@@ -191,20 +208,10 @@ pub fn start_audio_capture(
                         );
                     }
                 }
-                Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
-                    // Timeout - continue loop to check running flag
-                    continue;
-                }
-                Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
-                    // Channel disconnected - audio manager stopped
-                    debug!(
-                        "Audio packet channel disconnected, exiting forwarding thread ({})",
-                        context_for_thread
-                    );
-                    break;
-                }
             }
         }
+
+        running_clone.store(false, Ordering::SeqCst);
 
         debug!(
             "Audio forwarding thread stopped after forwarding {} packets ({})",
@@ -212,7 +219,7 @@ pub fn start_audio_capture(
         );
     });
 
-    let forward_handle = AudioForwardHandle::new(thread, running);
+    let forward_handle = AudioForwardHandle::new(thread, running, shutdown_tx);
 
     info!("Audio capture started ({})", context_label);
     Ok(AudioCaptureResult {

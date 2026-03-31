@@ -401,7 +401,7 @@ fn render_action_section(
         let output_path = editor
             .custom_output_path
             .clone()
-            .unwrap_or(fallback_output_path.clone());
+            .unwrap_or(fallback_output_path);
         ui.label(
             egui::RichText::new(format!("Save To: {}", output_path.display()))
                 .small()

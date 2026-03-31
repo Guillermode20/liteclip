@@ -755,9 +755,16 @@ impl ClipCompressApp {
 
     fn poll_background_work(&mut self, ctx: &egui::Context) -> Option<f64> {
         let mut follow_up_preview = None;
+        let has_editor_pending_activity = self
+            .editor
+            .as_ref()
+            .map(|editor| editor.playback.has_pending_activity())
+            .unwrap_or(false);
 
         // Check for newly generated thumbnails periodically
-        self.check_for_new_thumbnails(ctx);
+        if !has_editor_pending_activity {
+            self.check_for_new_thumbnails(ctx);
+        }
 
         while let Ok(result) = self.thumbnail_strip_rx.try_recv() {
             if let Some(editor) = self.editor.as_mut() {

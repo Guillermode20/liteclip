@@ -114,6 +114,10 @@ impl TrayManager {
             }
         }
     }
+
+    pub fn has_pending_events(&self) -> bool {
+        !TrayIconEvent::receiver().is_empty() || !MenuEvent::receiver().is_empty()
+    }
 }
 
 /// Load the tray icon, falling back to a solid-colour square if no file is found.

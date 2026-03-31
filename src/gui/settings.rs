@@ -146,6 +146,7 @@ pub struct SettingsApp {
     pub save_status: Option<String>,
     hotkey_errors: HotkeyValidationErrors,
     level_monitor: Option<AudioLevelMonitor>,
+    last_audio_levels: Option<(AudioLevels, AudioLevels)>,
     mic_devices: Vec<(String, String)>,
     current_tab: SettingsTab,
 }
@@ -164,6 +165,7 @@ impl SettingsApp {
             save_status: None,
             hotkey_errors: HotkeyValidationErrors::default(),
             level_monitor,
+            last_audio_levels: None,
             mic_devices,
             current_tab: SettingsTab::default(),
         }
@@ -176,6 +178,7 @@ impl SettingsApp {
     pub fn release_resources(&mut self) {
         self.save_status = None;
         self.level_monitor = None;
+        self.last_audio_levels = None;
     }
 
     fn render(&mut self, ctx: &egui::Context, is_open: &mut bool) {
@@ -492,7 +495,7 @@ impl SettingsApp {
             );
         }
 
-        ui.add(egui::Slider::new(&mut self.config.audio.mic_volume, 0..=200).text("Mic Volume %"));
+        ui.add(egui::Slider::new(&mut self.config.audio.mic_volume, 0..=400).text("Mic Volume %"));
         ui.checkbox(
             &mut self.config.audio.mic_noise_reduction,
             "Reduce mic background hiss",
@@ -650,9 +653,21 @@ impl eframe::App for SettingsApp {
         self.render(ctx, &mut _dummy);
 
         if self.level_monitor.is_some() && self.current_tab == SettingsTab::Audio {
-            // Increased from 66ms to 100ms to reduce CPU usage
-            // Audio level visualization is still smooth at 10fps
-            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            let mut request_ms = 220;
+            if let Some(ref monitor) = self.level_monitor {
+                let system = monitor.get_system_levels();
+                let mic = monitor.get_mic_levels();
+                let changed = self
+                    .last_audio_levels
+                    .map(|last| last != (system, mic))
+                    .unwrap_or(true);
+                self.last_audio_levels = Some((system, mic));
+
+                if changed || system.level > 0 || mic.level > 0 || system.peak > 0 || mic.peak > 0 {
+                    request_ms = 100;
+                }
+            }
+            ctx.request_repaint_after(std::time::Duration::from_millis(request_ms));
         }
     }
 }

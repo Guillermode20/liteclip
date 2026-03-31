@@ -96,8 +96,8 @@ impl FfmpegEncoder {
             (*d3d11_ctx).device_context = ffmpeg_context.as_raw() as *mut _;
 
             // Store the objects in the struct to keep them alive
-            let device_for_storage = ffmpeg_device.clone();
-            let context_for_storage = context.clone();
+            let device_for_storage = ffmpeg_device;
+            let context_for_storage = context;
 
             let init_result = ffmpeg::ffi::av_hwdevice_ctx_init(device_ctx_ref);
             if init_result < 0 {

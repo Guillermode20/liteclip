@@ -672,7 +672,7 @@ async fn spawn_save_clip_task(
     let game_name = game_detector.as_ref().and_then(|d| {
         let app = d.get_detected_app();
         if app.is_game {
-            Some(app.folder_name.clone())
+            Some(app.folder_name)
         } else {
             None
         }
