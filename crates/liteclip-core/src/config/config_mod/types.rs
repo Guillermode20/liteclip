@@ -10,14 +10,16 @@ use std::path::PathBuf;
 use crate::paths::AppDirs;
 
 use super::functions::{
-    default_balance, default_bitrate, default_encoder, default_false, default_framerate,
-    default_gpu_index, default_hotkey_gallery, default_hotkey_save, default_hotkey_screenshot,
-    default_hotkey_toggle, default_keyframe_interval, default_master_volume, default_mic_device,
-    default_mic_volume, default_quality_preset, default_quality_value,
-    default_quality_value_for_preset, default_rate_control, default_replay_duration,
-    default_resolution, default_save_directory, default_system_volume, default_true,
-    ESTIMATED_MIC_AUDIO_BITRATE_BPS, ESTIMATED_SYSTEM_AUDIO_BITRATE_BPS, MAX_FRAMERATE,
-    MAX_REPLAY_MEMORY_LIMIT_MB, MIN_REPLAY_MEMORY_LIMIT_MB, RECOMMENDED_BUFFER_BASE_OVERHEAD_MB,
+    default_audio_normalization_enabled, default_audio_target_lufs, default_balance,
+    default_bitrate, default_encoder, default_false, default_framerate, default_gpu_index,
+    default_hotkey_gallery, default_hotkey_save, default_hotkey_screenshot, default_hotkey_toggle,
+    default_keyframe_interval, default_master_volume, default_mic_device, default_mic_volume,
+    default_quality_preset, default_quality_value, default_quality_value_for_preset,
+    default_rate_control, default_replay_duration, default_resolution, default_save_directory,
+    default_system_volume, default_true, default_true_peak_limit_dbtp,
+    default_true_peak_limiter_enabled, ESTIMATED_MIC_AUDIO_BITRATE_BPS,
+    ESTIMATED_SYSTEM_AUDIO_BITRATE_BPS, MAX_FRAMERATE, MAX_REPLAY_MEMORY_LIMIT_MB,
+    MIN_REPLAY_MEMORY_LIMIT_MB, RECOMMENDED_BUFFER_BASE_OVERHEAD_MB,
     RECOMMENDED_BUFFER_HEADROOM_PERCENT, REPLAY_MEMORY_LIMIT_AUTO_MB,
 };
 
@@ -288,6 +290,8 @@ impl Config {
         self.audio.master_volume = self.audio.master_volume.clamp(0, 200);
         self.audio.system_volume = self.audio.system_volume.clamp(0, 200);
         self.audio.mic_volume = self.audio.mic_volume.clamp(0, 200);
+        self.audio.target_lufs = self.audio.target_lufs.clamp(-23, -14);
+        self.audio.true_peak_limit_dbtp = self.audio.true_peak_limit_dbtp.clamp(-3, 0);
         // mic_noise_reduction is a simple on/off toggle, no per-parameter clamping required.
 
         // Validate save_directory for security and correctness
@@ -450,6 +454,14 @@ pub struct AudioConfig {
     pub master_volume: u8,
     #[serde(default = "default_true")]
     pub mic_noise_reduction: bool,
+    #[serde(default = "default_audio_normalization_enabled")]
+    pub normalization_enabled: bool,
+    #[serde(default = "default_audio_target_lufs")]
+    pub target_lufs: i8,
+    #[serde(default = "default_true_peak_limiter_enabled")]
+    pub true_peak_limiter_enabled: bool,
+    #[serde(default = "default_true_peak_limit_dbtp")]
+    pub true_peak_limit_dbtp: i8,
 }
 /// Global hotkey bindings
 #[derive(Debug, Clone, Serialize, Deserialize)]

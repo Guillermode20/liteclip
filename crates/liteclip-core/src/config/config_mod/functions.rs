@@ -72,11 +72,23 @@ pub(super) fn default_mic_volume() -> u16 {
 pub(super) fn default_system_volume() -> u8 {
     72
 }
+pub(super) fn default_audio_normalization_enabled() -> bool {
+    true
+}
+pub(super) fn default_audio_target_lufs() -> i8 {
+    -16
+}
 pub(crate) fn default_balance() -> i8 {
     0
 }
 pub(crate) fn default_master_volume() -> u8 {
     100
+}
+pub(super) fn default_true_peak_limiter_enabled() -> bool {
+    true
+}
+pub(super) fn default_true_peak_limit_dbtp() -> i8 {
+    -1
 }
 pub(super) fn default_hotkey_save() -> String {
     "Alt+F9".to_string()
@@ -116,6 +128,10 @@ mod tests {
         assert_eq!(config.audio.system_volume, 72);
         assert_eq!(config.audio.mic_volume, 100);
         assert!(config.audio.mic_noise_reduction);
+        assert!(config.audio.normalization_enabled);
+        assert_eq!(config.audio.target_lufs, -16);
+        assert!(config.audio.true_peak_limiter_enabled);
+        assert_eq!(config.audio.true_peak_limit_dbtp, -1);
     }
     #[test]
     fn test_validate_quality_value_clamps() {

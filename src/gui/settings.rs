@@ -504,6 +504,36 @@ impl SettingsApp {
             .small(),
         );
 
+        ui.add_space(8.0);
+        ui.checkbox(
+            &mut self.config.audio.normalization_enabled,
+            "Gentle live audio normalization",
+        );
+        ui.label(
+            egui::RichText::new(
+                "Balances mic/system loudness and tracks overall program level slowly to preserve dynamics.",
+            )
+            .small(),
+        );
+
+        ui.add_enabled_ui(self.config.audio.normalization_enabled, |ui| {
+            ui.add(
+                egui::Slider::new(&mut self.config.audio.target_lufs, -23..=-14)
+                    .text("Target Loudness (LUFS)"),
+            );
+        });
+
+        ui.checkbox(
+            &mut self.config.audio.true_peak_limiter_enabled,
+            "True-peak safety limiter",
+        );
+        ui.add_enabled_ui(self.config.audio.true_peak_limiter_enabled, |ui| {
+            ui.add(
+                egui::Slider::new(&mut self.config.audio.true_peak_limit_dbtp, -3..=0)
+                    .text("Limiter Ceiling (dBTP)"),
+            );
+        });
+
         ui.add_space(12.0);
         ui.separator();
         ui.add_space(12.0);

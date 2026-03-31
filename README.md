@@ -89,6 +89,10 @@ quality_preset = "balanced"
 [audio]
 capture_system = true
 capture_mic = false
+normalization_enabled = true
+target_lufs = -16
+true_peak_limiter_enabled = true
+true_peak_limit_dbtp = -1
 
 [hotkeys]
 save_clip = "Ctrl+Shift+S"
