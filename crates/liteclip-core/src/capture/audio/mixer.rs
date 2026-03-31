@@ -210,9 +210,8 @@ impl AudioMixer {
 
         let target_level = db_to_linear(self.config.target_lufs as f32).max(SILENCE_RMS_FLOOR);
         // Adjust target to account for master_gain so final output hits the configured LUFS
-        let adjusted_target = (target_level / master_gain.max(SILENCE_RMS_FLOOR))
-            .max(SILENCE_RMS_FLOOR)
-            .min(1.0);
+        let adjusted_target =
+            (target_level / master_gain.max(SILENCE_RMS_FLOOR)).clamp(SILENCE_RMS_FLOOR, 1.0);
         let desired_gain = (adjusted_target / self.program_rms_ema)
             .clamp(NORMALIZATION_MIN_GAIN, NORMALIZATION_MAX_GAIN);
         let coeff = if desired_gain < self.normalization_gain {
