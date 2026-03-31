@@ -265,9 +265,10 @@ impl WasapiMicCapture {
                         processed_samples_noise,
                     );
                 });
-                if let Ok(mut guard) = noise_thread_handle.lock() {
-                    *guard = Some(handle);
-                }
+                let mut guard = noise_thread_handle
+                    .lock()
+                    .expect("noise_thread_handle mutex poisoned");
+                *guard = Some(handle);
                 Some(tx)
             } else {
                 tracing::warn!(
@@ -465,23 +466,36 @@ impl Drop for AudioClientGuard {
     fn drop(&mut self) {
         if let Some(audio_client) = self.audio_client.take() {
             let _ = unsafe { audio_client.Stop() };
+            let _ = unsafe { audio_client.Reset() };
         }
     }
 }
 
-struct ComApartment;
+struct ComApartment {
+    initialized_by_us: bool,
+}
 
 impl ComApartment {
     fn new(mode: windows::Win32::System::Com::COINIT) -> Result<Self> {
-        unsafe { CoInitializeEx(None, mode) }.ok()?;
-        Ok(Self)
+        let hr = unsafe { CoInitializeEx(None, mode) };
+        if hr.is_err() {
+            return Err(anyhow::anyhow!(
+                "CoInitializeEx failed for WASAPI mic capture: {:?}",
+                hr
+            ));
+        }
+        Ok(Self {
+            initialized_by_us: hr.is_ok(),
+        })
     }
 }
 
 impl Drop for ComApartment {
     fn drop(&mut self) {
-        unsafe {
-            CoUninitialize();
+        if self.initialized_by_us {
+            unsafe {
+                CoUninitialize();
+            }
         }
     }
 }
@@ -637,7 +651,7 @@ impl RNNoiseProcessor {
             out_buf,
             out_head: 0,
             discard_warmup_frame: true,
-            gate_gain: Self::GATE_FLOOR,
+            gate_gain: Self::GATE_MAX_GAIN,
             speech_presence: 0.0,
             hold_counter: 0,
             hp_x_prev: 0.0,
@@ -1028,10 +1042,10 @@ mod tests {
     fn test_adaptive_noise_gate_hysteresis() {
         let mut processor = RNNoiseProcessor::new(1);
 
-        // Gate should start closed (at floor)
-        assert!(processor.gate_gain < 0.1);
+        // Gate starts open, then should close during silence
+        assert!(processor.gate_gain > 0.9);
 
-        // Simulate several frames of "speech" to open the gate
+        // Simulate several frames of "speech" to keep the gate open
         for _ in 0..15 {
             let mut data: Vec<u8> = (0..AUDIO_FRAME_SIZE)
                 .map(|i| ((i as f32 * 0.5).sin() * 20000.0) as i16)
@@ -1043,7 +1057,7 @@ mod tests {
         let gain_after_speech = processor.gate_gain;
         assert!(
             gain_after_speech > 0.5,
-            "Gate should open after sustained speech, got {}",
+            "Gate should stay open during sustained speech, got {}",
             gain_after_speech
         );
 

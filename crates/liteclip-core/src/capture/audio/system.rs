@@ -51,6 +51,7 @@ impl Default for WasapiSystemConfig {
 /// WASAPI system audio capture implementation
 pub struct WasapiSystemCapture {
     running: Arc<AtomicBool>,
+    initialized: Arc<AtomicBool>,
     packet_tx: Sender<EncodedPacket>,
     packet_rx: Receiver<EncodedPacket>,
     processed_samples: Arc<AtomicU64>,
@@ -64,6 +65,7 @@ impl WasapiSystemCapture {
 
         Ok(Self {
             running: Arc::new(AtomicBool::new(false)),
+            initialized: Arc::new(AtomicBool::new(false)),
             packet_tx,
             packet_rx,
             processed_samples: Arc::new(AtomicU64::new(0)),
@@ -78,17 +80,38 @@ impl WasapiSystemCapture {
         }
 
         self.running.store(true, Ordering::Relaxed);
-
         let running = Arc::clone(&self.running);
+        let initialized = self.initialized.clone();
         let packet_tx = self.packet_tx.clone();
         let processed_samples = Arc::clone(&self.processed_samples);
 
-        // Spawn the capture thread
         self.capture_thread = Some(thread::spawn(move || {
-            if let Err(e) = Self::capture_loop(running, packet_tx, processed_samples, config) {
+            if let Err(e) = Self::capture_loop(
+                running.clone(),
+                initialized,
+                packet_tx,
+                processed_samples,
+                config,
+            ) {
                 error!("System audio capture error: {}", e);
+                running.store(false, Ordering::Relaxed);
             }
         }));
+
+        let mut attempts = 0;
+        while !self.initialized.load(Ordering::Relaxed) && self.running.load(Ordering::Relaxed) {
+            thread::sleep(Duration::from_millis(50));
+            attempts += 1;
+            if attempts > 40 {
+                return Err(anyhow::anyhow!(
+                    "System audio capture initialization timed out"
+                ));
+            }
+        }
+
+        if !self.running.load(Ordering::Relaxed) {
+            return Err(anyhow::anyhow!("System audio capture failed to start"));
+        }
 
         debug!("WASAPI system audio capture started");
         Ok(())
@@ -103,6 +126,7 @@ impl WasapiSystemCapture {
                 error!("System audio capture thread panicked");
             }
         }
+        self.initialized.store(false, Ordering::SeqCst);
         debug!("WASAPI system audio capture stopped");
     }
 
@@ -114,6 +138,7 @@ impl WasapiSystemCapture {
     /// Main capture loop
     fn capture_loop(
         running: Arc<AtomicBool>,
+        initialized: Arc<AtomicBool>,
         packet_tx: Sender<EncodedPacket>,
         processed_samples: Arc<AtomicU64>,
         config: WasapiSystemConfig,
@@ -189,6 +214,9 @@ impl WasapiSystemCapture {
 
         unsafe { audio_client.Start() }.context("Failed to start system audio capture")?;
         let wait_timeout_ms = config.buffer_duration.as_millis().clamp(1, 25) as u32;
+
+        initialized.store(true, Ordering::SeqCst);
+        debug!("WASAPI system audio capture loop initialized successfully");
 
         let start_qpc = query_qpc()?;
         let qpc_freq = qpc_frequency() as f64;
@@ -328,20 +356,31 @@ fn query_qpc() -> Result<i64> {
     Ok(qpc)
 }
 
-struct ComApartment;
+struct ComApartment {
+    initialized_by_us: bool,
+}
 
 impl ComApartment {
     fn initialize() -> Result<Self> {
-        unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).ok() }
-            .context("CoInitializeEx failed for WASAPI system capture")?;
-        Ok(Self)
+        let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+        if hr.is_err() {
+            return Err(anyhow::anyhow!(
+                "CoInitializeEx failed for WASAPI system capture: {:?}",
+                hr
+            ));
+        }
+        Ok(Self {
+            initialized_by_us: hr.is_ok(),
+        })
     }
 }
 
 impl Drop for ComApartment {
     fn drop(&mut self) {
-        unsafe {
-            CoUninitialize();
+        if self.initialized_by_us {
+            unsafe {
+                CoUninitialize();
+            }
         }
     }
 }

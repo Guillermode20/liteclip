@@ -26,9 +26,9 @@ pub fn get_device_friendly_name(device: &IMMDevice) -> Option<String> {
 pub fn get_device_id(device: &IMMDevice) -> Option<String> {
     unsafe {
         let id = device.GetId().ok()?;
-        let s = id.to_string().ok()?;
+        let s = id.to_string().ok();
         windows::Win32::System::Com::CoTaskMemFree(Some(id.0 as *const _));
-        Some(s)
+        s
     }
 }
 
