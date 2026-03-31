@@ -4,6 +4,7 @@ use eframe::egui;
 use eframe::UserEvent;
 use egui::ViewportId;
 use egui_notify::{Anchor, Toasts};
+use std::collections::VecDeque;
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::LazyLock;
 use std::sync::{Arc, Mutex};
@@ -38,6 +39,7 @@ struct GuiManagerState {
     /// Enables instant wake-on-message without periodic polling.
     event_loop_proxy: Option<EventLoopProxy<UserEvent>>,
     thread: Option<std::thread::JoinHandle<()>>,
+    session_running: bool,
 }
 
 static GUI_STATE: LazyLock<Mutex<GuiManagerState>> =
@@ -47,6 +49,7 @@ const TOAST_WINDOW_SIZE: [f32; 2] = [350.0, 300.0];
 /// When idle, shrink the overlay so it does not block clicks elsewhere (1×1 logical pixel).
 const TOAST_WINDOW_IDLE_SIZE: [f32; 2] = [1.0, 1.0];
 const TOAST_WINDOW_MARGIN: [f32; 2] = [20.0, 20.0];
+const GUI_IDLE_SHUTDOWN_DELAY: Duration = Duration::from_secs(3);
 /// GUI Manager for the application.
 ///
 /// Uses a completely dormant EventLoop pattern: the event loop only wakes on:
@@ -63,13 +66,16 @@ pub fn init_gui_manager() {
 fn spawn_gui_manager_thread(state: &mut GuiManagerState) {
     let (tx, rx) = channel();
     state.tx = Some(tx);
+    state.session_running = false;
 
     state.thread = Some(std::thread::spawn(move || {
+        let rx = Arc::new(Mutex::new(rx));
+
         // Create the event loop ourselves to capture its proxy for wake-on-message.
-        // This enables instant GUI thread wake without periodic polling.
-        // Note: On Windows, we can use with_any_thread to run off the main thread.
+        // The event loop can't be recreated in winit 0.30, so we create it once
+        // and run GUI sessions on-demand on the same thread.
         #[cfg(target_os = "windows")]
-        let event_loop: EventLoop<UserEvent> = {
+        let mut event_loop: EventLoop<UserEvent> = {
             use winit::platform::windows::EventLoopBuilderExtWindows;
             match EventLoop::with_user_event().with_any_thread(true).build() {
                 Ok(el) => el,
@@ -81,7 +87,7 @@ fn spawn_gui_manager_thread(state: &mut GuiManagerState) {
         };
 
         #[cfg(not(target_os = "windows"))]
-        let event_loop: EventLoop<UserEvent> = match EventLoop::with_user_event().build() {
+        let mut event_loop: EventLoop<UserEvent> = match EventLoop::with_user_event().build() {
             Ok(el) => el,
             Err(e) => {
                 warn!("Failed to create event loop: {:?}", e);
@@ -95,40 +101,71 @@ fn spawn_gui_manager_thread(state: &mut GuiManagerState) {
         // Store the proxy in global state so send_gui_message can wake the event loop.
         with_gui_state(|s| s.event_loop_proxy = Some(proxy));
 
-        let pos = get_toast_window_pos_for_size(TOAST_WINDOW_IDLE_SIZE);
+        loop {
+            let first_msg = match rx.lock().unwrap_or_else(|e| e.into_inner()).recv() {
+                Ok(msg) => msg,
+                Err(_) => break,
+            };
 
-        let options = eframe::NativeOptions {
-            renderer: eframe::Renderer::Glow,
-            viewport: egui::ViewportBuilder::default()
-                .with_transparent(true)
-                .with_always_on_top()
-                .with_decorations(false)
-                .with_taskbar(false)
-                .with_active(false)
-                .with_inner_size(TOAST_WINDOW_IDLE_SIZE)
-                .with_position(pos),
-            // Note: event_loop_builder is NOT used here since we pass a pre-built event loop
-            // to create_native. The with_any_thread setting was applied when building the event loop above.
-            ..Default::default()
-        };
+            with_gui_state(|s| s.session_running = true);
 
-        // Use create_native + run_app pattern instead of run_native.
-        // This allows us to control the event loop lifecycle and capture the proxy.
-        // create_native returns EframeWinitApplication directly (not a Result).
-        let mut winit_app = eframe::create_native(
-            "liteclip_overlay",
-            options,
-            Box::new(|cc| Ok(Box::new(GuiManagerApp::new(cc, rx)))),
-            &event_loop,
-        );
+            let pos = get_toast_window_pos_for_size(TOAST_WINDOW_IDLE_SIZE);
+            let options = eframe::NativeOptions {
+                renderer: eframe::Renderer::Glow,
+                viewport: egui::ViewportBuilder::default()
+                    .with_transparent(true)
+                    .with_always_on_top()
+                    .with_decorations(false)
+                    .with_taskbar(false)
+                    .with_active(false)
+                    .with_inner_size(TOAST_WINDOW_IDLE_SIZE)
+                    .with_position(pos),
+                // Note: event_loop_builder is NOT used here since we pass a pre-built event loop
+                // to create_native. The with_any_thread setting was applied when building the event loop above.
+                ..Default::default()
+            };
 
-        // Run the event loop - this blocks until the app closes.
-        if let Err(e) = event_loop.run_app(&mut winit_app) {
-            warn!("event_loop.run_app failed: {:?}", e);
+            let shared_rx = Arc::clone(&rx);
+            let mut winit_app = eframe::create_native(
+                "liteclip_overlay",
+                options,
+                Box::new(move |cc| {
+                    Ok(Box::new(GuiManagerApp::new(
+                        cc,
+                        Arc::clone(&shared_rx),
+                        first_msg,
+                    )))
+                }),
+                &event_loop,
+            );
+
+            #[cfg(not(target_os = "ios"))]
+            {
+                use winit::platform::run_on_demand::EventLoopExtRunOnDemand as _;
+
+                if let Err(e) = event_loop.run_app_on_demand(&mut winit_app) {
+                    warn!("event_loop.run_app_on_demand failed: {:?}", e);
+                    break;
+                }
+            }
+
+            #[cfg(target_os = "ios")]
+            {
+                if let Err(e) = event_loop.run_app(&mut winit_app) {
+                    warn!("event_loop.run_app failed: {:?}", e);
+                    break;
+                }
+            }
+
+            with_gui_state(|s| s.session_running = false);
         }
 
-        // Clear the proxy when the event loop exits.
-        with_gui_state(|s| s.event_loop_proxy = None);
+        // Clear runtime handles when the GUI control thread exits.
+        with_gui_state(|s| {
+            s.tx = None;
+            s.event_loop_proxy = None;
+            s.session_running = false;
+        });
     }));
 }
 
@@ -176,29 +213,51 @@ impl GuiActivityState {
     }
 }
 
+fn wake_gui_event_loop(proxy: &EventLoopProxy<UserEvent>) {
+    let _ = proxy.send_event(UserEvent::RequestRepaint {
+        viewport_id: ViewportId::ROOT,
+        when: Instant::now(),
+        cumulative_pass_nr: 0,
+    });
+}
+
+fn remaining_idle_shutdown_delay(idle_since: Instant, now: Instant) -> Option<Duration> {
+    let idle_for = now.saturating_duration_since(idle_since);
+    if idle_for >= GUI_IDLE_SHUTDOWN_DELAY {
+        None
+    } else {
+        Some(GUI_IDLE_SHUTDOWN_DELAY - idle_for)
+    }
+}
+
 pub fn send_gui_message(msg: GuiMessage) {
     init_gui_manager();
 
-    let tx = with_gui_state(|state| state.tx.as_ref().cloned());
-    if let Some(tx) = tx {
-        if tx.send(msg).is_err() {
-            warn!("GUI manager channel closed - message dropped");
-        } else {
-            // Wake the dormant event loop instantly via proxy.
-            // The GUI thread is dormant (ControlFlow::Wait) and will wake
-            // immediately to process this message without polling.
-            with_gui_state(|state| {
-                if let Some(proxy) = &state.event_loop_proxy {
-                    let _ = proxy.send_event(UserEvent::RequestRepaint {
-                        viewport_id: ViewportId::ROOT,
-                        when: Instant::now(),
-                        cumulative_pass_nr: 0,
-                    });
-                }
-            });
-        }
-    } else {
+    let (tx, proxy, session_running) = with_gui_state(|state| {
+        (
+            state.tx.as_ref().cloned(),
+            state.event_loop_proxy.as_ref().cloned(),
+            state.session_running,
+        )
+    });
+
+    let Some(tx) = tx else {
         warn!("GUI manager not initialized - message dropped");
+        return;
+    };
+
+    if tx.send(msg).is_err() {
+        warn!("GUI manager channel closed - message dropped");
+        return;
+    }
+
+    // If a GUI session is already active, wake the dormant event loop instantly.
+    // Otherwise the control thread is blocked on recv() and the channel send above
+    // already wakes it to start a fresh on-demand session.
+    if session_running {
+        if let Some(proxy) = &proxy {
+            wake_gui_event_loop(proxy);
+        }
     }
 }
 
@@ -207,18 +266,37 @@ pub fn show_toast(kind: ToastKind, message: impl Into<String>) {
 }
 
 pub fn shutdown_gui() {
-    // Signal the GUI thread to close by dropping the sender.
-    // The GUI thread will detect Disconnected and close gracefully.
-    // Note: The thread continues running in dormant state until app exit.
-    // The EventLoop is never recreated - it just waits forever after closing windows.
+    // Signal the GUI control thread to close by dropping the sender. If a GUI
+    // session is running, wake the event loop so run_app_on_demand can observe
+    // the disconnect and exit promptly.
+    let (proxy, handle, session_running) = with_gui_state(|state| {
+        (
+            state.event_loop_proxy.as_ref().cloned(),
+            state.thread.take(),
+            state.session_running,
+        )
+    });
+
     with_gui_state(|state| {
         state.tx = None;
         state.event_loop_proxy = None;
+        state.session_running = false;
     });
+
+    if session_running {
+        if let Some(proxy) = &proxy {
+            wake_gui_event_loop(proxy);
+        }
+    }
+
+    if let Some(handle) = handle {
+        let _ = handle.join();
+    }
 }
 
 struct GuiManagerApp {
-    rx: Receiver<GuiMessage>,
+    rx: Arc<Mutex<Receiver<GuiMessage>>>,
+    pending_messages: VecDeque<GuiMessage>,
     settings: Arc<Mutex<Option<crate::gui::settings::SettingsApp>>>,
     gallery: Arc<Mutex<Option<crate::gui::gallery::GalleryApp>>>,
     toasts: Toasts,
@@ -230,9 +308,14 @@ struct GuiManagerApp {
 
 impl GuiManagerApp {
     #[cfg(target_os = "windows")]
-    fn new(_cc: &eframe::CreationContext<'_>, rx: Receiver<GuiMessage>) -> Self {
+    fn new(
+        _cc: &eframe::CreationContext<'_>,
+        rx: Arc<Mutex<Receiver<GuiMessage>>>,
+        first_msg: GuiMessage,
+    ) -> Self {
         Self {
             rx,
+            pending_messages: VecDeque::from([first_msg]),
             settings: Arc::new(Mutex::new(None)),
             gallery: Arc::new(Mutex::new(None)),
             toasts: Toasts::default().with_anchor(Anchor::TopRight),
@@ -243,7 +326,11 @@ impl GuiManagerApp {
     }
 
     #[cfg(not(target_os = "windows"))]
-    fn new(cc: &eframe::CreationContext<'_>, rx: Receiver<GuiMessage>) -> Self {
+    fn new(
+        cc: &eframe::CreationContext<'_>,
+        rx: Arc<Mutex<Receiver<GuiMessage>>>,
+        first_msg: GuiMessage,
+    ) -> Self {
         let mut visuals = cc.egui_ctx.style().visuals.clone();
         visuals.selection.bg_fill = egui::Color32::TRANSPARENT;
         visuals.selection.stroke = egui::Stroke::new(0.0, egui::Color32::TRANSPARENT);
@@ -251,6 +338,7 @@ impl GuiManagerApp {
 
         Self {
             rx,
+            pending_messages: VecDeque::from([first_msg]),
             settings: Arc::new(Mutex::new(None)),
             gallery: Arc::new(Mutex::new(None)),
             toasts: Toasts::default().with_anchor(Anchor::TopRight),
@@ -350,6 +438,23 @@ impl GuiManagerApp {
         self.last_mouse_passthrough = None;
         ctx.memory_mut(|mem| mem.reset_areas());
     }
+
+    fn should_shutdown_for_idle(&mut self, ctx: &egui::Context, now: Instant) -> bool {
+        let activity_state = self.activity_state();
+        if !activity_state.is_truly_idle() {
+            self.idle_since = None;
+            return false;
+        }
+
+        let idle_since = *self.idle_since.get_or_insert(now);
+        match remaining_idle_shutdown_delay(idle_since, now) {
+            Some(remaining) => {
+                ctx.request_repaint_after(remaining);
+                false
+            }
+            None => true,
+        }
+    }
 }
 
 impl eframe::App for GuiManagerApp {
@@ -360,7 +465,13 @@ impl eframe::App for GuiManagerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let mut disconnected = false;
         loop {
-            match self.rx.try_recv() {
+            let maybe_msg = if let Some(msg) = self.pending_messages.pop_front() {
+                Ok(msg)
+            } else {
+                self.rx.lock().unwrap_or_else(|e| e.into_inner()).try_recv()
+            };
+
+            match maybe_msg {
                 Ok(msg) => match msg {
                     GuiMessage::ShowSettings(tx, level_monitor, config) => {
                         *self.settings.lock().unwrap_or_else(|e| e.into_inner()) = Some(
@@ -477,29 +588,21 @@ impl eframe::App for GuiManagerApp {
         }
 
         let now = Instant::now();
-        let activity_state = self.activity_state();
-
-        // With true dormancy, we never request periodic repaints.
-        // The event loop naturally wakes on input events and proxy messages.
-        let _ = (activity_state, now); // Silence unused warnings for now
 
         self.toasts.show(ctx);
         self.sync_mouse_passthrough(ctx);
         self.sync_overlay_window_size(ctx);
         self.release_idle_resources(ctx);
 
-        let activity_state = self.activity_state();
-
-        if activity_state.is_truly_idle() {
-            self.idle_since.get_or_insert(now);
-        } else {
-            self.idle_since = None;
+        if disconnected {
+            // Channel closed - close the overlay window so the event loop exits.
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
         }
 
-        if disconnected {
-            // Channel closed - close the overlay window but keep event loop alive.
-            // The thread will remain dormant until app termination.
+        if self.should_shutdown_for_idle(ctx, now) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
         }
     }
 }
@@ -569,6 +672,10 @@ mod tests {
             "event_loop_proxy should be None by default"
         );
         assert!(state.thread.is_none(), "thread should be None by default");
+        assert!(
+            !state.session_running,
+            "session_running should be false by default"
+        );
     }
 
     /// Tests that GuiManagerState can store an EventLoopProxy reference.
@@ -619,5 +726,24 @@ mod tests {
                 panic!("Unexpected event type");
             }
         }
+    }
+
+    #[test]
+    fn test_remaining_idle_shutdown_delay_before_deadline() {
+        let now = Instant::now();
+        let idle_since = now - Duration::from_secs(1);
+        let remaining = remaining_idle_shutdown_delay(idle_since, now)
+            .expect("idle shutdown grace period should still be active");
+        assert_eq!(remaining, Duration::from_secs(2));
+    }
+
+    #[test]
+    fn test_remaining_idle_shutdown_delay_after_deadline() {
+        let now = Instant::now();
+        let idle_since = now - GUI_IDLE_SHUTDOWN_DELAY - Duration::from_millis(1);
+        assert!(
+            remaining_idle_shutdown_delay(idle_since, now).is_none(),
+            "idle shutdown should trigger once the grace period elapses"
+        );
     }
 }
