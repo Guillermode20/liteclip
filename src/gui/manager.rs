@@ -602,7 +602,6 @@ impl eframe::App for GuiManagerApp {
 
         if self.should_shutdown_for_idle(ctx, now) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            return;
         }
     }
 }
