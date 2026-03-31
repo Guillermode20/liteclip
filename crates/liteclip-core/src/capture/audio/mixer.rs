@@ -524,7 +524,10 @@ mod tests {
         // First call processes system packet by itself and advances last_processed_pts.
         let first = mixer.mix_packets(Some(system_packet), None);
         assert_eq!(first.len(), 1);
-        assert!(matches!(first[0].stream, crate::encode::StreamType::SystemAudio));
+        assert!(matches!(
+            first[0].stream,
+            crate::encode::StreamType::SystemAudio
+        ));
 
         // Mic packet arrives later but has very close PTS (normal cross-thread arrival skew).
         // It must still be emitted, not discarded as stale.
