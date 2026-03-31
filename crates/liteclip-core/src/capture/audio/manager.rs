@@ -270,9 +270,23 @@ impl WasapiAudioManager {
             // Mix as soon as any packet is available.
             // The mixer itself handles timestamp alignment and timeout behavior.
             if system_packet.is_some() || mic_packet.is_some() {
+                let system_present = system_packet.is_some();
+                let mic_present = mic_packet.is_some();
                 let mixed_packets = mixer.mix_packets(system_packet.take(), mic_packet.take());
 
+                // Telemetry: Log first few mic-only packets to verify flow
+                if !system_present && mic_present && forwarded_total < 5 {
+                    tracing::info!("Audio forward: mic-only packet mixed and ready to forward");
+                }
+
                 for mixed_packet in mixed_packets {
+                    // Log stream type for first few packets to verify mixer output
+                    if forwarded_total < 5 {
+                        tracing::info!(
+                            "Audio forward: forwarding packet with stream_type={:?}",
+                            mixed_packet.stream
+                        );
+                    }
                     if packet_tx.send(mixed_packet).is_err() {
                         warn!("Audio manager output channel disconnected while forwarding mixed audio");
                         break;

@@ -476,6 +476,14 @@ impl LockFreeReplayBuffer {
             );
         }
 
+        // Log first few microphone packets to verify they reach the buffer
+        if matches!(stream_type, StreamType::Microphone) && write_idx <= 5 {
+            info!(
+                "Buffer push[{}]: microphone packet stored, size={}B, pts={}",
+                write_idx, packet_size, packet_pts
+            );
+        }
+
         // Enforce memory budget: if total_bytes exceeds max_memory_bytes, proactively
         // evict the oldest packets (those the ring would discard next anyway) until we
         // are back under the limit.  This prevents the initial fill phase from growing

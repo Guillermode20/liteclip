@@ -41,6 +41,8 @@ pub struct AudioMixer {
     mixed_samples_buf: Vec<i16>,
     /// Count of evicted packets for telemetry
     evicted_packets: u64,
+    /// Pending outputs from timeout processing (later packets that need separate processing)
+    extra_outputs: Vec<EncodedPacket>,
 }
 
 impl AudioMixer {
@@ -66,6 +68,7 @@ impl AudioMixer {
             mic_decode_buf: Vec::with_capacity(4096 / 2),
             mixed_samples_buf: Vec::with_capacity(4096 / 2),
             evicted_packets: 0,
+            extra_outputs: Vec::new(),
         }
     }
 
@@ -125,6 +128,16 @@ impl AudioMixer {
             Self::insert_sorted(&mut self.mic_packets, packet, &mut self.evicted_packets);
         }
 
+        // Drain any pending outputs from previous timeout processing
+        let pending: Vec<_> = self.extra_outputs.drain(..).collect();
+        for pending_packet in pending {
+            let pts = pending_packet.pts;
+            if let Some(mixed) = self.process_matching_packets(None, Some(&pending_packet), pts) {
+                output.push(mixed);
+            }
+            self.last_processed_pts = pts;
+        }
+
         // Try to find matching packets for synchronization
         while let Some((system_packet, mic_packet, pts)) = self.find_matching_packets() {
             // Process the matching packets
@@ -154,17 +167,6 @@ impl AudioMixer {
             let system_ts = self.system_packets.front()?.pts;
             let mic_ts = self.mic_packets.front()?.pts;
 
-            if system_ts <= self.last_processed_pts {
-                // Remove stale packet
-                self.system_packets.pop_front();
-                return self.find_matching_packets();
-            }
-            if mic_ts <= self.last_processed_pts {
-                // Remove stale packet
-                self.mic_packets.pop_front();
-                return self.find_matching_packets();
-            }
-
             let diff = (system_ts - mic_ts).abs();
 
             if diff <= self.sync_threshold {
@@ -184,9 +186,17 @@ impl AudioMixer {
                 if later_ts - earlier_ts > self.timeout {
                     if system_ts < mic_ts {
                         let system_packet = self.system_packets.pop_front().map(|p| p.packet);
+                        let mic_packet = self.mic_packets.pop_front().map(|p| p.packet);
+                        if let Some(pkt) = mic_packet {
+                            self.extra_outputs.push(pkt);
+                        }
                         return Some((system_packet, None, system_ts));
                     } else {
                         let mic_packet = self.mic_packets.pop_front().map(|p| p.packet);
+                        let system_packet = self.system_packets.pop_front().map(|p| p.packet);
+                        if let Some(pkt) = system_packet {
+                            self.extra_outputs.push(pkt);
+                        }
                         return Some((None, mic_packet, mic_ts));
                     }
                 } else {
@@ -205,19 +215,11 @@ impl AudioMixer {
         } else if !self.system_packets.is_empty() {
             // If only system has packets, return earliest available
             let ts = self.system_packets.front()?.pts;
-            if ts <= self.last_processed_pts {
-                self.system_packets.pop_front();
-                return self.find_matching_packets();
-            }
             let system_packet = self.system_packets.pop_front().map(|p| p.packet);
             return Some((system_packet, None, ts));
         } else if !self.mic_packets.is_empty() {
             // If only mic has packets, return earliest available
             let ts = self.mic_packets.front()?.pts;
-            if ts <= self.last_processed_pts {
-                self.mic_packets.pop_front();
-                return self.find_matching_packets();
-            }
             let mic_packet = self.mic_packets.pop_front().map(|p| p.packet);
             return Some((None, mic_packet, ts));
         }
@@ -314,12 +316,27 @@ impl AudioMixer {
             self.output_buffer.extend_from_slice(&sample.to_le_bytes());
         }
 
+        // Determine output stream type based on what was mixed
+        let output_stream_type = if system_packet.is_some() && mic_packet.is_some() {
+            // Mixed audio - use SystemAudio as the canonical type for mixed output
+            crate::encode::StreamType::SystemAudio
+        } else if system_packet.is_some() {
+            // Only system audio
+            crate::encode::StreamType::SystemAudio
+        } else if mic_packet.is_some() {
+            // Only microphone audio - preserve Microphone stream type
+            crate::encode::StreamType::Microphone
+        } else {
+            // Should not happen (max_samples would be 0), but default to SystemAudio
+            crate::encode::StreamType::SystemAudio
+        };
+
         Some(EncodedPacket::new(
             self.output_buffer.split().freeze(),
             pts,
             pts,
             false,
-            crate::encode::StreamType::SystemAudio, // Use SystemAudio for mixed output
+            output_stream_type,
         ))
     }
 
@@ -486,6 +503,52 @@ mod tests {
         // Both queues should be empty after processing
         assert!(mixer.system_packets.is_empty());
         assert!(mixer.mic_packets.is_empty());
+    }
+
+    #[test]
+    fn test_late_mic_packet_after_system_is_not_dropped() {
+        let config = Config::default().audio;
+        let mut mixer = AudioMixer::new(&config);
+
+        let mut system_data = BytesMut::with_capacity(4);
+        system_data.extend_from_slice(&1000i16.to_le_bytes());
+        system_data.extend_from_slice(&1000i16.to_le_bytes());
+        let system_packet = EncodedPacket::new(
+            system_data.freeze(),
+            1000,
+            1000,
+            false,
+            crate::encode::StreamType::SystemAudio,
+        );
+
+        // First call processes system packet by itself and advances last_processed_pts.
+        let first = mixer.mix_packets(Some(system_packet), None);
+        assert_eq!(first.len(), 1);
+        assert!(matches!(first[0].stream, crate::encode::StreamType::SystemAudio));
+
+        // Mic packet arrives later but has very close PTS (normal cross-thread arrival skew).
+        // It must still be emitted, not discarded as stale.
+        let mut mic_data = BytesMut::with_capacity(4);
+        mic_data.extend_from_slice(&2000i16.to_le_bytes());
+        mic_data.extend_from_slice(&2000i16.to_le_bytes());
+        let mic_packet = EncodedPacket::new(
+            mic_data.freeze(),
+            1001,
+            1001,
+            false,
+            crate::encode::StreamType::Microphone,
+        );
+
+        let second = mixer.mix_packets(None, Some(mic_packet));
+        assert_eq!(
+            second.len(),
+            1,
+            "late mic packet should be forwarded instead of dropped"
+        );
+        assert!(
+            matches!(second[0].stream, crate::encode::StreamType::Microphone),
+            "late packet stream type should remain microphone when no system packet is paired"
+        );
     }
 
     #[test]

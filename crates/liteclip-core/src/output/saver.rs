@@ -198,11 +198,19 @@ pub fn spawn_clip_saver(
             .iter()
             .filter(|packet| matches!(packet.stream, crate::encode::StreamType::Video))
             .count();
-        let audio_count = snapshot.len().saturating_sub(video_count);
+        let system_audio_count = snapshot
+            .iter()
+            .filter(|packet| matches!(packet.stream, crate::encode::StreamType::SystemAudio))
+            .count();
+        let mic_audio_count = snapshot
+            .iter()
+            .filter(|packet| matches!(packet.stream, crate::encode::StreamType::Microphone))
+            .count();
+        let audio_count = system_audio_count + mic_audio_count;
 
         info!(
-            "Prepared clip packet set: {} video packets, {} audio packets",
-            video_count, audio_count
+            "Prepared clip packet set: {} video packets, {} audio packets ({} system + {} mic)",
+            video_count, audio_count, system_audio_count, mic_audio_count
         );
 
         if video_count == 0 {
@@ -226,10 +234,12 @@ pub fn spawn_clip_saver(
         drop(buffer);
 
         info!(
-            "Clip saved successfully: {:?} ({} video packets, {} audio packets, ~{:.1}s)",
+            "Clip saved successfully: {:?} ({} video packets, {} audio packets [{} system + {} mic], ~{:.1}s)",
             final_path,
             video_count,
             audio_count,
+            system_audio_count,
+            mic_audio_count,
             clip_span_secs.unwrap_or(duration.as_secs_f64())
         );
 
@@ -311,20 +321,29 @@ pub fn log_save_memory(
         .unwrap_or(0);
 
     // Count video vs audio packets
-    let (clip_video_count, clip_audio_count) = clip_packets
+    let (clip_video_count, clip_system_audio_count, clip_mic_audio_count) = clip_packets
         .map(|packets| {
             let v = packets
                 .iter()
                 .filter(|p| matches!(p.stream, crate::encode::StreamType::Video))
                 .count();
-            (v, packets.len().saturating_sub(v))
+            let sa = packets
+                .iter()
+                .filter(|p| matches!(p.stream, crate::encode::StreamType::SystemAudio))
+                .count();
+            let ma = packets
+                .iter()
+                .filter(|p| matches!(p.stream, crate::encode::StreamType::Microphone))
+                .count();
+            (v, sa, ma)
         })
-        .unwrap_or((0, 0));
+        .unwrap_or((0, 0, 0));
+    let _clip_audio_count = clip_system_audio_count + clip_mic_audio_count;
 
     if let Some((working_set_mb, private_mb)) = process_memory_mb() {
         if let Some(stats) = buffer_stats {
             info!(
-                "Save memory [{}]: process_working={:.1}MB, private={:.1}MB, buffer={:.1}MB ({}pkts), clip={:.1}MB ({}v+{}a={})",
+                "Save memory [{}]: process_working={:.1}MB, private={:.1}MB, buffer={:.1}MB ({}pkts), clip={:.1}MB ({}v+{}sa+{}ma={})",
                 stage,
                 working_set_mb,
                 private_mb,
@@ -332,18 +351,20 @@ pub fn log_save_memory(
                 stats.packet_count,
                 clip_packet_bytes as f64 / 1_048_576.0,
                 clip_video_count,
-                clip_audio_count,
+                clip_system_audio_count,
+                clip_mic_audio_count,
                 clip_packet_count
             );
         } else {
             info!(
-                "Save memory [{}]: process_working={:.1}MB, private={:.1}MB, clip={:.1}MB ({}v+{}a={})",
+                "Save memory [{}]: process_working={:.1}MB, private={:.1}MB, clip={:.1}MB ({}v+{}sa+{}ma={})",
                 stage,
                 working_set_mb,
                 private_mb,
                 clip_packet_bytes as f64 / 1_048_576.0,
                 clip_video_count,
-                clip_audio_count,
+                clip_system_audio_count,
+                clip_mic_audio_count,
                 clip_packet_count
             );
         }
@@ -351,13 +372,14 @@ pub fn log_save_memory(
         // Fallback if process memory not available
         if let Some(stats) = buffer_stats {
             info!(
-                "Save memory [{}]: buffer={:.1}MB ({}pkts), clip={:.1}MB ({}v+{}a={})",
+                "Save memory [{}]: buffer={:.1}MB ({}pkts), clip={:.1}MB ({}v+{}sa+{}ma={})",
                 stage,
                 stats.total_bytes as f64 / 1_048_576.0,
                 stats.packet_count,
                 clip_packet_bytes as f64 / 1_048_576.0,
                 clip_video_count,
-                clip_audio_count,
+                clip_system_audio_count,
+                clip_mic_audio_count,
                 clip_packet_count
             );
         }
