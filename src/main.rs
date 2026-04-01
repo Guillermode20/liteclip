@@ -283,9 +283,7 @@ async fn main() -> Result<()> {
     );
 
     // Apply auto-start registry entry based on config
-    match liteclip::platform::autostart::set_autostart(
-        config.general.auto_start_with_windows,
-    ) {
+    match liteclip::platform::autostart::set_autostart(config.general.auto_start_with_windows) {
         Ok(()) => info!(
             "Auto-start set to {}",
             config.general.auto_start_with_windows
@@ -320,8 +318,7 @@ async fn main() -> Result<()> {
     // Start the platform message loop for hotkeys and tray
     let hotkey_config = HotkeyConfig::from(&config);
     info!("Spawning platform thread...");
-    let (platform_handle, event_rx) =
-        liteclip::platform::spawn_platform_thread(hotkey_config)?;
+    let (platform_handle, event_rx) = liteclip::platform::spawn_platform_thread(hotkey_config)?;
     info!("Platform thread spawned, handle created");
     let platform_handle = Arc::new(platform_handle);
 
@@ -331,8 +328,7 @@ async fn main() -> Result<()> {
     );
 
     // Convert the crossbeam receiver to a tokio-compatible channel
-    let (tokio_tx, mut tokio_rx) =
-        tokio::sync::mpsc::channel::<liteclip::platform::AppEvent>(100);
+    let (tokio_tx, mut tokio_rx) = tokio::sync::mpsc::channel::<liteclip::platform::AppEvent>(100);
 
     // Persist config asynchronously with debounce so settings changes don't block the main event flow.
     let (config_save_tx, mut config_save_rx) = tokio::sync::mpsc::unbounded_channel::<Config>();
@@ -717,13 +713,9 @@ async fn spawn_save_clip_task(
     });
 
     tokio::spawn(async move {
-        let result = liteclip::app::ClipManager::save_clip(
-            &config,
-            &buffer,
-            game_name.as_deref(),
-            None,
-        )
-        .await;
+        let result =
+            liteclip::app::ClipManager::save_clip(&config, &buffer, game_name.as_deref(), None)
+                .await;
 
         match result {
             Ok(path) => {
