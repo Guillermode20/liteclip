@@ -1,7 +1,7 @@
 # LiteClip Replay
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Rust](https://img.shields.io/badge/Rust-1.74%2B-blue.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/Rust-1.94%2B-blue.svg)](https://www.rust-lang.org)
 
 Lightweight Windows screen recorder with background replay buffer. Save clips on demand with `Ctrl + Shift + S`.
 

@@ -92,7 +92,7 @@ impl GameDetector {
 
             while running.load(Ordering::SeqCst) {
                 iteration = iteration.wrapping_add(1);
-                let force_refresh = iteration % FORCE_REFRESH_INTERVAL == 0;
+                let force_refresh = iteration.is_multiple_of(FORCE_REFRESH_INTERVAL);
 
                 let hwnd = unsafe { GetForegroundWindow() };
                 if !hwnd.0.is_null() {

@@ -432,7 +432,7 @@ impl PlaybackController {
                     .playback_empty_polls
                     .fetch_add(1, Ordering::SeqCst)
                     + 1;
-                if empty_polls == 60 || empty_polls == 180 || empty_polls % 600 == 0 {
+                if empty_polls == 60 || empty_polls == 180 || empty_polls.is_multiple_of(600) {
                     tracing::warn!(
                         "Playback queue has been empty for {} polls at wall={:.3}s",
                         empty_polls,
@@ -466,7 +466,7 @@ impl PlaybackController {
                 .playback_drop_bursts
                 .fetch_add(1, Ordering::SeqCst)
                 + 1;
-            if burst <= 3 || burst % 30 == 0 {
+            if burst <= 3 || burst.is_multiple_of(30) {
                 tracing::warn!(
                     "Playback dropped {} stale frame(s) at wall={:.3}s (burst #{})",
                     dropped_count,
@@ -499,7 +499,7 @@ impl PlaybackController {
                 .playback_empty_polls
                 .fetch_add(1, Ordering::SeqCst)
                 + 1;
-            if empty_polls == 60 || empty_polls == 180 || empty_polls % 600 == 0 {
+            if empty_polls == 60 || empty_polls == 180 || empty_polls.is_multiple_of(600) {
                 tracing::warn!(
                     "Playback queue drained after dropping stale frames for {} poll(s) at wall={:.3}s",
                     empty_polls,
@@ -2032,7 +2032,7 @@ fn scaled_dimensions(preview_width: u32, metadata: &VideoFileMetadata) -> (u32, 
     let aspect = metadata.height.max(1) as f64 / metadata.width.max(1) as f64;
     let mut height = (f64::from(width) * aspect).round() as u32;
     height = height.max(1);
-    if height % 2 != 0 {
+    if !height.is_multiple_of(2) {
         height += 1;
     }
     (width, height)
