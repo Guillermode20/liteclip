@@ -1,7 +1,7 @@
-//! LiteClip Replay — desktop application library facade.
+//! LiteClip — desktop application library facade.
 //!
 //! Re-exports the recording engine from [`liteclip_core`] so existing paths such as
-//! `liteclip_replay::app::AppState` remain stable, and adds shell modules for the
+//! `liteclip::app::AppState` remain stable, and adds shell modules for the
 //! full product (tray, hotkeys, settings, gallery, game detection).
 //!
 //! For embedding only the engine in another binary, depend on **`liteclip-core`** directly.

@@ -22,7 +22,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use liteclip_replay::gui::{show_settings_gui, init_gui_manager};
+//! use liteclip::gui::{show_settings_gui, init_gui_manager};
 //! use liteclip_core::config::Config;
 //! use tokio::sync::mpsc::channel;
 //!

@@ -1,7 +1,7 @@
 //! Windows auto-start registry management
 //!
 //! Manages the `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` registry
-//! entry so LiteClip Replay can optionally launch on Windows startup.
+//! entry so LiteClip can optionally launch on Windows startup.
 
 use anyhow::{Context, Result};
 use tracing::info;
@@ -9,7 +9,7 @@ use tracing::info;
 use tracing::warn;
 
 #[cfg(windows)]
-const REG_APP_NAME: &str = "LiteClipReplay";
+const REG_APP_NAME: &str = "LiteClip";
 
 /// Enable or disable Windows auto-start for the current executable.
 ///

@@ -120,12 +120,12 @@ impl Config {
         config
     }
 
-    /// Loads configuration from [`AppDirs::liteclip_replay`].
+    /// Loads configuration from [`AppDirs::liteclip`].
     ///
-    /// Configuration file: `%APPDATA%\liteclip-replay\liteclip-replay.toml`.
+    /// Configuration file: `%APPDATA%\liteclip\liteclip.toml`.
     /// If the file doesn't exist, creates defaults and writes the file.
     pub async fn load() -> Result<Self> {
-        Self::load_with_dirs(&AppDirs::liteclip_replay()?).await
+        Self::load_with_dirs(&AppDirs::liteclip()?).await
     }
 
     /// Load using explicit application directories (embedders).
@@ -150,9 +150,9 @@ impl Config {
         }
     }
 
-    /// Save configuration next to [`AppDirs::liteclip_replay`].
+    /// Save configuration next to [`AppDirs::liteclip`].
     pub async fn save(&self) -> Result<()> {
-        self.save_to_dirs(&AppDirs::liteclip_replay()?).await
+        self.save_to_dirs(&AppDirs::liteclip()?).await
     }
 
     /// Save to the TOML path implied by `dirs`.
@@ -171,7 +171,7 @@ impl Config {
 
     /// Save synchronously — used from the GUI thread which has no tokio runtime.
     pub fn save_sync(&self) -> Result<()> {
-        self.save_sync_to_dirs(&AppDirs::liteclip_replay()?)
+        self.save_sync_to_dirs(&AppDirs::liteclip()?)
     }
 
     /// Save synchronously using explicit [`AppDirs`].
@@ -189,7 +189,7 @@ impl Config {
 
     /// Load synchronously — used from the GUI thread which has no tokio runtime.
     pub fn load_sync() -> Result<Self> {
-        Self::load_sync_from_dirs(&AppDirs::liteclip_replay()?)
+        Self::load_sync_from_dirs(&AppDirs::liteclip()?)
     }
 
     /// Load synchronously from explicit [`AppDirs`].
@@ -210,9 +210,9 @@ impl Config {
         }
     }
 
-    /// Configuration file path for LiteClip Replay defaults.
+    /// Configuration file path for LiteClip defaults.
     pub fn config_path() -> Result<PathBuf> {
-        Ok(AppDirs::liteclip_replay()?.config_file)
+        Ok(AppDirs::liteclip()?.config_file)
     }
     /// Validate and sanitize configuration values
     ///

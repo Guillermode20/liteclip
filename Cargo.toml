@@ -1,8 +1,8 @@
 [package]
-name = "liteclip-replay"
+name = "liteclip"
 version = "0.2.0"
 edition = "2021"
-default-run = "liteclip-replay"
+default-run = "liteclip"
 
 [features]
 default = ["ffmpeg"]

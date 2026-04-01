@@ -2,10 +2,10 @@
   <Fragment>
     <!-- Per-machine file association (writes to HKCR) -->
     <Component Id="cmpFileAssocHKLM" Guid="{D4F5C6E7-F8A9-4A10-9ABC-DEF012345671}" Directory="INSTALLDIR">
-      <RegistryValue Root="HKCR" Key=".lcr" Type="string" Value="LiteClipReplay.Document" KeyPath="yes" />
-      <RegistryValue Root="HKCR" Key="LiteClipReplay.Document" Type="string" Value="LiteClip Replay Recording" />
-      <RegistryValue Root="HKCR" Key="LiteClipReplay.Document\DefaultIcon" Type="string" Value="[INSTALLDIR]liteclip-replay.exe,0" />
-      <RegistryValue Root="HKCR" Key="LiteClipReplay.Document\shell\open\command" Type="string" Value="&quot;[INSTALLDIR]liteclip-replay.exe&quot; &quot;%1&quot;" />
+      <RegistryValue Root="HKCR" Key=".lcr" Type="string" Value="LiteClip.Document" KeyPath="yes" />
+      <RegistryValue Root="HKCR" Key="LiteClip.Document" Type="string" Value="LiteClip Recording" />
+      <RegistryValue Root="HKCR" Key="LiteClip.Document\DefaultIcon" Type="string" Value="[INSTALLDIR]liteclip.exe,0" />
+      <RegistryValue Root="HKCR" Key="LiteClip.Document\shell\open\command" Type="string" Value="&quot;[INSTALLDIR]liteclip.exe&quot; &quot;%1&quot;" />
     </Component>
 
     <!-- ARP (Add/Remove Programs) registry entries (primary key path here) -->

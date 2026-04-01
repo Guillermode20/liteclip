@@ -8,7 +8,7 @@ use tracing::{error, info, warn};
 
 /// Application state manager.
 ///
-/// Central coordinator for LiteClip Replay, managing:
+/// Central coordinator for LiteClip, managing:
 /// - Configuration
 /// - Replay buffer
 /// - Recording pipeline

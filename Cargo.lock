@@ -2556,31 +2556,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df1d3c3b53da64cf5760482273a98e575c651a67eec7f77df96b5b642de8f039"
 
 [[package]]
-name = "liteclip-core"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "bytes",
- "chrono",
- "crossbeam",
- "dirs",
- "ffmpeg-next",
- "image",
- "memchr",
- "nnnoiseless",
- "parking_lot",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "toml 0.8.2",
- "tracing",
- "windows 0.58.0",
- "windows-core 0.58.0",
-]
-
-[[package]]
-name = "liteclip-replay"
+name = "liteclip"
 version = "0.2.0"
 dependencies = [
  "anyhow",
@@ -2605,6 +2581,30 @@ dependencies = [
  "windows-core 0.58.0",
  "winit",
  "winres",
+]
+
+[[package]]
+name = "liteclip-core"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "chrono",
+ "crossbeam",
+ "dirs",
+ "ffmpeg-next",
+ "image",
+ "memchr",
+ "nnnoiseless",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "toml 0.8.2",
+ "tracing",
+ "windows 0.58.0",
+ "windows-core 0.58.0",
 ]
 
 [[package]]

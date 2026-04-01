@@ -18,7 +18,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_HOTKEY, WM_QUIT, WNDCLASSW, WS_EX_NOACTIVATE, WS_OVERLAPPED,
 };
 
-const CLASS_NAME: &str = "LiteClipReplay_HotkeyWindow";
+const CLASS_NAME: &str = "LiteClip_HotkeyWindow";
 
 /// Hotkey ID constants.
 const HOTKEY_ID_SAVE_CLIP: i32 = 1000;

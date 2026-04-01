@@ -1,6 +1,6 @@
 //! LiteClip core — Windows screen capture, encoding, replay ring buffer, and muxing.
 //!
-//! This crate is the engine behind LiteClip Replay. Host applications (tray apps, games,
+//! This crate is the engine behind LiteClip. Host applications (tray apps, games,
 //! overlays) can depend on it to run continuous capture into a retroactive buffer and
 //! save clips on demand.
 //!
@@ -10,7 +10,7 @@
 //!
 //! - [`ReplayEngine`] — lifecycle, config-backed state, and [`ReplayEngine::save_clip`].
 //! - [`prelude`] — common imports (`ReplayEngine`, [`Config`], [`AppDirs`], [`CoreHost`], [`encode`], [`runtime`]).
-//! - [`paths::AppDirs`] — isolate config and clips from the LiteClip Replay desktop layout.
+//! - [`paths::AppDirs`] — isolate config and clips from the LiteClip desktop layout.
 //! - [`runtime`] — resolve or override the `ffmpeg` / `ffmpeg.exe` binary for external tools.
 //! - [`ffmpeg_backend`] — backend kind and runtime validation (SDK-only).
 //! - [`host::CoreHost`] — optional UI hooks ([`CoreHost::on_clip_saved`], [`CoreHost::on_pipeline_fatal`]).
@@ -35,8 +35,8 @@
 //!
 //! # Application directories
 //!
-//! Use [`paths::AppDirs`] so your app does not share `%APPDATA%\liteclip-replay\` with the
-//! desktop product. [`AppDirs::liteclip_replay`] matches the LiteClip Replay layout exactly.
+//! Use [`paths::AppDirs`] so your app does not share `%APPDATA%\liteclip\` with the
+//! desktop product. [`AppDirs::liteclip`] matches the LiteClip layout exactly.
 //! [`Config::load_with_dirs`] / [`Config::save_to_dirs`] persist settings relative to that layout.
 //!
 //! # Data flow
@@ -62,7 +62,7 @@
 //!
 //! # Versioning
 //!
-//! This crate is versioned **independently** of the `liteclip-replay` binary. Breaking API changes
+//! This crate is versioned **independently** of the `liteclip` binary. Breaking API changes
 //! here use semver; bump the major version when removing or changing public types.
 //!
 //! # Modules

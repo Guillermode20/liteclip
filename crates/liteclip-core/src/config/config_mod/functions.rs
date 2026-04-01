@@ -26,12 +26,12 @@ pub(super) fn default_replay_duration() -> u32 {
 }
 pub(super) fn default_save_directory() -> String {
     dirs::video_dir()
-        .map(|p| p.join("liteclip-replay").to_string_lossy().to_string())
+        .map(|p| p.join("liteclip").to_string_lossy().to_string())
         .unwrap_or_else(|| {
             if let Ok(profile) = std::env::var("USERPROFILE") {
-                format!("{}\\Videos\\liteclip-replay", profile)
+                format!("{}\\Videos\\liteclip", profile)
             } else {
-                "C:\\Videos\\liteclip-replay".to_string()
+                "C:\\Videos\\liteclip".to_string()
             }
         })
 }

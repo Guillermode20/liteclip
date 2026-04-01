@@ -7,7 +7,7 @@
     <OutputPath>$(MSBuildThisFileDirectory)output\</OutputPath>
 
     <!-- WiX preprocessor variables available to .wxs files -->
-    <DefineConstants>ProductVersion=$(ProductVersion);Manufacturer=LiteClip;ProductName=LiteClip Replay;BinariesDir=$(MSBuildThisFileDirectory)..\target\release</DefineConstants>
+    <DefineConstants>ProductVersion=$(ProductVersion);Manufacturer=LiteClip;ProductName=LiteClip;BinariesDir=$(MSBuildThisFileDirectory)..\target\release</DefineConstants>
   </PropertyGroup>
 
   <ItemGroup>

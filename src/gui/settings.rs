@@ -197,7 +197,7 @@ impl SettingsApp {
                 .show(ui, |ui| {
                     // Header
                     ui.horizontal(|ui| {
-                        ui.heading("LiteClip Replay Settings");
+                        ui.heading("LiteClip Settings");
                         ui.label(egui::RichText::new("—").weak());
                         ui.label(egui::RichText::new(self.current_tab.label()).strong());
                     });

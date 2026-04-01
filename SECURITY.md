@@ -7,7 +7,7 @@ This is a **local-only** Windows application with no network functionality, user
 - **No network ports opened**
 - **No data transmitted to external servers**
 - **No telemetry or analytics**
-- All recordings stay on your local machine in `%APPDATA%\liteclip-replay`
+- All recordings stay on your local machine in `%APPDATA%\liteclip`
 
 ## Security Considerations
 

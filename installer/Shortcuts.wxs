@@ -2,23 +2,23 @@
   <Fragment>
     <!-- Start Menu shortcut component -->
     <Component Id="cmpStartMenuShortcut" Guid="{F7A8B9C0-D1E2-4D10-9ABC-DEF012345674}" Directory="ProgramMenuShortcuts">
-      <Shortcut Id="StartMenuShortcut" Name="LiteClip Replay" Description="LiteClip Replay" Target="[INSTALLDIR]liteclip-replay.exe" WorkingDirectory="INSTALLDIR" Icon="AppIcon" />
+      <Shortcut Id="StartMenuShortcut" Name="LiteClip" Description="LiteClip" Target="[INSTALLDIR]liteclip.exe" WorkingDirectory="INSTALLDIR" Icon="AppIcon" />
       <RemoveFile Id="RemoveProgramMenuShortcutsFiles" Directory="ProgramMenuShortcuts" Name="*" On="uninstall" />
       <RemoveFolder Id="RemoveProgramMenuShortcutsFolder" Directory="ProgramMenuShortcuts" On="uninstall" />
       <RemoveFolder Id="RemoveProgramMenuDir" Directory="ProgramMenuDir" On="uninstall" />
-      <RegistryValue Root="HKCU" Key="Software\LiteClip\LiteClip Replay\Shortcuts" Name="start_menu" Type="integer" Value="1" KeyPath="yes" />
+      <RegistryValue Root="HKCU" Key="Software\LiteClip\LiteClip\Shortcuts" Name="start_menu" Type="integer" Value="1" KeyPath="yes" />
     </Component>
 
     <!-- Uninstall shortcut in Start Menu -->
     <Component Id="cmpUninstallShortcut" Guid="{07A8B9C1-D2E3-4E10-9ABC-DEF012345675}" Directory="ProgramMenuShortcuts">
-      <Shortcut Id="UninstallShortcut" Name="Uninstall LiteClip Replay" Description="Uninstall" Target="[SystemFolder]msiexec.exe" Arguments="/x [ProductCode]" WorkingDirectory="INSTALLDIR" />
-      <RegistryValue Root="HKCU" Key="Software\LiteClip\LiteClip Replay\Shortcuts" Name="uninstall" Type="integer" Value="1" KeyPath="yes" />
+      <Shortcut Id="UninstallShortcut" Name="Uninstall LiteClip" Description="Uninstall" Target="[SystemFolder]msiexec.exe" Arguments="/x [ProductCode]" WorkingDirectory="INSTALLDIR" />
+      <RegistryValue Root="HKCU" Key="Software\LiteClip\LiteClip\Shortcuts" Name="uninstall" Type="integer" Value="1" KeyPath="yes" />
     </Component>
 
     <!-- Optional Desktop shortcut (feature-controlled) -->
     <Component Id="cmpDesktopShortcut" Guid="{C3F4C5D6-E7F8-4910-9ABC-DEF012345670}" Directory="DesktopFolder">
-      <Shortcut Id="DesktopShortcut" Name="LiteClip Replay" Description="Launch LiteClip Replay" Target="[INSTALLDIR]liteclip-replay.exe" WorkingDirectory="INSTALLDIR" Advertise="no" Icon="AppIcon" />
-      <RegistryValue Root="HKCU" Key="Software\LiteClip\LiteClip Replay" Name="desktop_shortcut" Type="integer" Value="1" KeyPath="yes" />
+      <Shortcut Id="DesktopShortcut" Name="LiteClip" Description="Launch LiteClip" Target="[INSTALLDIR]liteclip.exe" WorkingDirectory="INSTALLDIR" Advertise="no" Icon="AppIcon" />
+      <RegistryValue Root="HKCU" Key="Software\LiteClip\LiteClip" Name="desktop_shortcut" Type="integer" Value="1" KeyPath="yes" />
     </Component>
   </Fragment>
 </Wix>

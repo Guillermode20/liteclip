@@ -1,8 +1,8 @@
 <WixLocalization xmlns="http://wixtoolset.org/schemas/v4/wxl" Culture="en-US">
-  <String Id="WelcomeDlgTitle" Value="Welcome to the LiteClip Replay Setup Wizard" />
+  <String Id="WelcomeDlgTitle" Value="Welcome to the LiteClip Setup Wizard" />
   <String Id="LicenseAgreementDlgTitle" Value="License Agreement" />
   <String Id="FeatureSelectionDlg_Title" Value="Choose features" />
-  <String Id="ProgressDlgTitle" Value="Installing LiteClip Replay" />
+  <String Id="ProgressDlgTitle" Value="Installing LiteClip" />
   <String Id="ExitDlgTitle" Value="Installation Complete" />
-  <String Id="LaunchCheckbox" Value="Launch LiteClip Replay" />
+  <String Id="LaunchCheckbox" Value="Launch LiteClip" />
 </WixLocalization>

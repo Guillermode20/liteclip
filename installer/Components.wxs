@@ -2,7 +2,7 @@
   <Fragment>
     <!-- Main application binary component (one executable = one component) -->
     <Component Id="cmpLiteClipExe" Guid="{A1F2C3D4-E5F6-4710-9ABC-DEF012345678}" Directory="INSTALLDIR">
-      <File Id="filLiteClipExe" Source="..\target\release\liteclip-replay.exe" KeyPath="yes" />
+      <File Id="filLiteClipExe" Source="..\target\release\liteclip.exe" KeyPath="yes" />
     </Component>
 
     <!-- Core component group contains required runtime components + shortcuts/registry (refs supplied below) -->

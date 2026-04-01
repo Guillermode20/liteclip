@@ -1,4 +1,4 @@
-# LiteClip Replay
+# LiteClip
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Rust](https://img.shields.io/badge/Rust-1.94%2B-blue.svg)](https://www.rust-lang.org)
@@ -40,7 +40,7 @@ Get the latest installer from [Releases](https://github.com/Guillermode20/litecl
 
 ## Configuration
 
-Settings stored at `%APPDATA%\liteclip-replay\config.toml`. See [CONTRIBUTING.md](CONTRIBUTING.md) for build instructions.
+Settings stored at `%APPDATA%\liteclip\config.toml`. See [CONTRIBUTING.md](CONTRIBUTING.md) for build instructions.
 
 ## License
 

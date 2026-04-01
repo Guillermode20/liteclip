@@ -17,7 +17,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use liteclip_replay::detection::GameDetector;
+//! use liteclip::detection::GameDetector;
 //!
 //! let detector = GameDetector::new();
 //! detector.start();

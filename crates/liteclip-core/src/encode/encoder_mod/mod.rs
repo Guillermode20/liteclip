@@ -5,7 +5,7 @@
 //!
 //! # Architecture
 //!
-//! Encoders in LiteClip Replay follow a streaming model:
+//! Encoders in LiteClip follow a streaming model:
 //! 1. Frames are received from the capture layer.
 //! 2. The encoder processes them (using GPU or CPU).
 //! 3. Encoded packets are wrapped in `EncodedPacket` and pushed to the buffer.

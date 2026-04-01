@@ -59,7 +59,7 @@ impl TrayManager {
         let tray = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
             .with_menu_on_left_click(false)
-            .with_tooltip("LiteClip Replay")
+            .with_tooltip("LiteClip")
             .with_icon(icon)
             .build()
             .context("Failed to build tray icon")?;

@@ -1,6 +1,6 @@
-//! LiteClip Replay - Application Entry Point
+//! LiteClip - Application Entry Point
 //!
-//! This is the main entry point for LiteClip Replay. The application runs as a
+//! This is the main entry point for LiteClip. The application runs as a
 //! background process with system tray integration, providing screen recording
 //! with replay buffer functionality.
 //!
@@ -12,7 +12,7 @@
 //! 2. Set up logging via tracing
 //! 3. Configure Windows timer resolution for precise frame timing
 //! 4. Create a job object for child process management
-//! 5. Load configuration from `%APPDATA%\liteclip-replay\liteclip-replay.toml`
+//! 5. Load configuration from `%APPDATA%\liteclip\liteclip.toml`
 //! 6. Initialize application state and recording pipeline
 //! 7. Spawn platform thread for hotkeys and tray
 //! 8. Enter main event loop
@@ -39,7 +39,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 use anyhow::{Context, Result};
-use liteclip_replay::{
+use liteclip::{
     app::AppState,
     config::{Config, HotkeyConfig},
     detection::GameDetector,
@@ -161,7 +161,7 @@ impl Drop for TimerResolutionGuard {
 
 /// Application entry point.
 ///
-/// Initializes and runs the LiteClip Replay application. The function:
+/// Initializes and runs the LiteClip application. The function:
 ///
 /// 1. Initializes FFmpeg libraries for encoding/muxing
 /// 2. Configures environment variables for Vulkan/FFmpeg
@@ -183,14 +183,14 @@ impl Drop for TimerResolutionGuard {
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize FFmpeg (SDK backend: linked libav; validate DLLs / CLI availability)
-    liteclip_replay::encode::init_ffmpeg()
+    liteclip::encode::init_ffmpeg()
         .map_err(anyhow::Error::from)
         .context("Failed to initialize FFmpeg")?;
-    liteclip_replay::ffmpeg_backend::validate_runtime()
+    liteclip::ffmpeg_backend::validate_runtime()
         .map_err(|e| anyhow::anyhow!("{}", e))
         .context("FFmpeg runtime validation failed")?;
 
-    liteclip_replay::output::saver::log_save_memory("app_start", None, None);
+    liteclip::output::saver::log_save_memory("app_start", None, None);
 
     // Suppress all Vulkan loader output (prints directly to stderr from C code)
     std::env::set_var("VK_LOADER_DEBUG", "none");
@@ -248,10 +248,10 @@ async fn main() -> Result<()> {
     }
 
     let version = env!("CARGO_PKG_VERSION");
-    println!("LiteClip Replay v{}", version);
-    info!("LiteClip Replay {} starting", version);
+    println!("LiteClip v{}", version);
+    info!("LiteClip {} starting", version);
 
-    // Load configuration from %APPDATA%/liteclip-replay/liteclip-replay.toml
+    // Load configuration from %APPDATA%/liteclip/liteclip.toml
     let config = match Config::load().await {
         Ok(cfg) => {
             let config_path = Config::config_path()?;
@@ -283,7 +283,7 @@ async fn main() -> Result<()> {
     );
 
     // Apply auto-start registry entry based on config
-    match liteclip_replay::platform::autostart::set_autostart(
+    match liteclip::platform::autostart::set_autostart(
         config.general.auto_start_with_windows,
     ) {
         Ok(()) => info!(
@@ -298,7 +298,7 @@ async fn main() -> Result<()> {
 
     // Show welcome notification if not starting minimized
     if !config.general.start_minimised {
-        info!("LiteClip Replay is running in the system tray");
+        info!("LiteClip is running in the system tray");
         info!("Right-click the tray icon to access settings");
     } else {
         info!("Started minimized to system tray");
@@ -321,7 +321,7 @@ async fn main() -> Result<()> {
     let hotkey_config = HotkeyConfig::from(&config);
     info!("Spawning platform thread...");
     let (platform_handle, event_rx) =
-        liteclip_replay::platform::spawn_platform_thread(hotkey_config)?;
+        liteclip::platform::spawn_platform_thread(hotkey_config)?;
     info!("Platform thread spawned, handle created");
     let platform_handle = Arc::new(platform_handle);
 
@@ -332,7 +332,7 @@ async fn main() -> Result<()> {
 
     // Convert the crossbeam receiver to a tokio-compatible channel
     let (tokio_tx, mut tokio_rx) =
-        tokio::sync::mpsc::channel::<liteclip_replay::platform::AppEvent>(100);
+        tokio::sync::mpsc::channel::<liteclip::platform::AppEvent>(100);
 
     // Persist config asynchronously with debounce so settings changes don't block the main event flow.
     let (config_save_tx, mut config_save_rx) = tokio::sync::mpsc::unbounded_channel::<Config>();
@@ -403,9 +403,9 @@ async fn main() -> Result<()> {
                             break;
                         };
                                 match event {
-                                    liteclip_replay::platform::AppEvent::Hotkey(action) => {
+                                    liteclip::platform::AppEvent::Hotkey(action) => {
                                         match action {
-        liteclip_replay::platform::HotkeyAction::SaveClip => {
+        liteclip::platform::HotkeyAction::SaveClip => {
                                                 info!("Hotkey: save clip");
                                                 spawn_save_clip_task(
                                                     &app_state,
@@ -415,7 +415,7 @@ async fn main() -> Result<()> {
                                                 )
                                                 .await;
                                             }
-                                            liteclip_replay::platform::HotkeyAction::ToggleRecording => {
+                                            liteclip::platform::HotkeyAction::ToggleRecording => {
                                                 info!("Hotkey: toggle recording");
                                                 match app_state_blocking_try(&app_state, |s| {
                                                     if s.is_recording() {
@@ -437,22 +437,22 @@ async fn main() -> Result<()> {
                                                     }
                                                 }
                                             }
-                                            liteclip_replay::platform::HotkeyAction::Screenshot => {
+                                            liteclip::platform::HotkeyAction::Screenshot => {
                                                 info!("Hotkey: screenshot (not implemented)");
                                                 warn!("Screenshot feature not yet implemented");
                                             }
-                                            liteclip_replay::platform::HotkeyAction::OpenGallery => {
+                                            liteclip::platform::HotkeyAction::OpenGallery => {
                                                 info!("Hotkey: open gallery");
-                                                liteclip_replay::gui::show_gallery_gui(
+                                                liteclip::gui::show_gallery_gui(
                                                     tokio_tx.clone(),
                                                     config.clone(),
                                                 );
                                             }
                                         }
                                     }
-                                    liteclip_replay::platform::AppEvent::Tray(tray_event) => {
+                                    liteclip::platform::AppEvent::Tray(tray_event) => {
                                         match tray_event {
-        liteclip_replay::platform::TrayEvent::SaveClip => {
+        liteclip::platform::TrayEvent::SaveClip => {
                                                 info!("Tray: Save Clip selected");
                                                 spawn_save_clip_task(
                                                     &app_state,
@@ -462,16 +462,16 @@ async fn main() -> Result<()> {
                                                 )
                                                 .await;
                                             }
-                                            liteclip_replay::platform::TrayEvent::Exit => {
+                                            liteclip::platform::TrayEvent::Exit => {
                                                 info!("Tray: Exit selected");
                                                 break;
                                             }
-                                            liteclip_replay::platform::TrayEvent::Restart => {
+                                            liteclip::platform::TrayEvent::Restart => {
                                                 info!("Tray: Restart selected");
                                                 should_restart = true;
                                                 break;
                                             }
-        liteclip_replay::platform::TrayEvent::OpenSettings => {
+        liteclip::platform::TrayEvent::OpenSettings => {
                                                  info!("Tray: Open Settings selected");
                                                  match app_state_blocking(&app_state, |s| {
                                                      s.level_monitor().clone()
@@ -479,7 +479,7 @@ async fn main() -> Result<()> {
                                                  .await
                                                  {
                                                      Ok(level_monitor) => {
-                                                         liteclip_replay::gui::show_settings_gui(
+                                                         liteclip::gui::show_settings_gui(
                                                              tokio_tx.clone(),
                                                              Some(level_monitor),
                                                              config.clone(),
@@ -488,9 +488,9 @@ async fn main() -> Result<()> {
                                                      Err(e) => error!("Failed to read app state for settings: {}", e),
                                                  }
                                              }
-                                             liteclip_replay::platform::TrayEvent::OpenGallery => {
+                                             liteclip::platform::TrayEvent::OpenGallery => {
                                                  info!("Tray: Open Gallery selected");
-                                                 liteclip_replay::gui::show_gallery_gui(
+                                                 liteclip::gui::show_gallery_gui(
                                                      tokio_tx.clone(),
                                                      config.clone(),
                                                  );
@@ -501,16 +501,16 @@ async fn main() -> Result<()> {
                                             }
                                         }
                                     }
-                                    liteclip_replay::platform::AppEvent::Quit => {
+                                    liteclip::platform::AppEvent::Quit => {
                                         info!("Quit signal received");
                                         break;
                                     }
-        liteclip_replay::platform::AppEvent::Restart => {
+        liteclip::platform::AppEvent::Restart => {
                                         info!("Restart signal received");
                                         should_restart = true;
                                         break;
                                     }
-                                    liteclip_replay::platform::AppEvent::ConfigUpdated(new_config) => {
+                                    liteclip::platform::AppEvent::ConfigUpdated(new_config) => {
                                         info!("ConfigUpdated event received from settings GUI");
                                         let cfg = (*new_config).clone();
                                         let cfg_for_apply = cfg.clone();
@@ -567,7 +567,7 @@ async fn main() -> Result<()> {
                                         if s.is_recording() {
                                             let stats = s.replay_buffer_stats();
                                             if let Some((working_set_mb, private_mb)) =
-                                                liteclip_replay::output::saver::process_memory_mb()
+                                                liteclip::output::saver::process_memory_mb()
                                             {
                                                 info!(
                                                     "Memory telemetry [pipeline]: process_working_set_mb={:.1}, process_private_mb={:.1}, buffer_mb={:.1}, buffer_packets={}, buffer_usage_pct={:.1}",
@@ -652,10 +652,10 @@ async fn main() -> Result<()> {
     info!("Event bridge thread joined");
 
     // Shutdown GUI manager to release static channel
-    liteclip_replay::gui::shutdown_gui();
+    liteclip::gui::shutdown_gui();
 
     let _ = shutdown_done_tx.send(());
-    info!("LiteClip Replay stopped");
+    info!("LiteClip stopped");
 
     // For restart: spawn the new process after everything else is cleaned up
     // to avoid resource conflicts (GPU, Audio, Tray icon, etc.)
@@ -684,7 +684,7 @@ async fn main() -> Result<()> {
 
 async fn spawn_save_clip_task(
     app_state: &Arc<Mutex<AppState>>,
-    _platform_handle: &Arc<liteclip_replay::platform::PlatformHandle>,
+    _platform_handle: &Arc<liteclip::platform::PlatformHandle>,
     save_in_progress: &Arc<AtomicBool>,
     game_detector: &Option<Arc<GameDetector>>,
 ) {
@@ -717,7 +717,7 @@ async fn spawn_save_clip_task(
     });
 
     tokio::spawn(async move {
-        let result = liteclip_replay::app::ClipManager::save_clip(
+        let result = liteclip::app::ClipManager::save_clip(
             &config,
             &buffer,
             game_name.as_deref(),
@@ -732,15 +732,15 @@ async fn spawn_save_clip_task(
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| "clip".to_string());
-                liteclip_replay::gui::show_toast(
-                    liteclip_replay::gui::ToastKind::Success,
+                liteclip::gui::show_toast(
+                    liteclip::gui::ToastKind::Success,
                     format!("Clip saved: {}", filename),
                 );
             }
             Err(e) => {
                 error!("Failed to save clip: {:#}", e);
-                liteclip_replay::gui::show_toast(
-                    liteclip_replay::gui::ToastKind::Error,
+                liteclip::gui::show_toast(
+                    liteclip::gui::ToastKind::Error,
                     format!("Failed to save clip: {}", e),
                 );
             }

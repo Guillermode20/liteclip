@@ -1,7 +1,7 @@
 //! Application State and Recording Pipeline
 //!
 //! This module provides the core application state management and recording
-//! pipeline coordination for LiteClip Replay.
+//! pipeline coordination for LiteClip.
 //!
 //! # Architecture
 //!

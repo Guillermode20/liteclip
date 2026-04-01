@@ -1,13 +1,13 @@
 //! Application directory layout for config and default clip storage.
 //!
-//! Use [`AppDirs::liteclip_replay`] for the same paths as the LiteClip Replay desktop app.
+//! Use [`AppDirs::liteclip`] for the same paths as the LiteClip desktop app.
 //! Use [`AppDirs::from_app_slug`] when embedding the engine under your own product id.
 
 use anyhow::{bail, Context, Result};
 use std::path::PathBuf;
 
-/// Slug used by LiteClip Replay for `%APPDATA%` and default `Videos` subfolder.
-pub const LITECLIP_REPLAY_SLUG: &str = "liteclip-replay";
+/// Slug used by LiteClip for `%APPDATA%` and default `Videos` subfolder.
+pub const LITECLIP_REPLAY_SLUG: &str = "liteclip";
 
 /// Resolved paths for configuration file and default clip folder naming.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,10 +41,10 @@ impl AppDirs {
         })
     }
 
-    /// Same layout as the LiteClip Replay application (backward compatible).
+    /// Same layout as the LiteClip application (backward compatible).
     ///
-    /// Config: `%APPDATA%\liteclip-replay\liteclip-replay.toml`
-    pub fn liteclip_replay() -> Result<Self> {
+    /// Config: `%APPDATA%\liteclip\liteclip.toml`
+    pub fn liteclip() -> Result<Self> {
         Self::from_app_slug(LITECLIP_REPLAY_SLUG)
     }
 

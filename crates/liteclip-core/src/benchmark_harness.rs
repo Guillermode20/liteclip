@@ -1023,7 +1023,7 @@ INFO Memory telemetry [capture]: fps=57, drops=0, drop_ratio=0.000, duplicates=1
 INFO Recording memory [encoder_periodic]: process_working=101.2MB, private=130.2MB, buffer=9.1MB (5403pkts, 15kf, mem=2%), pinned_snapshots=0.0MB
 "#;
         let idle_stdout = r#"
-INFO LiteClip Replay started
+INFO LiteClip started
 "#;
         let active_path = write_temp(active_stdout, "active");
         let idle_path = write_temp(idle_stdout, "idle");

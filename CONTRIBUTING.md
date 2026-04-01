@@ -1,4 +1,4 @@
-# Contributing to LiteClip Replay
+# Contributing to LiteClip
 
 ## Quick Start
 
@@ -50,7 +50,7 @@ cargo run
 
 ## Hardware Encoders (NVENC / QSV / AMF)
 
-**Maintainer note:** LiteClip Replay is developed and tested primarily on AMD GPUs. The AMF encoder
+**Maintainer note:** LiteClip is developed and tested primarily on AMD GPUs. The AMF encoder
 path is the reference implementation. **Contributors with NVIDIA and Intel GPUs are strongly encouraged
 to test, report issues, and submit improvements.**
 

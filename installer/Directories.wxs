@@ -3,14 +3,14 @@
     <!-- Program Files (x64) install location -->
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="LiteClipFolder" Name="LiteClip">
-        <Directory Id="INSTALLDIR" Name="LiteClip Replay" />
+        <Directory Id="INSTALLDIR" Name="LiteClip" />
       </Directory>
     </StandardDirectory>
 
     <!-- Start Menu shortcuts -->
     <StandardDirectory Id="ProgramMenuFolder">
       <Directory Id="ProgramMenuDir" Name="LiteClip">
-        <Directory Id="ProgramMenuShortcuts" Name="LiteClip Replay" />
+        <Directory Id="ProgramMenuShortcuts" Name="LiteClip" />
       </Directory>
     </StandardDirectory>
 

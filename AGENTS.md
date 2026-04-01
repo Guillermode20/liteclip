@@ -1,10 +1,10 @@
 # AGENTS.md
 
-Essential information for autonomous agents working on LiteClip Replay.
+Essential information for autonomous agents working on LiteClip.
 
 ## Project Overview
 
-LiteClip Replay is a native Windows desktop screen recorder built in Rust. It continuously records in the background using a replay buffer and lets users save clips on demand. The architecture separates the core engine (reusable library) from the GUI application.
+LiteClip is a native Windows desktop screen recorder built in Rust. It continuously records in the background using a replay buffer and lets users save clips on demand. The architecture separates the core engine (reusable library) from the GUI application.
 
 ## Quick Reference
 
@@ -285,10 +285,10 @@ const MAX_OUTSTANDING_SNAPSHOT_BYTES: usize = 512 * 1024 * 1024;
 
 ## Configuration
 
-**Location:** `%APPDATA%\liteclip-replay\liteclip-replay.toml`
+**Location:** `%APPDATA%\liteclip\liteclip.toml`
 
 **Loading flow:**
-1. `Config::load()` reads from `AppDirs::liteclip_replay()`
+1. `Config::load()` reads from `AppDirs::liteclip()`
 2. If missing, creates defaults and writes the file
 3. `Config::validate()` normalizes and validates values
 

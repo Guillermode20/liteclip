@@ -54,16 +54,16 @@ jobs:
       - name: Upload MSI artifact
         uses: actions/upload-artifact@v4
         with:
-          name: LiteClipReplay-msi
-          path: installer/output/en-US/LiteClipReplay.msi
+          name: LiteClip-msi
+          path: installer/output/en-US/LiteClip.msi
           if-no-files-found: error
           retention-days: 30
 
       - name: Upload portable artifact
         uses: actions/upload-artifact@v4
         with:
-          name: LiteClipReplay-portable
-          path: installer/output/portable/LiteClipReplay-portable.zip
+          name: LiteClip-portable
+          path: installer/output/portable/LiteClip-portable.zip
           if-no-files-found: error
           retention-days: 30
 
@@ -75,12 +75,12 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: LiteClipReplay-msi
+          name: LiteClip-msi
           path: artifacts
 
       - uses: actions/download-artifact@v4
         with:
-          name: LiteClipReplay-portable
+          name: LiteClip-portable
           path: artifacts
 
       - name: Create GitHub Release

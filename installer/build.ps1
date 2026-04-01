@@ -11,11 +11,11 @@ Push-Location $PSScriptRoot
 
 $releaseDir = Join-Path $PSScriptRoot "..\target\release"
 $ffmpegBinDir = Join-Path $PSScriptRoot "..\ffmpeg_dev\sdk\bin"
-$appExe = Join-Path $releaseDir "liteclip-replay.exe"
+$appExe = Join-Path $releaseDir "liteclip.exe"
 $outputDir = Join-Path $PSScriptRoot "output"
 $portableRoot = Join-Path $outputDir "portable"
-$portableDir = Join-Path $portableRoot "LiteClipReplay-portable"
-$portableZip = Join-Path $portableRoot "LiteClipReplay-portable.zip"
+$portableDir = Join-Path $portableRoot "LiteClip-portable"
+$portableZip = Join-Path $portableRoot "LiteClip-portable.zip"
 
 Write-Host "1) Building Rust release (ffmpeg feature)"
 cargo build --release --features ffmpeg
@@ -34,17 +34,17 @@ if (-not (Get-Command heat.exe -ErrorAction SilentlyContinue)) {
   Write-Host "Warning: WiX Toolset (heat.exe) not found in PATH. FFmpeg DLL harvest is skipped."
 }
 # ensure NuGet packages (WixToolset.MSBuild) are restored before msbuild
-dotnet restore .\LiteClipReplay.wixproj
+dotnet restore .\LiteClip.wixproj
 
 Write-Host "3) Building WiX installer project"
 $msbuildStarted = Get-Date
-dotnet msbuild .\LiteClipReplay.wixproj /t:Rebuild /p:Configuration=$Configuration /p:Platform=$Platform /p:ProductVersion=$ProductVersion
+dotnet msbuild .\LiteClip.wixproj /t:Rebuild /p:Configuration=$Configuration /p:Platform=$Platform /p:ProductVersion=$ProductVersion
 if ($LASTEXITCODE -ne 0) {
   throw "dotnet msbuild failed with exit code $LASTEXITCODE"
 }
 
 # WiX v4 outputs to en-US subdirectory
-$msi = Join-Path $PSScriptRoot "output\en-US\LiteClipReplay.msi"
+$msi = Join-Path $PSScriptRoot "output\en-US\LiteClip.msi"
 if (Test-Path $msi) {
   $msiInfo = Get-Item $msi
   if ($msiInfo.LastWriteTime -lt $msbuildStarted) {

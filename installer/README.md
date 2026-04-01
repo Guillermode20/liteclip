@@ -1,9 +1,9 @@
-# LiteClip Replay — WiX v4 Installer
+# LiteClip — WiX v4 Installer
 
-This folder contains a WiX Toolset v4 installer project for LiteClip Replay.
+This folder contains a WiX Toolset v4 installer project for LiteClip.
 
 ## What is included
-- `LiteClipReplay.wixproj` — MSBuild-based WiX v4 project (x64, Debug/Release support)
+- `LiteClip.wixproj` — MSBuild-based WiX v4 project (x64, Debug/Release support)
 - `Product.wxs`, `Directories.wxs`, `Components.wxs`, `Features.wxs`, `Shortcuts.wxs`, `Registry.wxs`, `UI.wxs` — WiX fragments
 - `Harvest.targets` — generates WiX fragments for required FFmpeg DLLs from `ffmpeg_dev/sdk/bin`
 - `Bundle.wxs` — bootstrapper (Burn) stub chaining prerequisites + MSI
@@ -16,15 +16,15 @@ This folder contains a WiX Toolset v4 installer project for LiteClip Replay.
 2. Build the Rust binary:
    cargo build --release --features ffmpeg
 3. Build the installer from `installer/`:
-   dotnet msbuild installer\LiteClipReplay.wixproj /p:Configuration=Release /p:ProductVersion=1.0.0.0
+   dotnet msbuild installer\LiteClip.wixproj /p:Configuration=Release /p:ProductVersion=1.0.0.0
 
 Or use the convenience script in `installer/`:
    powershell -ExecutionPolicy Bypass -File installer\build.ps1
 
 This produces:
-- `installer\output\en-US\LiteClipReplay.msi`
-- `installer\output\portable\LiteClipReplay-portable\`
-- `installer\output\portable\LiteClipReplay-portable.zip`
+- `installer\output\en-US\LiteClip.msi`
+- `installer\output\portable\LiteClip-portable\`
+- `installer\output\portable\LiteClip-portable.zip`
 
 ## CI / Versioning
 - Override `ProductVersion` via MSBuild `/p:ProductVersion=1.2.3.0`.

@@ -534,7 +534,7 @@ impl eframe::App for GuiManagerApp {
             ctx.show_viewport_deferred(
                 egui::ViewportId::from_hash_of("settings"),
                 egui::ViewportBuilder::default()
-                    .with_title("LiteClip Replay Settings")
+                    .with_title("LiteClip Settings")
                     .with_inner_size([600.0, 700.0])
                     .with_resizable(true)
                     .with_min_inner_size([600.0, 500.0]),

@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-/// Where `liteclip-replay.exe` / `liteclip_core.dll` tests land: `target/debug` or `target/release`.
+/// Where `liteclip.exe` / `liteclip_core.dll` tests land: `target/debug` or `target/release`.
 fn cargo_target_profile_dir() -> Option<PathBuf> {
     let profile = std::env::var("PROFILE").ok()?;
     if let Ok(target) = std::env::var("CARGO_TARGET_DIR") {
@@ -82,7 +82,7 @@ STATUS_DLL_NOT_FOUND (0xc0000135).",
         let Some(name) = path.file_name().map(PathBuf::from) else {
             continue;
         };
-        // Main binary (e.g. liteclip-replay.exe) loads DLLs from target/debug/.
+        // Main binary (e.g. liteclip.exe) loads DLLs from target/debug/.
         for dest_dir in [&profile_dir, &deps_dir] {
             let destination = dest_dir.join(&name);
 
