@@ -41,6 +41,136 @@ const EDITOR_STACK_BREAKPOINT: f32 = 960.0;
 const EDITOR_SMALL_SEEK_SECS: f64 = 1.0;
 const EDITOR_LARGE_SEEK_SECS: f64 = 5.0;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CardSize {
+    Small,
+    Medium,
+    Large,
+    XLarge,
+}
+
+impl CardSize {
+    pub fn dimensions(self) -> (f32, f32) {
+        match self {
+            CardSize::Small => (160.0, 90.0),
+            CardSize::Medium => (220.0, 124.0),
+            CardSize::Large => (300.0, 169.0),
+            CardSize::XLarge => (400.0, 225.0),
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            CardSize::Small => CardSize::Medium,
+            CardSize::Medium => CardSize::Large,
+            CardSize::Large => CardSize::XLarge,
+            CardSize::XLarge => CardSize::Small,
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        match self {
+            CardSize::Small => CardSize::XLarge,
+            CardSize::Medium => CardSize::Small,
+            CardSize::Large => CardSize::Medium,
+            CardSize::XLarge => CardSize::Large,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            CardSize::Small => "Small",
+            CardSize::Medium => "Medium",
+            CardSize::Large => "Large",
+            CardSize::XLarge => "Extra Large",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DateFilter {
+    AllTime,
+    Last24Hours,
+    Last7Days,
+    Last30Days,
+}
+
+impl DateFilter {
+    pub fn label(self) -> &'static str {
+        match self {
+            DateFilter::AllTime => "All Time",
+            DateFilter::Last24Hours => "Last 24 Hours",
+            DateFilter::Last7Days => "Last 7 Days",
+            DateFilter::Last30Days => "Last 30 Days",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DurationFilter {
+    All,
+    Short,
+    Medium,
+    Long,
+}
+
+impl DurationFilter {
+    pub fn label(self) -> &'static str {
+        match self {
+            DurationFilter::All => "All Durations",
+            DurationFilter::Short => "Short (<30s)",
+            DurationFilter::Medium => "Medium (30s-5m)",
+            DurationFilter::Long => "Long (>5m)",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SizeFilter {
+    All,
+    Small,
+    Medium,
+    Large,
+}
+
+impl SizeFilter {
+    pub fn label(self) -> &'static str {
+        match self {
+            SizeFilter::All => "All Sizes",
+            SizeFilter::Small => "Small (<10MB)",
+            SizeFilter::Medium => "Medium (10-50MB)",
+            SizeFilter::Large => "Large (>50MB)",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SortBy {
+    DateNewest,
+    DateOldest,
+    NameAZ,
+    NameZA,
+    SizeLarge,
+    SizeSmall,
+    DurationLong,
+    DurationShort,
+}
+
+impl SortBy {
+    pub fn label(self) -> &'static str {
+        match self {
+            SortBy::DateNewest => "Date (Newest First)",
+            SortBy::DateOldest => "Date (Oldest First)",
+            SortBy::NameAZ => "Name (A-Z)",
+            SortBy::NameZA => "Name (Z-A)",
+            SortBy::SizeLarge => "Size (Largest First)",
+            SortBy::SizeSmall => "Size (Smallest First)",
+            SortBy::DurationLong => "Duration (Longest First)",
+            SortBy::DurationShort => "Duration (Shortest First)",
+        }
+    }
+}
+
 pub fn show_gallery_gui(event_tx: TokioSender<AppEvent>, config: Config) {
     crate::gui::manager::send_gui_message(crate::gui::manager::GuiMessage::ShowGallery(
         event_tx, config,
@@ -57,6 +187,7 @@ struct VideoEntry {
     size_mb: f64,
     modified: SystemTime,
     metadata: VideoFileMetadata,
+    is_clipped: bool, // True if video came from a "Clipped-" folder
 }
 
 struct ThumbnailResult {
@@ -309,6 +440,17 @@ pub struct ClipCompressApp {
     cache_directory: PathBuf,
     videos_by_game: Vec<(String, Vec<VideoEntry>)>,
     filter_game: String,
+    // Enhanced filtering
+    search_query: String,
+    date_filter: DateFilter,
+    duration_filter: DurationFilter,
+    size_filter: SizeFilter,
+    show_clipped_only: bool,
+    sort_by: SortBy,
+    // Card sizing
+    card_size: CardSize,
+    // Collapsible sections
+    collapsed_games: HashSet<String>,
     loaded: bool,
     scan_error: Option<String>,
     thumbnails: FxHashMap<PathBuf, egui::TextureHandle>,
@@ -326,11 +468,8 @@ pub struct ClipCompressApp {
     pub selection_mode: bool,
     pub selected_videos: HashSet<PathBuf>,
     pub delete_slider_progress: f32,
-    keyboard_selected_video: Option<PathBuf>,
     delete_hold_started_at: Option<Instant>,
-    focus_filter_requested: bool,
     preferred_export_encoder: EncoderType,
-    /// Track last time we checked for new thumbnails to avoid excessive polling
     last_thumbnail_check: Instant,
 }
 
@@ -349,6 +488,17 @@ impl ClipCompressApp {
             cache_directory,
             videos_by_game: Vec::new(),
             filter_game: ALL_GAMES_FILTER.to_string(),
+            // Enhanced filtering - initialized with defaults
+            search_query: String::new(),
+            date_filter: DateFilter::AllTime,
+            duration_filter: DurationFilter::All,
+            size_filter: SizeFilter::All,
+            show_clipped_only: false,
+            sort_by: SortBy::DateNewest,
+            // Card sizing
+            card_size: CardSize::Medium,
+            // Collapsible sections
+            collapsed_games: HashSet::new(),
             loaded: false,
             scan_error: None,
             thumbnails: FxHashMap::default(),
@@ -365,9 +515,7 @@ impl ClipCompressApp {
             selection_mode: false,
             selected_videos: HashSet::new(),
             delete_slider_progress: 0.0,
-            keyboard_selected_video: None,
             delete_hold_started_at: None,
-            focus_filter_requested: false,
             preferred_export_encoder: config.video.encoder,
             last_thumbnail_check: Instant::now(),
         }
@@ -457,11 +605,15 @@ impl ClipCompressApp {
             .map(|name| name.to_string_lossy().to_string())
             .unwrap_or_else(|| "unknown.mp4".to_string());
         let relative = path.strip_prefix(base_dir).unwrap_or(&path);
-        let game = relative
+        let raw_game = relative
             .parent()
             .map(|parent| parent.to_string_lossy().to_string())
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| "Desktop".to_string());
+
+        // Normalize game name by stripping "Clipped-" prefix to consolidate sections
+        let game = Self::normalize_game_name(&raw_game);
+        let is_clipped = raw_game.starts_with("Clipped-");
 
         Ok(VideoEntry {
             path,
@@ -472,7 +624,14 @@ impl ClipCompressApp {
             size_mb: metadata.len() as f64 / (1024.0 * 1024.0),
             modified: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
             metadata: video_metadata,
+            is_clipped,
         })
+    }
+
+    fn normalize_game_name(game: &str) -> String {
+        game.strip_prefix("Clipped-")
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| game.to_string())
     }
 
     fn build_external_video_entry(path: &Path, save_root: &Path) -> anyhow::Result<VideoEntry> {
@@ -495,6 +654,7 @@ impl ClipCompressApp {
             size_mb: metadata.len() as f64 / (1024.0 * 1024.0),
             modified: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
             metadata: video_metadata,
+            is_clipped: false,
         })
     }
 
@@ -882,6 +1042,11 @@ impl ClipCompressApp {
             }
         });
 
+        // Handle keyboard navigation in browser mode
+        if self.editor.is_none() {
+            self.handle_keyboard_navigation(ctx);
+        }
+
         for video_path in browser_outcome.thumbnails_to_generate {
             self.schedule_thumbnail_generation(&video_path);
         }
@@ -1008,9 +1173,35 @@ impl ClipCompressApp {
         self.videos_by_game.clear();
         self.thumbnails.clear();
         self.thumbnails_generating.clear();
-        self.keyboard_selected_video = None;
         self.delete_hold_started_at = None;
         self.delete_slider_progress = 0.0;
+    }
+
+    fn handle_keyboard_navigation(&mut self, ctx: &egui::Context) {
+        use egui::Key;
+
+        // Card size shortcuts: Ctrl + Plus/Minus/Zero
+        ctx.input(|input| {
+            if input.modifiers.ctrl || input.modifiers.command {
+                if input.key_pressed(Key::Plus) || input.key_pressed(Key::Equals) {
+                    self.card_size = self.card_size.next();
+                } else if input.key_pressed(Key::Minus) {
+                    self.card_size = self.card_size.prev();
+                } else if input.key_pressed(Key::Num0) {
+                    self.card_size = CardSize::Medium;
+                }
+            }
+
+            // Selection shortcuts
+            if self.selection_mode {
+                // Escape to exit selection mode
+                if input.key_pressed(Key::Escape) {
+                    self.selection_mode = false;
+                    self.selected_videos.clear();
+                    self.delete_slider_progress = 0.0;
+                }
+            }
+        });
     }
 }
 
