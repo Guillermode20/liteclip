@@ -2,18 +2,23 @@
 /target*
 /target-*
 
+# Cargo
 .cargo
+Cargo.lock~
 
-# IDEs
+# IDE specific
 .vscode/
 .idea/
 *.swp
 *.swo
+*~
 
 # OS specific files
+.DS_Store
 Thumbs.db
 desktop.ini
-.DS_Store
+$RECYCLE.BIN/
+*.stackdump
 
 # Logs and environment
 *.log
@@ -25,13 +30,44 @@ desktop.ini
 *.tmp
 **/*.rs.bk
 
+# IDEs and editor configs
 .claude
-
-ffmpeg_dev/
-
 .kilocode/
 .opencode/
+*.sublime-*
+*.code-workspace
+
+# FFmpeg SDK directory (large binaries not for repo)
+ffmpeg_dev/
 
 # Installer build outputs
 installer/output/
 installer/Generated/
+installer/obj/
+*.msi
+*.wixpdb
+*.wixobj
+
+# Test and coverage artifacts
+*.profraw
+*.profdata
+lcov.info
+cobertura.xml
+tarpaulin-report.html
+
+# Documentation build
+docs/book/
+
+# Profiling and debugging
+*.svg
+
+# Core dumps
+*.dmp
+core
+core.*
+
+# Local development overrides
+local.*
+*.local
+
+.factory
