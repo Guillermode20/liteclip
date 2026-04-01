@@ -3,20 +3,32 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Rust](https://img.shields.io/badge/Rust-1.94%2B-blue.svg)](https://www.rust-lang.org)
 
-Lightweight Windows screen recorder with background replay buffer. Save clips on demand with `Ctrl + Shift + S`.
+Lightweight Windows screen recorder that captures your best moments retroactively. Never miss an epic play again.
 
 ## Features
 
-- **Background recording** - Continuous buffer, no disk writes until you save
-- **GPU encoding** - NVIDIA NVENC, AMD AMF, Intel QSV support
-- **Gallery & trim** - Browse, trim, and export clips without re-encoding
-- **System tray app** - Runs quietly, minimal resource usage
+- **Always-On Replay Buffer** — Continuously records in RAM with zero disk writes until you save. Capture that clutch moment even if you weren't recording.
+
+- **Hardware-Accelerated Encoding** — First-class support for NVIDIA NVENC, AMD AMF, and Intel QSV with D3D11 zero-copy frame transport. Falls back to software encoding automatically.
+
+- **Smart Audio Processing** — AI-powered noise suppression (RNNoise), automatic loudness normalization, and Discord-style noise gate for clean voice capture.
+
+- **Lossless Clip Editor** — Built-in gallery with timeline scrubbing, multi-snippet trimming without re-encoding, and export to target file size.
+
+- **Game-Aware Organization** — Auto-detects fullscreen games and organizes clips by game name. No manual sorting needed.
+
+- **Minimal Resource Footprint** — Rust-powered with lock-free ring buffers, async I/O, and proactive memory management. Runs quietly in the system tray.
+
+## Quick Start
+
+1. Download and run the MSI from [Releases](https://github.com/Guillermode20/liteclip-recorder/releases)
+2. LiteClip starts automatically in your system tray
+3. Hit `Ctrl + Shift + S` anytime to save the last 30 seconds as an MP4
+4. Press `Ctrl + Shift + G` to open the gallery and browse your clips
 
 ## GPU Testing Needed
 
-**This project relies on hardware-accelerated encoding across all major GPU vendors, but the
-maintainer only has an AMD GPU for testing.** If you have an NVIDIA or Intel GPU, your help is
-critical to ensure these encoder paths work correctly.
+**This project relies on hardware-accelerated encoding across all major GPU vendors, but the maintainer only has an AMD GPU for testing.** If you have an NVIDIA or Intel GPU, your help is critical to ensure these encoder paths work correctly.
 
 | Encoder | Status | What needs testing |
 |---------|--------|--------------------|
@@ -26,11 +38,9 @@ critical to ensure these encoder paths work correctly.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed testing checklists and how to report results.
 
-## Download
-
-Get the latest installer from [Releases](https://github.com/Guillermode20/liteclip-recorder/releases).
-
 ## Hotkeys
+
+Global hotkeys work even while gaming:
 
 | Action | Default |
 |:---|:---|
@@ -40,7 +50,16 @@ Get the latest installer from [Releases](https://github.com/Guillermode20/litecl
 
 ## Configuration
 
-Settings stored at `%APPDATA%\liteclip\config.toml`. See [CONTRIBUTING.md](CONTRIBUTING.md) for build instructions.
+Settings are stored at `%APPDATA%\liteclip\config.toml` and include:
+
+- **Replay duration**: 5-300 seconds of buffer
+- **Video quality**: Resolution, bitrate (1-150 Mbps), framerate (10-144 FPS)
+- **Encoder**: Auto-detect hardware or force software
+- **Audio**: Per-source volume, noise suppression toggle, mic selection
+- **Hotkeys**: Customize all bindings
+- **Storage**: Change save directory and file naming
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for build instructions.
 
 ## License
 
