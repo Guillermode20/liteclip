@@ -80,16 +80,10 @@ impl ClipManager {
             );
         }
 
-        let (width, height) =
-            buffer
-                .snapshot_first_packet_resolution()
-                .unwrap_or(match config.video.resolution {
-                    crate::config::Resolution::Native | crate::config::Resolution::P1080 => {
-                        (1920, 1080)
-                    }
-                    crate::config::Resolution::P720 => (1280, 720),
-                    crate::config::Resolution::P480 => (854, 480),
-                });
+        let (width, height) = buffer
+            .snapshot_first_packet_resolution()
+            .or_else(|| config.video.target_resolution())
+            .unwrap_or((1920, 1080));
         let fps = f64::from(config.video.framerate);
 
         let muxer_config = MuxerConfig::new(width, height, fps, &output_path)

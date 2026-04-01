@@ -60,3 +60,66 @@ impl CaptureFactory for DxgiCaptureFactory {
         DxgiCapture::validate_nv12_capability_for_output(output_index).unwrap_or(false)
     }
 }
+
+/// Detects the resolution of the specified display output.
+///
+/// Returns the native resolution (width, height) of the display at the given index.
+/// Returns `None` if the display cannot be accessed or doesn't exist.
+///
+/// # Arguments
+/// * `output_index` - Display output index (0 = primary monitor)
+///
+/// # Example
+/// ```ignore
+/// if let Some((width, height)) = detect_display_resolution(0) {
+///     println!("Primary display: {}x{}", width, height);
+/// }
+/// ```
+#[cfg(windows)]
+pub fn detect_display_resolution(output_index: u32) -> Option<(u32, u32)> {
+    use tracing::warn;
+    use windows::Win32::Graphics::Dxgi::CreateDXGIFactory1;
+
+    let factory: windows::Win32::Graphics::Dxgi::IDXGIFactory1 =
+        unsafe { CreateDXGIFactory1() }.ok()?;
+
+    let mut adapter_index = 0;
+    let mut output_count = 0u32;
+
+    while let Ok(adapter) = unsafe { factory.EnumAdapters1(adapter_index) } {
+        let mut output_idx = 0;
+
+        while let Ok(output) = unsafe { adapter.EnumOutputs(output_idx) } {
+            if output_count == output_index {
+                // Found the target output
+                let desc = unsafe { output.GetDesc() }.ok()?;
+                let width =
+                    (desc.DesktopCoordinates.right - desc.DesktopCoordinates.left).unsigned_abs();
+                let height =
+                    (desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top).unsigned_abs();
+
+                if width > 0 && height > 0 {
+                    return Some((width, height));
+                } else {
+                    warn!(
+                        "Detected display {} has invalid dimensions: {}x{}",
+                        output_index, width, height
+                    );
+                    return None;
+                }
+            }
+            output_count += 1;
+            output_idx += 1;
+        }
+
+        adapter_index += 1;
+    }
+
+    warn!("Display output {} not found", output_index);
+    None
+}
+
+#[cfg(not(windows))]
+pub fn detect_display_resolution(_output_index: u32) -> Option<(u32, u32)> {
+    None
+}

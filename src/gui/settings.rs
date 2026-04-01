@@ -3,6 +3,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
 
 use crate::capture::audio::AudioLevelMonitor;
+use crate::capture::detect_display_resolution;
 use crate::config::{config_mod::types::*, Config};
 use crate::config::{
     MAX_REPLAY_MEMORY_LIMIT_MB, MIN_REPLAY_MEMORY_LIMIT_MB, REPLAY_MEMORY_LIMIT_AUTO_MB,
@@ -333,30 +334,109 @@ impl SettingsApp {
         );
 
         if !self.config.video.use_native_resolution {
+            let (show_4k, show_1440p, show_ultrawide, show_super_ultrawide) =
+                get_display_resolution_options();
+
             egui::ComboBox::from_label("Resolution")
-                .selected_text(format!("{:?}", self.config.video.resolution))
+                .selected_text(resolution_display_name(&self.config.video.resolution))
                 .show_ui(ui, |ui| {
                     ui.selectable_value(
                         &mut self.config.video.resolution,
                         Resolution::Native,
-                        "Native",
+                        "Native (Desktop Resolution)",
                     );
+                    ui.separator();
+                    ui.label("Standard 16:9");
+                    if show_4k {
+                        ui.selectable_value(
+                            &mut self.config.video.resolution,
+                            Resolution::P2160,
+                            "4K (3840x2160)",
+                        );
+                    }
+                    if show_1440p {
+                        ui.selectable_value(
+                            &mut self.config.video.resolution,
+                            Resolution::P1440,
+                            "1440p (2560x1440)",
+                        );
+                    }
                     ui.selectable_value(
                         &mut self.config.video.resolution,
                         Resolution::P1080,
-                        "1080p",
+                        "1080p (1920x1080)",
                     );
                     ui.selectable_value(
                         &mut self.config.video.resolution,
                         Resolution::P720,
-                        "720p",
+                        "720p (1280x720)",
                     );
                     ui.selectable_value(
                         &mut self.config.video.resolution,
                         Resolution::P480,
-                        "480p",
+                        "480p (854x480)",
+                    );
+
+                    if show_ultrawide {
+                        ui.separator();
+                        ui.label("Ultrawide 21:9");
+                        if show_4k {
+                            ui.selectable_value(
+                                &mut self.config.video.resolution,
+                                Resolution::UW2160,
+                                "UW 4K (5120x2160)",
+                            );
+                        }
+                        ui.selectable_value(
+                            &mut self.config.video.resolution,
+                            Resolution::UW1440,
+                            "UW 1440p (3440x1440)",
+                        );
+                        ui.selectable_value(
+                            &mut self.config.video.resolution,
+                            Resolution::UW1080,
+                            "UW 1080p (2560x1080)",
+                        );
+                    }
+
+                    if show_super_ultrawide {
+                        ui.separator();
+                        ui.label("Super Ultrawide 32:9");
+                        if show_1440p {
+                            ui.selectable_value(
+                                &mut self.config.video.resolution,
+                                Resolution::SuperUW1440,
+                                "SUW 1440p (5120x1440)",
+                            );
+                        }
+                        ui.selectable_value(
+                            &mut self.config.video.resolution,
+                            Resolution::SuperUW,
+                            "SUW 1080p (3840x1080)",
+                        );
+                    }
+
+                    ui.separator();
+                    ui.label("Custom");
+                    ui.selectable_value(
+                        &mut self.config.video.resolution,
+                        Resolution::Custom(1920, 1080),
+                        "Custom Resolution",
                     );
                 });
+
+            // Show custom resolution input fields when Custom is selected
+            if let Resolution::Custom(width, height) = &mut self.config.video.resolution {
+                ui.horizontal(|ui| {
+                    ui.label("Width:");
+                    ui.add(egui::DragValue::new(width).range(160..=8192).speed(10.0));
+                    ui.label("Height:");
+                    ui.add(egui::DragValue::new(height).range(160..=8192).speed(10.0));
+                });
+                ui.label(
+                    "Note: Dimensions will be rounded to even numbers for encoder compatibility",
+                );
+            }
         }
 
         ui.add_space(8.0);
@@ -669,5 +749,46 @@ impl eframe::App for SettingsApp {
             }
             ctx.request_repaint_after(std::time::Duration::from_millis(request_ms));
         }
+    }
+}
+
+/// Returns a human-readable display name for a resolution variant.
+fn resolution_display_name(resolution: &Resolution) -> String {
+    match resolution {
+        Resolution::Native => "Native (Desktop Resolution)".to_string(),
+        Resolution::P480 => "480p (854x480)".to_string(),
+        Resolution::P720 => "720p (1280x720)".to_string(),
+        Resolution::P1080 => "1080p (1920x1080)".to_string(),
+        Resolution::P1440 => "1440p (2560x1440)".to_string(),
+        Resolution::P2160 => "4K (3840x2160)".to_string(),
+        Resolution::UW1080 => "UW 1080p (2560x1080)".to_string(),
+        Resolution::UW1440 => "UW 1440p (3440x1440)".to_string(),
+        Resolution::UW2160 => "UW 4K (5120x2160)".to_string(),
+        Resolution::SuperUW => "SUW 1080p (3840x1080)".to_string(),
+        Resolution::SuperUW1440 => "SUW 1440p (5120x1440)".to_string(),
+        Resolution::Custom(width, height) => format!("Custom ({}x{})", width, height),
+    }
+}
+
+/// Determines which resolution options to show based on detected display capabilities.
+///
+/// Returns a tuple of (show_4k, show_1440p, show_ultrawide, show_super_ultrawide) booleans.
+/// Uses the primary display (index 0) to determine appropriate options.
+fn get_display_resolution_options() -> (bool, bool, bool, bool) {
+    const MIN_WIDTH_1440P: u32 = 1920; // Show 1440p+ if display is at least 1920 wide
+    const MIN_WIDTH_4K: u32 = 2560; // Show 4K if display is at least 2560 wide
+    const MIN_WIDTH_ULTRAWIDE: u32 = 2560; // Show ultrawide if display is at least 2560 wide
+    const MIN_WIDTH_SUPERUW: u32 = 3840; // Show super ultrawide if display is at least 3840 wide
+
+    if let Some((width, _height)) = detect_display_resolution(0) {
+        (
+            width >= MIN_WIDTH_4K,        // Show 4K options
+            width >= MIN_WIDTH_1440P,     // Show 1440p options
+            width >= MIN_WIDTH_ULTRAWIDE, // Show ultrawide (21:9) options
+            width >= MIN_WIDTH_SUPERUW,   // Show super ultrawide (32:9) options
+        )
+    } else {
+        // If we can't detect the display, show all options (user might have exotic setup)
+        (true, true, true, true)
     }
 }

@@ -69,20 +69,46 @@ pub enum QualityPreset {
 /// Resolution options for video capture.
 ///
 /// Specifies the capture and output resolution.
+/// Supports standard 16:9, ultrawide 21:9/32:9, and custom resolutions.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Resolution {
     /// Use the native/desktop resolution.
     Native,
-    /// 1920x1080 resolution.
+    /// 1920x1080 resolution (Full HD, 16:9).
     #[serde(rename = "1080p")]
     P1080,
-    /// 1280x720 resolution.
+    /// 1280x720 resolution (HD, 16:9).
     #[serde(rename = "720p")]
     P720,
-    /// 854x480 resolution.
+    /// 854x480 resolution (480p, 16:9).
     #[serde(rename = "480p")]
     P480,
+    /// 2560x1440 resolution (QHD/2K, 16:9).
+    #[serde(rename = "1440p")]
+    P1440,
+    /// 3840x2160 resolution (4K UHD, 16:9).
+    #[serde(rename = "2160p")]
+    P2160,
+    /// 2560x1080 resolution (Ultrawide 21:9, 1080p height).
+    #[serde(rename = "uw1080")]
+    UW1080,
+    /// 3440x1440 resolution (Ultrawide 21:9, 1440p height).
+    #[serde(rename = "uw1440")]
+    UW1440,
+    /// 5120x2160 resolution (Ultrawide 21:9, 4K height).
+    #[serde(rename = "uw2160")]
+    UW2160,
+    /// 3840x1080 resolution (Super Ultrawide 32:9).
+    #[serde(rename = "superuw")]
+    SuperUW,
+    /// 5120x1440 resolution (Super Ultrawide 32:9, 1440p height).
+    #[serde(rename = "superuw1440")]
+    SuperUW1440,
+    /// Custom resolution with user-defined width and height.
+    /// Stored as (width, height) tuple. Must be divisible by 2 for encoder compatibility.
+    #[serde(rename = "custom")]
+    Custom(u32, u32),
 }
 
 /// Root configuration structure.
@@ -284,6 +310,43 @@ impl Config {
                  resolution setting will be ignored",
                 self.video.resolution
             );
+        }
+        // Validate custom resolution dimensions
+        if let Resolution::Custom(width, height) = self.video.resolution {
+            const MIN_DIMENSION: u32 = 160;
+            const MAX_DIMENSION: u32 = 8192;
+            let mut adjusted_width = width;
+            let mut adjusted_height = height;
+
+            // Ensure dimensions are even (required by most hardware encoders)
+            if width % 2 != 0 {
+                warn!(
+                    "Config: Custom resolution width {} is not divisible by 2, rounding to {}",
+                    width,
+                    width + 1
+                );
+                adjusted_width = width + 1;
+            }
+            if height % 2 != 0 {
+                warn!(
+                    "Config: Custom resolution height {} is not divisible by 2, rounding to {}",
+                    height,
+                    height + 1
+                );
+                adjusted_height = height + 1;
+            }
+
+            // Clamp to valid range
+            adjusted_width = adjusted_width.clamp(MIN_DIMENSION, MAX_DIMENSION);
+            adjusted_height = adjusted_height.clamp(MIN_DIMENSION, MAX_DIMENSION);
+
+            if adjusted_width != width || adjusted_height != height {
+                warn!(
+                    "Config: Custom resolution adjusted from {}x{} to {}x{}",
+                    width, height, adjusted_width, adjusted_height
+                );
+                self.video.resolution = Resolution::Custom(adjusted_width, adjusted_height);
+            }
         }
         // Validate audio settings
         self.audio.balance = self.audio.balance.clamp(-100, 100);
@@ -504,15 +567,37 @@ pub struct VideoConfig {
 }
 
 impl VideoConfig {
+    /// Returns the target resolution dimensions based on the configured resolution setting.
+    ///
+    /// Returns `None` if using native resolution (capture at desktop resolution).
+    /// Otherwise returns the specific dimensions for the selected resolution preset.
+    ///
+    /// # Returns
+    /// - `None` - Use native/desktop resolution
+    /// - `Some((width, height))` - Use specified resolution dimensions
+    ///
+    /// # Resolution Presets
+    /// - Standard 16:9: 480p, 720p, 1080p, 1440p, 2160p
+    /// - Ultrawide 21:9: UW1080 (2560x1080), UW1440 (3440x1440), UW2160 (5120x2160)
+    /// - Super Ultrawide 32:9: SuperUW (3840x1080), SuperUW1440 (5120x1440)
+    /// - Custom: User-defined dimensions
     pub fn target_resolution(&self) -> Option<(u32, u32)> {
         if self.use_native_resolution {
             return None;
         }
         match self.resolution {
             Resolution::Native => None,
-            Resolution::P1080 => Some((1920, 1080)),
-            Resolution::P720 => Some((1280, 720)),
             Resolution::P480 => Some((854, 480)),
+            Resolution::P720 => Some((1280, 720)),
+            Resolution::P1080 => Some((1920, 1080)),
+            Resolution::P1440 => Some((2560, 1440)),
+            Resolution::P2160 => Some((3840, 2160)),
+            Resolution::UW1080 => Some((2560, 1080)),
+            Resolution::UW1440 => Some((3440, 1440)),
+            Resolution::UW2160 => Some((5120, 2160)),
+            Resolution::SuperUW => Some((3840, 1080)),
+            Resolution::SuperUW1440 => Some((5120, 1440)),
+            Resolution::Custom(width, height) => Some((width, height)),
         }
     }
 }

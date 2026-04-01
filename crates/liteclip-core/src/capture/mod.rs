@@ -53,7 +53,7 @@ pub mod backpressure;
 pub mod dxgi;
 pub mod error;
 
-pub use dxgi::{DxgiCapture, DxgiCaptureFactory};
+pub use dxgi::{detect_display_resolution, DxgiCapture, DxgiCaptureFactory};
 pub use error::{CaptureError, CaptureResult};
 
 /// Configuration for screen capture.
