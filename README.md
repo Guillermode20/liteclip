@@ -61,6 +61,24 @@ Settings are stored at `%APPDATA%\liteclip\config.toml` and include:
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for build instructions.
 
+## FFmpeg DLL Requirements
+
+For development or running from source, FFmpeg 6.0+ shared DLLs are required:
+
+**Required DLLs:**
+- `avcodec-61.dll`
+- `avformat-61.dll`
+- `avutil-59.dll`
+- `swresample-5.dll`
+- `swscale-8.dll`
+
+**Setup:**
+1. Download FFmpeg 6.0+ shared libraries from [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) or [BtbN](https://github.com/BtbN/FFmpeg-Builds/releases)
+2. Extract the `bin` folder contents to `ffmpeg_dev/sdk/bin/` in the project root
+3. The build script automatically copies DLLs next to the executable
+
+The MSI installer includes these DLLs pre-bundled, so end users don't need to set this up manually.
+
 ## AI Disclosure
 
 This project was developed with assistance from AI coding tools, including code generation, refactoring suggestions, and documentation help. Human oversight and review was applied to all AI-assisted contributions.
