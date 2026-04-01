@@ -84,19 +84,20 @@ impl ClipManager {
             buffer
                 .snapshot_first_packet_resolution()
                 .unwrap_or(match config.video.resolution {
-                    crate::config::Resolution::Native => (1920, 1080),
-                    crate::config::Resolution::P1080 => (1920, 1080),
+                    crate::config::Resolution::Native | crate::config::Resolution::P1080 => {
+                        (1920, 1080)
+                    }
                     crate::config::Resolution::P720 => (1280, 720),
                     crate::config::Resolution::P480 => (854, 480),
                 });
-        let fps = config.video.framerate as f64;
+        let fps = f64::from(config.video.framerate);
 
         let muxer_config = MuxerConfig::new(width, height, fps, &output_path)
             .with_video_codec("hevc")
             .with_expect_audio(config.audio.capture_system || config.audio.capture_mic);
 
         let buffer_clone = buffer.clone();
-        let duration = Duration::from_secs(config.general.replay_duration_secs as u64);
+        let duration = Duration::from_secs(u64::from(config.general.replay_duration_secs));
         let save_directory = PathBuf::from(&config.general.save_directory);
 
         crate::output::saver::log_save_memory("before_spawn_saver", Some(buffer), None);

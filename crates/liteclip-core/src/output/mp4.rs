@@ -1,3 +1,4 @@
+#![allow(clippy::similar_names)]
 use crate::encode::EncodedPacket;
 use anyhow::{Context, Result};
 use ffmpeg_next as ffmpeg;

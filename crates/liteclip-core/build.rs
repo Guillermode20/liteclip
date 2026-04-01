@@ -1,5 +1,5 @@
 //! Link Windows graphics libraries for DXGI / D3D11 capture.
-//! Also copy FFmpeg `bin\\*.dll` next to test artifacts (`cargo test -p liteclip-core`) so
+//! Also copy `FFmpeg` `bin\\*.dll` next to test artifacts (`cargo test -p liteclip-core`) so
 //! `ffmpeg-next` can load (see repo root `build.rs` for the main app).
 
 use std::fs;
@@ -52,8 +52,8 @@ fn copy_ffmpeg_runtime_dlls() {
         if path
             .extension()
             .and_then(|s| s.to_str())
-            .map(|e| e.eq_ignore_ascii_case("dll"))
-            != Some(true)
+            .map(|e| !e.eq_ignore_ascii_case("dll"))
+            .unwrap_or(true)
         {
             continue;
         }

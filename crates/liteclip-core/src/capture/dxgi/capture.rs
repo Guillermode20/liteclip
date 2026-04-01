@@ -295,7 +295,7 @@ impl DxgiCaptureState {
                         Ok(()) => match fence_opt {
                             Some(fence) => match fence.CreateSharedHandle(
                                 None,
-                                0x10000000u32,
+                                0x1000_0000u32,
                                 windows_core::PCWSTR::null(),
                             ) {
                                 Ok(handle) => {
@@ -342,7 +342,7 @@ impl DxgiCaptureState {
                                     // 0x10000000 = GENERIC_ALL — full access for cross-device use
                                     match fence.CreateSharedHandle(
                                         None,
-                                        0x10000000u32,
+                                        0x1000_0000u32,
                                         windows_core::PCWSTR::null(),
                                     ) {
                                         Ok(handle) => {

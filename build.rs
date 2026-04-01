@@ -12,11 +12,11 @@ fn cargo_target_profile_dir() -> Option<PathBuf> {
     out_dir.ancestors().nth(3).map(PathBuf::from)
 }
 
-/// `ffmpeg-next` links FFmpeg DLLs dynamically on Windows. The loader must find them next to the
-/// `.exe` or on `PATH`, otherwise the process exits with **STATUS_DLL_NOT_FOUND (0xc0000135)**
+/// `ffmpeg-next` links `FFmpeg` DLLs dynamically on Windows. The loader must find them next to the
+/// `.exe` or on `PATH`, otherwise the process exits with **`STATUS_DLL_NOT_FOUND` (0xc0000135)**
 /// before `main`.
 ///
-/// Copies every `*.dll` from the FFmpeg SDK `bin` directory into `target/<profile>/`.
+/// Copies every `*.dll` from the `FFmpeg` SDK `bin` directory into `target/<profile>/`.
 #[cfg(windows)]
 fn copy_runtime_dlls() {
     println!("cargo:rerun-if-env-changed=FFMPEG_DIR");
@@ -30,11 +30,10 @@ fn copy_runtime_dlls() {
 
     let manifest_dir =
         PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string()));
-    let ffmpeg_bin_dir = if let Ok(dir) = std::env::var("FFMPEG_DIR") {
-        PathBuf::from(dir).join("bin")
-    } else {
-        manifest_dir.join("ffmpeg_dev").join("sdk").join("bin")
-    };
+    let ffmpeg_bin_dir = std::env::var("FFMPEG_DIR").map_or_else(
+        |_| manifest_dir.join("ffmpeg_dev").join("sdk").join("bin"),
+        |dir| PathBuf::from(dir).join("bin"),
+    );
 
     if !ffmpeg_bin_dir.is_dir() {
         println!(
@@ -74,8 +73,7 @@ STATUS_DLL_NOT_FOUND (0xc0000135).",
         if path
             .extension()
             .and_then(|s| s.to_str())
-            .map(|e| e.eq_ignore_ascii_case("dll"))
-            != Some(true)
+            .is_none_or(|e| !e.eq_ignore_ascii_case("dll"))
         {
             continue;
         }
@@ -115,8 +113,7 @@ Add FFmpeg shared libraries there (or set FFMPEG_DIR) to fix 0xc0000135 at start
         );
     } else if failed > 0 {
         println!(
-            "cargo:warning=liteclip: {} FFmpeg DLL copy operation(s) failed (see warnings above).",
-            failed
+            "cargo:warning=liteclip: {failed} FFmpeg DLL copy operation(s) failed (see warnings above)."
         );
     }
 }

@@ -113,8 +113,9 @@ impl FirstVideoKind {
     /// # Returns
     ///
     /// `true` if this is a parameter set (SPS or VPS).
+    #[must_use]
     pub fn is_parameter_set(&self) -> bool {
-        matches!(self, FirstVideoKind::H264Sps | FirstVideoKind::HevcVps)
+        matches!(self, Self::H264Sps | Self::HevcVps)
     }
 }
 
@@ -129,6 +130,7 @@ pub struct SnapshotBytes {
 }
 
 impl SnapshotBytes {
+    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
     fn new(inner: Arc<LockFreeInner>, bytes: usize) -> Self {
         if bytes > 0 {
             let current = inner
@@ -137,6 +139,7 @@ impl SnapshotBytes {
             let new_total = current.saturating_add(bytes);
 
             // Warn if approaching limit
+            #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
             let warning_threshold = (inner.max_memory_bytes as f64
                 * OUTSTANDING_SNAPSHOT_WARNING_RATIO as f64)
                 as usize;
@@ -182,18 +185,22 @@ impl TrackedSnapshot {
         }
     }
 
+    #[must_use]
     pub fn into_inner(self) -> Vec<EncodedPacket> {
         self.packets
     }
 
+    #[must_use]
     pub fn as_slice(&self) -> &[EncodedPacket] {
         &self.packets
     }
 
+    #[must_use]
     pub fn len(&self) -> usize {
         self.packets.len()
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.packets.is_empty()
     }
@@ -254,7 +261,7 @@ struct Slot {
 }
 
 impl Slot {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
             packet: parking_lot::Mutex::new(None),
         }
@@ -267,6 +274,10 @@ impl LockFreeReplayBuffer {
     /// # Arguments
     ///
     /// * `config` - Configuration with replay duration and memory limits.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the buffer cannot be initialized with the given configuration.
     ///
     /// # Returns
     ///
@@ -281,6 +292,12 @@ impl LockFreeReplayBuffer {
     /// let config = Config::default();
     /// let buffer = LockFreeReplayBuffer::new(&config).unwrap();
     /// ```
+    #[allow(clippy::too_many_lines)]
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
     pub fn new(config: &crate::config::Config) -> BufferResult<Self> {
         let duration = Duration::from_secs(config.general.replay_duration_secs as u64 + 1);
         let effective_memory_limit_mb = config.effective_replay_memory_limit_mb();
@@ -291,7 +308,7 @@ impl LockFreeReplayBuffer {
 
         let video_packets_per_sec = config.video.framerate as f32;
         let audio_streams =
-            (config.audio.capture_system as u8 + config.audio.capture_mic as u8) as f32;
+            (u8::from(config.audio.capture_system) + u8::from(config.audio.capture_mic)) as f32;
         let audio_packets_per_sec = audio_streams * 50.0;
         let packets_per_sec = video_packets_per_sec + audio_packets_per_sec;
         let estimated_packets = (duration.as_secs_f32() * packets_per_sec).max(100.0) as usize;
@@ -340,6 +357,7 @@ impl LockFreeReplayBuffer {
     /// # Arguments
     ///
     /// * `packets` - Iterator of encoded packets.
+    #[allow(clippy::too_many_lines)]
     pub fn push_batch(&self, packets: impl IntoIterator<Item = EncodedPacket>) {
         for packet in packets {
             self.push_single(packet);
@@ -415,8 +433,8 @@ impl LockFreeReplayBuffer {
         let old_packet_size = {
             let mut packet_guard = slot.packet.lock();
             let old = packet_guard.take();
-            let old_size = old.as_ref().map(|p| p.data.len()).unwrap_or(0);
-            let old_was_keyframe = old.as_ref().map(|p| p.is_keyframe).unwrap_or(false);
+            let old_size = old.as_ref().map_or(0, |p| p.data.len());
+            let old_was_keyframe = old.as_ref().is_some_and(|p| p.is_keyframe);
             *packet_guard = Some(packet);
             // Account for new packet bytes immediately, inside the lock.
             // Use Release ordering to "publish" the packet write to other threads.
@@ -813,6 +831,10 @@ impl LockFreeReplayBuffer {
     /// parameter sets (SPS/PPS or VPS/SPS/PPS) if the first video packet
     /// is not a parameter set.
     ///
+    /// # Errors
+    ///
+    /// Returns an error if snapshot creation fails (e.g., memory limit exceeded).
+    ///
     /// # Returns
     ///
     /// Vector of all encoded packets in chronological order.
@@ -820,6 +842,7 @@ impl LockFreeReplayBuffer {
     /// # Thread Safety
     ///
     /// Safe to call from multiple consumer threads.
+    #[allow(clippy::too_many_lines)]
     pub fn snapshot(&self) -> BufferResult<TrackedSnapshot> {
         let inner = &self.inner;
         let write_idx = inner.write_idx.load(Ordering::Acquire);
@@ -959,6 +982,10 @@ impl LockFreeReplayBuffer {
     ///
     /// * `start_pts` - The starting presentation timestamp (in stream timebase).
     ///
+    /// # Errors
+    ///
+    /// Returns an error if snapshot creation fails or outstanding snapshot bytes exceed limit.
+    ///
     /// # Returns
     ///
     /// Vector of encoded packets starting from a keyframe.
@@ -966,6 +993,7 @@ impl LockFreeReplayBuffer {
     /// # Thread Safety
     ///
     /// Safe to call from multiple consumer threads.
+    #[allow(clippy::too_many_lines)]
     pub fn snapshot_from(&self, start_pts: i64) -> BufferResult<TrackedSnapshot> {
         let inner = &self.inner;
         let write_idx = inner.write_idx.load(Ordering::Acquire);
@@ -1434,6 +1462,7 @@ impl LockFreeReplayBuffer {
     /// - `packet_count`: Number of packets in buffer
     /// - `keyframe_count`: Number of keyframes
     /// - `memory_usage_percent`: Percentage of max memory used
+    #[must_use]
     pub fn stats(&self) -> BufferStats {
         let inner = &self.inner;
         let write_idx = inner.write_idx.load(Ordering::Acquire);
@@ -1468,7 +1497,7 @@ impl LockFreeReplayBuffer {
             // Read actual oldest packet's PTS from its slot (evict_frontier aware).
             let oldest_slot = &inner.slots[actual_start & inner.mask];
             let oldest_pts = if let Some(g) = oldest_slot.packet.try_lock() {
-                g.as_ref().map(|p| p.pts).unwrap_or(0)
+                g.as_ref().map_or(0, |p| p.pts)
             } else {
                 0
             };
@@ -1504,12 +1533,14 @@ impl LockFreeReplayBuffer {
     /// **Note:** This uses `Bytes::len()` (logical slice length), not the backing
     /// allocation size. If packets are views into larger `BytesMut` pages, this
     /// will underreport actual RSS — it's a lower bound, not exact.
+    #[must_use]
     pub fn pinned_bytes(&self) -> usize {
         self.inner
             .outstanding_snapshot_bytes
             .load(Ordering::Relaxed)
     }
 
+    #[must_use]
     pub fn oldest_pts(&self) -> Option<i64> {
         let inner = &self.inner;
         let write_idx = inner.write_idx.load(Ordering::Acquire);
@@ -1530,6 +1561,7 @@ impl LockFreeReplayBuffer {
         }
     }
 
+    #[must_use]
     pub fn newest_pts(&self) -> Option<i64> {
         let inner = &self.inner;
         let write_idx = inner.write_idx.load(Ordering::Acquire);
@@ -1548,6 +1580,7 @@ impl LockFreeReplayBuffer {
         }
     }
 
+    #[must_use]
     pub fn first_packet_resolution(&self) -> Option<(u32, u32)> {
         let inner = &self.inner;
         let write_idx = inner.write_idx.load(Ordering::Acquire);
@@ -1568,6 +1601,7 @@ impl LockFreeReplayBuffer {
         }
     }
 
+    #[must_use]
     pub fn has_keyframe(&self) -> bool {
         self.inner.keyframe_count.load(Ordering::Relaxed) > 0
     }
