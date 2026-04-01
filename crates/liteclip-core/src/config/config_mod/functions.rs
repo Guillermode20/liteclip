@@ -91,16 +91,16 @@ pub(super) fn default_true_peak_limit_dbtp() -> i8 {
     -1
 }
 pub(super) fn default_hotkey_save() -> String {
-    "Alt+F9".to_string()
+    "Ctrl+Shift+S".to_string()
 }
 pub(super) fn default_hotkey_toggle() -> String {
-    "Alt+F10".to_string()
+    "Ctrl+Shift+R".to_string()
 }
 pub(super) fn default_hotkey_screenshot() -> String {
-    "Alt+F11".to_string()
+    "Ctrl+Shift+P".to_string()
 }
 pub(super) fn default_hotkey_gallery() -> String {
-    "Alt+G".to_string()
+    "Ctrl+Shift+G".to_string()
 }
 pub(super) fn default_gpu_index() -> u32 {
     0
