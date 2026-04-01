@@ -437,18 +437,19 @@ pub(crate) fn attempt_export(
     let mut opts = ffmpeg::Dictionary::new();
     match video_encoder {
         ExportVideoEncoder::SoftwareHevc => {
-            opts.set("preset", "medium");
+            opts.set("preset", "slow");
         }
         ExportVideoEncoder::HevcNvenc => {
-            opts.set("preset", "p4");
+            opts.set("preset", "p7");
+            opts.set("tune", "hq");
             opts.set("rc", "vbr");
         }
         ExportVideoEncoder::HevcAmf => {
-            opts.set("quality", "balanced");
+            opts.set("quality", "quality");
             opts.set("rc", "vbr_peak");
         }
         ExportVideoEncoder::HevcQsv => {
-            opts.set("preset", "balanced");
+            opts.set("preset", "medium");
             opts.set("look_ahead", "1");
         }
     }

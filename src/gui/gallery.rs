@@ -295,7 +295,7 @@ struct EditorState {
 }
 
 impl EditorState {
-    fn new(video: VideoEntry, preferred_encoder: EncoderType) -> Self {
+    fn new(video: VideoEntry, preferred_encoder: EncoderType, use_software_encoder: bool) -> Self {
         let target_size_mb = DEFAULT_TARGET_SIZE_MB
             .max(video.size_mb.round() as u32 / 2)
             .min(video.size_mb.ceil().max(1.0) as u32);
@@ -315,7 +315,7 @@ impl EditorState {
             target_size_mb,
             target_size_manually_adjusted: false,
             audio_bitrate_kbps: DEFAULT_AUDIO_BITRATE_KBPS,
-            use_hardware_acceleration: true,
+            use_hardware_acceleration: !use_software_encoder,
             preferred_encoder,
             output_width: None,
             output_height: None,
@@ -470,6 +470,7 @@ pub struct ClipCompressApp {
     pub delete_slider_progress: f32,
     delete_hold_started_at: Option<Instant>,
     preferred_export_encoder: EncoderType,
+    use_software_encoder: bool,
     last_thumbnail_check: Instant,
 }
 
@@ -517,6 +518,7 @@ impl ClipCompressApp {
             delete_slider_progress: 0.0,
             delete_hold_started_at: None,
             preferred_export_encoder: config.video.encoder,
+            use_software_encoder: config.general.use_software_encoder,
             last_thumbnail_check: Instant::now(),
         }
     }
@@ -1155,7 +1157,11 @@ impl ClipCompressApp {
     fn open_editor(&mut self, video: VideoEntry) {
         info!("Opening Clip & Compress editor for {:?}", video.path);
         self.unload_browser_thumbnails();
-        self.editor = Some(EditorState::new(video, self.preferred_export_encoder));
+        self.editor = Some(EditorState::new(
+            video,
+            self.preferred_export_encoder,
+            self.use_software_encoder,
+        ));
     }
 
     fn render_browser(&mut self, ui: &mut egui::Ui) -> BrowserUiOutcome {

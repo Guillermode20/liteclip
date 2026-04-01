@@ -8,7 +8,9 @@
 //!
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
-use super::functions::{default_replay_duration, default_save_directory, default_true};
+use super::functions::{
+    default_false, default_replay_duration, default_save_directory, default_true,
+};
 use super::types::GeneralConfig;
 
 impl Default for GeneralConfig {
@@ -21,6 +23,7 @@ impl Default for GeneralConfig {
             notifications: default_true(),
             auto_detect_game: default_true(),
             generate_clip_thumbnail: default_true(),
+            use_software_encoder: default_false(),
         }
     }
 }

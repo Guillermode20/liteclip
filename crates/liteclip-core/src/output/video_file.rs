@@ -117,6 +117,10 @@ const AMF_TARGET_FILL_RATIO_IDEAL: f64 = 0.925;
 // a proportionally higher fill ratio in the calibration formula to compensate, so the first
 // full encode attempt lands in the acceptable 90-100% window without a retry.
 const AMF_CALIBRATION_FILL_RATIO: f64 = 0.990;
+const AMF_CALIBRATION_SAMPLE_RATIO: f64 = 0.15;
+const AMF_CALIBRATION_MIN_SAMPLE_SECS: f64 = 4.0;
+const AMF_CALIBRATION_MAX_SAMPLE_SECS: f64 = 8.0;
+const AMF_CALIBRATION_THREE_WINDOW_RATIO: f64 = 12.0;
 const TARGET_SIZE_UNDERFILL_RATIO: f64 = 0.992;
 const MAX_VIDEO_BITRATE_KBPS: u32 = 400_000;
 
@@ -1104,8 +1108,11 @@ fn blend_non_video_bytes_estimate(previous_estimate: u64, measured_estimate: u64
 
 fn calibration_duration_secs(output_duration_secs: f64) -> f64 {
     output_duration_secs
-        .mul_add(0.20, 0.0)
-        .clamp(5.0, 12.0)
+        .mul_add(AMF_CALIBRATION_SAMPLE_RATIO, 0.0)
+        .clamp(
+            AMF_CALIBRATION_MIN_SAMPLE_SECS,
+            AMF_CALIBRATION_MAX_SAMPLE_SECS,
+        )
         .min(output_duration_secs.max(0.1))
 }
 
@@ -1157,13 +1164,14 @@ fn build_amf_calibration_request(
     calibration_request.output_path = output_path;
     let full_duration_secs = request.output_duration_secs().max(0.1);
     let sample_duration_secs = calibration_duration_secs.min(full_duration_secs);
-    let window_count = if full_duration_secs >= sample_duration_secs * 3.0 {
-        3
-    } else if full_duration_secs >= sample_duration_secs * 2.0 {
-        2
-    } else {
-        1
-    };
+    let window_count =
+        if full_duration_secs >= sample_duration_secs * AMF_CALIBRATION_THREE_WINDOW_RATIO {
+            3
+        } else if full_duration_secs >= sample_duration_secs * 2.0 {
+            2
+        } else {
+            1
+        };
     let window_duration_secs = (sample_duration_secs / window_count as f64)
         .max(0.5)
         .min(full_duration_secs);
@@ -1733,6 +1741,54 @@ mod tests {
                 end_secs: 20.0,
             }
         );
+    }
+
+    #[test]
+    fn calibration_request_uses_three_windows_only_for_long_clips() {
+        let request = ClipExportRequest {
+            input_path: PathBuf::from("input.mp4"),
+            output_path: PathBuf::from("output.mp4"),
+            keep_ranges: vec![TimeRange {
+                start_secs: 0.0,
+                end_secs: 120.0,
+            }],
+            target_size_mb: 3,
+            audio_bitrate_kbps: 128,
+            use_hardware_acceleration: true,
+            preferred_encoder: EncoderType::Auto,
+            metadata: VideoFileMetadata {
+                duration_secs: 120.0,
+                width: 1920,
+                height: 1080,
+                has_audio: true,
+                fps: 60.0,
+            },
+            stream_copy: false,
+            output_width: None,
+            output_height: None,
+            output_fps: None,
+        };
+
+        let medium_calibration = build_amf_calibration_request(
+            &ClipExportRequest {
+                keep_ranges: vec![TimeRange {
+                    start_secs: 0.0,
+                    end_secs: 80.0,
+                }],
+                metadata: VideoFileMetadata {
+                    duration_secs: 80.0,
+                    ..request.metadata.clone()
+                },
+                ..request.clone()
+            },
+            8.0,
+            PathBuf::from("calibration-medium.mp4"),
+        );
+        assert_eq!(medium_calibration.keep_ranges.len(), 2);
+
+        let long_calibration =
+            build_amf_calibration_request(&request, 10.0, PathBuf::from("calibration-long.mp4"));
+        assert_eq!(long_calibration.keep_ranges.len(), 3);
     }
 
     #[test]

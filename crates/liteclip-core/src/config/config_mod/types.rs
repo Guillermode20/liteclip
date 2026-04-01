@@ -632,6 +632,10 @@ pub struct GeneralConfig {
     /// When false, skip post-save gallery thumbnail (linked libav decode); use for A/B memory diagnosis or `LITECLIP_SKIP_THUMBNAIL=1`.
     #[serde(default = "default_true")]
     pub generate_clip_thumbnail: bool,
+    /// When true, use software encoder (libx265) for clip export instead of hardware encoders.
+    /// Defaults to false (use hardware acceleration when available).
+    #[serde(default = "default_false")]
+    pub use_software_encoder: bool,
 }
 
 #[cfg(test)]

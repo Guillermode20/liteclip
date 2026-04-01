@@ -84,6 +84,8 @@ struct SharedPlaybackState {
     audio_buffer: Mutex<Option<AudioBuffer>>,
     audio_generation: AtomicU64,
     audio_started_generation: AtomicU64,
+    /// The user-requested playback start time, used to align the clock with scrub position
+    playback_start_target_secs: Mutex<f64>,
     #[allow(dead_code)]
     frame_pool: Arc<FramePool>,
 }
@@ -177,6 +179,7 @@ impl PlaybackController {
             audio_buffer: Mutex::new(None),
             audio_generation: AtomicU64::new(1),
             audio_started_generation: AtomicU64::new(0),
+            playback_start_target_secs: Mutex::new(0.0),
             frame_pool: frame_pool.clone(),
         });
 
@@ -292,6 +295,11 @@ impl PlaybackController {
         *self
             .shared
             .current_time_secs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = clamped_time;
+        *self
+            .shared
+            .playback_start_target_secs
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = clamped_time;
         *self
@@ -577,48 +585,74 @@ impl PlaybackController {
         } else {
             PLAYBACK_QUEUE_DEPTH_PAUSED
         };
-        let mut frame_count = 0;
-        while let Some(frame) = self.decoder.try_recv_frame() {
-            let active_request = self.active_request_id();
-            if frame.request_id != active_request {
-                tracing::debug!("poll: skipping frame from old request {}", frame.request_id);
-                continue;
+        let queue_is_saturated = if self.is_playing() {
+            let queue_len = self
+                .shared
+                .frame_queue
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .len();
+            if queue_len >= queue_depth_limit {
+                tracing::trace!(
+                    "poll: playback queue saturated ({}/{}), deferring decoder drain",
+                    queue_len,
+                    queue_depth_limit
+                );
+                true
+            } else {
+                false
             }
-
-            match frame.kind {
-                DecoderFrameKind::Preview => {
-                    tracing::debug!("poll: received preview frame pts={:.3}s", frame.pts_secs);
-                    *self
-                        .shared
-                        .latest_frame
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner()) =
-                        Some(PlaybackFrame { image: frame.image });
-                    self.shared
-                        .video_request_in_flight
-                        .store(false, Ordering::SeqCst);
+        } else {
+            false
+        };
+        let mut frame_count = 0;
+        if !queue_is_saturated {
+            while let Some(frame) = self.decoder.try_recv_frame() {
+                let active_request = self.active_request_id();
+                if frame.request_id != active_request {
+                    tracing::debug!("poll: skipping frame from old request {}", frame.request_id);
+                    continue;
                 }
-                DecoderFrameKind::Playback => {
-                    let mut queue = self
-                        .shared
-                        .frame_queue
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner());
-                    if queue.len() >= queue_depth_limit {
-                        queue.pop_front();
+
+                match frame.kind {
+                    DecoderFrameKind::Preview => {
+                        tracing::debug!("poll: received preview frame pts={:.3}s", frame.pts_secs);
+                        *self
+                            .shared
+                            .latest_frame
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner()) =
+                            Some(PlaybackFrame { image: frame.image });
+                        self.shared
+                            .video_request_in_flight
+                            .store(false, Ordering::SeqCst);
                     }
-                    let pts = frame.pts_secs;
-                    queue.push_back(TimedFrame {
-                        pts_secs: pts,
-                        image: frame.image,
-                    });
-                    frame_count += 1;
-                    if frame_count <= 5 {
-                        tracing::trace!(
-                            "poll: queued frame pts={:.3}s, queue_len={}",
-                            pts,
-                            queue.len()
-                        );
+                    DecoderFrameKind::Playback => {
+                        let mut queue = self
+                            .shared
+                            .frame_queue
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        let pts = frame.pts_secs;
+                        if queue.len() >= queue_depth_limit {
+                            tracing::trace!(
+                                "poll: playback queue reached limit while draining ({})",
+                                queue_depth_limit
+                            );
+                            break;
+                        }
+                        queue.push_back(TimedFrame {
+                            pts_secs: pts,
+                            image: frame.image,
+                        });
+                        frame_count += 1;
+                        if frame_count <= 5 {
+                            tracing::trace!(
+                                "poll: queued frame pts={:.3}s, queue_len={}",
+                                pts,
+                                queue.len()
+                            );
+                        }
                     }
                 }
             }
@@ -674,8 +708,16 @@ impl PlaybackController {
                         .frame_queue
                         .lock()
                         .unwrap_or_else(|e| e.into_inner());
-                    if let Some(front) = queue.front() {
-                        clock.start_time_secs = front.pts_secs;
+                    if queue.front().is_some() {
+                        // Use the user-requested start time, not the first frame's PTS.
+                        // This prevents frames from being dropped as "stale" when the
+                        // decoder starts from a keyframe before the target position.
+                        let target_start = *self
+                            .shared
+                            .playback_start_target_secs
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        clock.start_time_secs = target_start;
                         clock.started_at = Some(Instant::now());
                         clock_unlocked = true;
                     }
