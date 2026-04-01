@@ -3,6 +3,7 @@
 use crate::capture::{
     backpressure::BackpressureState, CaptureConfig, CapturedFrame, D3d11TexturePoolItem,
 };
+use crate::runtime_budget::{RuntimeBudgetGovernor, RuntimeBudgetInput};
 use anyhow::{bail, Context, Result};
 use bytes::Bytes;
 use crossbeam::channel::{bounded, Receiver, Sender};
@@ -745,6 +746,7 @@ impl DxgiCapture {
         let mut reinit_backoff_ms = 100u64;
         const MAX_BACKOFF_MS: u64 = 5000;
         let backpressure = BackpressureState::new();
+        let budget_governor = RuntimeBudgetGovernor::new();
         let mut adaptive_skip_counter = 0u32;
         let mut adaptive_adjust_tick = Instant::now();
         let mut pressure_high_streak = 0u32;
@@ -998,16 +1000,18 @@ impl DxgiCapture {
             if adaptive_adjust_tick.elapsed() >= Duration::from_secs(2) {
                 let queue_len = frame_tx.len() as u32;
                 let queue_cap = frame_tx.capacity().unwrap_or(32) as u32;
-                let high_watermark = queue_cap.saturating_mul(3) / 4;
-                let low_watermark = queue_cap / 4;
-                let severe_watermark = queue_cap.saturating_mul(7) / 8;
                 let mut fps_divisor = backpressure.current_fps_divisor();
                 let encoder_overloaded = backpressure.is_encoder_overloaded();
+                let decision = budget_governor.decide(RuntimeBudgetInput {
+                    queue_len,
+                    queue_cap,
+                    encoder_overloaded,
+                });
 
-                if queue_len >= severe_watermark {
+                if queue_len >= decision.severe_watermark {
                     pressure_high_streak = 0;
                     pressure_low_streak = 0;
-                    if fps_divisor < 3 {
+                    if fps_divisor < decision.max_fps_divisor {
                         fps_divisor += 1;
                         backpressure.set_fps_divisor(fps_divisor);
                         warn!(
@@ -1015,10 +1019,12 @@ impl DxgiCapture {
                             fps_divisor, queue_len, queue_cap
                         );
                     }
-                } else if encoder_overloaded || queue_len >= high_watermark {
+                } else if encoder_overloaded || queue_len >= decision.high_watermark {
                     pressure_high_streak = pressure_high_streak.saturating_add(1);
                     pressure_low_streak = 0;
-                    if pressure_high_streak >= 2 && fps_divisor < 3 {
+                    if pressure_high_streak >= decision.high_streak_threshold
+                        && fps_divisor < decision.max_fps_divisor
+                    {
                         fps_divisor += 1;
                         backpressure.set_fps_divisor(fps_divisor);
                         pressure_high_streak = 0;
@@ -1027,10 +1033,10 @@ impl DxgiCapture {
                             fps_divisor, queue_len, queue_cap
                         );
                     }
-                } else if queue_len <= low_watermark {
+                } else if queue_len <= decision.low_watermark {
                     pressure_low_streak = pressure_low_streak.saturating_add(1);
                     pressure_high_streak = 0;
-                    if pressure_low_streak >= 3 && fps_divisor > 0 {
+                    if pressure_low_streak >= decision.low_streak_threshold && fps_divisor > 0 {
                         fps_divisor -= 1;
                         backpressure.set_fps_divisor(fps_divisor);
                         pressure_low_streak = 0;
@@ -1046,6 +1052,14 @@ impl DxgiCapture {
                 adaptive_adjust_tick = Instant::now();
             }
             if window_start.elapsed() >= Duration::from_secs(30) {
+                let fps_divisor = backpressure.current_fps_divisor();
+                let quality_assessment = crate::quality_contracts::assess_active_recording_window(
+                    crate::quality_contracts::ActiveRecordingWindowSample {
+                        captured_frames: window_frames,
+                        dropped_frames: window_drops,
+                        fps_divisor,
+                    },
+                );
                 let nv12_stats = state.nv12_pool.as_ref().map(|p| {
                     (
                         p.available.len(),
@@ -1064,11 +1078,13 @@ impl DxgiCapture {
                     crate::output::saver::process_memory_mb()
                 {
                     info!(
-                        "Memory telemetry [capture]: fps={}, drops={}, duplicates={}, divisor={}, queue={}/{}, nv12={:?}, bgra={:?}, process_working_set_mb={:.1}, process_private_mb={:.1}",
+                        "Memory telemetry [capture]: fps={}, drops={}, drop_ratio={:.3}, duplicates={}, divisor={}, quality_contract_ok={}, queue={}/{}, nv12={:?}, bgra={:?}, process_working_set_mb={:.1}, process_private_mb={:.1}",
                         window_frames / 30,
                         window_drops,
+                        quality_assessment.drop_ratio,
                         window_duplicates,
-                        backpressure.current_fps_divisor(),
+                        fps_divisor,
+                        quality_assessment.within_contract,
                         frame_tx.len(),
                         frame_tx.capacity().unwrap_or(32),
                         nv12_stats,
@@ -1078,15 +1094,28 @@ impl DxgiCapture {
                     );
                 } else {
                     info!(
-                        "Memory telemetry [capture]: fps={}, drops={}, duplicates={}, divisor={}, queue={}/{}, nv12={:?}, bgra={:?}",
+                        "Memory telemetry [capture]: fps={}, drops={}, drop_ratio={:.3}, duplicates={}, divisor={}, quality_contract_ok={}, queue={}/{}, nv12={:?}, bgra={:?}",
                         window_frames / 30,
                         window_drops,
+                        quality_assessment.drop_ratio,
                         window_duplicates,
-                        backpressure.current_fps_divisor(),
+                        fps_divisor,
+                        quality_assessment.within_contract,
                         frame_tx.len(),
                         frame_tx.capacity().unwrap_or(32),
                         nv12_stats,
                         bgra_stats
+                    );
+                }
+                if !quality_assessment.within_contract {
+                    warn!(
+                        "Recording quality contract exceeded: drop_ratio={:.3} (limit {:.3}), fps_divisor={} (limit {})",
+                        quality_assessment.drop_ratio,
+                        crate::quality_contracts::ACTIVE_RECORDING_DROPPED_FRAMES_GUARDRAIL
+                            .max_drop_ratio,
+                        fps_divisor,
+                        crate::quality_contracts::ACTIVE_RECORDING_DROPPED_FRAMES_GUARDRAIL
+                            .max_fps_divisor
                     );
                 }
                 window_start = Instant::now();

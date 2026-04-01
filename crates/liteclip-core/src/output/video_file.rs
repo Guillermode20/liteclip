@@ -1,4 +1,5 @@
 use crate::config::EncoderType;
+use crate::quality_contracts::{validate_export_validity, ExportValidationInput};
 use anyhow::{bail, Context, Result};
 use image::RgbaImage;
 use std::path::{Path, PathBuf};
@@ -683,6 +684,37 @@ fn run_clip_export(
                 )
             },
         )?;
+
+        #[cfg(feature = "ffmpeg")]
+        {
+            match probe_video_file(&request.output_path) {
+                Ok(output_metadata) => {
+                    let violations = validate_export_validity(ExportValidationInput {
+                        expected_duration_secs: output_duration_secs,
+                        expect_audio: request.metadata.has_audio,
+                        metadata: &output_metadata,
+                    });
+                    if !violations.is_empty() {
+                        let details = violations
+                            .into_iter()
+                            .map(|violation| violation.to_string())
+                            .collect::<Vec<_>>()
+                            .join("; ");
+                        warn!(
+                            "Export output quality contract warnings for {:?}: {}",
+                            request.output_path, details
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to probe exported output for validity checks: {:?}: {}",
+                        request.output_path, e
+                    );
+                    // Continue - don't fail the export just because post-hoc validation failed
+                }
+            }
+        }
 
         Ok(ExportOutcome::Finished(request.output_path.clone()))
     })();
@@ -1467,6 +1499,9 @@ fn format_seconds_arg(seconds: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::quality_contracts::{
+        validate_export_validity, ExportValidationInput, ExportValidityViolation,
+    };
 
     #[test]
     fn parses_progress_output_variants() {
@@ -1741,5 +1776,50 @@ mod tests {
             farther_attempt.size_bytes,
             target_size_bytes,
         ));
+    }
+
+    #[test]
+    fn export_contract_accepts_probe_metadata_for_nominal_export() {
+        let metadata = VideoFileMetadata {
+            duration_secs: 9.8,
+            width: 1920,
+            height: 1080,
+            has_audio: true,
+            fps: 60.0,
+        };
+        let violations = validate_export_validity(ExportValidationInput {
+            expected_duration_secs: 10.0,
+            expect_audio: true,
+            metadata: &metadata,
+        });
+        assert!(violations.is_empty(), "violations: {violations:?}");
+    }
+
+    #[test]
+    fn export_contract_flags_invalid_probe_metadata() {
+        let metadata = VideoFileMetadata {
+            duration_secs: 7.5,
+            width: 0,
+            height: 1080,
+            has_audio: false,
+            fps: 0.5,
+        };
+        let violations = validate_export_validity(ExportValidationInput {
+            expected_duration_secs: 10.0,
+            expect_audio: true,
+            metadata: &metadata,
+        });
+        assert!(violations
+            .iter()
+            .any(|v| matches!(v, ExportValidityViolation::InvalidResolution { .. })));
+        assert!(violations
+            .iter()
+            .any(|v| matches!(v, ExportValidityViolation::DurationTooShort { .. })));
+        assert!(violations
+            .iter()
+            .any(|v| matches!(v, ExportValidityViolation::MissingAudioTrack)));
+        assert!(violations
+            .iter()
+            .any(|v| matches!(v, ExportValidityViolation::InvalidFps { .. })));
     }
 }

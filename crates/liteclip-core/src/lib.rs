@@ -100,6 +100,7 @@
 //! ```
 
 pub mod app;
+pub mod benchmark_harness;
 pub mod buffer;
 pub mod capture;
 pub mod config;
@@ -112,7 +113,9 @@ pub mod media;
 pub mod memory_diag;
 pub mod output;
 pub mod paths;
+pub mod quality_contracts;
 pub mod runtime;
+pub mod runtime_budget;
 
 mod engine;
 pub use engine::ReplayEngine;
@@ -122,6 +125,7 @@ pub use engine::ReplayEngine;
 /// For full engine control, import [`crate::app::AppState`] and submodules from [`crate`] directly.
 pub mod prelude {
     pub use crate::app::{AppState, ClipManager};
+    pub use crate::benchmark_harness;
     pub use crate::buffer::ReplayBuffer;
     pub use crate::config::Config;
     pub use crate::encode;
@@ -130,5 +134,7 @@ pub mod prelude {
     pub use crate::ffmpeg_backend::{self, validate_runtime, FfmpegBackendKind};
     pub use crate::host::CoreHost;
     pub use crate::paths::AppDirs;
+    pub use crate::quality_contracts;
     pub use crate::runtime::{self, set_ffmpeg_path, FFMPEG_ENV};
+    pub use crate::runtime_budget;
 }

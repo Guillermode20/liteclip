@@ -8,6 +8,7 @@
 
 pub use liteclip_core::{
     app, buffer, capture, config, encode, ffmpeg_backend, hotkey_parse, media, output,
+    quality_contracts, runtime_budget,
 };
 
 pub mod detection;

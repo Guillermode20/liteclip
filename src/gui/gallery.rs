@@ -803,7 +803,7 @@ impl ClipCompressApp {
             // Live playback path: drain the frame queue for frames due by now.
             if editor.is_playing {
                 let wall_time = editor.playback.playback_position_secs();
-                let (queue_len, _) = editor.playback.cache_stats();
+                let queue_len = editor.playback.cached_frame_count();
                 if let Some(image) = editor.playback.take_playback_frame() {
                     tracing::trace!(
                         "poll_background_work: displaying frame at wall_time={:.3}s",

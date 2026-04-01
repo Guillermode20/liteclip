@@ -12,6 +12,9 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::output::VideoFileMetadata;
+use crate::quality_contracts::{
+    assess_gallery_playback_runtime, GalleryPlaybackRuntimeSample, GALLERY_PLAYBACK_GUARDRAIL,
+};
 
 mod frame_pool;
 
@@ -21,7 +24,10 @@ use frame_pool::{FramePool, PooledRgbaImage, FRAME_POOL_SIZE};
 /// Reduced from 24 to 12 frames (~0.4s at 30fps) to minimize memory overhead
 /// while still providing smooth playback. Lower values enable faster stop/seek feedback.
 const FRAME_CHANNEL_CAPACITY: usize = 12;
-const PLAYBACK_QUEUE_DEPTH: usize = 20;
+const PLAYBACK_QUEUE_DEPTH_PLAYING: usize = 20;
+const PLAYBACK_QUEUE_DEPTH_PAUSED: usize = 6;
+const FRAME_POOL_IDLE_TRIM_TARGET: usize = 8;
+const FRAME_POOL_ACTIVE_TRIM_TARGET: usize = 24;
 
 struct DecoderHardwareContext {
     device_ctx_ref: *mut ffmpeg::ffi::AVBufferRef,
@@ -254,6 +260,7 @@ impl PlaybackController {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
+        self.shared.frame_pool.trim_to(FRAME_POOL_IDLE_TRIM_TARGET);
         self.decoder.stop();
 
         let request_id = self.next_request_id();
@@ -274,6 +281,9 @@ impl PlaybackController {
 
     pub fn play_from(&mut self, time_secs: f64) {
         let clamped_time = self.clamp_time(time_secs);
+        self.shared
+            .frame_pool
+            .trim_to(FRAME_POOL_ACTIVE_TRIM_TARGET);
         self.shared
             .frame_queue
             .lock()
@@ -332,6 +342,7 @@ impl PlaybackController {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
+        self.shared.frame_pool.trim_to(FRAME_POOL_IDLE_TRIM_TARGET);
         self.shared
             .video_request_in_flight
             .store(false, Ordering::SeqCst);
@@ -380,7 +391,7 @@ impl PlaybackController {
         let _ = self.shared.audio_buffer.lock().map(|mut g| *g = None);
         self.shared.playback_empty_polls.store(0, Ordering::SeqCst);
         self.shared.playback_drop_bursts.store(0, Ordering::SeqCst);
-        self.shared.frame_pool.trim_to(FRAME_POOL_SIZE);
+        self.shared.frame_pool.trim_to(FRAME_POOL_IDLE_TRIM_TARGET);
     }
 
     pub fn is_frame_request_in_flight(&self) -> bool {
@@ -461,6 +472,23 @@ impl PlaybackController {
                     dropped_count,
                     wall_time_secs,
                     burst
+                );
+            }
+            let quality_sample = GalleryPlaybackRuntimeSample {
+                stale_frames_dropped: dropped_count,
+                empty_queue_polls: self.shared.playback_empty_polls.load(Ordering::SeqCst),
+                queue_depth: queue.len(),
+            };
+            let quality_assessment = assess_gallery_playback_runtime(quality_sample);
+            if !quality_assessment.within_contract {
+                tracing::warn!(
+                    "Gallery playback quality contract exceeded: stale_dropped={} (limit {}), empty_polls={} (limit {}), queue_depth={} (limit {})",
+                    quality_sample.stale_frames_dropped,
+                    GALLERY_PLAYBACK_GUARDRAIL.max_stale_frames_dropped_per_poll,
+                    quality_sample.empty_queue_polls,
+                    GALLERY_PLAYBACK_GUARDRAIL.max_empty_queue_polls,
+                    quality_sample.queue_depth,
+                    GALLERY_PLAYBACK_GUARDRAIL.max_queue_depth_frames
                 );
             }
         }
@@ -544,24 +572,15 @@ impl PlaybackController {
     }
 
     pub fn poll(&mut self) {
+        let queue_depth_limit = if self.is_playing() {
+            PLAYBACK_QUEUE_DEPTH_PLAYING
+        } else {
+            PLAYBACK_QUEUE_DEPTH_PAUSED
+        };
         let mut frame_count = 0;
-        loop {
-            {
-                let queue = self
-                    .shared
-                    .frame_queue
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                if queue.len() >= PLAYBACK_QUEUE_DEPTH {
-                    break;
-                }
-            }
-
-            let Some(frame) = self.decoder.try_recv_frame() else {
-                break;
-            };
-
-            if frame.request_id != self.active_request_id() {
+        while let Some(frame) = self.decoder.try_recv_frame() {
+            let active_request = self.active_request_id();
+            if frame.request_id != active_request {
                 tracing::debug!("poll: skipping frame from old request {}", frame.request_id);
                 continue;
             }
@@ -585,6 +604,9 @@ impl PlaybackController {
                         .frame_queue
                         .lock()
                         .unwrap_or_else(|e| e.into_inner());
+                    if queue.len() >= queue_depth_limit {
+                        queue.pop_front();
+                    }
                     let pts = frame.pts_secs;
                     queue.push_back(TimedFrame {
                         pts_secs: pts,
@@ -675,6 +697,14 @@ impl PlaybackController {
         let mb =
             queue.iter().map(|f| f.image.as_raw().len()).sum::<usize>() as f64 / (1024.0 * 1024.0);
         (count, mb)
+    }
+
+    pub fn cached_frame_count(&self) -> usize {
+        self.shared
+            .frame_queue
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len()
     }
 
     fn clamp_time(&self, time_secs: f64) -> f64 {

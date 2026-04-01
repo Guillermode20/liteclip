@@ -49,12 +49,14 @@ use std::os::windows::process::CommandExt;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tracing::{error, info, warn};
 #[cfg(windows)]
 use windows::Win32::Media::{timeBeginPeriod, timeEndPeriod, TIMERR_NOERROR};
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x01000000;
+const CONFIG_SAVE_DEBOUNCE: Duration = Duration::from_millis(300);
 
 /// Run a fallible synchronous operation on `AppState` without blocking Tokio worker threads.
 async fn app_state_blocking_try<T, F>(app_state: &Arc<Mutex<AppState>>, f: F) -> Result<T>
@@ -332,6 +334,34 @@ async fn main() -> Result<()> {
     let (tokio_tx, mut tokio_rx) =
         tokio::sync::mpsc::channel::<liteclip_replay::platform::AppEvent>(100);
 
+    // Persist config asynchronously with debounce so settings changes don't block the main event flow.
+    let (config_save_tx, mut config_save_rx) = tokio::sync::mpsc::unbounded_channel::<Config>();
+    let config_save_task = tokio::spawn(async move {
+        while let Some(mut latest_cfg) = config_save_rx.recv().await {
+            loop {
+                match tokio::time::timeout(CONFIG_SAVE_DEBOUNCE, config_save_rx.recv()).await {
+                    Ok(Some(newer_cfg)) => {
+                        latest_cfg = newer_cfg;
+                    }
+                    Ok(None) => {
+                        if let Err(e) = latest_cfg.save().await {
+                            error!(
+                                "Failed to persist configuration during shutdown drain: {}",
+                                e
+                            );
+                        }
+                        return;
+                    }
+                    Err(_) => break,
+                }
+            }
+
+            if let Err(e) = latest_cfg.save().await {
+                error!("Failed to persist configuration: {}", e);
+            }
+        }
+    });
+
     // Bridge: hotkey/tray crossbeam events -> tokio
     let tokio_tx_bridge = tokio_tx.clone();
     let event_bridge_handle = std::thread::spawn(move || {
@@ -486,7 +516,6 @@ async fn main() -> Result<()> {
                                         let cfg_for_apply = cfg.clone();
                                         match app_state_blocking_try(&app_state, move |s| {
                                             let needs_hotkey_reregister = s.apply_config(cfg_for_apply)?;
-                                            s.config().save_sync()?;
                                             Ok(needs_hotkey_reregister)
                                         })
                                         .await
@@ -510,6 +539,9 @@ async fn main() -> Result<()> {
                                                 }
                                                 let _ = platform_handle.update_recording_state(true);
                                                 config = cfg;
+                                                if let Err(e) = config_save_tx.send(config.clone()) {
+                                                    error!("Failed to queue config persistence: {}", e);
+                                                }
                                             }
                                             Err(e) => {
                                                 error!("Failed to apply config: {}", e);
@@ -608,6 +640,12 @@ async fn main() -> Result<()> {
 
     // Drop the tokio sender to signal the event bridge to stop
     drop(tokio_tx);
+
+    // Drain and persist any pending config changes before full shutdown.
+    drop(config_save_tx);
+    if let Err(e) = config_save_task.await {
+        warn!("Config persistence task join error: {}", e);
+    }
 
     // Join the event bridge thread
     let _ = event_bridge_handle.join();

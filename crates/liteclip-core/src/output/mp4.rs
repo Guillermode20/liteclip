@@ -669,7 +669,14 @@ fn mix_audio_packets_to_pcm(
         .collect()
 }
 
-fn copy_pcm_into_frame(frame: &mut ffmpeg::frame::Audio, chunk: &[i16]) {
+fn copy_pcm_into_frame(
+    frame: &mut ffmpeg::frame::Audio,
+    chunk: &[i16],
+    planar_i16_left: &mut Vec<i16>,
+    planar_i16_right: &mut Vec<i16>,
+    planar_f32_left: &mut Vec<f32>,
+    planar_f32_right: &mut Vec<f32>,
+) {
     match frame.format() {
         ffmpeg::format::Sample::I16(ffmpeg::format::sample::Type::Packed) => {
             let plane = frame.plane_mut::<(i16, i16)>(0);
@@ -681,14 +688,14 @@ fn copy_pcm_into_frame(frame: &mut ffmpeg::frame::Audio, chunk: &[i16]) {
             }
         }
         ffmpeg::format::Sample::I16(ffmpeg::format::sample::Type::Planar) => {
-            let mut left = Vec::with_capacity(chunk.len() / AUDIO_CHANNELS as usize);
-            let mut right = Vec::with_capacity(chunk.len() / AUDIO_CHANNELS as usize);
+            planar_i16_left.clear();
+            planar_i16_right.clear();
             for src in chunk.chunks_exact(AUDIO_CHANNELS as usize) {
-                left.push(src[0]);
-                right.push(src[1]);
+                planar_i16_left.push(src[0]);
+                planar_i16_right.push(src[1]);
             }
-            write_i16_plane(frame.data_mut(0), &left);
-            write_i16_plane(frame.data_mut(1), &right);
+            write_i16_plane(frame.data_mut(0), planar_i16_left);
+            write_i16_plane(frame.data_mut(1), planar_i16_right);
         }
         ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Packed) => {
             let plane = frame.plane_mut::<(f32, f32)>(0);
@@ -703,14 +710,14 @@ fn copy_pcm_into_frame(frame: &mut ffmpeg::frame::Audio, chunk: &[i16]) {
             }
         }
         ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Planar) => {
-            let mut left = Vec::with_capacity(chunk.len() / AUDIO_CHANNELS as usize);
-            let mut right = Vec::with_capacity(chunk.len() / AUDIO_CHANNELS as usize);
+            planar_f32_left.clear();
+            planar_f32_right.clear();
             for src in chunk.chunks_exact(AUDIO_CHANNELS as usize) {
-                left.push(src[0] as f32 / i16::MAX as f32);
-                right.push(src[1] as f32 / i16::MAX as f32);
+                planar_f32_left.push(src[0] as f32 / i16::MAX as f32);
+                planar_f32_right.push(src[1] as f32 / i16::MAX as f32);
             }
-            write_f32_plane(frame.data_mut(0), &left);
-            write_f32_plane(frame.data_mut(1), &right);
+            write_f32_plane(frame.data_mut(0), planar_f32_left);
+            write_f32_plane(frame.data_mut(1), planar_f32_right);
         }
         _ => {
             let packed_bytes = frame.data_mut(0);
@@ -782,6 +789,11 @@ fn mix_and_encode_audio_chunks(
     let mut mixed_i32 = vec![0_i32; chunk_samples];
     let mut mixed_i16 = vec![0_i16; chunk_samples];
     let mut pcm_buffer = Vec::with_capacity(samples_per_chunk * 2);
+    let planar_capacity = samples_per_chunk / AUDIO_CHANNELS as usize;
+    let mut planar_i16_left = Vec::with_capacity(planar_capacity);
+    let mut planar_i16_right = Vec::with_capacity(planar_capacity);
+    let mut planar_f32_left = Vec::with_capacity(planar_capacity);
+    let mut planar_f32_right = Vec::with_capacity(planar_capacity);
 
     while chunk_start < final_len {
         let chunk_end = (chunk_start + chunk_samples).min(final_len);
@@ -851,7 +863,14 @@ fn mix_and_encode_audio_chunks(
                 ffmpeg::frame::Audio::new(input_format, samples_in_frame, channel_layout);
             input.set_rate(AUDIO_SAMPLE_RATE);
             input.set_pts(Some(next_pts));
-            copy_pcm_into_frame(&mut input, chunk);
+            copy_pcm_into_frame(
+                &mut input,
+                chunk,
+                &mut planar_i16_left,
+                &mut planar_i16_right,
+                &mut planar_f32_left,
+                &mut planar_f32_right,
+            );
 
             let mut converted = ffmpeg::frame::Audio::empty();
             resampler
@@ -884,7 +903,14 @@ fn mix_and_encode_audio_chunks(
         let mut input = ffmpeg::frame::Audio::new(input_format, samples_in_frame, channel_layout);
         input.set_rate(AUDIO_SAMPLE_RATE);
         input.set_pts(Some(next_pts));
-        copy_pcm_into_frame(&mut input, chunk);
+        copy_pcm_into_frame(
+            &mut input,
+            chunk,
+            &mut planar_i16_left,
+            &mut planar_i16_right,
+            &mut planar_f32_left,
+            &mut planar_f32_right,
+        );
 
         let mut converted = ffmpeg::frame::Audio::empty();
         resampler
