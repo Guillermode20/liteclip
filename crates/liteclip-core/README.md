@@ -23,5 +23,9 @@ engine.save_clip(duration, output_path).await?;
 
 - Windows 10+
 - FFmpeg 6.0+ shared libraries
+- **GPU encoders:** NVIDIA NVENC, AMD AMF, and Intel QSV are supported via FFmpeg.
+  The library is primarily tested on AMD GPUs. If you embed `liteclip-core` with an
+  NVIDIA or Intel GPU, please report any encoder issues. See the main project
+  [CONTRIBUTING.md](../../CONTRIBUTING.md) for detailed testing checklists.
 
 See [docs.rs](https://docs.rs/liteclip-core) for API details and examples.
