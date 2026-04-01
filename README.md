@@ -61,6 +61,10 @@ Settings are stored at `%APPDATA%\liteclip\config.toml` and include:
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for build instructions.
 
+## AI Disclosure
+
+This project was developed with assistance from AI coding tools, including code generation, refactoring suggestions, and documentation help. Human oversight and review was applied to all AI-assisted contributions.
+
 ## License
 
 MIT License. See [LICENSE](LICENSE).
