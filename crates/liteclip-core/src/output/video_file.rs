@@ -105,12 +105,34 @@ pub struct ExportBitrateEstimate {
 /// Captures both the raw size and derived metrics about content complexity.
 #[derive(Debug, Clone, Copy)]
 pub struct AmfCalibrationResult {
+    pub calibration_bitrate_kbps: u32,
     pub sample_size_bytes: u64,
     pub sample_video_bytes: u64,
     pub sample_duration_secs: f64,
     pub sample_num_segments: usize,
     pub measured_overhead_bytes: u64,
     pub complexity_ratio: f64,
+    pub sample_coverage_ratio: f64,
+    pub segment_coverage_ratio: f64,
+    pub confidence_score: f64,
+    pub confidence_tier: AmfCalibrationConfidence,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AmfCalibrationConfidence {
+    Low,
+    Medium,
+    High,
+}
+
+impl AmfCalibrationConfidence {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
 }
 
 impl AmfCalibrationResult {
@@ -120,6 +142,8 @@ impl AmfCalibrationResult {
         sample_num_segments: usize,
         audio_bitrate_kbps: u32,
         calibration_bitrate_kbps: u32,
+        full_duration_secs: f64,
+        full_num_segments: usize,
     ) -> Self {
         let estimated_non_video = estimate_non_video_bytes(
             sample_duration_secs,
@@ -142,15 +166,39 @@ impl AmfCalibrationResult {
             1.0
         };
 
+        let safe_full_duration = full_duration_secs.max(sample_duration_secs).max(0.1);
+        let sample_coverage_ratio = (sample_duration_secs / safe_full_duration).clamp(0.0, 1.0);
+        let segment_coverage_ratio =
+            (sample_num_segments as f64 / full_num_segments.max(1) as f64).clamp(0.0, 1.0);
+        let coverage_score = (sample_coverage_ratio / 0.30).clamp(0.0, 1.0);
+        let segment_score = (segment_coverage_ratio / 0.75).clamp(0.0, 1.0);
+        let complexity_stability_score =
+            (1.0 - ((complexity_ratio - 1.0).abs() / 0.65).clamp(0.0, 1.0)).clamp(0.0, 1.0);
+        let confidence_score =
+            (coverage_score * 0.50 + segment_score * 0.35 + complexity_stability_score * 0.15)
+                .clamp(0.0, 1.0);
+        let confidence_tier = if confidence_score >= AMF_CALIBRATION_CONFIDENCE_HIGH_THRESHOLD {
+            AmfCalibrationConfidence::High
+        } else if confidence_score >= AMF_CALIBRATION_CONFIDENCE_MEDIUM_THRESHOLD {
+            AmfCalibrationConfidence::Medium
+        } else {
+            AmfCalibrationConfidence::Low
+        };
+
         let measured_overhead_bytes = sample_size_bytes.saturating_sub(expected_video_bytes);
 
         Self {
+            calibration_bitrate_kbps,
             sample_size_bytes,
             sample_video_bytes,
             sample_duration_secs,
             sample_num_segments,
             measured_overhead_bytes,
             complexity_ratio,
+            sample_coverage_ratio,
+            segment_coverage_ratio,
+            confidence_score,
+            confidence_tier,
         }
     }
 
@@ -163,7 +211,7 @@ impl AmfCalibrationResult {
     }
 
     fn adaptive_fill_ratio(&self) -> f64 {
-        if self.is_complex_content() {
+        let complexity_fill_ratio = if self.is_complex_content() {
             AMF_CALIBRATION_FILL_RATIO
         } else if self.is_simple_content() {
             AMF_CALIBRATION_FILL_RATIO_CONFIDENT
@@ -173,7 +221,16 @@ impl AmfCalibrationResult {
                     - AMF_CALIBRATION_COMPLEXITY_THRESHOLD_LOW);
             AMF_CALIBRATION_FILL_RATIO_CONFIDENT
                 - t * (AMF_CALIBRATION_FILL_RATIO_CONFIDENT - AMF_CALIBRATION_FILL_RATIO)
-        }
+        };
+        let confidence_penalty = match self.confidence_tier {
+            AmfCalibrationConfidence::High => 0.0,
+            AmfCalibrationConfidence::Medium => 0.012,
+            AmfCalibrationConfidence::Low => 0.022,
+        };
+        (complexity_fill_ratio - confidence_penalty).clamp(
+            AMF_CALIBRATION_FILL_RATIO_MIN_CONSERVATIVE,
+            AMF_CALIBRATION_FILL_RATIO_CONFIDENT,
+        )
     }
 }
 
@@ -194,12 +251,20 @@ const AMF_TARGET_FILL_RATIO_IDEAL: f64 = 0.925;
 // full encode attempt lands in the acceptable 90-100% window without a retry.
 const AMF_CALIBRATION_FILL_RATIO: f64 = 0.985; // Slightly lower to allow more headroom for variance
 const AMF_CALIBRATION_FILL_RATIO_CONFIDENT: f64 = 0.990; // Higher when calibration quality is good
+const AMF_CALIBRATION_FILL_RATIO_MIN_CONSERVATIVE: f64 = 0.940;
 const AMF_CALIBRATION_SAMPLE_RATIO: f64 = 0.12; // Slightly reduced from 0.15
 const AMF_CALIBRATION_MIN_SAMPLE_SECS: f64 = 3.0; // Reduced from 4.0 for short clips
 const AMF_CALIBRATION_MAX_SAMPLE_SECS: f64 = 10.0; // Increased max for complex content
+const AMF_CALIBRATION_REFINEMENT_MAX_SAMPLE_SECS: f64 = 16.0;
+const AMF_CALIBRATION_REFINEMENT_MIN_DURATION_SECS: f64 = 24.0;
+const AMF_CALIBRATION_REFINEMENT_RATIO_BOOST: f64 = 0.06;
+const AMF_CALIBRATION_MULTI_SEGMENT_RATIO_BOOST: f64 = 0.03;
 const AMF_CALIBRATION_THREE_WINDOW_RATIO: f64 = 10.0; // Slightly more aggressive
+const AMF_CALIBRATION_MAX_WINDOWS: usize = 4;
 const AMF_CALIBRATION_COMPLEXITY_THRESHOLD_HIGH: f64 = 1.35; // Ratio indicating high complexity
 const AMF_CALIBRATION_COMPLEXITY_THRESHOLD_LOW: f64 = 1.15; // Ratio indicating low complexity
+const AMF_CALIBRATION_CONFIDENCE_HIGH_THRESHOLD: f64 = 0.78;
+const AMF_CALIBRATION_CONFIDENCE_MEDIUM_THRESHOLD: f64 = 0.58;
 const TARGET_SIZE_UNDERFILL_RATIO: f64 = 0.992;
 const MAX_VIDEO_BITRATE_KBPS: u32 = 400_000;
 
@@ -484,8 +549,12 @@ fn run_clip_export(
         if selected_encoder == ExportVideoEncoder::HevcAmf {
             anyhow::bail!("AMF calibration requires ffmpeg feature");
         }
-        let calibration_request =
-            build_amf_calibration_request(request, sample_duration_secs, calibration_path.clone());
+        let calibration_request = build_amf_calibration_request_with_mode(
+            request,
+            sample_duration_secs,
+            calibration_path.clone(),
+            false,
+        );
         if prototype_flags.filter_graph_concat {
             info!(
                 "Filter-graph export prototype flag is enabled. Calibration/export currently uses seek-based range processing; filter-graph path is planned but not yet wired."
@@ -499,8 +568,7 @@ fn run_clip_export(
         let calibration_bitrate_kbps = bitrate_estimate
             .video_kbps
             .max(selected_encoder.min_video_bitrate_kbps());
-
-        let mut calibration_result = None;
+        let mut calibration_results = Vec::new();
         match super::sdk_export::attempt_export(
             &calibration_request,
             &calibration_path,
@@ -513,7 +581,17 @@ fn run_clip_export(
             2,
             ClipExportPhase::Calibration,
         ) {
-            Ok(Some(attempt_result)) => calibration_result = Some(attempt_result),
+            Ok(Some(attempt_result)) => {
+                calibration_results.push(AmfCalibrationResult::from_attempt(
+                    attempt_result.size_bytes,
+                    calibration_request.output_duration_secs().max(0.1),
+                    calibration_request.keep_ranges.len(),
+                    bitrate_estimate.audio_kbps,
+                    calibration_bitrate_kbps,
+                    output_duration_secs,
+                    request.keep_ranges.len(),
+                ));
+            }
             Ok(None) => {
                 let _ = std::fs::remove_file(&calibration_path);
                 return Ok(ExportOutcome::Cancelled);
@@ -537,6 +615,7 @@ fn run_clip_export(
                     bitrate_estimate.audio_kbps,
                     request.keep_ranges.len(),
                 );
+                calibration_results.clear();
                 let _ = std::fs::remove_file(&calibration_path);
             }
             Err(err) => {
@@ -544,35 +623,123 @@ fn run_clip_export(
                 return Err(err);
             }
         }
+        let _ = std::fs::remove_file(&calibration_path);
 
-        if let Some(calibration_result) = calibration_result {
-            let amf_result = AmfCalibrationResult::from_attempt(
-                calibration_result.size_bytes,
-                calibration_request.output_duration_secs().max(0.1),
-                calibration_request.keep_ranges.len(),
-                bitrate_estimate.audio_kbps,
-                calibration_bitrate_kbps,
-            );
+        if selected_encoder == ExportVideoEncoder::HevcAmf {
+            if let Some(primary_result) = calibration_results.first().copied() {
+                if should_run_refinement_calibration(&primary_result, output_duration_secs) {
+                    let refinement_path = export_work_dir.join("amf-calibration-refinement.mp4");
+                    let refinement_duration_secs =
+                        calibration_duration_secs_for_mode(output_duration_secs, true)
+                            .max((sample_duration_secs * 1.35).min(output_duration_secs));
+                    let refinement_request = build_amf_calibration_request_with_mode(
+                        request,
+                        refinement_duration_secs,
+                        refinement_path.clone(),
+                        true,
+                    );
+                    let refinement_bitrate_kbps = calibrate_amf_video_bitrate(
+                        calibration_bitrate_kbps,
+                        &primary_result,
+                        output_duration_secs,
+                        request.keep_ranges.len(),
+                        bitrate_estimate.audio_kbps,
+                        target_size_bytes,
+                    )
+                    .max(selected_encoder.min_video_bitrate_kbps());
+                    info!(
+                        confidence = primary_result.confidence_tier.label(),
+                        primary_confidence_score = primary_result.confidence_score,
+                        refinement_sample_secs = refinement_duration_secs,
+                        refinement_bitrate_kbps,
+                        "AMF calibration entering high-accuracy refinement pass"
+                    );
+                    match super::sdk_export::attempt_export(
+                        &refinement_request,
+                        &refinement_path,
+                        refinement_bitrate_kbps,
+                        bitrate_estimate.audio_kbps,
+                        selected_encoder,
+                        progress_tx,
+                        cancel_flag,
+                        1,
+                        2,
+                        ClipExportPhase::Calibration,
+                    ) {
+                        Ok(Some(refinement_attempt)) => {
+                            calibration_results.push(AmfCalibrationResult::from_attempt(
+                                refinement_attempt.size_bytes,
+                                refinement_request.output_duration_secs().max(0.1),
+                                refinement_request.keep_ranges.len(),
+                                bitrate_estimate.audio_kbps,
+                                refinement_bitrate_kbps,
+                                output_duration_secs,
+                                request.keep_ranges.len(),
+                            ));
+                        }
+                        Ok(None) => {
+                            let _ = std::fs::remove_file(&refinement_path);
+                            return Ok(ExportOutcome::Cancelled);
+                        }
+                        Err(err) if should_fallback_to_software_encoder(&err) => {
+                            warn!(
+                                encoder = selected_encoder.ffmpeg_name(),
+                                "AMF refinement calibration failed at runtime, falling back to libx265: {err:#}"
+                            );
+                            selected_encoder = ExportVideoEncoder::SoftwareHevc;
+                            bitrate_estimate = estimate_export_bitrates_for_encoder(
+                                request.target_size_mb,
+                                output_duration_secs,
+                                request.metadata.has_audio,
+                                request.audio_bitrate_kbps,
+                                request.keep_ranges.len(),
+                                selected_encoder,
+                            );
+                            estimated_non_video_bytes = estimate_non_video_bytes(
+                                output_duration_secs,
+                                bitrate_estimate.audio_kbps,
+                                request.keep_ranges.len(),
+                            );
+                            calibration_results.clear();
+                        }
+                        Err(err) => {
+                            let _ = std::fs::remove_file(&refinement_path);
+                            return Err(err);
+                        }
+                    }
+                    let _ = std::fs::remove_file(&refinement_path);
+                }
+            }
+        }
 
-            let calibrated_video_bitrate_kbps = calibrate_amf_video_bitrate(
+        if selected_encoder == ExportVideoEncoder::HevcAmf && !calibration_results.is_empty() {
+            let calibrated_video_bitrate_kbps = calibrate_amf_video_bitrate_from_results(
                 calibration_bitrate_kbps,
-                &amf_result,
+                &calibration_results,
                 output_duration_secs,
                 request.keep_ranges.len(),
                 bitrate_estimate.audio_kbps,
                 target_size_bytes,
             );
+            let strongest_confidence = calibration_results
+                .iter()
+                .map(|result| result.confidence_tier)
+                .min()
+                .unwrap_or(AmfCalibrationConfidence::Low);
+            let observed_complexity = calibration_results
+                .iter()
+                .map(|result| result.complexity_ratio)
+                .fold(0.0f64, f64::max);
             info!(
-                "AMF calibration pass produced {} bytes at {} kbps; complexity_ratio={:.2}; next full encode will use {} kbps",
-                calibration_result.size_bytes,
+                "AMF calibration produced {} observation(s) at base {} kbps; confidence={}; max_complexity_ratio={:.2}; next full encode will use {} kbps",
+                calibration_results.len(),
                 calibration_bitrate_kbps,
-                amf_result.complexity_ratio,
+                strongest_confidence.label(),
+                observed_complexity,
                 calibrated_video_bitrate_kbps
             );
             bitrate_estimate.video_kbps = calibrated_video_bitrate_kbps;
         }
-
-        let _ = std::fs::remove_file(&calibration_path);
     }
 
     let export_result = (|| -> Result<ExportOutcome> {
@@ -1194,13 +1361,43 @@ fn blend_non_video_bytes_estimate(previous_estimate: u64, measured_estimate: u64
 }
 
 fn calibration_duration_secs(output_duration_secs: f64) -> f64 {
+    calibration_duration_secs_for_mode(output_duration_secs, false)
+}
+
+fn calibration_duration_secs_for_mode(output_duration_secs: f64, high_accuracy_mode: bool) -> f64 {
+    let ratio_boost = if high_accuracy_mode {
+        AMF_CALIBRATION_REFINEMENT_RATIO_BOOST
+    } else {
+        0.0
+    };
+    let max_secs = if high_accuracy_mode {
+        AMF_CALIBRATION_REFINEMENT_MAX_SAMPLE_SECS
+    } else {
+        AMF_CALIBRATION_MAX_SAMPLE_SECS
+    };
     output_duration_secs
-        .mul_add(AMF_CALIBRATION_SAMPLE_RATIO, 0.0)
-        .clamp(
-            AMF_CALIBRATION_MIN_SAMPLE_SECS,
-            AMF_CALIBRATION_MAX_SAMPLE_SECS,
-        )
+        .mul_add(AMF_CALIBRATION_SAMPLE_RATIO + ratio_boost, 0.0)
+        .clamp(AMF_CALIBRATION_MIN_SAMPLE_SECS, max_secs)
         .min(output_duration_secs.max(0.1))
+}
+
+fn calibration_window_count(
+    full_duration_secs: f64,
+    sample_duration_secs: f64,
+    high_accuracy_mode: bool,
+) -> usize {
+    let duration_ratio = full_duration_secs / sample_duration_secs.max(0.1);
+    let mut window_count = if duration_ratio >= AMF_CALIBRATION_THREE_WINDOW_RATIO {
+        3
+    } else if duration_ratio >= 2.0 {
+        2
+    } else {
+        1
+    };
+    if high_accuracy_mode && duration_ratio >= AMF_CALIBRATION_THREE_WINDOW_RATIO * 1.6 {
+        window_count = 4;
+    }
+    window_count.clamp(1, AMF_CALIBRATION_MAX_WINDOWS)
 }
 
 fn slice_keep_ranges_for_output_window(
@@ -1242,23 +1439,27 @@ fn slice_keep_ranges_for_output_window(
     sliced
 }
 
+#[cfg(test)]
 fn build_amf_calibration_request(
     request: &ClipExportRequest,
     calibration_duration_secs: f64,
     output_path: PathBuf,
+) -> ClipExportRequest {
+    build_amf_calibration_request_with_mode(request, calibration_duration_secs, output_path, false)
+}
+
+fn build_amf_calibration_request_with_mode(
+    request: &ClipExportRequest,
+    calibration_duration_secs: f64,
+    output_path: PathBuf,
+    high_accuracy_mode: bool,
 ) -> ClipExportRequest {
     let mut calibration_request = request.clone();
     calibration_request.output_path = output_path;
     let full_duration_secs = request.output_duration_secs().max(0.1);
     let sample_duration_secs = calibration_duration_secs.min(full_duration_secs);
     let window_count =
-        if full_duration_secs >= sample_duration_secs * AMF_CALIBRATION_THREE_WINDOW_RATIO {
-            3
-        } else if full_duration_secs >= sample_duration_secs * 2.0 {
-            2
-        } else {
-            1
-        };
+        calibration_window_count(full_duration_secs, sample_duration_secs, high_accuracy_mode);
     let window_duration_secs = (sample_duration_secs / window_count as f64)
         .max(0.5)
         .min(full_duration_secs);
@@ -1267,6 +1468,12 @@ fn build_amf_calibration_request(
     let window_starts: Vec<f64> = match window_count {
         1 => vec![0.0],
         2 => vec![0.0, (full_duration_secs - window_duration_secs).max(0.0)],
+        4 => vec![
+            0.0,
+            ((full_duration_secs - window_duration_secs) / 3.0).max(0.0),
+            ((full_duration_secs - window_duration_secs) * (2.0 / 3.0)).max(0.0),
+            (full_duration_secs - window_duration_secs).max(0.0),
+        ],
         _ => vec![
             0.0,
             ((full_duration_secs - window_duration_secs) / 2.0).max(0.0),
@@ -1286,6 +1493,153 @@ fn build_amf_calibration_request(
     calibration_request
 }
 
+fn calibration_length_correction(
+    sample_duration_secs: f64,
+    sample_num_segments: usize,
+    full_duration_secs: f64,
+    full_num_segments: usize,
+) -> f64 {
+    let avg_sample_seg_len = sample_duration_secs / sample_num_segments.max(1) as f64;
+    let avg_full_seg_len = full_duration_secs / full_num_segments.max(1) as f64;
+    let segment_length_ratio = avg_full_seg_len / avg_sample_seg_len.max(0.1);
+    let base = if segment_length_ratio > 1.1 {
+        1.0 + (segment_length_ratio.log10() * 0.22).clamp(0.0, 0.40)
+    } else {
+        1.0
+    };
+    let segment_count_boost =
+        ((full_num_segments.max(1) as f64 / sample_num_segments.max(1) as f64).sqrt() - 1.0)
+            .max(0.0)
+            * AMF_CALIBRATION_MULTI_SEGMENT_RATIO_BOOST;
+    (base * (1.0 + segment_count_boost.clamp(0.0, 0.10))).clamp(1.0, 1.55)
+}
+
+fn should_run_refinement_calibration(
+    primary: &AmfCalibrationResult,
+    output_duration_secs: f64,
+) -> bool {
+    if output_duration_secs < AMF_CALIBRATION_REFINEMENT_MIN_DURATION_SECS {
+        return false;
+    }
+    matches!(primary.confidence_tier, AmfCalibrationConfidence::Low)
+}
+
+fn calibrate_amf_video_bitrate_from_results(
+    current_video_bitrate_kbps: u32,
+    calibration_results: &[AmfCalibrationResult],
+    full_duration_secs: f64,
+    full_num_segments: usize,
+    audio_bitrate_kbps: u32,
+    target_size_bytes: u64,
+) -> u32 {
+    if calibration_results.is_empty() {
+        return current_video_bitrate_kbps.max(MIN_AUTO_VIDEO_BITRATE_KBPS);
+    }
+
+    let sample_duration_floor = calibration_results
+        .iter()
+        .map(|result| result.sample_duration_secs.max(0.1))
+        .fold(0.1, f64::max);
+    let full_duration_secs = full_duration_secs.max(sample_duration_floor);
+    let full_non_video_bytes =
+        estimate_non_video_bytes(full_duration_secs, audio_bitrate_kbps, full_num_segments);
+    let fill_ratio = calibration_results
+        .iter()
+        .map(AmfCalibrationResult::adaptive_fill_ratio)
+        .fold(AMF_CALIBRATION_FILL_RATIO_CONFIDENT, f64::min);
+    let safe_target_size_bytes = ((target_size_bytes as f64) * fill_ratio).round() as u64;
+    let desired_video_bytes = safe_target_size_bytes
+        .saturating_sub(full_non_video_bytes)
+        .max(1);
+
+    let mut conservative_video_bytes_per_kbps = 0.0f64;
+    let mut min_video_bytes_per_kbps = f64::MAX;
+    let mut max_video_bytes_per_kbps = 0.0f64;
+    let mut used_results = 0usize;
+    let mut worst_confidence = AmfCalibrationConfidence::High;
+
+    for result in calibration_results {
+        let sample_duration_secs = result.sample_duration_secs.max(0.1);
+        if result.calibration_bitrate_kbps == 0 {
+            continue;
+        }
+        let length_correction = calibration_length_correction(
+            sample_duration_secs,
+            result.sample_num_segments,
+            full_duration_secs,
+            full_num_segments,
+        );
+        let extrapolated_full_video = (result.sample_video_bytes as f64)
+            * (full_duration_secs / sample_duration_secs)
+            * length_correction;
+        if extrapolated_full_video <= 1.0 {
+            continue;
+        }
+        let video_bytes_per_kbps =
+            extrapolated_full_video / f64::from(result.calibration_bitrate_kbps);
+        conservative_video_bytes_per_kbps =
+            conservative_video_bytes_per_kbps.max(video_bytes_per_kbps);
+        min_video_bytes_per_kbps = min_video_bytes_per_kbps.min(video_bytes_per_kbps);
+        max_video_bytes_per_kbps = max_video_bytes_per_kbps.max(video_bytes_per_kbps);
+        used_results = used_results.saturating_add(1);
+        if result.confidence_tier < worst_confidence {
+            worst_confidence = result.confidence_tier;
+        }
+    }
+
+    if used_results == 0 || conservative_video_bytes_per_kbps <= 0.0 {
+        return current_video_bitrate_kbps.max(MIN_AUTO_VIDEO_BITRATE_KBPS);
+    }
+
+    let spread_ratio = if max_video_bytes_per_kbps > 0.0 && min_video_bytes_per_kbps.is_finite() {
+        ((max_video_bytes_per_kbps - min_video_bytes_per_kbps) / max_video_bytes_per_kbps)
+            .clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let mut risk_margin = match worst_confidence {
+        AmfCalibrationConfidence::High => 0.03,
+        AmfCalibrationConfidence::Medium => 0.05,
+        AmfCalibrationConfidence::Low => 0.08,
+    };
+    risk_margin += (spread_ratio * 0.5).clamp(0.0, 0.08);
+
+    let guarded_video_bytes_per_kbps = conservative_video_bytes_per_kbps * (1.0 + risk_margin);
+    let raw_calibrated = ((desired_video_bytes as f64) / guarded_video_bytes_per_kbps).max(1.0);
+
+    let upward_cap = match worst_confidence {
+        AmfCalibrationConfidence::High => 1.25,
+        AmfCalibrationConfidence::Medium => 1.14,
+        AmfCalibrationConfidence::Low => 1.08,
+    };
+    let capped_upward = raw_calibrated.min(f64::from(current_video_bitrate_kbps) * upward_cap);
+    let under_target_guard = match worst_confidence {
+        AmfCalibrationConfidence::High => 0.992,
+        AmfCalibrationConfidence::Medium => 0.984,
+        AmfCalibrationConfidence::Low => 0.972,
+    };
+    let calibrated = (capped_upward * under_target_guard)
+        .round()
+        .clamp(100.0, MAX_VIDEO_BITRATE_KBPS as f64) as u32;
+
+    tracing::info!(
+        calibration_observations = used_results,
+        conservative_video_bytes_per_kbps,
+        guarded_video_bytes_per_kbps,
+        desired_video_bytes,
+        full_non_video_bytes,
+        fill_ratio,
+        spread_ratio,
+        confidence = worst_confidence.label(),
+        risk_margin,
+        raw_calibrated,
+        calibrated_bitrate = calibrated,
+        "AMF calibration computed conservative bitrate"
+    );
+
+    calibrated.max(MIN_AUTO_VIDEO_BITRATE_KBPS)
+}
+
 /// Calibrate AMF video bitrate using detailed calibration metrics.
 /// Uses simple linear extrapolation: if sample produced X bytes at bitrate B,
 /// then full video will produce X * (full_duration/sample_duration) bytes at bitrate B.
@@ -1299,77 +1653,14 @@ fn calibrate_amf_video_bitrate(
     audio_bitrate_kbps: u32,
     target_size_bytes: u64,
 ) -> u32 {
-    let sample_duration_secs = calibration_result.sample_duration_secs.max(0.1);
-    let full_duration_secs = full_duration_secs.max(sample_duration_secs);
-
-    // Compute non-video bytes for the full video using standard estimation
-    let full_non_video_bytes =
-        estimate_non_video_bytes(full_duration_secs, audio_bitrate_kbps, full_num_segments);
-
-    // Apply adaptive fill ratio based on content complexity
-    let fill_ratio = calibration_result.adaptive_fill_ratio();
-    let safe_target_size_bytes = ((target_size_bytes as f64) * fill_ratio) as u64;
-
-    // Desired video bytes = safe_target - non-video (audio + container overhead)
-    let desired_video_bytes = safe_target_size_bytes
-        .saturating_sub(full_non_video_bytes)
-        .max(1);
-
-    // Extrapolate sample video bytes to full duration
-    // sample_video_bytes is what the encoder actually produced for video-only
-    let avg_sample_seg_len =
-        sample_duration_secs / calibration_result.sample_num_segments.max(1) as f64;
-    let avg_full_seg_len = full_duration_secs / full_num_segments.max(1) as f64;
-    let segment_length_ratio = avg_full_seg_len / avg_sample_seg_len;
-
-    // AMF rate control produces significantly lower bitrates on short segments
-    // compared to long continuous segments. We apply an empirical boost to the
-    // extrapolated bytes to simulate the VBR overshoot on the long segments.
-    let length_correction = if segment_length_ratio > 1.1 {
-        1.0 + (segment_length_ratio.log10() * 0.22).clamp(0.0, 0.40)
-    } else {
-        1.0
-    };
-
-    let extrapolated_full_video = (calibration_result.sample_video_bytes as f64)
-        * (full_duration_secs / sample_duration_secs)
-        * length_correction;
-
-    if extrapolated_full_video <= 1.0 {
-        return current_video_bitrate_kbps;
-    }
-
-    let raw_bitrate_ratio = (desired_video_bytes as f64) / extrapolated_full_video;
-
-    // AMF VBR exhibits an S-curve: it resists dropping below MaxQP and going above MinQP.
-    // To force file size changes, we must apply super-linear bitrate adjustments.
-    let compensated_ratio = if raw_bitrate_ratio > 1.0 {
-        raw_bitrate_ratio.powf(0.85) // Dampen upward scaling to avoid overshoot
-    } else {
-        raw_bitrate_ratio.powf(1.15) // Steepen downward scaling to overcome MaxQP resistance
-    };
-
-    // Cap the ratio to prevent extreme adjustments
-    let capped_ratio = compensated_ratio.clamp(0.2, 5.0);
-
-    let calibrated = (f64::from(current_video_bitrate_kbps) * capped_ratio)
-        .round()
-        .clamp(100.0, MAX_VIDEO_BITRATE_KBPS as f64) as u32;
-
-    tracing::info!(
-        sample_video_bytes = calibration_result.sample_video_bytes,
-        length_correction,
-        extrapolated_full_video,
-        desired_video_bytes,
-        raw_bitrate_ratio,
-        compensated_ratio,
-        capped_ratio,
-        fill_ratio,
-        calibrated_bitrate = calibrated,
-        "AMF calibration computed bitrate"
-    );
-
-    calibrated.max(MIN_AUTO_VIDEO_BITRATE_KBPS)
+    calibrate_amf_video_bitrate_from_results(
+        current_video_bitrate_kbps,
+        std::slice::from_ref(calibration_result),
+        full_duration_secs,
+        full_num_segments,
+        audio_bitrate_kbps,
+        target_size_bytes,
+    )
 }
 
 fn desired_output_size_bytes(encoder: ExportVideoEncoder, target_size_bytes: u64) -> u64 {
@@ -1912,21 +2203,105 @@ mod tests {
     }
 
     #[test]
+    fn high_accuracy_calibration_can_use_four_windows_for_long_clips() {
+        let request = ClipExportRequest {
+            input_path: PathBuf::from("input.mp4"),
+            output_path: PathBuf::from("output.mp4"),
+            keep_ranges: vec![TimeRange {
+                start_secs: 0.0,
+                end_secs: 300.0,
+            }],
+            target_size_mb: 3,
+            audio_bitrate_kbps: 128,
+            use_hardware_acceleration: true,
+            preferred_encoder: EncoderType::Auto,
+            metadata: VideoFileMetadata {
+                duration_secs: 300.0,
+                width: 1920,
+                height: 1080,
+                has_audio: true,
+                fps: 60.0,
+            },
+            stream_copy: false,
+            output_width: None,
+            output_height: None,
+            output_fps: None,
+        };
+        let calibration = build_amf_calibration_request_with_mode(
+            &request,
+            calibration_duration_secs_for_mode(300.0, true),
+            PathBuf::from("calibration-accurate.mp4"),
+            true,
+        );
+        assert_eq!(calibration.keep_ranges.len(), 4);
+    }
+
+    #[test]
+    fn low_confidence_calibration_triggers_refinement_policy() {
+        let low_confidence =
+            AmfCalibrationResult::from_attempt(1_050_000, 3.0, 1, 128, 350, 120.0, 6);
+        assert_eq!(
+            low_confidence.confidence_tier,
+            AmfCalibrationConfidence::Low
+        );
+        assert!(should_run_refinement_calibration(&low_confidence, 120.0));
+    }
+
+    #[test]
+    fn high_confidence_calibration_skips_refinement_policy() {
+        let high_confidence =
+            AmfCalibrationResult::from_attempt(720_000, 10.0, 3, 64, 500, 20.0, 3);
+        assert_eq!(
+            high_confidence.confidence_tier,
+            AmfCalibrationConfidence::High
+        );
+        assert!(!should_run_refinement_calibration(&high_confidence, 20.0));
+        assert!(!should_run_refinement_calibration(&high_confidence, 120.0));
+    }
+
+    #[test]
     fn calibration_bitrate_scales_from_the_sample_size() {
         // 3 calibration segments, 1 full segment, 48 kbps audio.
         // Sample: 600KB at 300kbps for 4 seconds
         // Full: 20 seconds, target 3MB
-        let amf_result = AmfCalibrationResult::from_attempt(600_000, 4.0, 3, 48, 300);
+        let amf_result = AmfCalibrationResult::from_attempt(600_000, 4.0, 3, 48, 300, 20.0, 1);
         let calibrated =
             calibrate_amf_video_bitrate(300, &amf_result, 20.0, 1, 48, target_size_bytes(3));
-        // With power-law VBR compensation and segment length correction, the scale from 300 will be dampened.
-        // extrapolated = 600k * (20/4) = 3MB * length_correction(~1.25) = ~3.75MB
-        // desired = 3.14MB * 0.99 - non_video(~0.12MB) = ~2.99MB
-        // raw_ratio ~ 0.8, power ~ 0.77, calibrated ~ 300 * 0.77 = 231
         assert!(
-            (245..=265).contains(&calibrated),
+            (170..=240).contains(&calibrated),
             "calibrated: {}",
             calibrated
+        );
+    }
+
+    #[test]
+    fn multi_observation_amf_calibration_is_more_conservative_than_single_observation() {
+        let base_bitrate = 350;
+        let target_bytes = target_size_bytes(4);
+        let first =
+            AmfCalibrationResult::from_attempt(1_000_000, 6.0, 2, 80, base_bitrate, 60.0, 4);
+        let second = AmfCalibrationResult::from_attempt(1_450_000, 12.0, 4, 80, 300, 60.0, 4);
+        let single = calibrate_amf_video_bitrate_from_results(
+            base_bitrate,
+            std::slice::from_ref(&first),
+            60.0,
+            4,
+            80,
+            target_bytes,
+        );
+        let multi = calibrate_amf_video_bitrate_from_results(
+            base_bitrate,
+            &[first, second],
+            60.0,
+            4,
+            80,
+            target_bytes,
+        );
+        assert!(
+            multi <= single,
+            "multi={} should be <= single={} for under-target conservative solve",
+            multi,
+            single
         );
     }
 
