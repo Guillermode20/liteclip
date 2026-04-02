@@ -121,8 +121,11 @@ impl AmfCalibrationResult {
         audio_bitrate_kbps: u32,
         calibration_bitrate_kbps: u32,
     ) -> Self {
-        let estimated_non_video =
-            estimate_non_video_bytes(sample_duration_secs, audio_bitrate_kbps, sample_num_segments);
+        let estimated_non_video = estimate_non_video_bytes(
+            sample_duration_secs,
+            audio_bitrate_kbps,
+            sample_num_segments,
+        );
 
         let sample_video_bytes = sample_size_bytes.saturating_sub(estimated_non_video).max(1);
 
@@ -166,7 +169,8 @@ impl AmfCalibrationResult {
             AMF_CALIBRATION_FILL_RATIO_CONFIDENT
         } else {
             let t = (self.complexity_ratio - AMF_CALIBRATION_COMPLEXITY_THRESHOLD_LOW)
-                / (AMF_CALIBRATION_COMPLEXITY_THRESHOLD_HIGH - AMF_CALIBRATION_COMPLEXITY_THRESHOLD_LOW);
+                / (AMF_CALIBRATION_COMPLEXITY_THRESHOLD_HIGH
+                    - AMF_CALIBRATION_COMPLEXITY_THRESHOLD_LOW);
             AMF_CALIBRATION_FILL_RATIO_CONFIDENT
                 - t * (AMF_CALIBRATION_FILL_RATIO_CONFIDENT - AMF_CALIBRATION_FILL_RATIO)
         }
@@ -1299,8 +1303,9 @@ fn calibrate_amf_video_bitrate(
     let full_duration_secs = full_duration_secs.max(sample_duration_secs);
 
     // Compute non-video bytes for the full video using standard estimation
-    let full_non_video_bytes = estimate_non_video_bytes(full_duration_secs, audio_bitrate_kbps, full_num_segments);
-    
+    let full_non_video_bytes =
+        estimate_non_video_bytes(full_duration_secs, audio_bitrate_kbps, full_num_segments);
+
     // Apply adaptive fill ratio based on content complexity
     let fill_ratio = calibration_result.adaptive_fill_ratio();
     let safe_target_size_bytes = ((target_size_bytes as f64) * fill_ratio) as u64;
@@ -1312,12 +1317,13 @@ fn calibrate_amf_video_bitrate(
 
     // Extrapolate sample video bytes to full duration
     // sample_video_bytes is what the encoder actually produced for video-only
-    let avg_sample_seg_len = sample_duration_secs / calibration_result.sample_num_segments.max(1) as f64;
+    let avg_sample_seg_len =
+        sample_duration_secs / calibration_result.sample_num_segments.max(1) as f64;
     let avg_full_seg_len = full_duration_secs / full_num_segments.max(1) as f64;
     let segment_length_ratio = avg_full_seg_len / avg_sample_seg_len;
-    
+
     // AMF rate control produces significantly lower bitrates on short segments
-    // compared to long continuous segments. We apply an empirical boost to the 
+    // compared to long continuous segments. We apply an empirical boost to the
     // extrapolated bytes to simulate the VBR overshoot on the long segments.
     let length_correction = if segment_length_ratio > 1.1 {
         1.0 + (segment_length_ratio.log10() * 0.22).clamp(0.0, 0.40)
@@ -1328,7 +1334,7 @@ fn calibrate_amf_video_bitrate(
     let extrapolated_full_video = (calibration_result.sample_video_bytes as f64)
         * (full_duration_secs / sample_duration_secs)
         * length_correction;
-    
+
     if extrapolated_full_video <= 1.0 {
         return current_video_bitrate_kbps;
     }
@@ -1776,7 +1782,11 @@ mod tests {
         // ratio = 2.9 / 3.22 = ~0.90
         // with the new 0.95 overshoot multiplier: ratio = 0.90 * 0.95 = ~0.855
         // 300 * 0.855 = 256.5
-        assert!((254..=258).contains(&next_video_bitrate_kbps), "next_video_bitrate_kbps: {}", next_video_bitrate_kbps);
+        assert!(
+            (254..=258).contains(&next_video_bitrate_kbps),
+            "next_video_bitrate_kbps: {}",
+            next_video_bitrate_kbps
+        );
     }
 
     #[test]
@@ -1907,19 +1917,17 @@ mod tests {
         // Sample: 600KB at 300kbps for 4 seconds
         // Full: 20 seconds, target 3MB
         let amf_result = AmfCalibrationResult::from_attempt(600_000, 4.0, 3, 48, 300);
-        let calibrated = calibrate_amf_video_bitrate(
-            300,
-            &amf_result,
-            20.0,
-            1,
-            48,
-            target_size_bytes(3),
-        );
+        let calibrated =
+            calibrate_amf_video_bitrate(300, &amf_result, 20.0, 1, 48, target_size_bytes(3));
         // With power-law VBR compensation and segment length correction, the scale from 300 will be dampened.
         // extrapolated = 600k * (20/4) = 3MB * length_correction(~1.25) = ~3.75MB
         // desired = 3.14MB * 0.99 - non_video(~0.12MB) = ~2.99MB
         // raw_ratio ~ 0.8, power ~ 0.77, calibrated ~ 300 * 0.77 = 231
-        assert!((245..=265).contains(&calibrated), "calibrated: {}", calibrated);
+        assert!(
+            (245..=265).contains(&calibrated),
+            "calibrated: {}",
+            calibrated
+        );
     }
 
     #[test]
