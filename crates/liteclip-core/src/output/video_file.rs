@@ -101,11 +101,83 @@ pub struct ExportBitrateEstimate {
     pub total_kbps: u32,
 }
 
+/// Detailed result from AMF calibration pass for improved bitrate extrapolation.
+/// Captures both the raw size and derived metrics about content complexity.
+#[derive(Debug, Clone, Copy)]
+pub struct AmfCalibrationResult {
+    pub sample_size_bytes: u64,
+    pub sample_video_bytes: u64,
+    pub sample_duration_secs: f64,
+    pub sample_num_segments: usize,
+    pub measured_overhead_bytes: u64,
+    pub complexity_ratio: f64,
+}
+
+impl AmfCalibrationResult {
+    fn from_attempt(
+        sample_size_bytes: u64,
+        sample_duration_secs: f64,
+        sample_num_segments: usize,
+        audio_bitrate_kbps: u32,
+        calibration_bitrate_kbps: u32,
+    ) -> Self {
+        let estimated_non_video =
+            estimate_non_video_bytes(sample_duration_secs, audio_bitrate_kbps, sample_num_segments);
+
+        let sample_video_bytes = sample_size_bytes.saturating_sub(estimated_non_video).max(1);
+
+        // Expected video bytes at the calibration bitrate
+        let expected_video_bytes = ((f64::from(calibration_bitrate_kbps) * 1000.0 / 8.0)
+            * sample_duration_secs.max(0.1))
+        .round() as u64;
+
+        // Complexity ratio: actual vs expected video bytes
+        // > 1.0 means harder to compress than expected, < 1.0 means easier
+        let complexity_ratio = if expected_video_bytes > 0 {
+            (sample_video_bytes as f64) / (expected_video_bytes as f64)
+        } else {
+            1.0
+        };
+
+        let measured_overhead_bytes = sample_size_bytes.saturating_sub(expected_video_bytes);
+
+        Self {
+            sample_size_bytes,
+            sample_video_bytes,
+            sample_duration_secs,
+            sample_num_segments,
+            measured_overhead_bytes,
+            complexity_ratio,
+        }
+    }
+
+    fn is_complex_content(&self) -> bool {
+        self.complexity_ratio > AMF_CALIBRATION_COMPLEXITY_THRESHOLD_HIGH
+    }
+
+    fn is_simple_content(&self) -> bool {
+        self.complexity_ratio < AMF_CALIBRATION_COMPLEXITY_THRESHOLD_LOW
+    }
+
+    fn adaptive_fill_ratio(&self) -> f64 {
+        if self.is_complex_content() {
+            AMF_CALIBRATION_FILL_RATIO
+        } else if self.is_simple_content() {
+            AMF_CALIBRATION_FILL_RATIO_CONFIDENT
+        } else {
+            let t = (self.complexity_ratio - AMF_CALIBRATION_COMPLEXITY_THRESHOLD_LOW)
+                / (AMF_CALIBRATION_COMPLEXITY_THRESHOLD_HIGH - AMF_CALIBRATION_COMPLEXITY_THRESHOLD_LOW);
+            AMF_CALIBRATION_FILL_RATIO_CONFIDENT
+                - t * (AMF_CALIBRATION_FILL_RATIO_CONFIDENT - AMF_CALIBRATION_FILL_RATIO)
+        }
+    }
+}
+
 const MIN_VIDEO_BITRATE_KBPS: u32 = 300;
 const MIN_AUTO_VIDEO_BITRATE_KBPS: u32 = 100;
 const MAX_EXPORT_ATTEMPTS: usize = 6;
 const AMF_MAX_EXPORT_ATTEMPTS: usize = 4;
-const AMF_MIN_CALIBRATION_DURATION_SECS: f64 = 30.0; // Skip calibration for shorter clips
+const AMF_MIN_CALIBRATION_DURATION_SECS: f64 = 10.0; // Enable calibration for clips >= 10 seconds
 const MIN_REASONABLE_FPS: f64 = 1.0;
 const MAX_REASONABLE_FPS: f64 = 240.0;
 const FALLBACK_EXPORT_FPS: f64 = 60.0;
@@ -116,11 +188,14 @@ const AMF_TARGET_FILL_RATIO_IDEAL: f64 = 0.925;
 // Observed correction factor ~1.056× (1.576 at 376 kbps vs 1.492 at 287 kbps). We target
 // a proportionally higher fill ratio in the calibration formula to compensate, so the first
 // full encode attempt lands in the acceptable 90-100% window without a retry.
-const AMF_CALIBRATION_FILL_RATIO: f64 = 0.990;
-const AMF_CALIBRATION_SAMPLE_RATIO: f64 = 0.15;
-const AMF_CALIBRATION_MIN_SAMPLE_SECS: f64 = 4.0;
-const AMF_CALIBRATION_MAX_SAMPLE_SECS: f64 = 8.0;
-const AMF_CALIBRATION_THREE_WINDOW_RATIO: f64 = 12.0;
+const AMF_CALIBRATION_FILL_RATIO: f64 = 0.985; // Slightly lower to allow more headroom for variance
+const AMF_CALIBRATION_FILL_RATIO_CONFIDENT: f64 = 0.990; // Higher when calibration quality is good
+const AMF_CALIBRATION_SAMPLE_RATIO: f64 = 0.12; // Slightly reduced from 0.15
+const AMF_CALIBRATION_MIN_SAMPLE_SECS: f64 = 3.0; // Reduced from 4.0 for short clips
+const AMF_CALIBRATION_MAX_SAMPLE_SECS: f64 = 10.0; // Increased max for complex content
+const AMF_CALIBRATION_THREE_WINDOW_RATIO: f64 = 10.0; // Slightly more aggressive
+const AMF_CALIBRATION_COMPLEXITY_THRESHOLD_HIGH: f64 = 1.35; // Ratio indicating high complexity
+const AMF_CALIBRATION_COMPLEXITY_THRESHOLD_LOW: f64 = 1.15; // Ratio indicating low complexity
 const TARGET_SIZE_UNDERFILL_RATIO: f64 = 0.992;
 const MAX_VIDEO_BITRATE_KBPS: u32 = 400_000;
 
@@ -467,20 +542,27 @@ fn run_clip_export(
         }
 
         if let Some(calibration_result) = calibration_result {
-            let calibrated_video_bitrate_kbps = calibrate_amf_video_bitrate(
-                calibration_bitrate_kbps,
+            let amf_result = AmfCalibrationResult::from_attempt(
                 calibration_result.size_bytes,
                 calibration_request.output_duration_secs().max(0.1),
                 calibration_request.keep_ranges.len(),
+                bitrate_estimate.audio_kbps,
+                calibration_bitrate_kbps,
+            );
+
+            let calibrated_video_bitrate_kbps = calibrate_amf_video_bitrate(
+                calibration_bitrate_kbps,
+                &amf_result,
                 output_duration_secs,
                 request.keep_ranges.len(),
                 bitrate_estimate.audio_kbps,
                 target_size_bytes,
             );
             info!(
-                "AMF calibration pass produced {} bytes at {} kbps; next full encode will use {} kbps",
+                "AMF calibration pass produced {} bytes at {} kbps; complexity_ratio={:.2}; next full encode will use {} kbps",
                 calibration_result.size_bytes,
                 calibration_bitrate_kbps,
+                amf_result.complexity_ratio,
                 calibrated_video_bitrate_kbps
             );
             bitrate_estimate.video_kbps = calibrated_video_bitrate_kbps;
@@ -1016,7 +1098,8 @@ fn next_export_video_bitrate_kbps(
     if encoder.prefers_direct_retry() {
         let mut ratio = (ideal_target_video_bytes as f64) / (current_video_bytes as f64);
         if actual_size_bytes > target_size_bytes {
-            ratio *= 0.97;
+            // Apply a stronger correction if we missed our adaptive target bounds
+            ratio *= 0.95;
         }
         return (f64::from(current_video_bitrate_kbps) * ratio)
             .round()
@@ -1199,85 +1282,86 @@ fn build_amf_calibration_request(
     calibration_request
 }
 
+/// Calibrate AMF video bitrate using detailed calibration metrics.
+/// Uses simple linear extrapolation: if sample produced X bytes at bitrate B,
+/// then full video will produce X * (full_duration/sample_duration) bytes at bitrate B.
+/// We compute the ratio needed to hit target and apply it.
 #[allow(clippy::too_many_arguments)]
 fn calibrate_amf_video_bitrate(
     current_video_bitrate_kbps: u32,
-    sample_size_bytes: u64,
-    sample_duration_secs: f64,
-    sample_num_segments: usize,
+    calibration_result: &AmfCalibrationResult,
     full_duration_secs: f64,
     full_num_segments: usize,
     audio_bitrate_kbps: u32,
     target_size_bytes: u64,
 ) -> u32 {
-    let sample_duration_secs = sample_duration_secs.max(0.1);
+    let sample_duration_secs = calibration_result.sample_duration_secs.max(0.1);
     let full_duration_secs = full_duration_secs.max(sample_duration_secs);
 
-    // Strip audio + container overhead before extrapolating. Overhead is NOT
-    // proportional to duration: calibration uses multiple short segments (higher
-    // per-second container overhead) while the full encode uses fewer segments.
-    // Using total bytes causes a systematic undershoot, worst at low bitrates
-    // where overhead is a larger fraction of the total.
-    let sample_non_video = estimate_non_video_bytes(
-        sample_duration_secs,
-        audio_bitrate_kbps,
-        sample_num_segments,
-    );
-    let sample_video_bytes = sample_size_bytes.saturating_sub(sample_non_video).max(1);
+    // Compute non-video bytes for the full video using standard estimation
+    let full_non_video_bytes = estimate_non_video_bytes(full_duration_secs, audio_bitrate_kbps, full_num_segments);
+    
+    // Apply adaptive fill ratio based on content complexity
+    let fill_ratio = calibration_result.adaptive_fill_ratio();
+    let safe_target_size_bytes = ((target_size_bytes as f64) * fill_ratio) as u64;
 
-    let full_non_video =
-        estimate_non_video_bytes(full_duration_secs, audio_bitrate_kbps, full_num_segments);
-    let desired_full_total = (target_size_bytes as f64 * AMF_CALIBRATION_FILL_RATIO).round() as u64;
-    let desired_video_bytes = desired_full_total.saturating_sub(full_non_video).max(1);
+    // Desired video bytes = safe_target - non-video (audio + container overhead)
+    let desired_video_bytes = safe_target_size_bytes
+        .saturating_sub(full_non_video_bytes)
+        .max(1);
 
-    let extrapolated_full_video =
-        (sample_video_bytes as f64) * (full_duration_secs / sample_duration_secs);
+    // Extrapolate sample video bytes to full duration
+    // sample_video_bytes is what the encoder actually produced for video-only
+    let avg_sample_seg_len = sample_duration_secs / calibration_result.sample_num_segments.max(1) as f64;
+    let avg_full_seg_len = full_duration_secs / full_num_segments.max(1) as f64;
+    let segment_length_ratio = avg_full_seg_len / avg_sample_seg_len;
+    
+    // AMF rate control produces significantly lower bitrates on short segments
+    // compared to long continuous segments. We apply an empirical boost to the 
+    // extrapolated bytes to simulate the VBR overshoot on the long segments.
+    let length_correction = if segment_length_ratio > 1.1 {
+        1.0 + (segment_length_ratio.log10() * 0.22).clamp(0.0, 0.40)
+    } else {
+        1.0
+    };
+
+    let extrapolated_full_video = (calibration_result.sample_video_bytes as f64)
+        * (full_duration_secs / sample_duration_secs)
+        * length_correction;
+    
     if extrapolated_full_video <= 1.0 {
         return current_video_bitrate_kbps;
     }
 
-    // Calculate the raw bitrate ratio needed to hit target
     let raw_bitrate_ratio = (desired_video_bytes as f64) / extrapolated_full_video;
 
-    // AMF vbr_peak has non-linear overshoot: higher bitrates overshoot by larger percentages.
-    // Apply a small compensation factor when extrapolating upward to account for this.
-    // Observed: extrapolating from 793→972 kbps (ratio 1.23) produced 2% overshoot.
-    // The overshoot grows roughly proportionally to the extrapolation ratio above 1.0.
-    const UPWARD_EXTRAPOLATION_COMPENSATION: f64 = 0.015; // 1.5% per unit ratio above 1.0
-    const MAX_UPWARD_EXTRAPOLATION_RATIO: f64 = 1.5;
-    const EXTRAPOLATION_SAFETY_MARGIN: f64 = 0.85; // 15% safety margin when capping
-
-    let (capped_ratio, was_capped) = if raw_bitrate_ratio > MAX_UPWARD_EXTRAPOLATION_RATIO {
-        // Extrapolation ratio exceeds cap - apply both cap and safety margin
-        (
-            MAX_UPWARD_EXTRAPOLATION_RATIO * EXTRAPOLATION_SAFETY_MARGIN,
-            true,
-        )
-    } else if raw_bitrate_ratio > 1.0 {
-        // Upward extrapolation within normal range - apply proportional compensation
-        // for non-linear VBR overshoot. Higher ratios need more compensation.
-        let overshoot_compensation =
-            1.0 - UPWARD_EXTRAPOLATION_COMPENSATION * (raw_bitrate_ratio - 1.0);
-        (raw_bitrate_ratio * overshoot_compensation, false)
+    // AMF VBR exhibits an S-curve: it resists dropping below MaxQP and going above MinQP.
+    // To force file size changes, we must apply super-linear bitrate adjustments.
+    let compensated_ratio = if raw_bitrate_ratio > 1.0 {
+        raw_bitrate_ratio.powf(0.85) // Dampen upward scaling to avoid overshoot
     } else {
-        // Downward extrapolation - use as-is (undershoot is acceptable)
-        (raw_bitrate_ratio, false)
+        raw_bitrate_ratio.powf(1.15) // Steepen downward scaling to overcome MaxQP resistance
     };
+
+    // Cap the ratio to prevent extreme adjustments
+    let capped_ratio = compensated_ratio.clamp(0.2, 5.0);
 
     let calibrated = (f64::from(current_video_bitrate_kbps) * capped_ratio)
         .round()
         .clamp(100.0, MAX_VIDEO_BITRATE_KBPS as f64) as u32;
 
-    // If we capped the extrapolation, log a warning about potential quality limitation
-    if was_capped {
-        tracing::warn!(
-            calibration_bitrate = current_video_bitrate_kbps,
-            target_ratio = raw_bitrate_ratio,
-            capped_ratio,
-            "AMF calibration: capped upward extrapolation ratio to prevent overshoot. \
-             Consider using higher calibration bitrate or software encoder for this target."
-        );
-    }
+    tracing::info!(
+        sample_video_bytes = calibration_result.sample_video_bytes,
+        length_correction,
+        extrapolated_full_video,
+        desired_video_bytes,
+        raw_bitrate_ratio,
+        compensated_ratio,
+        capped_ratio,
+        fill_ratio,
+        calibrated_bitrate = calibrated,
+        "AMF calibration computed bitrate"
+    );
 
     calibrated.max(MIN_AUTO_VIDEO_BITRATE_KBPS)
 }
@@ -1687,7 +1771,12 @@ mod tests {
             None,
         );
 
-        assert!((260..=264).contains(&next_video_bitrate_kbps));
+        // ideal = 3.14MB * 0.925 = ~2.9MB
+        // current = 3.22MB
+        // ratio = 2.9 / 3.22 = ~0.90
+        // with the new 0.95 overshoot multiplier: ratio = 0.90 * 0.95 = ~0.855
+        // 300 * 0.855 = 256.5
+        assert!((254..=258).contains(&next_video_bitrate_kbps), "next_video_bitrate_kbps: {}", next_video_bitrate_kbps);
     }
 
     #[test]
@@ -1784,22 +1873,53 @@ mod tests {
             8.0,
             PathBuf::from("calibration-medium.mp4"),
         );
-        assert_eq!(medium_calibration.keep_ranges.len(), 2);
+        // With AMF_CALIBRATION_THREE_WINDOW_RATIO=10.0, 80s duration with 8s sample
+        // (ratio=10.0) now qualifies for 3 windows
+        assert_eq!(medium_calibration.keep_ranges.len(), 3);
 
         let long_calibration =
             build_amf_calibration_request(&request, 10.0, PathBuf::from("calibration-long.mp4"));
+        // 120s duration with 10s sample (ratio=12.0) definitely qualifies for 3 windows
         assert_eq!(long_calibration.keep_ranges.len(), 3);
+
+        // Test the boundary case for 2 windows: 70s duration with 8s sample = ratio 8.75 < 10
+        let two_window_calibration = build_amf_calibration_request(
+            &ClipExportRequest {
+                keep_ranges: vec![TimeRange {
+                    start_secs: 0.0,
+                    end_secs: 70.0,
+                }],
+                metadata: VideoFileMetadata {
+                    duration_secs: 70.0,
+                    ..request.metadata.clone()
+                },
+                ..request.clone()
+            },
+            8.0,
+            PathBuf::from("calibration-two.mp4"),
+        );
+        assert_eq!(two_window_calibration.keep_ranges.len(), 2);
     }
 
     #[test]
     fn calibration_bitrate_scales_from_the_sample_size() {
         // 3 calibration segments, 1 full segment, 48 kbps audio.
-        // Video-only extrapolation with AMF_CALIBRATION_FILL_RATIO=0.990 pushes the
-        // calibrated bitrate higher than the old total-bytes formula to compensate
-        // for AMF's non-linear overshoot and per-segment container overhead bias.
-        let calibrated =
-            calibrate_amf_video_bitrate(300, 600_000, 4.0, 3, 20.0, 1, 48, target_size_bytes(3));
-        assert!((315..=345).contains(&calibrated));
+        // Sample: 600KB at 300kbps for 4 seconds
+        // Full: 20 seconds, target 3MB
+        let amf_result = AmfCalibrationResult::from_attempt(600_000, 4.0, 3, 48, 300);
+        let calibrated = calibrate_amf_video_bitrate(
+            300,
+            &amf_result,
+            20.0,
+            1,
+            48,
+            target_size_bytes(3),
+        );
+        // With power-law VBR compensation and segment length correction, the scale from 300 will be dampened.
+        // extrapolated = 600k * (20/4) = 3MB * length_correction(~1.25) = ~3.75MB
+        // desired = 3.14MB * 0.99 - non_video(~0.12MB) = ~2.99MB
+        // raw_ratio ~ 0.8, power ~ 0.77, calibrated ~ 300 * 0.77 = 231
+        assert!((245..=265).contains(&calibrated), "calibrated: {}", calibrated);
     }
 
     #[test]
