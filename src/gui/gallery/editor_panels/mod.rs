@@ -1,7 +1,5 @@
 use eframe::egui;
 
-#[cfg(feature = "parakeet")]
-use super::start_subtitle_generation;
 use super::{
     add_cut_point, estimate_export_bitrates_from_editor, format_compact_duration, format_size_mb,
     format_timestamp_precise, remove_cut_point, start_export, toggle_editor_playback, x_to_time,
@@ -39,45 +37,7 @@ pub(super) fn render_preview_panel_impl(
                     .fit_to_exact_size(preview_size)
                     .maintain_aspect_ratio(true),
             );
-            let rect = response.rect;
-            if editor.burn_auto_subtitles && !editor.subtitle_cues.is_empty() {
-                if let Some(et) = super::export_time_for_source_playhead(editor) {
-                    let t = et as f32;
-                    if let Some(line) = editor
-                        .subtitle_cues
-                        .iter()
-                        .find(|c| t >= c.start_secs && t < c.end_secs.max(c.start_secs + 0.05))
-                    {
-                        let text = line.text.as_str();
-                        let max_w = rect.width() - 16.0;
-                        let galley = ui.fonts_mut(|f| {
-                            let mut job = egui::text::LayoutJob::single_section(
-                                text.to_owned(),
-                                egui::TextFormat {
-                                    font_id: egui::FontId::proportional(16.0),
-                                    color: editor.subtitle_burn_color,
-                                    ..Default::default()
-                                },
-                            );
-                            job.wrap.max_width = max_w;
-                            f.layout_job(job)
-                        });
-                        let pad = 6.0;
-                        let bg_h = galley.size().y + pad * 2.0;
-                        let bg = egui::Rect::from_min_max(
-                            egui::pos2(rect.left() + 8.0, rect.bottom() - bg_h - 8.0),
-                            egui::pos2(rect.right() - 8.0, rect.bottom() - 8.0),
-                        );
-                        ui.painter()
-                            .rect_filled(bg, 4.0, egui::Color32::from_black_alpha(175));
-                        let pos = egui::pos2(
-                            bg.center().x - galley.size().x / 2.0,
-                            bg.center().y - galley.size().y / 2.0,
-                        );
-                        ui.painter().galley(pos, galley, editor.subtitle_burn_color);
-                    }
-                }
-            }
+            let _rect = response.rect;
         } else {
             let (rect, _) = ui.allocate_exact_size(preview_size, egui::Sense::hover());
             ui.painter().rect_filled(
@@ -698,96 +658,6 @@ fn render_size_section(ui: &mut egui::Ui, editor: &mut EditorState) {
 
         ui.add_space(8.0);
         ui.separator();
-        if editor.video.metadata.has_audio {
-            ui.checkbox(
-                &mut editor.burn_auto_subtitles,
-                "Burn subtitles into exported video (Parakeet)",
-            );
-            ui.label(
-                egui::RichText::new(
-                    "Generate subtitles first (Parakeet ONNX), edit text and colour below, then export. The final encode step burns them in. Leave model folder empty to download on first use.",
-                )
-                .small()
-                .weak(),
-            );
-            ui.horizontal(|ui| {
-                ui.label("Model folder:");
-                ui.add(
-                    egui::TextEdit::singleline(&mut editor.parakeet_model_dir_edit)
-                        .desired_width(280.0),
-                );
-            });
-            #[cfg(feature = "parakeet")]
-            {
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(
-                            !editor.has_active_export() && !editor.has_active_subtitle_gen(),
-                            egui::Button::new("Generate subtitles"),
-                        )
-                        .clicked()
-                    {
-                        start_subtitle_generation(editor);
-                    }
-                    if editor.has_active_subtitle_gen() {
-                        ui.spinner();
-                        ui.label("Working…");
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Subtitle colour:");
-                    let mut rgba = egui::Rgba::from(editor.subtitle_burn_color);
-                    if egui::widgets::color_picker::color_edit_button_rgba(
-                        ui,
-                        &mut rgba,
-                        egui::color_picker::Alpha::Opaque,
-                    )
-                    .changed()
-                    {
-                        editor.subtitle_burn_color = egui::Color32::from(rgba);
-                    }
-                });
-                if !editor.subtitle_cues.is_empty() {
-                    ui.label(egui::RichText::new("Edit lines (export timeline)").small());
-                    egui::ScrollArea::vertical()
-                        .max_height(220.0)
-                        .show(ui, |ui| {
-                            for cue in &mut editor.subtitle_cues {
-                                ui.horizontal(|ui| {
-                                    ui.label(format!(
-                                        "{:.1}s – {:.1}s",
-                                        cue.start_secs, cue.end_secs
-                                    ));
-                                });
-                                ui.add(
-                                    egui::TextEdit::multiline(&mut cue.text)
-                                        .desired_width(f32::INFINITY),
-                                );
-                                ui.separator();
-                            }
-                        });
-                    ui.label(
-                        egui::RichText::new(
-                            "Preview shows the active line when your playhead is inside a kept segment.",
-                        )
-                        .small()
-                        .weak(),
-                    );
-                }
-            }
-            #[cfg(not(feature = "parakeet"))]
-            {
-                ui.label(
-                    egui::RichText::new("This build does not include Parakeet; disable burn-in or rebuild with the `parakeet` feature.")
-                        .small()
-                        .weak(),
-                );
-                editor.burn_auto_subtitles = false;
-            }
-        } else if editor.burn_auto_subtitles {
-            editor.burn_auto_subtitles = false;
-        }
-
         ui.label(format!(
             "Kept duration after cuts: {}",
             format_compact_duration(kept_duration)

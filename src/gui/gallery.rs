@@ -4,10 +4,9 @@ use image::RgbaImage;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::collections::HashSet;
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::mpsc::Sender as TokioSender;
@@ -24,14 +23,8 @@ use decode_pipeline::PlaybackController;
 use crate::config::{Config, EncoderType};
 use crate::gui::manager::{show_toast, ToastKind};
 use crate::output::{
-    generate_thumbnail, probe_video_file, spawn_clip_export, subtitle_primary_colour_ass_from_rgb,
-    ClipExportRequest, ClipExportUpdate, PreparedSubtitleCue, PreparedSubtitles, TimeRange,
-    VideoFileMetadata,
-};
-#[cfg(feature = "parakeet")]
-use crate::output::{
-    resolve_parakeet_model_directory_with_progress, transcribe_parakeet_for_kept_ranges,
-    ParakeetModelDownloadProgress, SubtitleTranscribeProgress,
+    generate_thumbnail, probe_video_file, spawn_clip_export, ClipExportRequest, ClipExportUpdate,
+    TimeRange, VideoFileMetadata,
 };
 use crate::platform::AppEvent;
 
@@ -292,15 +285,6 @@ pub(super) struct EditorState {
     export_state: Option<ExportState>,
     export_output: Option<PathBuf>,
     custom_output_path: Option<PathBuf>,
-    /// Editable path string for Parakeet ONNX assets (folder containing model.onnx).
-    parakeet_model_dir_edit: String,
-    burn_auto_subtitles: bool,
-    /// Subtitles on the **export** timeline (after kept segments). Cleared when cuts/snippets change.
-    subtitle_cues: Vec<PreparedSubtitleCue>,
-    subtitle_burn_color: egui::Color32,
-    subtitles_ready_fingerprint: Option<u64>,
-    #[cfg(feature = "parakeet")]
-    subtitle_gen: Option<SubtitleGenState>,
     playback: PlaybackController,
     was_playing_before_scrub: bool,
     last_scrub_time: Option<Instant>,
@@ -310,31 +294,8 @@ pub(super) struct EditorState {
     thumbnail_strip_loading: bool,
 }
 
-#[cfg(feature = "parakeet")]
-enum SubtitleGenMessage {
-    ModelDownload(ParakeetModelDownloadProgress),
-    Transcribe(SubtitleTranscribeProgress),
-    Done(Result<Vec<PreparedSubtitleCue>, String>),
-}
-
-#[cfg(feature = "parakeet")]
-struct SubtitleGenState {
-    progress_rx: Receiver<SubtitleGenMessage>,
-    cancel_flag: Arc<AtomicBool>,
-    progress: f32,
-    message: String,
-    /// Hugging Face ONNX download in progress (empty model path).
-    is_download_phase: bool,
-}
-
 impl EditorState {
-    fn new(
-        video: VideoEntry,
-        preferred_encoder: EncoderType,
-        use_software_encoder: bool,
-        burn_auto_subtitles_default: bool,
-        parakeet_model_dir_edit: String,
-    ) -> Self {
+    fn new(video: VideoEntry, preferred_encoder: EncoderType, use_software_encoder: bool) -> Self {
         let target_size_mb = DEFAULT_TARGET_SIZE_MB
             .max(video.size_mb.round() as u32 / 2)
             .min(video.size_mb.ceil().max(1.0) as u32);
@@ -369,13 +330,6 @@ impl EditorState {
             export_state: None,
             export_output: None,
             custom_output_path: None,
-            parakeet_model_dir_edit,
-            burn_auto_subtitles: burn_auto_subtitles_default,
-            subtitle_cues: Vec::new(),
-            subtitle_burn_color: egui::Color32::WHITE,
-            subtitles_ready_fingerprint: None,
-            #[cfg(feature = "parakeet")]
-            subtitle_gen: None,
             playback,
             was_playing_before_scrub: false,
             last_scrub_time: None,
@@ -428,17 +382,6 @@ impl EditorState {
 
     fn has_active_export(&self) -> bool {
         self.export_state.is_some()
-    }
-
-    fn has_active_subtitle_gen(&self) -> bool {
-        #[cfg(feature = "parakeet")]
-        {
-            self.subtitle_gen.is_some()
-        }
-        #[cfg(not(feature = "parakeet"))]
-        {
-            false
-        }
     }
 
     /// Compute effective output resolution.
@@ -528,9 +471,6 @@ pub struct ClipCompressApp {
     delete_hold_started_at: Option<Instant>,
     preferred_export_encoder: EncoderType,
     use_software_encoder: bool,
-    /// Default Parakeet ONNX folder for export subtitles (from config).
-    parakeet_model_directory: Option<PathBuf>,
-    burn_auto_subtitles_default: bool,
     last_thumbnail_check: Instant,
 }
 
@@ -579,12 +519,6 @@ impl ClipCompressApp {
             delete_hold_started_at: None,
             preferred_export_encoder: config.video.encoder,
             use_software_encoder: config.general.use_software_encoder,
-            parakeet_model_directory: config
-                .general
-                .parakeet_model_directory
-                .as_ref()
-                .map(PathBuf::from),
-            burn_auto_subtitles_default: config.general.burn_auto_subtitles_default,
             last_thumbnail_check: Instant::now(),
         }
     }
@@ -1223,17 +1157,10 @@ impl ClipCompressApp {
     fn open_editor(&mut self, video: VideoEntry) {
         info!("Opening Clip & Compress editor for {:?}", video.path);
         self.unload_browser_thumbnails();
-        let parakeet_edit = self
-            .parakeet_model_directory
-            .as_ref()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_default();
         self.editor = Some(EditorState::new(
             video,
             self.preferred_export_encoder,
             self.use_software_encoder,
-            self.burn_auto_subtitles_default,
-            parakeet_edit,
         ));
     }
 
@@ -1361,45 +1288,6 @@ fn update_playback_clock(editor: &mut EditorState, _outcome: &mut EditorUiOutcom
     }
 }
 
-fn subtitle_edit_fingerprint(editor: &EditorState) -> u64 {
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    editor.video.path.hash(&mut h);
-    editor.cut_points.len().hash(&mut h);
-    for &x in &editor.cut_points {
-        x.to_bits().hash(&mut h);
-    }
-    editor.snippet_enabled.hash(&mut h);
-    h.finish()
-}
-
-pub(super) fn sync_subtitle_stale(editor: &mut EditorState) {
-    let fp = subtitle_edit_fingerprint(editor);
-    if let Some(saved) = editor.subtitles_ready_fingerprint {
-        if saved != fp {
-            editor.subtitles_ready_fingerprint = None;
-            if !editor.subtitle_cues.is_empty() {
-                editor.subtitle_cues.clear();
-                editor.status_message = Some(
-                    "Subtitles cleared — timeline changed. Generate subtitles again.".to_string(),
-                );
-            }
-        }
-    }
-}
-
-/// Map source-file playhead time to concatenated export timeline seconds (for subtitle preview).
-pub(super) fn export_time_for_source_playhead(editor: &EditorState) -> Option<f64> {
-    let t = editor.current_time_secs;
-    let mut offset = 0.0f64;
-    for r in editor.kept_ranges() {
-        if t >= r.start_secs && t < r.end_secs {
-            return Some(offset + (t - r.start_secs));
-        }
-        offset += r.duration_secs();
-    }
-    None
-}
-
 fn start_export(editor: &mut EditorState) {
     let kept_ranges = editor.kept_ranges();
     if kept_ranges.is_empty() {
@@ -1407,36 +1295,6 @@ fn start_export(editor: &mut EditorState) {
             Some("At least one snippet must stay enabled for export".to_string());
         return;
     }
-
-    if editor.burn_auto_subtitles {
-        if !editor.video.metadata.has_audio {
-            editor.error_message = Some(
-                "This clip has no audio track; automatic subtitles require audio.".to_string(),
-            );
-            return;
-        }
-        if editor.subtitle_cues.is_empty() {
-            editor.error_message =
-                Some("Generate subtitles first, or disable burn-in.".to_string());
-            return;
-        }
-        if editor.subtitles_ready_fingerprint != Some(subtitle_edit_fingerprint(editor)) {
-            editor.error_message = Some(
-                "Subtitles are out of date — generate again after your latest edits.".to_string(),
-            );
-            return;
-        }
-    }
-
-    let prepared_subtitles = if editor.burn_auto_subtitles {
-        let [r, g, b, _a] = editor.subtitle_burn_color.to_array();
-        Some(PreparedSubtitles {
-            cues: editor.subtitle_cues.clone(),
-            primary_colour_ass: subtitle_primary_colour_ass_from_rgb(r, g, b),
-        })
-    } else {
-        None
-    };
 
     let output_path = editor
         .custom_output_path
@@ -1469,9 +1327,6 @@ fn start_export(editor: &mut EditorState) {
                 editor.output_height
             },
             output_fps: Some(editor.effective_output_fps()),
-            burn_auto_subtitles: editor.burn_auto_subtitles,
-            parakeet_model_dir: None,
-            prepared_subtitles,
         },
         progress_tx,
         cancel_flag.clone(),
@@ -1488,176 +1343,6 @@ fn start_export(editor: &mut EditorState) {
     editor.error_message = None;
     editor.playback.pause_at(editor.current_time_secs);
     editor.is_playing = false;
-}
-
-#[cfg(feature = "parakeet")]
-pub(super) fn start_subtitle_generation(editor: &mut EditorState) {
-    if editor.has_active_subtitle_gen() || editor.has_active_export() {
-        return;
-    }
-    if !editor.video.metadata.has_audio {
-        editor.error_message = Some("No audio to transcribe.".to_string());
-        return;
-    }
-    let kept_ranges = editor.kept_ranges();
-    if kept_ranges.is_empty() {
-        editor.error_message = Some("Enable at least one snippet first.".to_string());
-        return;
-    }
-    let trimmed_model_path = editor.parakeet_model_dir_edit.trim().to_string();
-    let use_model_cache = trimmed_model_path.is_empty();
-
-    let (tx, rx) = mpsc::channel::<SubtitleGenMessage>();
-    let input_path = editor.video.path.clone();
-    let cancel_flag = Arc::new(AtomicBool::new(false));
-    let cflag = cancel_flag.clone();
-    let source_label = editor.video.filename.clone();
-    let use_cache_for_log = use_model_cache;
-    let model_input_for_log = trimmed_model_path.clone();
-    std::thread::spawn(move || {
-        tracing::info!(
-            video = %source_label,
-            use_model_cache = use_cache_for_log,
-            model_input = %model_input_for_log,
-            kept_ranges = kept_ranges.len(),
-            "Subtitle generation worker started"
-        );
-        let model_dir = if trimmed_model_path.is_empty() {
-            let (dl_tx, dl_rx) = mpsc::channel::<ParakeetModelDownloadProgress>();
-            let ui_dl = tx.clone();
-            let cancel_dl = cflag.clone();
-            let forward = std::thread::spawn(move || {
-                while let Ok(p) = dl_rx.recv() {
-                    if ui_dl.send(SubtitleGenMessage::ModelDownload(p)).is_err() {
-                        break;
-                    }
-                }
-            });
-            let resolved = resolve_parakeet_model_directory_with_progress("", &dl_tx, &cancel_dl);
-            drop(dl_tx);
-            let _ = forward.join();
-            match resolved {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::error!(error = %e, "Failed to resolve cached Parakeet model directory");
-                    let _ = tx.send(SubtitleGenMessage::Done(Err(format!("{e:#}"))));
-                    return;
-                }
-            }
-        } else {
-            let p = std::path::PathBuf::from(&trimmed_model_path);
-            if !p.is_dir() {
-                tracing::error!(
-                    path = %p.display(),
-                    "Configured Parakeet model directory is missing or invalid"
-                );
-                let _ = tx.send(SubtitleGenMessage::Done(Err(format!(
-                    "Parakeet model folder is missing or not a directory: {}",
-                    p.display()
-                ))));
-                return;
-            }
-            p
-        };
-        tracing::info!(model_dir = %model_dir.display(), "Resolved Parakeet model directory");
-
-        let (inner_tx, inner_rx) = mpsc::channel::<SubtitleTranscribeProgress>();
-        let worker_tx = tx.clone();
-        let bridge = std::thread::spawn(move || {
-            while let Ok(p) = inner_rx.recv() {
-                if worker_tx.send(SubtitleGenMessage::Transcribe(p)).is_err() {
-                    break;
-                }
-            }
-        });
-        let result = transcribe_parakeet_for_kept_ranges(
-            &input_path,
-            &kept_ranges,
-            &model_dir,
-            &inner_tx,
-            &cflag,
-        );
-        if let Err(ref err) = result {
-            tracing::error!(error = %err, "Subtitle transcription failed");
-        } else {
-            tracing::info!("Subtitle transcription finished successfully");
-        }
-        drop(inner_tx);
-        let _ = bridge.join();
-        let done = result.map_err(|e| format!("{e:#}"));
-        let _ = tx.send(SubtitleGenMessage::Done(done));
-    });
-
-    editor.subtitle_gen = Some(SubtitleGenState {
-        progress_rx: rx,
-        cancel_flag,
-        progress: 0.0,
-        message: if use_model_cache {
-            "Preparing model download…".to_string()
-        } else {
-            "Starting…".to_string()
-        },
-        is_download_phase: use_model_cache,
-    });
-    editor.error_message = None;
-    editor.status_message = Some("Generating subtitles…".to_string());
-}
-
-#[cfg(feature = "parakeet")]
-pub(super) fn poll_subtitle_generation(editor: &mut EditorState, ctx: &egui::Context) -> bool {
-    let Some(gen) = editor.subtitle_gen.as_mut() else {
-        return false;
-    };
-    let mut received = false;
-    loop {
-        let msg = match gen.progress_rx.try_recv() {
-            Ok(msg) => msg,
-            Err(TryRecvError::Empty) => break,
-            Err(TryRecvError::Disconnected) => {
-                editor.subtitle_gen = None;
-                editor.error_message =
-                    Some("Subtitle generation stopped unexpectedly. Please try again.".to_string());
-                ctx.request_repaint();
-                return true;
-            }
-        };
-        received = true;
-        match msg {
-            SubtitleGenMessage::ModelDownload(p) => {
-                gen.is_download_phase = true;
-                gen.progress = p.overall_fraction();
-                gen.message = p.status_line();
-            }
-            SubtitleGenMessage::Transcribe(p) => {
-                gen.is_download_phase = false;
-                gen.progress = p.fraction;
-                gen.message = p.message;
-            }
-            SubtitleGenMessage::Done(result) => {
-                editor.subtitle_gen = None;
-                match result {
-                    Ok(cues) => {
-                        editor.subtitle_cues = cues;
-                        editor.subtitles_ready_fingerprint =
-                            Some(subtitle_edit_fingerprint(editor));
-                        editor.status_message = Some(
-                            "Subtitles ready — review text and colour, then export.".to_string(),
-                        );
-                        editor.error_message = None;
-                    }
-                    Err(e) => {
-                        editor.error_message = Some(e);
-                    }
-                }
-                ctx.request_repaint();
-                return true;
-            }
-        }
-    }
-    if editor.subtitle_gen.is_some() {
-        ctx.request_repaint();
-    }
-    received
 }
 
 fn poll_editor_export_updates(

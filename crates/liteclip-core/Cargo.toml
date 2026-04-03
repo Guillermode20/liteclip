@@ -30,9 +30,6 @@ default = ["ffmpeg"]
 # This is the only supported backend; the previous ffmpeg-cli feature has been removed in favor of
 # native ffmpeg-next filter graphs for all operations including clip export.
 ffmpeg = ["dep:ffmpeg-next"]
-# NVIDIA Parakeet (ONNX) for optional burned-in subtitles on gallery export.
-# `ort` is declared so we enable `load-dynamic` (DLL) — static `ort-sys` libs require a matching MSVC STL.
-parakeet = ["dep:parakeet-rs", "dep:ureq", "dep:ort", "dep:zip"]
 # In release builds, also walk ancestors for `ffmpeg_dev/...` (debug builds always may).
 dev-ffmpeg-paths = []
 
@@ -52,17 +49,17 @@ dirs = "6"
 chrono = "0.4"
 windows-core = "0.58"
 ffmpeg-next = { version = "7.1.0", default-features = false, features = ["codec", "format", "filter", "software-scaling", "software-resampling", "device"], optional = true }
-parakeet-rs = { version = "0.3.4", optional = true }
-# Same version as `parakeet-rs`; features merged so we use dynamic ORT (see `parakeet` feature).
-ort = { version = "2.0.0-rc.12", optional = true, default-features = false, features = [
-    "load-dynamic",
-    "ndarray",
-    "tracing",
-    "tls-native",
-    "api-24",
-] }
-zip = { version = "2", optional = true }
-ureq = { version = "3", optional = true }
+# parakeet-rs = { version = "0.3.4", optional = true }
+# # Same version as `parakeet-rs`; features merged so we use dynamic ORT (see `parakeet` feature).
+# ort = { version = "2.0.0-rc.12", optional = true, default-features = false, features = [
+#     "load-dynamic",
+#     "ndarray",
+#     "tracing",
+#     "tls-native",
+#     "api-24",
+# ] }
+# zip = { version = "2", optional = true }
+# ureq = { version = "3", optional = true }
 nnnoiseless = "0.5.2"
 parking_lot = "0.12"
 memchr = "2"

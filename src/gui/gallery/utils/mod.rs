@@ -167,6 +167,38 @@ pub(super) fn format_timestamp_precise_impl(seconds: f64) -> String {
     format!("{hours:02}:{minutes:02}:{secs:02}.{millis:03}")
 }
 
+#[allow(dead_code)]
+pub(super) fn parse_timestamp_precise_impl(text: &str) -> Option<f64> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+
+    let normalized = text.replace(',', ".");
+    let parts: Vec<&str> = normalized.split(':').collect();
+    let seconds = match parts.as_slice() {
+        [secs] => secs.parse::<f64>().ok()?,
+        [mins, secs] => {
+            let mins = mins.parse::<f64>().ok()?;
+            let secs = secs.parse::<f64>().ok()?;
+            mins * 60.0 + secs
+        }
+        [hours, mins, secs] => {
+            let hours = hours.parse::<f64>().ok()?;
+            let mins = mins.parse::<f64>().ok()?;
+            let secs = secs.parse::<f64>().ok()?;
+            hours * 3600.0 + mins * 60.0 + secs
+        }
+        _ => return None,
+    };
+
+    if seconds.is_finite() && seconds >= 0.0 {
+        Some(seconds)
+    } else {
+        None
+    }
+}
+
 fn normalize_cut_points_impl(cut_points: &mut Vec<f64>, duration_secs: f64) {
     cut_points.retain(|point| *point > MIN_RANGE_SECS && *point < duration_secs - MIN_RANGE_SECS);
     cut_points.sort_by(|a, b| a.total_cmp(b));
@@ -374,6 +406,24 @@ pub(super) fn time_to_x_impl(rect: egui::Rect, time_secs: f64, duration_secs: f6
         (time_secs / duration_secs).clamp(0.0, 1.0) as f32
     };
     egui::lerp(rect.left()..=rect.right(), ratio)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timestamp_precise_roundtrip() {
+        assert_eq!(format_timestamp_precise_impl(3661.5), "01:01:01.500");
+        assert_eq!(parse_timestamp_precise_impl("01:01:01.500"), Some(3661.5));
+    }
+
+    #[test]
+    fn timestamp_precise_parser_accepts_short_forms() {
+        assert_eq!(parse_timestamp_precise_impl("61.5"), Some(61.5));
+        assert_eq!(parse_timestamp_precise_impl("01:01.5"), Some(61.5));
+        assert_eq!(parse_timestamp_precise_impl("01:01:01,500"), Some(3661.5));
+    }
 }
 
 pub(super) fn x_to_time_impl(rect: egui::Rect, x: f32, duration_secs: f64) -> f64 {
