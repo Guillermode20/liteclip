@@ -1,7 +1,5 @@
 # Code of Conduct
 
-Be respectful and constructive. Harassment, hate speech, and unwelcome sexual attention are not tolerated.
+Be respectful, constructive, and professional. Harassment, trolling, or inappropriate behavior won't be tolerated.
 
-Issues violating this code may be removed. Repeated violations may result in a ban.
-
-Based on the [Contributor Covenant](https://www.contributor-covenant.org/).
+Adapted from [Contributor Covenant](https://www.contributor-covenant.org) v2.1.

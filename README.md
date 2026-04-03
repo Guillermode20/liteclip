@@ -26,6 +26,12 @@ Lightweight Windows screen recorder that captures your best moments retroactivel
 3. Hit `Ctrl + Shift + S` anytime to save the last 30 seconds as an MP4
 4. Press `Ctrl + Shift + G` to open the gallery and browse your clips
 
+## Screenshots
+
+| Gallery | Settings | Video Editor |
+|:--------|:---------|:-------------|
+| ![Gallery](screenshots/gallery-image.png) | ![Settings](screenshots/settings-image.png) | ![Video Editor](screenshots/video-editor-image.png) |
+
 ## GPU Testing Needed
 
 **This project relies on hardware-accelerated encoding across all major GPU vendors, but the maintainer only has an AMD GPU for testing.** If you have an NVIDIA or Intel GPU, your help is critical to ensure these encoder paths work correctly.

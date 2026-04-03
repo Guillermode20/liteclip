@@ -3,6 +3,10 @@ name = "liteclip"
 version = "0.2.0"
 edition = "2021"
 license = "MIT"
+description = "Lightweight Windows screen recorder with replay buffer, hardware-accelerated encoding, and built-in clip editor"
+repository = "https://github.com/Guillermode20/liteclip-recorder"
+homepage = "https://github.com/Guillermode20/liteclip-recorder"
+documentation = "https://github.com/Guillermode20/liteclip-recorder#readme"
 default-run = "liteclip"
 
 [features]
