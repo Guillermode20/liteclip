@@ -150,6 +150,7 @@ pub struct SettingsApp {
     last_audio_levels: Option<(AudioLevels, AudioLevels)>,
     mic_devices: Vec<(String, String)>,
     current_tab: SettingsTab,
+    last_tab: SettingsTab,
 }
 
 impl SettingsApp {
@@ -169,6 +170,7 @@ impl SettingsApp {
             last_audio_levels: None,
             mic_devices,
             current_tab: SettingsTab::default(),
+            last_tab: SettingsTab::default(),
         }
     }
 
@@ -182,7 +184,18 @@ impl SettingsApp {
         self.last_audio_levels = None;
     }
 
+    /// Refresh microphone device list from system
+    fn refresh_mic_devices(&mut self) {
+        self.mic_devices = crate::capture::audio::device_info::list_capture_devices();
+    }
+
     fn render(&mut self, ctx: &egui::Context, is_open: &mut bool) {
+        // Refresh microphone devices once when switching to Audio tab
+        if self.current_tab == SettingsTab::Audio && self.last_tab != SettingsTab::Audio {
+            self.refresh_mic_devices();
+        }
+        self.last_tab = self.current_tab;
+
         // Render sidebar on the left
         egui::SidePanel::left("settings_sidebar")
             .exact_width(SIDEBAR_WIDTH)

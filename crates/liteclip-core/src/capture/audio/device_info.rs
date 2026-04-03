@@ -6,6 +6,7 @@ use tracing::{info, warn};
 use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
 use windows::Win32::Media::Audio::{
     eCapture, eRender, IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator, DEVICE_STATE_ACTIVE,
+    DEVICE_STATE_UNPLUGGED,
 };
 use windows::Win32::System::Com::StructuredStorage::PropVariantToBSTR;
 use windows::Win32::System::Com::{
@@ -74,21 +75,35 @@ pub fn log_all_capture_devices(enumerator: &IMMDeviceEnumerator) {
 pub fn list_capture_devices() -> Vec<(String, String)> {
     let mut devices = vec![("System Default".to_string(), "default".to_string())];
 
+    const RPC_E_CHANGED_MODE: i32 = 0x80010106u32 as i32;
+
     let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
-    if hr.is_err() {
+    // S_OK = 0 means we initialized COM, S_FALSE = 1 means already initialized
+    // RPC_E_CHANGED_MODE means already initialized with different threading model
+    // All three cases mean COM is usable - only treat other errors as fatal
+    if hr.0 < 0 && hr.0 != RPC_E_CHANGED_MODE {
         warn!(
             "Failed to initialize COM while listing capture devices: {:?}",
             hr
         );
         return devices;
     }
-    let initialized_by_us = hr.is_ok();
+    let initialized_by_us = hr == windows::core::HRESULT(0);
 
     let result = (|| -> windows::core::Result<()> {
         let enumerator: IMMDeviceEnumerator =
             unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }?;
-        let collection = unsafe { enumerator.EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE) }?;
+        // Include active and unplugged devices for better detection
+        let device_state = DEVICE_STATE_ACTIVE.0 | DEVICE_STATE_UNPLUGGED.0;
+        let collection = unsafe {
+            enumerator.EnumAudioEndpoints(
+                eCapture,
+                windows::Win32::Media::Audio::DEVICE_STATE(device_state),
+            )
+        }?;
         let count = unsafe { collection.GetCount() }?;
+
+        info!("Found {} capture devices", count);
 
         for i in 0..count {
             let device = unsafe { collection.Item(i) }?;
