@@ -71,4 +71,5 @@ local.*
 *.local
 
 .factory
+.kilo
 
