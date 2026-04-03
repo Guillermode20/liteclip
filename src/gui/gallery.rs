@@ -196,12 +196,6 @@ struct ThumbnailResult {
     error: Option<String>,
 }
 
-struct ThumbnailStripResult {
-    video_path: PathBuf,
-    strip: Option<ThumbnailStrip>,
-    error: Option<String>,
-}
-
 enum DialogResult {
     ImportVideo(Option<PathBuf>),
     SaveOutputPath(Option<PathBuf>),
@@ -225,33 +219,6 @@ struct ExportState {
     cancel_flag: Arc<AtomicBool>,
     progress: f32,
     message: String,
-}
-
-pub(super) const THUMBNAIL_STRIP_COUNT: usize = 20;
-pub(super) const THUMBNAIL_STRIP_WIDTH: u32 = 160;
-
-pub(super) struct ThumbnailStrip {
-    pub(super) thumbnails: Vec<(f64, RgbaImage)>,
-}
-
-impl ThumbnailStrip {
-    pub(super) fn new(thumbnails: Vec<(f64, RgbaImage)>, _duration_secs: f64) -> Self {
-        Self { thumbnails }
-    }
-
-    #[allow(dead_code)]
-    pub(super) fn nearest(&self, time_secs: f64) -> Option<&RgbaImage> {
-        if self.thumbnails.is_empty() {
-            return None;
-        }
-
-        let idx = self
-            .thumbnails
-            .partition_point(|(t, _)| *t <= time_secs)
-            .saturating_sub(1);
-
-        self.thumbnails.get(idx).map(|(_, img)| img)
-    }
 }
 
 pub(super) struct EditorState {
@@ -290,8 +257,6 @@ pub(super) struct EditorState {
     last_scrub_time: Option<Instant>,
     last_scrub_position: Option<f64>,
     selected_snippet_index: Option<usize>,
-    thumbnail_strip: Option<ThumbnailStrip>,
-    thumbnail_strip_loading: bool,
 }
 
 impl EditorState {
@@ -335,8 +300,6 @@ impl EditorState {
             last_scrub_time: None,
             last_scrub_position: None,
             selected_snippet_index: Some(0),
-            thumbnail_strip: None,
-            thumbnail_strip_loading: false,
         }
     }
 
@@ -457,9 +420,6 @@ pub struct ClipCompressApp {
     thumbnails_generating: HashSet<PathBuf>,
     thumbnail_tx: Sender<ThumbnailResult>,
     thumbnail_rx: Receiver<ThumbnailResult>,
-    #[allow(dead_code)]
-    thumbnail_strip_tx: Sender<ThumbnailStripResult>,
-    thumbnail_strip_rx: Receiver<ThumbnailStripResult>,
     dialog_tx: Sender<DialogResult>,
     dialog_rx: Receiver<DialogResult>,
     import_dialog_pending: bool,
@@ -481,7 +441,6 @@ impl ClipCompressApp {
         let save_directory = PathBuf::from(&config.general.save_directory);
         let cache_directory = save_directory.join(".cache");
         let (thumbnail_tx, thumbnail_rx) = mpsc::channel();
-        let (thumbnail_strip_tx, thumbnail_strip_rx) = mpsc::channel();
         let (dialog_tx, dialog_rx) = mpsc::channel();
 
         Self {
@@ -506,8 +465,6 @@ impl ClipCompressApp {
             thumbnails_generating: HashSet::new(),
             thumbnail_tx,
             thumbnail_rx,
-            thumbnail_strip_tx,
-            thumbnail_strip_rx,
             dialog_tx,
             dialog_rx,
             import_dialog_pending: false,
@@ -777,8 +734,6 @@ impl ClipCompressApp {
         if let Some(mut editor) = self.editor.take() {
             editor.playback.release_idle_resources();
             editor.preview_texture = None;
-            editor.thumbnail_strip = None;
-            editor.thumbnail_strip_loading = false;
             editor.pending_preview_request = None;
             editor.last_requested_preview_time = None;
         }
@@ -926,23 +881,6 @@ impl ClipCompressApp {
         // Check for newly generated thumbnails periodically
         if !has_editor_pending_activity {
             self.check_for_new_thumbnails(ctx);
-        }
-
-        while let Ok(result) = self.thumbnail_strip_rx.try_recv() {
-            if let Some(editor) = self.editor.as_mut() {
-                if editor.video.path == result.video_path {
-                    editor.thumbnail_strip_loading = false;
-                    if let Some(strip) = result.strip {
-                        tracing::info!(
-                            "Generated thumbnail strip with {} frames",
-                            strip.thumbnails.len()
-                        );
-                        editor.thumbnail_strip = Some(strip);
-                    } else if let Some(error) = result.error {
-                        tracing::warn!("Failed to generate thumbnail strip: {error}");
-                    }
-                }
-            }
         }
 
         while let Ok(result) = self.thumbnail_rx.try_recv() {
@@ -1121,25 +1059,18 @@ impl ClipCompressApp {
     }
 
     fn should_repaint(&self) -> bool {
-        let (
-            editor_is_playing,
-            preview_frame_in_flight,
-            thumbnail_strip_loading,
-            playback_pending_activity,
-            export_active,
-        ) = self
-            .editor
-            .as_ref()
-            .map(|editor| {
-                (
-                    editor.is_playing,
-                    editor.preview_frame_in_flight,
-                    editor.thumbnail_strip_loading,
-                    editor.playback.has_pending_activity(),
-                    editor.has_active_export(),
-                )
-            })
-            .unwrap_or((false, false, false, false, false));
+        let (editor_is_playing, preview_frame_in_flight, playback_pending_activity, export_active) =
+            self.editor
+                .as_ref()
+                .map(|editor| {
+                    (
+                        editor.is_playing,
+                        editor.preview_frame_in_flight,
+                        editor.playback.has_pending_activity(),
+                        editor.has_active_export(),
+                    )
+                })
+                .unwrap_or((false, false, false, false));
 
         should_repaint_gallery(
             self.delete_hold_started_at.is_some(),
@@ -1148,7 +1079,6 @@ impl ClipCompressApp {
             self.save_dialog_pending,
             editor_is_playing,
             preview_frame_in_flight,
-            thumbnail_strip_loading,
             playback_pending_activity,
             export_active,
         )
@@ -1557,7 +1487,6 @@ fn should_repaint_gallery(
     save_dialog_pending: bool,
     editor_is_playing: bool,
     preview_frame_in_flight: bool,
-    thumbnail_strip_loading: bool,
     playback_pending_activity: bool,
     export_active: bool,
 ) -> bool {
@@ -1567,7 +1496,6 @@ fn should_repaint_gallery(
         || save_dialog_pending
         || editor_is_playing
         || preview_frame_in_flight
-        || thumbnail_strip_loading
         || playback_pending_activity
         || export_active
 }
@@ -1603,7 +1531,7 @@ mod tests {
     #[test]
     fn gallery_repaint_stays_idle_when_editor_is_paused() {
         assert!(
-            !should_repaint_gallery(false, false, false, false, false, false, false, false, false),
+            !should_repaint_gallery(false, false, false, false, false, false, false, false),
             "Paused gallery/editor should not keep repainting without active work"
         );
     }
@@ -1611,32 +1539,29 @@ mod tests {
     #[test]
     fn gallery_repaint_runs_for_live_editor_work() {
         assert!(should_repaint_gallery(
-            false, false, false, false, true, false, false, false, false
+            false, false, false, false, true, false, false, false
         ));
         assert!(should_repaint_gallery(
-            false, false, false, false, false, true, false, false, false
+            false, false, false, false, false, true, false, false
         ));
         assert!(should_repaint_gallery(
-            false, false, false, false, false, false, true, false, false
+            false, false, false, false, false, false, true, false
         ));
         assert!(should_repaint_gallery(
-            false, false, false, false, false, false, false, true, false
-        ));
-        assert!(should_repaint_gallery(
-            false, false, false, false, false, false, false, false, true
+            false, false, false, false, false, false, false, true
         ));
     }
 
     #[test]
     fn gallery_repaint_runs_for_background_results_that_need_polling() {
         assert!(should_repaint_gallery(
-            false, true, false, false, false, false, false, false, false
+            false, true, false, false, false, false, false, false
         ));
         assert!(should_repaint_gallery(
-            false, false, true, false, false, false, false, false, false
+            false, false, true, false, false, false, false, false
         ));
         assert!(should_repaint_gallery(
-            false, false, false, true, false, false, false, false, false
+            false, false, false, true, false, false, false, false
         ));
     }
 }

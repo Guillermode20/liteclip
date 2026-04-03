@@ -33,7 +33,6 @@ use windows_core::Interface;
 
 pub(super) struct Nv12TexturePool {
     pub(super) available: Vec<D3d11TexturePoolItem>,
-    pub(super) return_tx: Sender<D3d11TexturePoolItem>,
     pub(super) return_rx: Receiver<D3d11TexturePoolItem>,
     pub(super) width: u32,
     pub(super) height: u32,
@@ -43,7 +42,6 @@ pub(super) struct Nv12TexturePool {
 
 pub(super) struct BgraTexturePool {
     pub(super) available: Vec<D3d11TexturePoolItem>,
-    pub(super) return_tx: Sender<D3d11TexturePoolItem>,
     pub(super) return_rx: Receiver<D3d11TexturePoolItem>,
     pub(super) width: u32,
     pub(super) height: u32,
@@ -60,10 +58,9 @@ enum CaptureOutcome {
 impl Nv12TexturePool {
     fn new(width: u32, height: u32) -> Self {
         let max_capacity = 12usize;
-        let (return_tx, return_rx) = bounded(max_capacity * 2);
+        let (_return_tx, return_rx) = bounded(max_capacity * 2);
         Self {
             available: Vec::new(),
-            return_tx,
             return_rx,
             width,
             height,
@@ -76,10 +73,9 @@ impl Nv12TexturePool {
 impl BgraTexturePool {
     fn new(width: u32, height: u32) -> Self {
         let max_capacity = 12usize;
-        let (return_tx, return_rx) = bounded(max_capacity * 2);
+        let (_return_tx, return_rx) = bounded(max_capacity * 2);
         Self {
             available: Vec::new(),
-            return_tx,
             return_rx,
             width,
             height,

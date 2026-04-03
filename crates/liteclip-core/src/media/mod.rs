@@ -4,8 +4,6 @@
 //! capture-backend traits or DXGI plumbing.
 
 use bytes::Bytes;
-#[cfg(windows)]
-use crossbeam::channel::Sender;
 use std::sync::Arc;
 #[cfg(windows)]
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
@@ -47,21 +45,6 @@ impl Drop for D3d11TexturePoolItem {
 }
 
 #[cfg(windows)]
-struct D3d11TextureRecycle {
-    return_tx: Sender<D3d11TexturePoolItem>,
-    item: Option<D3d11TexturePoolItem>,
-}
-
-#[cfg(windows)]
-impl Drop for D3d11TextureRecycle {
-    fn drop(&mut self) {
-        if let Some(item) = self.item.take() {
-            let _ = self.return_tx.try_send(item);
-        }
-    }
-}
-
-#[cfg(windows)]
 pub struct D3d11Frame {
     pub texture: ID3D11Texture2D,
     pub device: ID3D11Device,
@@ -69,8 +52,6 @@ pub struct D3d11Frame {
     pub shared_handle: HANDLE,
     pub fence_value: u64,
     pub fence_shared_handle: Option<HANDLE>,
-    #[allow(dead_code)]
-    recycle: Option<D3d11TextureRecycle>,
 }
 
 // SAFETY: D3d11Frame is Send because:
@@ -96,7 +77,6 @@ impl D3d11Frame {
     pub(crate) fn from_pooled(
         device: ID3D11Device,
         format: GpuTextureFormat,
-        return_tx: Sender<D3d11TexturePoolItem>,
         pool_item: D3d11TexturePoolItem,
         fence_value: u64,
         fence_shared_handle: Option<HANDLE>,
@@ -110,10 +90,6 @@ impl D3d11Frame {
             shared_handle,
             fence_value,
             fence_shared_handle,
-            recycle: Some(D3d11TextureRecycle {
-                return_tx,
-                item: Some(pool_item),
-            }),
         }
     }
 }

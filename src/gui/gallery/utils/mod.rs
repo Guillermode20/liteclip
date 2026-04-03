@@ -5,10 +5,7 @@ use std::path::{Path, PathBuf};
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
-use super::{
-    EditorState, SnippetSegment, ThumbnailStrip, TimeRange, VideoEntry, MIN_RANGE_SECS,
-    THUMBNAIL_STRIP_COUNT, THUMBNAIL_STRIP_WIDTH,
-};
+use super::{EditorState, SnippetSegment, TimeRange, VideoEntry, MIN_RANGE_SECS};
 use crate::output::{estimate_export_bitrates, VideoFileMetadata};
 
 #[cfg(all(target_os = "windows", not(feature = "ffmpeg")))]
@@ -165,38 +162,6 @@ pub(super) fn format_timestamp_precise_impl(seconds: f64) -> String {
     let secs = (total_millis / 1000) % 60;
     let millis = total_millis % 1000;
     format!("{hours:02}:{minutes:02}:{secs:02}.{millis:03}")
-}
-
-#[allow(dead_code)]
-pub(super) fn parse_timestamp_precise_impl(text: &str) -> Option<f64> {
-    let text = text.trim();
-    if text.is_empty() {
-        return None;
-    }
-
-    let normalized = text.replace(',', ".");
-    let parts: Vec<&str> = normalized.split(':').collect();
-    let seconds = match parts.as_slice() {
-        [secs] => secs.parse::<f64>().ok()?,
-        [mins, secs] => {
-            let mins = mins.parse::<f64>().ok()?;
-            let secs = secs.parse::<f64>().ok()?;
-            mins * 60.0 + secs
-        }
-        [hours, mins, secs] => {
-            let hours = hours.parse::<f64>().ok()?;
-            let mins = mins.parse::<f64>().ok()?;
-            let secs = secs.parse::<f64>().ok()?;
-            hours * 3600.0 + mins * 60.0 + secs
-        }
-        _ => return None,
-    };
-
-    if seconds.is_finite() && seconds >= 0.0 {
-        Some(seconds)
-    } else {
-        None
-    }
 }
 
 fn normalize_cut_points_impl(cut_points: &mut Vec<f64>, duration_secs: f64) {
@@ -415,14 +380,6 @@ mod tests {
     #[test]
     fn timestamp_precise_roundtrip() {
         assert_eq!(format_timestamp_precise_impl(3661.5), "01:01:01.500");
-        assert_eq!(parse_timestamp_precise_impl("01:01:01.500"), Some(3661.5));
-    }
-
-    #[test]
-    fn timestamp_precise_parser_accepts_short_forms() {
-        assert_eq!(parse_timestamp_precise_impl("61.5"), Some(61.5));
-        assert_eq!(parse_timestamp_precise_impl("01:01.5"), Some(61.5));
-        assert_eq!(parse_timestamp_precise_impl("01:01:01,500"), Some(3661.5));
     }
 }
 
@@ -432,60 +389,4 @@ pub(super) fn x_to_time_impl(rect: egui::Rect, x: f32, duration_secs: f64) -> f6
     }
     let ratio = ((x - rect.left()) / rect.width()).clamp(0.0, 1.0);
     duration_secs * f64::from(ratio)
-}
-
-#[allow(dead_code)]
-pub(super) fn generate_thumbnail_strip_frames_impl(
-    video_path: &Path,
-    duration_secs: f64,
-    _has_audio: bool,
-) -> anyhow::Result<ThumbnailStrip> {
-    generate_thumbnail_strip_frames_sdk(video_path, duration_secs)
-}
-
-#[cfg(feature = "ffmpeg")]
-#[allow(dead_code)]
-fn generate_thumbnail_strip_frames_sdk(
-    video_path: &Path,
-    duration_secs: f64,
-) -> anyhow::Result<ThumbnailStrip> {
-    use crate::output::sdk_ffmpeg_output::extract_preview_frame;
-    use tracing::{debug, warn};
-
-    let mut thumbnails = Vec::with_capacity(THUMBNAIL_STRIP_COUNT);
-
-    if duration_secs <= 0.0 {
-        return Ok(ThumbnailStrip::new(thumbnails, duration_secs));
-    }
-
-    for i in 1..=THUMBNAIL_STRIP_COUNT {
-        let time_secs = duration_secs * (i as f64) / (THUMBNAIL_STRIP_COUNT + 1) as f64;
-        debug!(
-            "Extracting thumbnail strip frame {}/{} at {:.2}s",
-            i, THUMBNAIL_STRIP_COUNT, time_secs
-        );
-        match extract_preview_frame(video_path, time_secs, THUMBNAIL_STRIP_WIDTH) {
-            Ok(frame) => {
-                thumbnails.push((time_secs, frame));
-            }
-            Err(e) => {
-                warn!("Failed to extract frame at {:.2}s: {}", time_secs, e);
-                if let Some(last) = thumbnails.last() {
-                    thumbnails.push((time_secs, last.1.clone()));
-                }
-            }
-        }
-    }
-
-    while thumbnails.len() < THUMBNAIL_STRIP_COUNT {
-        if let Some(last) = thumbnails.last() {
-            let idx = thumbnails.len();
-            let time = duration_secs * (idx as f64) / (THUMBNAIL_STRIP_COUNT as f64);
-            thumbnails.push((time, last.1.clone()));
-        } else {
-            break;
-        }
-    }
-
-    Ok(ThumbnailStrip::new(thumbnails, duration_secs))
 }

@@ -958,92 +958,6 @@ fn run_clip_export(
     export_result
 }
 
-#[allow(dead_code)]
-fn build_filter_complex_for_request(request: &ClipExportRequest, has_audio: bool) -> String {
-    let fps = normalize_output_fps(
-        request.output_fps.unwrap_or(request.metadata.fps),
-        request.metadata.fps,
-    );
-    let (out_w, out_h) = if let (Some(w), Some(h)) = (request.output_width, request.output_height) {
-        (w, h)
-    } else {
-        (request.metadata.width, request.metadata.height)
-    };
-    build_filter_complex(&request.keep_ranges, has_audio, fps, out_w, out_h)
-}
-
-#[allow(dead_code)]
-fn build_filter_complex(
-    keep_ranges: &[TimeRange],
-    has_audio: bool,
-    fps: f64,
-    out_width: u32,
-    out_height: u32,
-) -> String {
-    let mut filters = Vec::new();
-
-    for (index, range) in keep_ranges.iter().enumerate() {
-        // Use fps filter with explicit rate and optional scale
-        let scale_filter = if out_width != 0 && out_height != 0 {
-            format!(
-                ",scale={}:{}:force_original_aspect_ratio=decrease:force_divisible_by=2",
-                out_width, out_height
-            )
-        } else {
-            String::new()
-        };
-        filters.push(format!(
-            "[0:v:0]trim=start={}:end={},setpts=PTS-STARTPTS,fps={}{}[v{index}]",
-            format_seconds_arg(range.start_secs),
-            format_seconds_arg(range.end_secs),
-            fps,
-            scale_filter,
-        ));
-        if has_audio {
-            filters.push(format!(
-                "[0:a:0]atrim=start={}:end={},asetpts=PTS-STARTPTS[a{index}]",
-                format_seconds_arg(range.start_secs),
-                format_seconds_arg(range.end_secs),
-            ));
-        }
-    }
-
-    let mut concat_inputs = String::new();
-    for index in 0..keep_ranges.len() {
-        concat_inputs.push_str(&format!("[v{index}]"));
-        if has_audio {
-            concat_inputs.push_str(&format!("[a{index}]"));
-        }
-    }
-
-    concat_inputs.push_str(&format!(
-        "concat=n={}:v=1:a={}",
-        keep_ranges.len(),
-        if has_audio { 1 } else { 0 }
-    ));
-    if has_audio {
-        concat_inputs.push_str("[outv][outa]");
-    } else {
-        concat_inputs.push_str("[outv]");
-    }
-
-    filters.push(concat_inputs);
-    filters.join(";")
-}
-
-#[allow(dead_code)]
-fn parse_progress_seconds(line: &str) -> Option<f64> {
-    let (_, value) = line.split_once('=')?;
-    match line.split_once('=')?.0 {
-        "out_time_ms" | "out_time_us" => {
-            let micros = value.trim().parse::<f64>().ok()?;
-            Some(micros / 1_000_000.0)
-        }
-        "out_time" => parse_hhmmss_time(value.trim()),
-        _ => None,
-    }
-}
-
 fn cleanup_export_work_dir(work_dir: &Path) {
     let _ = std::fs::remove_dir_all(work_dir);
 }
@@ -1631,50 +1545,12 @@ fn move_or_copy_file(source_path: &Path, destination_path: &Path) -> Result<()> 
     }
 }
 
-fn parse_hhmmss_time(value: &str) -> Option<f64> {
-    let mut total = 0.0;
-    let parts: Vec<_> = value.split(':').collect();
-    if parts.len() != 3 {
-        return None;
-    }
-    for part in parts {
-        total = total * 60.0 + part.trim().parse::<f64>().ok()?;
-    }
-    Some(total)
-}
-
-fn format_seconds_arg(seconds: f64) -> String {
-    format!("{:.3}", seconds.max(0.0))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::quality_contracts::{
         validate_export_validity, ExportValidationInput, ExportValidityViolation,
     };
-
-    #[test]
-    fn parses_progress_output_variants() {
-        assert_eq!(parse_progress_seconds("out_time_ms=1500000"), Some(1.5));
-        assert_eq!(
-            parse_progress_seconds("out_time=00:00:02.500000"),
-            Some(2.5)
-        );
-        assert_eq!(parse_progress_seconds("progress=continue"), None);
-    }
-
-    #[test]
-    fn subtitle_primary_colour_ass_white() {
-        assert_eq!(
-            subtitle_primary_colour_ass_from_rgb(255, 255, 255),
-            "&H00FFFFFF"
-        );
-        assert_eq!(
-            subtitle_primary_colour_ass_from_rgb(0, 0, 255),
-            "&H00FF0000"
-        );
-    }
 
     #[test]
     fn estimate_export_bitrates_scales_audio_down_for_small_budgets() {
@@ -1878,9 +1754,6 @@ mod tests {
             output_width: None,
             output_height: None,
             output_fps: None,
-            burn_auto_subtitles: false,
-            parakeet_model_dir: None,
-            prepared_subtitles: None,
         };
 
         let cal = build_calibration_sample_request(&request, PathBuf::from("cal.mp4"));
@@ -1928,9 +1801,6 @@ mod tests {
             output_width: None,
             output_height: None,
             output_fps: None,
-            burn_auto_subtitles: false,
-            parakeet_model_dir: None,
-            prepared_subtitles: None,
         };
 
         let cal = build_calibration_sample_request(&request, PathBuf::from("cal.mp4"));

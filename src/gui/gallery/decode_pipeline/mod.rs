@@ -86,7 +86,6 @@ struct SharedPlaybackState {
     audio_started_generation: AtomicU64,
     /// The user-requested playback start time, used to align the clock with scrub position
     playback_start_target_secs: Mutex<f64>,
-    #[allow(dead_code)]
     frame_pool: Arc<FramePool>,
 }
 

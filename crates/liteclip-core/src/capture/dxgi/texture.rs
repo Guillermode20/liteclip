@@ -407,19 +407,11 @@ impl DxgiCapture {
                 }
             }
 
-            let return_tx = state
-                .bgra_pool
-                .as_ref()
-                .context("BGRA pool is not initialized")?
-                .return_tx
-                .clone();
-
             return Ok(CapturedFrame {
                 bgra: Bytes::new(),
                 d3d11: Some(Arc::new(D3d11Frame::from_pooled(
                     state.d3d_device.clone(),
                     GpuTextureFormat::Bgra,
-                    return_tx,
                     pooled_output,
                     state.bgra_fence_value,
                     state.bgra_fence_shared_handle,
@@ -452,12 +444,6 @@ impl DxgiCapture {
                         d3d11: Some(Arc::new(D3d11Frame::from_pooled(
                             state.d3d_device.clone(),
                             GpuTextureFormat::Nv12,
-                            state
-                                .nv12_pool
-                                .as_ref()
-                                .context("NV12 pool is not initialized")?
-                                .return_tx
-                                .clone(),
                             nv12_item,
                             state.nv12_fence_value,
                             state.nv12_fence_shared_handle,

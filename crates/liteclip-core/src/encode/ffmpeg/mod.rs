@@ -148,28 +148,6 @@ impl FfmpegEncoder {
         self.last_duplicate_template.clear();
     }
 
-    /// Re-emit the last encoded video bitstream with a new wall-clock PTS (static / duplicate DXGI frame).
-    #[allow(dead_code)]
-    fn emit_duplicate_video_packets(&mut self, timestamp: i64) -> EncodeResult<()> {
-        for (data, is_keyframe) in &self.last_duplicate_template {
-            let mut encoded_packet = EncodedPacket::new(
-                data.clone(),
-                timestamp,
-                timestamp,
-                *is_keyframe,
-                StreamType::Video,
-            );
-            if !self.config.use_native_resolution {
-                encoded_packet.resolution = Some(self.config.resolution);
-            }
-            if self.packet_tx.send(encoded_packet).is_err() {
-                break;
-            }
-            self.packet_count += 1;
-        }
-        Ok(())
-    }
-
     pub(super) fn init_hardware_encoder(
         &mut self,
         gpu_frame: &crate::media::D3d11Frame,
