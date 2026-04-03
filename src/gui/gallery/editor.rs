@@ -1,10 +1,12 @@
 use eframe::egui;
 
+#[cfg(feature = "parakeet")]
+use super::poll_subtitle_generation;
 use super::{
     add_cut_point, clamp_selected_snippet_index, poll_editor_export_updates, remove_cut_point,
     render_completion_screen, render_editor_workspace, seek_editor, start_export,
-    toggle_editor_playback, update_playback_clock, ClipCompressApp, EditorUiOutcome,
-    EDITOR_LARGE_SEEK_SECS, EDITOR_SMALL_SEEK_SECS,
+    sync_subtitle_stale, toggle_editor_playback, update_playback_clock, ClipCompressApp,
+    EditorUiOutcome, EDITOR_LARGE_SEEK_SECS, EDITOR_SMALL_SEEK_SECS,
 };
 
 pub(super) fn render_editor_ui(app: &mut ClipCompressApp, ui: &mut egui::Ui) -> EditorUiOutcome {
@@ -14,13 +16,26 @@ pub(super) fn render_editor_ui(app: &mut ClipCompressApp, ui: &mut egui::Ui) -> 
     };
 
     let ctx = ui.ctx().clone();
+    sync_subtitle_stale(editor);
+    #[cfg(feature = "parakeet")]
+    let sub_progress = poll_subtitle_generation(editor, &ctx);
+    #[cfg(not(feature = "parakeet"))]
+    let sub_progress = false;
     let received_update = poll_editor_export_updates(editor, &mut outcome, &ctx);
 
     let export_active = editor.has_active_export();
+    #[cfg(feature = "parakeet")]
+    let subtitle_busy = editor.has_active_subtitle_gen();
+    #[cfg(not(feature = "parakeet"))]
+    let subtitle_busy = false;
 
     // Render export progress modal overlay on top of everything when active
     if export_active {
         outcome = render_export_modal(ui, editor, outcome, &ctx);
+    }
+    #[cfg(feature = "parakeet")]
+    if subtitle_busy {
+        render_subtitle_modal(ui, editor, &ctx);
     }
 
     if editor.export_output.is_some() {
@@ -29,7 +44,7 @@ pub(super) fn render_editor_ui(app: &mut ClipCompressApp, ui: &mut egui::Ui) -> 
 
     update_playback_clock(editor, &mut outcome);
 
-    handle_editor_shortcuts(&ctx, editor, &mut outcome, export_active);
+    handle_editor_shortcuts(&ctx, editor, &mut outcome, export_active, subtitle_busy);
 
     ui.horizontal(|ui| {
         if ui
@@ -61,8 +76,8 @@ pub(super) fn render_editor_ui(app: &mut ClipCompressApp, ui: &mut egui::Ui) -> 
         ui.colored_label(egui::Color32::LIGHT_RED, error);
     }
 
-    // Request immediate repaint if we received an update or export is active
-    if received_update || export_active {
+    // Request immediate repaint if we received an update or export / subtitle gen is active
+    if received_update || export_active || sub_progress || subtitle_busy {
         ctx.request_repaint();
     }
 
@@ -135,17 +150,69 @@ fn render_export_modal(
     outcome
 }
 
+#[cfg(feature = "parakeet")]
+fn render_subtitle_modal(ui: &mut egui::Ui, editor: &mut super::EditorState, ctx: &egui::Context) {
+    let Some(gen) = editor.subtitle_gen.as_mut() else {
+        return;
+    };
+
+    egui::Window::new("subtitle_modal")
+        .title_bar(false)
+        .resizable(false)
+        .collapsible(false)
+        .movable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .frame(egui::Frame::window(ui.style()).corner_radius(8.0))
+        .show(ui.ctx(), |ui| {
+            ui.set_min_width(360.0);
+            ui.vertical_centered(|ui| {
+                ui.add_space(8.0);
+                ui.heading(if gen.is_download_phase {
+                    "Downloading Parakeet model"
+                } else {
+                    "Generating subtitles"
+                });
+                ui.add_space(12.0);
+                let progress = gen.progress.clamp(0.0, 1.0);
+                ui.add(
+                    egui::ProgressBar::new(progress)
+                        .show_percentage()
+                        .desired_width(320.0),
+                );
+                ui.add_space(6.0);
+                let text_color = ui.visuals().widgets.inactive.text_color();
+                ui.label(
+                    egui::RichText::new(&gen.message)
+                        .size(14.0)
+                        .color(text_color),
+                );
+                ui.add_space(12.0);
+                if ui
+                    .button(egui::RichText::new("Cancel").size(14.0))
+                    .clicked()
+                {
+                    gen.cancel_flag
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                ui.add_space(4.0);
+            });
+        });
+
+    ctx.request_repaint_after(std::time::Duration::from_millis(100));
+}
+
 fn handle_editor_shortcuts(
     ctx: &egui::Context,
     editor: &mut super::EditorState,
     outcome: &mut EditorUiOutcome,
     export_active: bool,
+    subtitle_busy: bool,
 ) {
     if ctx.wants_keyboard_input() {
         return;
     }
 
-    if export_active {
+    if export_active || subtitle_busy {
         return;
     }
 

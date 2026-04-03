@@ -10,9 +10,10 @@ documentation = "https://github.com/Guillermode20/liteclip-recorder#readme"
 default-run = "liteclip"
 
 [features]
-default = ["ffmpeg"]
+default = ["ffmpeg", "parakeet"]
 # Forward to engine; gallery also uses ffmpeg-next directly when this is on.
 ffmpeg = ["liteclip-core/ffmpeg"]
+parakeet = ["liteclip-core/parakeet"]
 
 [dependencies]
 liteclip-core = { path = "crates/liteclip-core", default-features = false }

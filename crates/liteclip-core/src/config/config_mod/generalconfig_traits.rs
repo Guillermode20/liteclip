@@ -24,6 +24,8 @@ impl Default for GeneralConfig {
             auto_detect_game: default_true(),
             generate_clip_thumbnail: default_true(),
             use_software_encoder: default_false(),
+            parakeet_model_directory: None,
+            burn_auto_subtitles_default: default_false(),
         }
     }
 }

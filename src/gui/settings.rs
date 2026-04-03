@@ -338,6 +338,38 @@ impl SettingsApp {
             .small()
             .weak(),
         );
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.label(egui::RichText::new("Clip export — Parakeet subtitles").strong());
+        ui.checkbox(
+            &mut self.config.general.burn_auto_subtitles_default,
+            "Default: enable burned-in subtitles in the clip editor",
+        );
+        ui.horizontal(|ui| {
+            ui.label("Parakeet ONNX folder:");
+            let mut path = self
+                .config
+                .general
+                .parakeet_model_directory
+                .clone()
+                .unwrap_or_default();
+            ui.add(egui::TextEdit::singleline(&mut path).desired_width(240.0));
+            self.config.general.parakeet_model_directory = if path.trim().is_empty() {
+                None
+            } else {
+                Some(path)
+            };
+            if ui.button("Browse…").clicked() {
+                if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                    self.config.general.parakeet_model_directory =
+                        Some(folder.to_string_lossy().to_string());
+                }
+            }
+        });
+        ui.label(egui::RichText::new(
+            "Use a folder containing model.onnx, tokenizer.json, and related Parakeet ONNX assets (see parakeet-rs / Hugging Face ONNX bundles).",
+        ).small().weak());
     }
 
     fn render_video_settings(&mut self, ui: &mut egui::Ui) {

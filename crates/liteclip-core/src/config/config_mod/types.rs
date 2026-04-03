@@ -636,6 +636,12 @@ pub struct GeneralConfig {
     /// Defaults to false (use hardware acceleration when available).
     #[serde(default = "default_false")]
     pub use_software_encoder: bool,
+    /// When set, directory with Parakeet ONNX model files for optional burned-in export subtitles.
+    #[serde(default)]
+    pub parakeet_model_directory: Option<String>,
+    /// Default state for the gallery export "burn auto subtitles" checkbox.
+    #[serde(default = "default_false", alias = "burn_subtitles_on_export")]
+    pub burn_auto_subtitles_default: bool,
 }
 
 #[cfg(test)]

@@ -41,11 +41,22 @@ pub mod error;
 pub mod functions;
 #[cfg(feature = "ffmpeg")]
 pub mod mp4;
+#[cfg(all(feature = "ffmpeg", feature = "parakeet"))]
+mod parakeet_model_cache;
+#[cfg(all(feature = "ffmpeg", feature = "parakeet"))]
+pub use parakeet_model_cache::{
+    resolve_parakeet_model_directory, resolve_parakeet_model_directory_with_progress,
+    ParakeetModelDownloadProgress,
+};
+#[cfg(all(feature = "ffmpeg", feature = "parakeet"))]
+mod parakeet_subtitles;
 pub mod saver;
 #[cfg(feature = "ffmpeg")]
 pub mod sdk_export;
 #[cfg(feature = "ffmpeg")]
 pub mod sdk_ffmpeg_output;
+#[cfg(all(feature = "ffmpeg", feature = "parakeet"))]
+mod subtitle_burn_sdk;
 pub mod types;
 pub mod video_file;
 
@@ -57,8 +68,11 @@ pub use functions::{
 };
 pub use saver::{spawn_clip_saver, SKIP_THUMBNAIL_ENV};
 pub use types::{Muxer, MuxerConfig};
+#[cfg(all(feature = "ffmpeg", feature = "parakeet"))]
+pub use video_file::transcribe_parakeet_for_kept_ranges;
 pub use video_file::{
     estimate_export_bitrates, extract_preview_frame, probe_video_file, spawn_clip_export,
-    ClipExportPhase, ClipExportRequest, ClipExportUpdate, ExportBitrateEstimate, TimeRange,
-    VideoFileMetadata,
+    subtitle_primary_colour_ass_from_rgb, ClipExportPhase, ClipExportRequest, ClipExportUpdate,
+    ExportBitrateEstimate, PreparedSubtitleCue, PreparedSubtitles, SubtitleTranscribeProgress,
+    TimeRange, VideoFileMetadata,
 };

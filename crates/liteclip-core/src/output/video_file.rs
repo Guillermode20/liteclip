@@ -39,6 +39,10 @@ pub enum ClipExportPhase {
     Calibration,
     FirstPass,
     SecondPass,
+    /// Parakeet speech-to-text (optional export step).
+    Transcribing,
+    /// FFmpeg subtitles filter re-encode (optional export step).
+    BurningSubtitles,
 }
 
 #[derive(Debug, Clone)]
@@ -51,6 +55,29 @@ pub enum ClipExportUpdate {
     Finished(PathBuf),
     Failed(String),
     Cancelled,
+}
+
+/// One subtitle line on the **export timeline** (concatenated kept ranges), in seconds.
+#[derive(Debug, Clone)]
+pub struct PreparedSubtitleCue {
+    pub start_secs: f32,
+    pub end_secs: f32,
+    pub text: String,
+}
+
+/// User-reviewed subtitles and style for the burn pass (generated in the editor before export).
+#[derive(Debug, Clone)]
+pub struct PreparedSubtitles {
+    pub cues: Vec<PreparedSubtitleCue>,
+    /// ASS `PrimaryColour` value, e.g. `&H00FFFFFF` for white (opaque BB GGRR).
+    pub primary_colour_ass: String,
+}
+
+/// Progress updates while Parakeet transcribes kept-range audio in the editor.
+#[derive(Debug, Clone)]
+pub struct SubtitleTranscribeProgress {
+    pub fraction: f32,
+    pub message: String,
 }
 
 #[derive(Debug, Clone)]
@@ -71,6 +98,14 @@ pub struct ClipExportRequest {
     pub output_height: Option<u32>,
     /// Output frame rate. None means use original.
     pub output_fps: Option<f64>,
+    /// When true, burn subtitles into the exported file (requires audio and [`Self::prepared_subtitles`]).
+    /// Ignored if the `parakeet` feature is disabled at build time.
+    pub burn_auto_subtitles: bool,
+    /// Directory containing Parakeet ONNX assets (`model.onnx`, tokenizer, etc.) — used only when
+    /// generating subtitles in the editor, not during export mux/encode.
+    pub parakeet_model_dir: Option<PathBuf>,
+    /// Cues and colour produced in the editor; export only **burns** them after video is written.
+    pub prepared_subtitles: Option<PreparedSubtitles>,
 }
 
 impl ClipExportRequest {
@@ -80,6 +115,29 @@ impl ClipExportRequest {
             .map(|range| range.duration_secs())
             .sum()
     }
+}
+
+/// ASS `PrimaryColour` for libass (`&H00BBGGRR`, opaque).
+#[must_use]
+pub fn subtitle_primary_colour_ass_from_rgb(r: u8, g: u8, b: u8) -> String {
+    format!("&H00{:02X}{:02X}{:02X}", b, g, r)
+}
+
+#[cfg(all(feature = "ffmpeg", feature = "parakeet"))]
+pub fn transcribe_parakeet_for_kept_ranges(
+    input_path: &Path,
+    keep_ranges: &[TimeRange],
+    model_dir: &Path,
+    progress_tx: &Sender<SubtitleTranscribeProgress>,
+    cancel_flag: &Arc<AtomicBool>,
+) -> Result<Vec<PreparedSubtitleCue>> {
+    super::parakeet_subtitles::transcribe_kept_ranges_parakeet(
+        input_path,
+        keep_ranges,
+        model_dir,
+        progress_tx,
+        cancel_flag,
+    )
 }
 
 pub enum ExportOutcome {
@@ -414,6 +472,35 @@ pub fn extract_preview_frame(
     }
 }
 
+fn finalize_export_maybe_subtitles(
+    request: &ClipExportRequest,
+    prior: ExportOutcome,
+    progress_tx: &Sender<ClipExportUpdate>,
+    cancel_flag: &Arc<AtomicBool>,
+) -> Result<ExportOutcome> {
+    #[cfg(all(feature = "ffmpeg", feature = "parakeet"))]
+    {
+        if request.burn_auto_subtitles {
+            return super::parakeet_subtitles::finalize_export_with_parakeet_subtitles(
+                request,
+                prior,
+                progress_tx,
+                cancel_flag,
+            );
+        }
+    }
+    #[cfg(not(all(feature = "ffmpeg", feature = "parakeet")))]
+    {
+        let _ = (progress_tx, cancel_flag);
+        if request.burn_auto_subtitles {
+            warn!(
+                "Burn-in subtitles requested but this build was compiled without the `parakeet` feature"
+            );
+        }
+    }
+    Ok(prior)
+}
+
 pub fn spawn_clip_export(
     request: ClipExportRequest,
     progress_tx: Sender<ClipExportUpdate>,
@@ -472,13 +559,18 @@ fn run_clip_export(
         #[cfg(feature = "ffmpeg")]
         {
             let stream_copy_result =
-                super::sdk_export::run_stream_copy_export_sdk(request, progress_tx, cancel_flag);
+                super::sdk_export::run_stream_copy_export_sdk(request, progress_tx, cancel_flag)?;
             info!(
                 elapsed_secs = export_started_at.elapsed().as_secs_f64(),
                 output = ?request.output_path,
                 "Stream copy export path completed"
             );
-            return stream_copy_result;
+            return finalize_export_maybe_subtitles(
+                request,
+                stream_copy_result,
+                progress_tx,
+                cancel_flag,
+            );
         }
         #[cfg(not(feature = "ffmpeg"))]
         {
@@ -945,7 +1037,12 @@ fn run_clip_export(
             }
         }
 
-        Ok(ExportOutcome::Finished(request.output_path.clone()))
+        finalize_export_maybe_subtitles(
+            request,
+            ExportOutcome::Finished(request.output_path.clone()),
+            progress_tx,
+            cancel_flag,
+        )
     })();
 
     info!(
@@ -1665,6 +1762,18 @@ mod tests {
     }
 
     #[test]
+    fn subtitle_primary_colour_ass_white() {
+        assert_eq!(
+            subtitle_primary_colour_ass_from_rgb(255, 255, 255),
+            "&H00FFFFFF"
+        );
+        assert_eq!(
+            subtitle_primary_colour_ass_from_rgb(0, 0, 255),
+            "&H00FF0000"
+        );
+    }
+
+    #[test]
     fn estimate_export_bitrates_scales_audio_down_for_small_budgets() {
         // Software encoder estimate
         // 1 MB / 20s = ~419 kbps total, so audio gets scaled down to 48 kbps
@@ -1866,6 +1975,9 @@ mod tests {
             output_width: None,
             output_height: None,
             output_fps: None,
+            burn_auto_subtitles: false,
+            parakeet_model_dir: None,
+            prepared_subtitles: None,
         };
 
         let cal = build_calibration_sample_request(&request, PathBuf::from("cal.mp4"));
@@ -1913,6 +2025,9 @@ mod tests {
             output_width: None,
             output_height: None,
             output_fps: None,
+            burn_auto_subtitles: false,
+            parakeet_model_dir: None,
+            prepared_subtitles: None,
         };
 
         let cal = build_calibration_sample_request(&request, PathBuf::from("cal.mp4"));
