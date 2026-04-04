@@ -35,7 +35,7 @@ jobs:
         run: cargo test --verbose
 
       - name: Setup .NET SDK (for WiX)
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v5
         with:
           dotnet-version: '8.0.x'
 
