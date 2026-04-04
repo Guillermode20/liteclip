@@ -235,6 +235,7 @@ mod tests {
     #[test]
     fn test_mic_meter_shows_quiet_voice() {
         let monitor = AudioLevelMonitor::new();
+        monitor.set_gui_active(true);
 
         monitor.update_mic_levels(0.0, 0.01);
 

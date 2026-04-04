@@ -21,12 +21,12 @@ use super::DxgiCapture;
 
 impl CaptureBackend for DxgiCapture {
     fn start(&mut self, config: CaptureConfig) -> Result<()> {
-        if self.running.load(Ordering::Relaxed) {
+        if self.running.load(Ordering::Acquire) {
             bail!("Capture already running");
         }
         info!("Starting DXGI capture: {} FPS", config.target_fps);
         self.config = config;
-        self.running.store(true, Ordering::Relaxed);
+        self.running.store(true, Ordering::Release);
         let running = Arc::clone(&self.running);
         let frame_tx = self._frame_tx.clone();
         let fatal_tx = self.fatal_tx.clone();
@@ -37,11 +37,11 @@ impl CaptureBackend for DxgiCapture {
         Ok(())
     }
     fn stop(&mut self) {
-        if !self.running.load(Ordering::Relaxed) {
+        if !self.running.load(Ordering::Acquire) {
             return;
         }
         info!("Stopping DXGI capture...");
-        self.running.store(false, Ordering::Relaxed);
+        self.running.store(false, Ordering::Release);
         if let Some(handle) = self.capture_thread.take() {
             if let Err(e) = handle.join() {
                 error!("Capture thread join failed: {:?}", e);
@@ -58,7 +58,7 @@ impl CaptureBackend for DxgiCapture {
     }
 
     fn is_running(&self) -> bool {
-        self.running.load(Ordering::Relaxed)
+        self.running.load(Ordering::Acquire)
     }
 
     fn is_capture_thread_finished(&self) -> bool {

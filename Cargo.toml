@@ -68,3 +68,21 @@ strip = true
 ico = "0.4"
 image = { version = "0.25", default-features = false, features = ["ico"] }
 winres = "0.1"
+
+[dev-dependencies]
+# Test utilities
+tempfile = "3"
+assert_matches = "1.5"
+serial_test = "3"
+rstest = "0.23"
+
+# Benchmarking
+criterion = { version = "0.5", features = ["html_reports"] }
+
+# Property-based testing
+proptest = "1"
+
+[[bench]]
+name = "gui_interactions"
+harness = false
+required-features = ["ffmpeg"]

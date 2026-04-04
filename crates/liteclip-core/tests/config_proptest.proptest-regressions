@@ -1,0 +1,12 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 11fd8eb2899dcfd69b61d85236dcbbce7cd288f4e0bd0b6f002a5d144b8e00c1 # shrinks to resolution = Native
+cc 2c60b930a33ca85776e19f2cc867fe6caa6db2a64d1dea5fdda60d71078e22b2 # shrinks to quality = Performance
+cc 494a64e847147f61c64398a39192858f90f9345b83a09e207948d3715b528138 # shrinks to extreme_bitrate = 0, extreme_framerate = 121
+cc 4899ad94a13add3c141b918efccfb57f1d674e4de7e2782d8f6d7575ed95a7e4 # shrinks to encoder = Auto
+cc d06880a1900fc3a12ee66d5489b1435432bf4b62e4e123cc0e515bb53e6d72fb # shrinks to extreme_bitrate = 0, extreme_framerate = 1
+cc aa88db97a7cc152c3cbc34a316b3df0ca667c62140a669edd4528c74cf4bdae5 # shrinks to extreme_bitrate = 1, extreme_framerate = 0

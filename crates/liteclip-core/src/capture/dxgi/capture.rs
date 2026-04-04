@@ -59,7 +59,7 @@ enum CaptureOutcome {
 
 impl Nv12TexturePool {
     fn new(width: u32, height: u32) -> Self {
-        let max_capacity = 12usize;
+        let max_capacity = TEXTURE_POOL_MAX_CAPACITY;
         let (return_tx, return_rx) = bounded(max_capacity * 2);
         Self {
             available: Vec::new(),
@@ -75,7 +75,7 @@ impl Nv12TexturePool {
 
 impl BgraTexturePool {
     fn new(width: u32, height: u32) -> Self {
-        let max_capacity = 12usize;
+        let max_capacity = TEXTURE_POOL_MAX_CAPACITY;
         let (return_tx, return_rx) = bounded(max_capacity * 2);
         Self {
             available: Vec::new(),
@@ -91,6 +91,10 @@ impl BgraTexturePool {
 
 /// Low-power mode FPS for adaptive capture rate when scene is static
 const LOW_POWER_FPS: u32 = 5;
+/// Per-format texture pool capacity.
+/// 12 items provides enough slack for capture/encode overlap and short encoder jitter bursts
+/// without retaining excessive GPU memory.
+const TEXTURE_POOL_MAX_CAPACITY: usize = 12;
 
 /// DXGI capture state (desktop resolution capture; resize to configured output is done in the encoder).
 pub(super) struct DxgiCaptureState {
@@ -110,6 +114,7 @@ pub(super) struct DxgiCaptureState {
         isize,
         windows::Win32::Graphics::Direct3D11::ID3D11VideoProcessorInputView,
     >,
+    pub(super) input_view_cache_fifo: std::collections::VecDeque<isize>,
     pub(super) nv12_conversion_available: bool,
     pub(super) nv12_runtime_failures: u32,
     pub(super) nv12_retry_after: Option<Instant>,
@@ -412,6 +417,7 @@ impl DxgiCaptureState {
                 video_processor,
                 video_processor_enumerator,
                 input_view_cache: std::collections::HashMap::new(),
+                input_view_cache_fifo: std::collections::VecDeque::new(),
                 nv12_conversion_available,
                 nv12_runtime_failures: 0,
                 nv12_retry_after: None,
@@ -681,7 +687,12 @@ impl DxgiCapture {
             match hr {
                 Ok(_) => {
                     if drop_before_process {
-                        state.duplication.ReleaseFrame().ok();
+                        if let Err(e) = state.duplication.ReleaseFrame() {
+                            debug!(
+                                "ReleaseFrame failed on dropped frame: 0x{:08X}",
+                                e.code().0 as u32
+                            );
+                        }
                         return Ok(CaptureOutcome::Dropped);
                     }
                     // Use capture-time QPC for replay timestamps. `LastPresentTime` reflects the
@@ -700,7 +711,12 @@ impl DxgiCapture {
                         timestamp,
                         gpu_texture_format,
                     )?;
-                    state.duplication.ReleaseFrame().ok();
+                    if let Err(e) = state.duplication.ReleaseFrame() {
+                        debug!(
+                            "ReleaseFrame failed after capture: 0x{:08X}",
+                            e.code().0 as u32
+                        );
+                    }
                     Ok(CaptureOutcome::Frame(frame))
                 }
                 Err(e) if e.code().0 == DXGI_ERROR_WAIT_TIMEOUT.0 => Ok(CaptureOutcome::Timeout),
@@ -800,11 +816,10 @@ impl DxgiCapture {
 
         // Adaptive capture rate: scene change detection
         let mut last_present_qpc: i64 = 0;
-        let _consecutive_static_frames: u32 = 0;
         let low_power_frame_period = Duration::from_nanos(1_000_000_000u64 / LOW_POWER_FPS as u64);
         let mut is_low_power_mode = false;
 
-        while running.load(Ordering::Relaxed) {
+        while running.load(Ordering::Acquire) {
             let mut drop_before_process = false;
             let queue_len = frame_tx.len() as u32;
             let queue_cap = frame_tx.capacity().unwrap_or(32) as u32;
@@ -839,7 +854,12 @@ impl DxgiCapture {
                     let is_new_content =
                         current_present_qpc != last_present_qpc && current_present_qpc != 0;
 
-                    unsafe { state.duplication.ReleaseFrame().ok() };
+                    if let Err(e) = unsafe { state.duplication.ReleaseFrame() } {
+                        debug!(
+                            "ReleaseFrame failed in low-power peek path: 0x{:08X}",
+                            e.code().0 as u32
+                        );
+                    }
 
                     if is_new_content {
                         // Scene changed, exit low-power mode

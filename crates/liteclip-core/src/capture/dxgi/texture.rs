@@ -8,7 +8,7 @@ use bytes::Bytes;
 use tracing::{debug, info, warn};
 use windows::Win32::Foundation::BOOL;
 use windows::Win32::Graphics::Direct3D11::{
-    ID3D11Device, ID3D11DeviceContext4, ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoDevice,
+    ID3D11Device, ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoDevice,
     ID3D11VideoProcessorEnumerator, ID3D11VideoProcessorInputView, ID3D11VideoProcessorOutputView,
     D3D11_BIND_RENDER_TARGET, D3D11_RESOURCE_MISC_SHARED, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
     D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255, D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_16_235,
@@ -328,20 +328,23 @@ impl DxgiCapture {
                 view.clone()
             } else {
                 // Cap cache at 16 entries to prevent unbounded growth on repeated
-                // resolution changes or pool expansions. Evict all entries when the
-                // limit is reached — the cache is warmed quickly as pool textures cycle.
+                // resolution changes or pool expansions. Evict only one oldest entry
+                // to preserve most warm cache hits under steady-state capture.
                 const INPUT_VIEW_CACHE_LIMIT: usize = 16;
                 if state.input_view_cache.len() >= INPUT_VIEW_CACHE_LIMIT {
-                    state.input_view_cache.clear();
-                    debug!(
-                        "input_view_cache cleared (limit {} reached)",
-                        INPUT_VIEW_CACHE_LIMIT
-                    );
+                    if let Some(oldest_key) = state.input_view_cache_fifo.pop_front() {
+                        let _ = state.input_view_cache.remove(&oldest_key);
+                        debug!(
+                            "input_view_cache evicted one entry (limit {} reached)",
+                            INPUT_VIEW_CACHE_LIMIT
+                        );
+                    }
                 }
                 let view = Self::create_video_processor_input_view(state, bgra_texture)?;
                 state
                     .input_view_cache
                     .insert(input_texture_ptr, view.clone());
+                state.input_view_cache_fifo.push_back(input_texture_ptr);
                 view
             };
 
@@ -377,17 +380,12 @@ impl DxgiCapture {
             // Fallback to Flush only if fence is unavailable (should not happen on Win10+)
             if let Some(ref sync_fence) = state.nv12_sync_fence {
                 state.nv12_fence_value += 1;
-                if let Some(ref ctx4) = state.d3d_context4 {
-                    ctx4.Signal(sync_fence, state.nv12_fence_value)
-                        .context("Failed to signal NV12 sync fence")?;
-                } else {
-                    let ctx4: ID3D11DeviceContext4 = state
-                        .d3d_context
-                        .cast()
-                        .context("Failed to get ID3D11DeviceContext4 for fence signal")?;
-                    ctx4.Signal(sync_fence, state.nv12_fence_value)
-                        .context("Failed to signal NV12 sync fence")?;
-                }
+                let ctx4 = state
+                    .d3d_context4
+                    .as_ref()
+                    .context("ID3D11DeviceContext4 unavailable for NV12 fence signal")?;
+                ctx4.Signal(sync_fence, state.nv12_fence_value)
+                    .context("Failed to signal NV12 sync fence")?;
             } else {
                 // Log warning when falling back to Flush - this causes CPU stalls
                 warn!("NV12 sync fence unavailable, falling back to Flush() - this may cause input latency");
@@ -425,17 +423,12 @@ impl DxgiCapture {
                 // Always use GPU fence for non-blocking synchronization
                 if let Some(ref sync_fence) = state.bgra_sync_fence {
                     state.bgra_fence_value += 1;
-                    if let Some(ref ctx4) = state.d3d_context4 {
-                        ctx4.Signal(sync_fence, state.bgra_fence_value)
-                            .context("Failed to signal BGRA sync fence")?;
-                    } else {
-                        let ctx4: ID3D11DeviceContext4 = state
-                            .d3d_context
-                            .cast()
-                            .context("Failed to get ID3D11DeviceContext4 for BGRA fence signal")?;
-                        ctx4.Signal(sync_fence, state.bgra_fence_value)
-                            .context("Failed to signal BGRA sync fence")?;
-                    }
+                    let ctx4 = state
+                        .d3d_context4
+                        .as_ref()
+                        .context("ID3D11DeviceContext4 unavailable for BGRA fence signal")?;
+                    ctx4.Signal(sync_fence, state.bgra_fence_value)
+                        .context("Failed to signal BGRA sync fence")?;
                 } else {
                     // Log warning when falling back to Flush - this causes CPU stalls
                     warn!("BGRA sync fence unavailable, falling back to Flush() - this may cause input latency");
@@ -451,7 +444,12 @@ impl DxgiCapture {
                     pooled_output,
                     state.bgra_fence_value,
                     state.bgra_fence_shared_handle,
-                    state.bgra_pool.as_ref().unwrap().return_tx.clone(),
+                    state
+                        .bgra_pool
+                        .as_ref()
+                        .context("BGRA texture pool not initialized")?
+                        .return_tx
+                        .clone(),
                 ))),
                 timestamp,
                 resolution,
@@ -484,7 +482,12 @@ impl DxgiCapture {
                             nv12_item,
                             state.nv12_fence_value,
                             state.nv12_fence_shared_handle,
-                            state.nv12_pool.as_ref().unwrap().return_tx.clone(),
+                            state
+                                .nv12_pool
+                                .as_ref()
+                                .context("NV12 texture pool not initialized")?
+                                .return_tx
+                                .clone(),
                         ))),
                         timestamp,
                         resolution,
@@ -492,7 +495,9 @@ impl DxgiCapture {
                 }
                 Err(e) => {
                     state.nv12_runtime_failures = state.nv12_runtime_failures.saturating_add(1);
-                    let retry_delay = Duration::from_secs(2);
+                    let shift = state.nv12_runtime_failures.saturating_sub(1).min(4);
+                    let retry_secs = 1u64 << shift;
+                    let retry_delay = Duration::from_secs(retry_secs.min(16));
                     state.nv12_retry_after = Some(now + retry_delay);
                     warn!(
                         "NV12 conversion failed (attempt {}), dropping frame and backing off for {:.1}s: {}",
