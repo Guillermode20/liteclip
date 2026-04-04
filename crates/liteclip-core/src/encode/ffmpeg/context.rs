@@ -198,7 +198,7 @@ impl FfmpegEncoder {
         }
 
         // For shared device, use the source texture directly
-        (*hw_frame).data[0] = gpu_frame.texture.as_raw() as *mut _;
+        (*hw_frame).data[0] = gpu_frame.texture().unwrap().as_raw() as *mut _;
         (*hw_frame).data[1] = std::ptr::null_mut();
         (*hw_frame).data[2] = std::ptr::null_mut();
         (*hw_frame).data[3] = std::ptr::null_mut();
@@ -216,10 +216,11 @@ impl FfmpegEncoder {
             let dst_texture = &*texture_ptr;
             let dest_subresource = (*hw_frame).data[1] as usize as u32;
 
+            let shared_handle = gpu_frame.shared_handle().unwrap();
             let shared_texture = if let Some(found) = hw_context
                 .cached_shared_textures
                 .iter()
-                .find(|(h, _)| *h == gpu_frame.shared_handle)
+                .find(|(h, _)| *h == shared_handle)
                 .map(|(_, t)| t)
             {
                 found.clone()
@@ -227,7 +228,7 @@ impl FfmpegEncoder {
                 let mut opened_opt: Option<ID3D11Texture2D> = None;
                 if let Some(ref encoder_device) = hw_context.encoder_device {
                     encoder_device
-                        .OpenSharedResource(gpu_frame.shared_handle, &mut opened_opt)
+                        .OpenSharedResource(shared_handle, &mut opened_opt)
                         .map_err(|e| {
                             EncodeError::msg(format!(
                                 "Failed to open shared texture on encoder device: {}",
@@ -243,7 +244,7 @@ impl FfmpegEncoder {
                     .ok_or_else(|| EncodeError::msg("OpenSharedResource returned null"))?;
                 hw_context
                     .cached_shared_textures
-                    .push((gpu_frame.shared_handle, opened.clone()));
+                    .push((shared_handle, opened.clone()));
                 if hw_context.cached_shared_textures.len() > MAX_CACHED_SHARED_TEXTURES {
                     hw_context.cached_shared_textures.remove(0);
                 }

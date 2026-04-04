@@ -180,9 +180,7 @@ impl DxgiCapture {
                 .as_mut()
                 .context("BGRA pool is not initialized")?;
             while let Ok(item) = pool.return_rx.try_recv() {
-                if pool.available.len() < pool.max_capacity {
-                    pool.available.push(item);
-                }
+                pool.available.push(item);
             }
             let at_capacity = pool
                 .total_created
@@ -231,9 +229,7 @@ impl DxgiCapture {
                 .as_mut()
                 .context("NV12 pool is not initialized")?;
             while let Ok(item) = pool.return_rx.try_recv() {
-                if pool.available.len() < pool.max_capacity {
-                    pool.available.push(item);
-                }
+                pool.available.push(item);
             }
             let at_capacity = pool
                 .total_created
@@ -326,9 +322,19 @@ impl DxgiCapture {
                 .output_view
                 .as_ref()
                 .context("NV12 pooled output view is missing")?;
-            let input_view = Self::create_video_processor_input_view(state, bgra_texture)?;
 
-            let stream_data = D3D11_VIDEO_PROCESSOR_STREAM {
+            let input_texture_ptr = bgra_texture.as_raw() as isize;
+            let input_view = if let Some(view) = state.input_view_cache.get(&input_texture_ptr) {
+                view.clone()
+            } else {
+                let view = Self::create_video_processor_input_view(state, bgra_texture)?;
+                state
+                    .input_view_cache
+                    .insert(input_texture_ptr, view.clone());
+                view
+            };
+
+            let stream_data_arr = [D3D11_VIDEO_PROCESSOR_STREAM {
                 Enable: BOOL(1),
                 OutputIndex: 0,
                 InputFrameOrField: 0,
@@ -340,23 +346,37 @@ impl DxgiCapture {
                 ppPastSurfacesRight: null_mut(),
                 pInputSurfaceRight: ManuallyDrop::new(None),
                 ppFutureSurfacesRight: null_mut(),
-            };
+            }];
 
-            video_context
-                .VideoProcessorBlt(video_processor, pooled_output_view, 0, &[stream_data])
-                .ok()
-                .context("VideoProcessorBlt failed")?;
+            let res = video_context.VideoProcessorBlt(
+                video_processor,
+                pooled_output_view,
+                0,
+                &stream_data_arr,
+            );
+
+            let [stream_data] = stream_data_arr;
+
+            // Un-leak the ManuallyDrop COM pointer wrapper
+            let _ = ManuallyDrop::into_inner(stream_data.pInputSurface);
+
+            res.ok().context("VideoProcessorBlt failed")?;
 
             // Always use GPU fence for non-blocking synchronization
             // Fallback to Flush only if fence is unavailable (should not happen on Win10+)
             if let Some(ref sync_fence) = state.nv12_sync_fence {
                 state.nv12_fence_value += 1;
-                let ctx4: ID3D11DeviceContext4 = state
-                    .d3d_context
-                    .cast()
-                    .context("Failed to get ID3D11DeviceContext4 for fence signal")?;
-                ctx4.Signal(sync_fence, state.nv12_fence_value)
-                    .context("Failed to signal NV12 sync fence")?;
+                if let Some(ref ctx4) = state.d3d_context4 {
+                    ctx4.Signal(sync_fence, state.nv12_fence_value)
+                        .context("Failed to signal NV12 sync fence")?;
+                } else {
+                    let ctx4: ID3D11DeviceContext4 = state
+                        .d3d_context
+                        .cast()
+                        .context("Failed to get ID3D11DeviceContext4 for fence signal")?;
+                    ctx4.Signal(sync_fence, state.nv12_fence_value)
+                        .context("Failed to signal NV12 sync fence")?;
+                }
             } else {
                 // Log warning when falling back to Flush - this causes CPU stalls
                 warn!("NV12 sync fence unavailable, falling back to Flush() - this may cause input latency");
@@ -394,12 +414,17 @@ impl DxgiCapture {
                 // Always use GPU fence for non-blocking synchronization
                 if let Some(ref sync_fence) = state.bgra_sync_fence {
                     state.bgra_fence_value += 1;
-                    let ctx4: ID3D11DeviceContext4 = state
-                        .d3d_context
-                        .cast()
-                        .context("Failed to get ID3D11DeviceContext4 for BGRA fence signal")?;
-                    ctx4.Signal(sync_fence, state.bgra_fence_value)
-                        .context("Failed to signal BGRA sync fence")?;
+                    if let Some(ref ctx4) = state.d3d_context4 {
+                        ctx4.Signal(sync_fence, state.bgra_fence_value)
+                            .context("Failed to signal BGRA sync fence")?;
+                    } else {
+                        let ctx4: ID3D11DeviceContext4 = state
+                            .d3d_context
+                            .cast()
+                            .context("Failed to get ID3D11DeviceContext4 for BGRA fence signal")?;
+                        ctx4.Signal(sync_fence, state.bgra_fence_value)
+                            .context("Failed to signal BGRA sync fence")?;
+                    }
                 } else {
                     // Log warning when falling back to Flush - this causes CPU stalls
                     warn!("BGRA sync fence unavailable, falling back to Flush() - this may cause input latency");
@@ -415,6 +440,7 @@ impl DxgiCapture {
                     pooled_output,
                     state.bgra_fence_value,
                     state.bgra_fence_shared_handle,
+                    state.bgra_pool.as_ref().unwrap().return_tx.clone(),
                 ))),
                 timestamp,
                 resolution,
@@ -447,6 +473,7 @@ impl DxgiCapture {
                             nv12_item,
                             state.nv12_fence_value,
                             state.nv12_fence_shared_handle,
+                            state.nv12_pool.as_ref().unwrap().return_tx.clone(),
                         ))),
                         timestamp,
                         resolution,

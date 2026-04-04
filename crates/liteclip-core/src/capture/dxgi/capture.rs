@@ -33,6 +33,7 @@ use windows_core::Interface;
 
 pub(super) struct Nv12TexturePool {
     pub(super) available: Vec<D3d11TexturePoolItem>,
+    pub(super) return_tx: Sender<D3d11TexturePoolItem>,
     pub(super) return_rx: Receiver<D3d11TexturePoolItem>,
     pub(super) width: u32,
     pub(super) height: u32,
@@ -42,6 +43,7 @@ pub(super) struct Nv12TexturePool {
 
 pub(super) struct BgraTexturePool {
     pub(super) available: Vec<D3d11TexturePoolItem>,
+    pub(super) return_tx: Sender<D3d11TexturePoolItem>,
     pub(super) return_rx: Receiver<D3d11TexturePoolItem>,
     pub(super) width: u32,
     pub(super) height: u32,
@@ -58,9 +60,10 @@ enum CaptureOutcome {
 impl Nv12TexturePool {
     fn new(width: u32, height: u32) -> Self {
         let max_capacity = 12usize;
-        let (_return_tx, return_rx) = bounded(max_capacity * 2);
+        let (return_tx, return_rx) = bounded(max_capacity * 2);
         Self {
             available: Vec::new(),
+            return_tx,
             return_rx,
             width,
             height,
@@ -73,9 +76,10 @@ impl Nv12TexturePool {
 impl BgraTexturePool {
     fn new(width: u32, height: u32) -> Self {
         let max_capacity = 12usize;
-        let (_return_tx, return_rx) = bounded(max_capacity * 2);
+        let (return_tx, return_rx) = bounded(max_capacity * 2);
         Self {
             available: Vec::new(),
+            return_tx,
             return_rx,
             width,
             height,
@@ -92,6 +96,7 @@ const LOW_POWER_FPS: u32 = 5;
 pub(super) struct DxgiCaptureState {
     pub(super) d3d_device: ID3D11Device,
     pub(super) d3d_context: ID3D11DeviceContext,
+    pub(super) d3d_context4: Option<windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext4>,
     pub(super) duplication: windows::Win32::Graphics::Dxgi::IDXGIOutputDuplication,
     pub(super) frame_width: u32,
     pub(super) frame_height: u32,
@@ -101,6 +106,10 @@ pub(super) struct DxgiCaptureState {
     pub(super) video_context: Option<ID3D11VideoContext>,
     pub(super) video_processor: Option<ID3D11VideoProcessor>,
     pub(super) video_processor_enumerator: Option<ID3D11VideoProcessorEnumerator>,
+    pub(super) input_view_cache: std::collections::HashMap<
+        isize,
+        windows::Win32::Graphics::Direct3D11::ID3D11VideoProcessorInputView,
+    >,
     pub(super) nv12_conversion_available: bool,
     pub(super) nv12_runtime_failures: u32,
     pub(super) nv12_retry_after: Option<Instant>,
@@ -281,6 +290,11 @@ impl DxgiCaptureState {
                     target_height,
                 )?);
             }
+            bgra_pool
+                .total_created
+                .store(4, std::sync::atomic::Ordering::Relaxed);
+
+            let d3d_context4 = d3d_context.cast().ok();
 
             let (bgra_sync_fence, bgra_fence_shared_handle) = match d3d_device
                 .cast::<ID3D11Device5>()
@@ -387,6 +401,7 @@ impl DxgiCaptureState {
             Ok(DxgiCaptureState {
                 d3d_device,
                 d3d_context,
+                d3d_context4,
                 duplication,
                 frame_width,
                 frame_height,
@@ -396,6 +411,7 @@ impl DxgiCaptureState {
                 video_context,
                 video_processor,
                 video_processor_enumerator,
+                input_view_cache: std::collections::HashMap::new(),
                 nv12_conversion_available,
                 nv12_runtime_failures: 0,
                 nv12_retry_after: None,
@@ -510,6 +526,9 @@ impl DxgiCaptureState {
                     output_height,
                 )?);
             }
+            nv12_pool
+                .total_created
+                .store(4, std::sync::atomic::Ordering::Relaxed);
 
             info!(
                 "NV12 video processor initialized successfully for {}x{} -> {}x{}",
