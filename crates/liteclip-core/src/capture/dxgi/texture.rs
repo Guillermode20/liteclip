@@ -327,6 +327,17 @@ impl DxgiCapture {
             let input_view = if let Some(view) = state.input_view_cache.get(&input_texture_ptr) {
                 view.clone()
             } else {
+                // Cap cache at 16 entries to prevent unbounded growth on repeated
+                // resolution changes or pool expansions. Evict all entries when the
+                // limit is reached — the cache is warmed quickly as pool textures cycle.
+                const INPUT_VIEW_CACHE_LIMIT: usize = 16;
+                if state.input_view_cache.len() >= INPUT_VIEW_CACHE_LIMIT {
+                    state.input_view_cache.clear();
+                    debug!(
+                        "input_view_cache cleared (limit {} reached)",
+                        INPUT_VIEW_CACHE_LIMIT
+                    );
+                }
                 let view = Self::create_video_processor_input_view(state, bgra_texture)?;
                 state
                     .input_view_cache

@@ -792,11 +792,11 @@ impl DxgiCapture {
         let mut log_counter = 0u64;
         const LOG_INTERVAL: u64 = 1800; // Log every 1800 frames (~30s at 60fps)
         const DROP_LOG_INTERVAL: u64 = 300;
-        // Use spin-wait for last 1.5ms for more precise frame timing
-        // This reduces jitter caused by Windows sleep granularity (1-15ms)
-        const FRAME_PACING_SPIN_WINDOW: Duration = Duration::from_micros(1500);
         let mut frame_period = Duration::from_nanos(1_000_000_000u64 / base_fps as u64);
         let mut next_frame_time = std::time::Instant::now();
+        // Cache the last real capture timestamp; reused for duplicate frames so we
+        // avoid a kernel call (QueryPerformanceCounter) for every static-scene frame.
+        let mut last_real_timestamp: i64 = 0;
 
         // Adaptive capture rate: scene change detection
         let mut last_present_qpc: i64 = 0;
@@ -817,9 +817,14 @@ impl DxgiCapture {
                 drop_before_process = true;
             }
 
-            // Check for scene changes when in low-power mode
+            // Check for scene changes when in low-power mode.
+            // Sleep FIRST so the peek happens at the low-power rate, not at full
+            // loop speed (which was causing hundreds of AcquireNextFrame calls/sec).
             let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
             if is_low_power_mode {
+                std::thread::sleep(low_power_frame_period);
+                next_frame_time = std::time::Instant::now() + low_power_frame_period;
+
                 // Peek at frame info without acquiring
                 let hr = unsafe {
                     state.duplication.AcquireNextFrame(
@@ -845,8 +850,8 @@ impl DxgiCapture {
                             "Adaptive capture: resumed full-rate capture (scene change detected)"
                         );
                     } else {
-                        // Still static, continue low-power mode
-                        // Send duplicate frame to maintain timing
+                        // Still static, continue low-power mode.
+                        // Re-use cached timestamp — avoids QueryPerformanceCounter on duplicate frames.
                         if let Some(ref last) = last_frame {
                             if backpressure.is_encoder_overloaded() || frame_tx.is_full() {
                                 // Encoder busy, skip this frame
@@ -858,7 +863,7 @@ impl DxgiCapture {
                                         last.bgra.clone()
                                     },
                                     d3d11: last.d3d11.clone(),
-                                    timestamp: Self::get_qpc_timestamp(),
+                                    timestamp: last_real_timestamp,
                                     resolution: last.resolution,
                                 };
                                 if frame_tx.try_send(frame).is_ok() {
@@ -869,12 +874,11 @@ impl DxgiCapture {
                                 }
                             }
                         }
-
-                        // Sleep for low-power interval
-                        std::thread::sleep(low_power_frame_period);
-                        next_frame_time = std::time::Instant::now() + low_power_frame_period;
                         continue;
                     }
+                } else {
+                    // No frame available — scene still static
+                    continue;
                 }
             }
 
@@ -892,6 +896,7 @@ impl DxgiCapture {
                     // GPU frames use Arc<D3d11Frame>, so cloning is safe — the
                     // pooled NV12 texture is returned to the pool only after every
                     // clone has been dropped.
+                    last_real_timestamp = frame.timestamp;
                     last_frame = Some(frame.clone());
                     match frame_tx.try_send(frame) {
                         Ok(()) => {
@@ -954,7 +959,9 @@ impl DxgiCapture {
                             last.bgra.clone()
                         },
                         d3d11: last.d3d11.clone(),
-                        timestamp: Self::get_qpc_timestamp(),
+                        // Reuse last real timestamp — avoids QueryPerformanceCounter kernel
+                        // call for every duplicate frame on a static desktop.
+                        timestamp: last_real_timestamp,
                         resolution: last.resolution,
                     };
                     match frame_tx.try_send(frame) {
@@ -1075,53 +1082,16 @@ impl DxgiCapture {
                         fps_divisor,
                     },
                 );
-                let nv12_stats = state.nv12_pool.as_ref().map(|p| {
-                    (
-                        p.available.len(),
-                        p.total_created.load(std::sync::atomic::Ordering::Relaxed),
-                        p.max_capacity,
-                    )
-                });
-                let bgra_stats = state.bgra_pool.as_ref().map(|p| {
-                    (
-                        p.available.len(),
-                        p.total_created.load(std::sync::atomic::Ordering::Relaxed),
-                        p.max_capacity,
-                    )
-                });
-                if let Some((working_set_mb, private_mb)) =
-                    crate::output::saver::process_memory_mb()
-                {
-                    info!(
-                        "Memory telemetry [capture]: fps={}, drops={}, drop_ratio={:.3}, duplicates={}, divisor={}, quality_contract_ok={}, queue={}/{}, nv12={:?}, bgra={:?}, process_working_set_mb={:.1}, process_private_mb={:.1}",
-                        window_frames / 30,
-                        window_drops,
-                        quality_assessment.drop_ratio,
-                        window_duplicates,
-                        fps_divisor,
-                        quality_assessment.within_contract,
-                        frame_tx.len(),
-                        frame_tx.capacity().unwrap_or(32),
-                        nv12_stats,
-                        bgra_stats,
-                        working_set_mb,
-                        private_mb
-                    );
-                } else {
-                    info!(
-                        "Memory telemetry [capture]: fps={}, drops={}, drop_ratio={:.3}, duplicates={}, divisor={}, quality_contract_ok={}, queue={}/{}, nv12={:?}, bgra={:?}",
-                        window_frames / 30,
-                        window_drops,
-                        quality_assessment.drop_ratio,
-                        window_duplicates,
-                        fps_divisor,
-                        quality_assessment.within_contract,
-                        frame_tx.len(),
-                        frame_tx.capacity().unwrap_or(32),
-                        nv12_stats,
-                        bgra_stats
-                    );
-                }
+                debug!(
+                    "Capture stats: fps={}, drops={}, drop_ratio={:.3}, duplicates={}, divisor={}, queue={}/{}",
+                    window_frames / 30,
+                    window_drops,
+                    quality_assessment.drop_ratio,
+                    window_duplicates,
+                    fps_divisor,
+                    frame_tx.len(),
+                    frame_tx.capacity().unwrap_or(32),
+                );
                 if !quality_assessment.within_contract {
                     warn!(
                         "Recording quality contract exceeded: drop_ratio={:.3} (limit {:.3}), fps_divisor={} (limit {})",
@@ -1139,13 +1109,12 @@ impl DxgiCapture {
                 window_duplicates = 0;
             }
 
-            // Precise pacing: mostly sleep, then a short final spin for accuracy.
+            // Frame pacing: pure sleep. AcquireNextFrame's kernel wait provides
+            // sufficient timing accuracy; the old 1.5 ms spin-wait cost ~90 ms of
+            // CPU time per second at 60 fps without meaningful precision benefit.
             let now = std::time::Instant::now();
             if now < next_frame_time {
-                let diff = next_frame_time - now;
-                if diff > FRAME_PACING_SPIN_WINDOW {
-                    std::thread::sleep(diff - FRAME_PACING_SPIN_WINDOW);
-                }
+                std::thread::sleep(next_frame_time - now);
             }
             next_frame_time += frame_period;
             // If we're significantly behind, reset the schedule

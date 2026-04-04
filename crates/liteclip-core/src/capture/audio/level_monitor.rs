@@ -29,6 +29,9 @@ struct AudioLevelMonitorInner {
     mic_level: AtomicU32,
     mic_peak: AtomicU32,
     mic_smoothed: AtomicU32,
+    /// Set to `true` while the settings GUI is open.
+    /// When `false`, level calculations are skipped to save CPU.
+    gui_active: std::sync::atomic::AtomicBool,
 }
 
 impl Default for AudioLevelMonitor {
@@ -47,11 +50,24 @@ impl AudioLevelMonitor {
                 mic_level: AtomicU32::new(0),
                 mic_peak: AtomicU32::new(0),
                 mic_smoothed: AtomicU32::new(0),
+                gui_active: std::sync::atomic::AtomicBool::new(false),
             }),
         }
     }
 
+    /// Notify the monitor whether the audio level GUI (settings window) is open.
+    ///
+    /// When `false` (default), `update_system_levels` and `update_mic_levels` are
+    /// no-ops so the per-buffer RMS scan is skipped entirely.
+    pub fn set_gui_active(&self, active: bool) {
+        self.inner.gui_active.store(active, Ordering::Relaxed);
+    }
+
     pub fn update_system_levels(&self, left: f32, right: f32) {
+        // Skip heavy RMS computation when the GUI meter is not visible.
+        if !self.inner.gui_active.load(Ordering::Relaxed) {
+            return;
+        }
         let combined = left.max(right).clamp(0.0, 1.0);
         let level_u32 = Self::amplitude_to_meter_level(combined);
 
@@ -75,6 +91,10 @@ impl AudioLevelMonitor {
     }
 
     pub fn update_mic_levels(&self, left: f32, right: f32) {
+        // Skip heavy RMS computation when the GUI meter is not visible.
+        if !self.inner.gui_active.load(Ordering::Relaxed) {
+            return;
+        }
         let combined = left.max(right).clamp(0.0, 1.0);
         let level_u32 = Self::amplitude_to_meter_level(combined);
 

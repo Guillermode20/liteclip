@@ -663,42 +663,17 @@ fn run_noise_thread(
     set_noise_thread_priority();
 
     let mut last_log = std::time::Instant::now();
-    let mut packets: u32 = 0;
-    let mut total_process_time = Duration::ZERO;
-    let mut max_process_time = Duration::ZERO;
 
     loop {
         match raw_rx.recv_timeout(Duration::from_millis(200)) {
             Ok(mut frame) => {
-                let process_start = std::time::Instant::now();
                 if !frame.silent {
                     processor.process(&mut frame.data);
                 }
-                let process_elapsed = process_start.elapsed();
-                total_process_time += process_elapsed;
-                if process_elapsed > max_process_time {
-                    max_process_time = process_elapsed;
-                }
 
-                packets += 1;
-                if last_log.elapsed() >= Duration::from_secs(5) {
-                    let avg_proc_us = if packets > 0 {
-                        (total_process_time.as_micros() / packets as u128) as u64
-                    } else {
-                        0
-                    };
-                    tracing::info!(
-                        "RNNoise: {} pkts/5s | gate={:.3} presence={:.3} hold={} avg_proc={}us max_proc={}us",
-                        packets,
-                        processor.gate_gain,
-                        processor.speech_presence,
-                        processor.hold_counter,
-                        avg_proc_us,
-                        max_process_time.as_micros(),
-                    );
-                    packets = 0;
-                    total_process_time = Duration::ZERO;
-                    max_process_time = Duration::ZERO;
+                if last_log.elapsed() >= Duration::from_secs(300) {
+                    // Heartbeat at trace level so it's off by default.
+                    tracing::trace!("RNNoise noise thread alive");
                     last_log = std::time::Instant::now();
                 }
                 let frozen = frame.data.freeze();

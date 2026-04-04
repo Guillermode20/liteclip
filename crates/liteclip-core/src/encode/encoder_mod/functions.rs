@@ -349,11 +349,12 @@ pub fn spawn_encoder_with_receiver(
             let mut total_forwarded_packets = 0u64;
             let mut flush_batches = 0usize;
             let mut last_packet_flush = Instant::now();
-            let mut last_mem_diag = Instant::now();
-            const MEM_DIAG_INTERVAL: Duration = Duration::from_secs(30);
-            let frame_recv_timeout = Duration::from_millis(
-                (1000u64 / u64::from(thread_config.framerate.max(1))).clamp(8, 16),
-            );
+            // Wake at most at the batch-flush granularity when no frames arrive.
+            // drain_ready_packets is called inline after every successful encode_frame,
+            // so this timeout only needs to cover flushing stale packet batches.
+            // Dropping from ~8-16 ms (1000/fps) down to batch-age cuts idle wakeups
+            // from 60-125/sec to ~13/sec with zero latency impact.
+            let frame_recv_timeout = Duration::from_millis(MAX_PACKET_BATCH_AGE_MS as u64);
 
             fn flush_packet_batch(
                 buffer: &crate::buffer::ring::SharedReplayBuffer,
@@ -393,11 +394,6 @@ pub fn spawn_encoder_with_receiver(
             }
 
             loop {
-                if last_mem_diag.elapsed() >= MEM_DIAG_INTERVAL {
-                    crate::memory_diag::log_recording_memory("encoder_periodic", &buffer);
-                    last_mem_diag = Instant::now();
-                }
-
                 total_forwarded_packets =
                     total_forwarded_packets.saturating_add(drain_ready_packets(
                         &packet_rx,

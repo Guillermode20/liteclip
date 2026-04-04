@@ -6,6 +6,47 @@ use anyhow::Result;
 use std::sync::Arc;
 use tracing::{error, info, warn};
 
+/// RAII guard that requests 1ms Windows timer resolution while recording and
+/// restores the default on drop. Declared here so it can be stored in [`AppState`].
+/// The guard is a no-op on non-Windows platforms.
+#[cfg(windows)]
+struct TimerResolutionGuard {
+    active: bool,
+}
+
+#[cfg(windows)]
+impl TimerResolutionGuard {
+    fn acquire() -> Self {
+        use windows::Win32::Media::{timeBeginPeriod, TIMERR_NOERROR};
+        let result = unsafe { timeBeginPeriod(1) };
+        let active = result == TIMERR_NOERROR;
+        if active {
+            info!("Timer resolution: 1ms enabled for recording");
+        } else {
+            warn!(
+                "Timer resolution: failed to request 1ms (MMRESULT={})",
+                result
+            );
+        }
+        Self { active }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for TimerResolutionGuard {
+    fn drop(&mut self) {
+        if self.active {
+            use windows::Win32::Media::{timeEndPeriod, TIMERR_NOERROR};
+            let result = unsafe { timeEndPeriod(1) };
+            if result != TIMERR_NOERROR {
+                warn!("Timer resolution: failed to restore (MMRESULT={})", result);
+            } else {
+                info!("Timer resolution: restored to system default");
+            }
+        }
+    }
+}
+
 /// Application state manager.
 ///
 /// Central coordinator for LiteClip, managing:
@@ -31,6 +72,10 @@ pub struct AppState {
     level_monitor: AudioLevelMonitor,
     /// Optional embedder hooks ([`CoreHost`]).
     host: Option<Arc<dyn CoreHost>>,
+    /// 1 ms Windows timer resolution guard. Held only while recording is active so
+    /// the system-wide timer interrupt reverts to the ~15.6 ms default at idle.
+    #[cfg(windows)]
+    timer_guard: Option<TimerResolutionGuard>,
 }
 
 impl AppState {
@@ -68,6 +113,8 @@ impl AppState {
             pipeline,
             level_monitor,
             host: None,
+            #[cfg(windows)]
+            timer_guard: None,
         })
     }
 
@@ -93,6 +140,12 @@ impl AppState {
     ///
     /// Returns an error if pipeline fails to start.
     pub fn start_recording(&mut self) -> Result<()> {
+        // Acquire 1 ms timer resolution for precise frame-pacing while recording.
+        // Released automatically when recording stops (or on drop).
+        #[cfg(windows)]
+        {
+            self.timer_guard = Some(TimerResolutionGuard::acquire());
+        }
         self.pipeline.start(&self.config, &self.buffer)
     }
 
@@ -105,7 +158,13 @@ impl AppState {
     ///
     /// Returns an error if pipeline fails to stop cleanly.
     pub fn stop_recording(&mut self) -> Result<()> {
-        self.pipeline.stop()
+        let result = self.pipeline.stop();
+        // Release the 1 ms timer guard: system reverts to ~15.6 ms default.
+        #[cfg(windows)]
+        {
+            self.timer_guard = None;
+        }
+        result
     }
 
     /// Polls the recording pipeline for fatal errors (crashed threads, etc.).

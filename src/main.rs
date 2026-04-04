@@ -51,8 +51,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::{error, info, warn};
-#[cfg(windows)]
-use windows::Win32::Media::{timeBeginPeriod, timeEndPeriod, TIMERR_NOERROR};
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x01000000;
@@ -90,73 +88,6 @@ where
     })
     .await
     .map_err(|e| anyhow::anyhow!("AppState blocking task join error: {e}"))?
-}
-
-/// Guard for Windows multimedia timer resolution.
-///
-/// Windows defaults to 15.6ms timer resolution, which is too coarse for
-/// precise frame timing at 60+ FPS. This guard requests a higher resolution
-/// (typically 1ms) and automatically restores the original resolution on drop.
-///
-/// # Example
-///
-/// ```ignore
-/// let _guard = TimerResolutionGuard::new(1);
-/// // Timer resolution is now 1ms
-/// // When _guard goes out of scope, resolution is restored
-/// ```
-#[cfg(windows)]
-struct TimerResolutionGuard {
-    /// Whether the timer resolution change was successful.
-    active: bool,
-    /// The requested resolution in milliseconds.
-    period_ms: u32,
-}
-
-#[cfg(windows)]
-impl TimerResolutionGuard {
-    /// Creates a new timer resolution guard.
-    ///
-    /// Requests the specified timer resolution from Windows via `timeBeginPeriod`.
-    /// The resolution is automatically restored when the guard is dropped.
-    ///
-    /// # Arguments
-    ///
-    /// * `period_ms` - The requested timer resolution in milliseconds (typically 1).
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let guard = TimerResolutionGuard::new(1);
-    /// if guard.active {
-    ///     // Timer resolution successfully set to 1ms
-    /// }
-    /// ```
-    fn new(period_ms: u32) -> Self {
-        let result = unsafe { timeBeginPeriod(period_ms) };
-        let active = result == TIMERR_NOERROR;
-        if active {
-            info!("Enabled {}ms timer resolution", period_ms);
-        } else {
-            warn!(
-                "Failed to enable {}ms timer resolution (MMRESULT={})",
-                period_ms, result
-            );
-        }
-        Self { active, period_ms }
-    }
-}
-
-#[cfg(windows)]
-impl Drop for TimerResolutionGuard {
-    fn drop(&mut self) {
-        if self.active {
-            let result = unsafe { timeEndPeriod(self.period_ms) };
-            if result != TIMERR_NOERROR {
-                warn!("Failed to restore timer resolution (MMRESULT={})", result);
-            }
-        }
-    }
 }
 
 /// Application entry point.
@@ -210,8 +141,9 @@ async fn main() -> Result<()> {
         .with_env_filter(filter)
         .init();
 
-    #[cfg(windows)]
-    let _timer_resolution_guard = TimerResolutionGuard::new(1);
+    // Timer resolution (timeBeginPeriod) is now managed by AppState:
+    // it is activated when recording starts and released when recording stops,
+    // so the system-wide 1ms interrupt is not held when the app is idle.
 
     // Create a job object and assign the current process to it.
     // This ensures any child processes like ffmpeg are grouped under
@@ -383,10 +315,8 @@ async fn main() -> Result<()> {
 
     let mut should_restart = false;
     let save_in_progress = Arc::new(AtomicBool::new(false));
-    let mut last_pipeline_memory_telemetry = std::time::Instant::now();
-    // Health check interval increased to 1000ms to reduce CPU overhead
     let mut pipeline_health_interval =
-        tokio::time::interval(tokio::time::Duration::from_millis(1000));
+        tokio::time::interval(tokio::time::Duration::from_millis(2500));
     pipeline_health_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     // Main event loop
@@ -555,38 +485,7 @@ async fn main() -> Result<()> {
                                 error!("Recording stopped due to fatal pipeline error: {}", reason);
                                 let _ = platform_handle.update_recording_state(false);
                             }
-                            Ok(None) => {
-                                if last_pipeline_memory_telemetry.elapsed()
-                                    >= std::time::Duration::from_secs(30)
-                                {
-                                    let _ = app_state_blocking(&app_state, |s| {
-                                        if s.is_recording() {
-                                            let stats = s.replay_buffer_stats();
-                                            if let Some((working_set_mb, private_mb)) =
-                                                liteclip::output::saver::process_memory_mb()
-                                            {
-                                                info!(
-                                                    "Memory telemetry [pipeline]: process_working_set_mb={:.1}, process_private_mb={:.1}, buffer_mb={:.1}, buffer_packets={}, buffer_usage_pct={:.1}",
-                                                    working_set_mb,
-                                                    private_mb,
-                                                    stats.total_bytes as f64 / (1024.0 * 1024.0),
-                                                    stats.packet_count,
-                                                    stats.memory_usage_percent
-                                                );
-                                            } else {
-                                                info!(
-                                                    "Memory telemetry [pipeline]: buffer_mb={:.1}, buffer_packets={}, buffer_usage_pct={:.1}",
-                                                    stats.total_bytes as f64 / (1024.0 * 1024.0),
-                                                    stats.packet_count,
-                                                    stats.memory_usage_percent
-                                                );
-                                            }
-                                        }
-                                    })
-                                    .await;
-                                    last_pipeline_memory_telemetry = std::time::Instant::now();
-                                }
-                            }
+                            Ok(None) => {}
                             Err(e) => {
                                 error!("Failed to enforce pipeline health: {}", e);
                             }

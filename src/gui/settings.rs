@@ -161,6 +161,11 @@ impl SettingsApp {
     ) -> Self {
         let mic_devices = crate::capture::audio::device_info::list_capture_devices();
 
+        // Activate audio level scanning while the settings window is open.
+        if let Some(ref monitor) = level_monitor {
+            monitor.set_gui_active(true);
+        }
+
         Self {
             config,
             event_tx,
@@ -179,6 +184,10 @@ impl SettingsApp {
     }
 
     pub fn release_resources(&mut self) {
+        // Deactivate audio level scanning when the window closes.
+        if let Some(ref monitor) = self.level_monitor {
+            monitor.set_gui_active(false);
+        }
         self.save_status = None;
         self.level_monitor = None;
         self.last_audio_levels = None;
