@@ -166,3 +166,103 @@ pub fn remux_fragmented_mp4(input_path: &Path, output_path: &Path, faststart: bo
 pub fn generate_thumbnail(video_path: &Path, save_directory: &Path) -> Result<PathBuf> {
     crate::output::sdk_ffmpeg_output::generate_thumbnail(video_path, save_directory)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn h264_nal_type_start_code_4byte() {
+        let data = [0x00, 0x00, 0x00, 0x01, 0x67];
+        assert_eq!(h264_nal_type(&data), Some(0x67 & 0x1f));
+    }
+
+    #[test]
+    fn h264_nal_type_start_code_3byte() {
+        let data = [0x00, 0x00, 0x01, 0x65];
+        assert_eq!(h264_nal_type(&data), Some(0x65 & 0x1f));
+    }
+
+    #[test]
+    fn h264_nal_type_length_prefixed() {
+        let data = vec![0x00, 0x00, 0x00, 0x02, 0x21, 0x00];
+        assert_eq!(h264_nal_type(&data), Some(0x21 & 0x1f));
+    }
+
+    #[test]
+    fn h264_nal_type_too_short() {
+        let data = [0x00, 0x00, 0x01];
+        assert_eq!(h264_nal_type(&data), None);
+    }
+
+    #[test]
+    fn h264_nal_type_sps() {
+        let data = [0x00, 0x00, 0x00, 0x01, 0x67];
+        assert_eq!(h264_nal_type(&data), Some(7));
+    }
+
+    #[test]
+    fn h264_nal_type_idr() {
+        let data = [0x00, 0x00, 0x00, 0x01, 0x65];
+        assert_eq!(h264_nal_type(&data), Some(5));
+    }
+
+    #[test]
+    fn hevc_nal_type_start_code_4byte() {
+        let data = [0x00, 0x00, 0x00, 0x01, 0x40, 0x01];
+        assert_eq!(hevc_nal_type(&data), Some((0x40 >> 1) & 0x3f));
+    }
+
+    #[test]
+    fn hevc_nal_type_start_code_3byte() {
+        let data = [0x00, 0x00, 0x01, 0x42, 0x01];
+        assert_eq!(hevc_nal_type(&data), Some((0x42 >> 1) & 0x3f));
+    }
+
+    #[test]
+    fn hevc_nal_type_vps() {
+        let data = [0x00, 0x00, 0x00, 0x01, 0x40, 0x01];
+        assert_eq!(hevc_nal_type(&data), Some(32));
+    }
+
+    #[test]
+    fn hevc_nal_type_sps() {
+        let data = [0x00, 0x00, 0x00, 0x01, 0x42, 0x01];
+        assert_eq!(hevc_nal_type(&data), Some(33));
+    }
+
+    #[test]
+    fn hevc_nal_type_idr() {
+        let data = [0x00, 0x00, 0x00, 0x01, 0x26, 0x01];
+        assert_eq!(hevc_nal_type(&data), Some(19));
+    }
+
+    #[test]
+    fn hevc_nal_type_too_short() {
+        let data = [0x00, 0x00, 0x01];
+        assert_eq!(hevc_nal_type(&data), None);
+    }
+
+    #[test]
+    fn generate_output_path_with_game() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = generate_output_path(temp.path(), Some("MyGame")).unwrap();
+        assert!(path.to_string_lossy().contains("MyGame"));
+        assert!(path.parent().unwrap().exists());
+    }
+
+    #[test]
+    fn generate_output_path_without_game() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = generate_output_path(temp.path(), None).unwrap();
+        assert!(path.to_string_lossy().contains("Desktop"));
+        assert!(path.parent().unwrap().exists());
+    }
+
+    #[test]
+    fn generate_output_path_empty_game() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = generate_output_path(temp.path(), Some("")).unwrap();
+        assert_eq!(path.parent().unwrap(), temp.path());
+    }
+}

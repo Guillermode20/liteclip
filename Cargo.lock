@@ -2731,6 +2731,7 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "assert_matches",
+ "bytes",
  "chrono",
  "criterion",
  "crossbeam",
@@ -2750,6 +2751,7 @@ dependencies = [
  "serial_test",
  "tempfile",
  "tokio",
+ "toml 0.8.2",
  "tracing",
  "tracing-subscriber",
  "tray-icon",

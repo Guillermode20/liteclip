@@ -41,3 +41,42 @@ impl From<ffmpeg_next::Error> for EncodeError {
         EncodeError::Ffmpeg(e.to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::EncoderType;
+
+    #[test]
+    fn no_hardware_for_auto_display() {
+        let err = EncodeError::NoHardwareForAuto;
+        assert!(format!("{}", err).contains("NVENC"));
+    }
+
+    #[test]
+    fn encoder_unavailable_display() {
+        let err = EncodeError::EncoderUnavailable {
+            encoder: EncoderType::Nvenc,
+        };
+        assert!(format!("{}", err).contains("Nvenc"));
+    }
+
+    #[test]
+    fn msg_constructor() {
+        let err = EncodeError::msg("test error");
+        match err {
+            EncodeError::Msg(s) => assert_eq!(s, "test error"),
+            _ => panic!("Expected Msg variant"),
+        }
+    }
+
+    #[test]
+    fn io_error_conversion() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "io failed");
+        let err: EncodeError = io_err.into();
+        match err {
+            EncodeError::Io(e) => assert!(e.to_string().contains("io failed")),
+            _ => panic!("Expected Io variant"),
+        }
+    }
+}

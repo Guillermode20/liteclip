@@ -46,7 +46,7 @@ fn bench_mixing_operation(c: &mut Criterion) {
     c.bench_function("audio/mixing_operation_empty", |b| {
         b.iter(|| {
             // Mix with no pending packets (baseline cost)
-            black_box(mixer.mix_packets(0, &mut Vec::new()))
+            black_box(mixer.mix_packets(None, None))
         })
     });
 }

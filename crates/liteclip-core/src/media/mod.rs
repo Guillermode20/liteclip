@@ -116,3 +116,51 @@ pub struct CapturedFrame {
     pub timestamp: i64,
     pub resolution: (u32, u32),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_test_frame() -> CapturedFrame {
+        CapturedFrame {
+            bgra: Bytes::from(vec![0u8; 1920 * 1080 * 4]),
+            #[cfg(windows)]
+            d3d11: None,
+            timestamp: 1000,
+            resolution: (1920, 1080),
+        }
+    }
+
+    #[test]
+    fn captured_frame_resolution() {
+        let frame = make_test_frame();
+        assert_eq!(frame.resolution, (1920, 1080));
+    }
+
+    #[test]
+    fn captured_frame_timestamp() {
+        let frame = make_test_frame();
+        assert_eq!(frame.timestamp, 1000);
+    }
+
+    #[test]
+    fn bgra_cheap_clone() {
+        let frame = make_test_frame();
+        let original_ptr = frame.bgra.as_ptr();
+        let cloned = frame.clone();
+        let cloned_ptr = cloned.bgra.as_ptr();
+        assert_eq!(
+            original_ptr, cloned_ptr,
+            "Bytes clone should share the same underlying pointer (ref count bump)"
+        );
+    }
+
+    #[test]
+    fn captured_frame_clone_preserves_fields() {
+        let frame = make_test_frame();
+        let cloned = frame.clone();
+        assert_eq!(cloned.resolution, frame.resolution);
+        assert_eq!(cloned.timestamp, frame.timestamp);
+        assert_eq!(cloned.bgra.len(), frame.bgra.len());
+    }
+}

@@ -15,7 +15,7 @@ fn make_complex_config() -> Config {
 }
 
 fn bench_config_serialize(c: &mut Criterion) {
-    let config = make_complex_config();
+    let _config = make_complex_config();
 
     c.bench_function("config/serialize_to_toml_string", |b| {
         b.iter(|| {
@@ -34,7 +34,7 @@ fn bench_config_deserialize(c: &mut Criterion) {
 }
 
 fn bench_config_roundtrip(c: &mut Criterion) {
-    let config = make_complex_config();
+    let _config = make_complex_config();
 
     c.bench_function("config/roundtrip_serialize_deserialize", |b| {
         b.iter(|| {

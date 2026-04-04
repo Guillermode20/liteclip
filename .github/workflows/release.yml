@@ -31,6 +31,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Run tests before release
+        run: cargo test --verbose
+
       - name: Setup .NET SDK (for WiX)
         uses: actions/setup-dotnet@v4
         with:

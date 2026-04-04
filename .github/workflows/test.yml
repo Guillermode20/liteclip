@@ -56,6 +56,9 @@ jobs:
       - name: Run tests
         run: cargo test --verbose -- --nocapture
 
+      - name: Run doc tests
+        run: cargo test --doc --verbose
+
       - name: Build release
         run: cargo build --release --features ffmpeg --verbose
 
@@ -78,7 +81,7 @@ jobs:
     name: Run Benchmarks
     runs-on: windows-latest
     timeout-minutes: 15
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     steps:
       - name: Checkout code
@@ -95,3 +98,21 @@ jobs:
 
       - name: Run audio mixer benchmarks
         run: cargo bench --package liteclip-core --bench audio_mixer
+
+      - name: Run GUI benchmarks
+        run: cargo bench --bench gui_interactions
+
+  check-msrv:
+    name: Check MSRV (1.74)
+    runs-on: windows-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust 1.74
+        uses: dtolnay/rust-toolchain@1.74
+
+      - name: Check compilation without default features
+        run: cargo check --no-default-features --verbose

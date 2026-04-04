@@ -9,6 +9,7 @@ mod common;
 use common::builders::ConfigBuilder;
 use liteclip_core::config::Config;
 use liteclip_core::paths::AppDirs;
+use serial_test::serial;
 use tempfile::TempDir;
 
 /// Test: Config can be saved and loaded through custom directory paths.
@@ -16,6 +17,7 @@ use tempfile::TempDir;
 /// Verifies the AppDirs abstraction correctly handles config file I/O
 /// in a temporary directory without affecting user config.
 #[test]
+#[serial]
 fn config_roundtrip_through_custom_dirs() -> anyhow::Result<()> {
     let temp_dir = TempDir::new()?;
     let config_file = temp_dir.path().join("settings.toml");
@@ -40,6 +42,7 @@ fn config_roundtrip_through_custom_dirs() -> anyhow::Result<()> {
 /// Uses ConfigBuilder to create a config with specific values and verifies
 /// each field is correctly serialized to TOML and deserialized back.
 #[test]
+#[serial]
 fn config_roundtrip_preserves_all_fields() -> anyhow::Result<()> {
     let temp_dir = TempDir::new()?;
     let config_file = temp_dir.path().join("settings.toml");
@@ -74,6 +77,7 @@ fn config_roundtrip_preserves_all_fields() -> anyhow::Result<()> {
 /// Verifies that loading from a non-existent config file creates
 /// a default configuration and the file is written on save.
 #[test]
+#[serial]
 fn config_creates_file_when_missing() -> anyhow::Result<()> {
     let temp_dir = TempDir::new()?;
     let config_file = temp_dir.path().join("nonexistent.toml");

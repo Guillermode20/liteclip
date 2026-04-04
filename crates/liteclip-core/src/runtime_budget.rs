@@ -94,4 +94,79 @@ mod tests {
         assert!(overloaded.high_watermark <= nominal.high_watermark);
         assert!(overloaded.severe_watermark <= nominal.severe_watermark);
     }
+
+    #[test]
+    fn watermarks_ordered_correctly() {
+        let governor = RuntimeBudgetGovernor::new();
+        let decision = governor.decide(RuntimeBudgetInput {
+            queue_len: 0,
+            queue_cap: 32,
+            encoder_overloaded: false,
+        });
+
+        assert!(
+            decision.low_watermark < decision.high_watermark,
+            "low < high"
+        );
+        assert!(
+            decision.high_watermark < decision.severe_watermark,
+            "high < severe"
+        );
+    }
+
+    #[test]
+    fn empty_queue_nominal() {
+        let governor = RuntimeBudgetGovernor::new();
+        let decision = governor.decide(RuntimeBudgetInput {
+            queue_len: 0,
+            queue_cap: 32,
+            encoder_overloaded: false,
+        });
+
+        assert_eq!(decision.high_watermark, 24);
+        assert_eq!(decision.low_watermark, 8);
+        assert_eq!(decision.severe_watermark, 28);
+    }
+
+    #[test]
+    fn queue_at_severe_watermark() {
+        let governor = RuntimeBudgetGovernor::new();
+        let decision = governor.decide(RuntimeBudgetInput {
+            queue_len: 28,
+            queue_cap: 32,
+            encoder_overloaded: false,
+        });
+
+        assert!(decision.low_watermark < decision.severe_watermark);
+    }
+
+    #[test]
+    fn queue_cap_zero_does_not_panic() {
+        let governor = RuntimeBudgetGovernor::new();
+        let decision = governor.decide(RuntimeBudgetInput {
+            queue_len: 0,
+            queue_cap: 0,
+            encoder_overloaded: false,
+        });
+
+        // queue_cap.max(1) ensures cap is at least 1, so watermarks are computed safely
+        // With queue_cap=0 (becomes 1 internally): high=0, low=0, severe=0 (integer division)
+        assert_eq!(decision.high_watermark, 0);
+        assert_eq!(decision.low_watermark, 0);
+        assert_eq!(decision.severe_watermark, 0);
+    }
+
+    #[test]
+    fn default_governor_values() {
+        let governor = RuntimeBudgetGovernor::default();
+        let decision = governor.decide(RuntimeBudgetInput {
+            queue_len: 10,
+            queue_cap: 32,
+            encoder_overloaded: false,
+        });
+
+        assert_eq!(decision.max_fps_divisor, 3);
+        assert_eq!(decision.high_streak_threshold, 2);
+        assert_eq!(decision.low_streak_threshold, 3);
+    }
 }

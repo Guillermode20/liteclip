@@ -136,3 +136,84 @@ impl ReplayEngine {
         Ok(path)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn builder_creates_engine() {
+        let temp = TempDir::new().unwrap();
+        let config_file = temp.path().join("config.toml");
+        let dirs = AppDirs::with_config_file(config_file, "test-engine").unwrap();
+        let engine = ReplayEngine::builder(dirs).build();
+        assert!(engine.is_ok());
+    }
+
+    #[test]
+    fn new_with_config() {
+        let temp = TempDir::new().unwrap();
+        let config_file = temp.path().join("config.toml");
+        let dirs = AppDirs::with_config_file(config_file, "test-engine").unwrap();
+        let config = Config::default_with_dirs(&dirs);
+        let engine = ReplayEngine::new(config, dirs);
+        assert!(engine.is_ok());
+    }
+
+    #[test]
+    fn with_default_config() {
+        let temp = TempDir::new().unwrap();
+        let config_file = temp.path().join("config.toml");
+        let dirs = AppDirs::with_config_file(config_file, "test-engine").unwrap();
+        let engine = ReplayEngine::with_default_config(dirs);
+        assert!(engine.is_ok());
+    }
+
+    #[test]
+    fn dirs_accessor() {
+        let temp = TempDir::new().unwrap();
+        let config_file = temp.path().join("config.toml");
+        let dirs = AppDirs::with_config_file(config_file.clone(), "test-engine").unwrap();
+        let engine = ReplayEngine::with_default_config(dirs.clone()).unwrap();
+        assert_eq!(engine.dirs().config_file, config_file);
+    }
+
+    #[test]
+    fn core_host_roundtrip() {
+        struct TestHost;
+        impl CoreHost for TestHost {}
+
+        let temp = TempDir::new().unwrap();
+        let config_file = temp.path().join("config.toml");
+        let dirs = AppDirs::with_config_file(config_file, "test-engine").unwrap();
+        let mut engine = ReplayEngine::with_default_config(dirs).unwrap();
+
+        assert!(engine.core_host().is_none());
+
+        let host = Arc::new(TestHost);
+        engine.set_core_host(Some(host));
+        assert!(engine.core_host().is_some());
+
+        engine.set_core_host(None);
+        assert!(engine.core_host().is_none());
+    }
+
+    #[test]
+    fn builder_with_config_and_host() {
+        struct TestHost;
+        impl CoreHost for TestHost {}
+
+        let temp = TempDir::new().unwrap();
+        let config_file = temp.path().join("config.toml");
+        let dirs = AppDirs::with_config_file(config_file, "test-engine").unwrap();
+        let config = Config::default_with_dirs(&dirs);
+        let host = Arc::new(TestHost);
+
+        let engine = ReplayEngine::builder(dirs)
+            .with_config(config)
+            .with_host(host)
+            .build();
+        assert!(engine.is_ok());
+    }
+}
