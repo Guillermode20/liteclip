@@ -150,6 +150,14 @@ Tests are inline (`#[cfg(test)]` modules) or in `crates/liteclip-core/tests/`.
 - All platform code gated with `#[cfg(windows)]`
 - Uses windows-rs for Win32 APIs
 
+### Hardware Encoder Testing Gap
+- **AMD AMF** is the only actively tested hardware encoder (maintainer has AMD GPU)
+- **NVIDIA NVENC** and **Intel QSV** paths have **never been tested on real hardware**
+- Code is written to spec based on FFmpeg documentation but may contain bugs that only surface on actual NVIDIA/Intel GPUs
+- When modifying encoder code, keep all three vendor paths consistent
+- Contributors with NVIDIA/Intel GPUs should test before merge — see CONTRIBUTING.md for checklists
+- Verification tests in `crates/liteclip-core/tests/hardware_encoder_verification.rs` validate config/metadata but cannot verify actual encoding without real hardware
+
 ### Zero-Copy Memory
 - Use `bytes::Bytes` for cheap cloning (O(1) ref count bump)
 - Ring buffer proactively evicts at 80% memory watermark

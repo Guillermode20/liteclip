@@ -40,6 +40,11 @@ fn write_int_to_buffer(mut val: usize, buf: &mut [u8; 16]) -> &str {
 }
 
 impl FfmpegEncoder {
+    // TODO(contributor): Needs testing on Intel hardware.
+    // This function derives a QSV device/context from D3D11 and initializes the QSV encoder.
+    // It has never been tested on real Intel GPUs (iGPU or Arc) by the maintainer.
+    // Key risk areas: av_hwdevice_ctx_create_derived, av_hwframe_ctx_create_derived,
+    // and the QSV pixel format setup. Please test and report results.
     pub(super) fn init_qsv_hardware_encoder(
         &mut self,
         gpu_frame: &crate::media::D3d11Frame,
@@ -160,6 +165,9 @@ impl FfmpegEncoder {
         Ok(())
     }
 
+    // TODO(contributor): Needs testing on Intel hardware.
+    // Verify that QSV options (preset, look_ahead, rc) are accepted without errors
+    // on real Intel iGPU/Arc hardware with a working oneVPL/Media SDK stack.
     pub(super) fn apply_qsv_options(&self, options: &mut ffmpeg::Dictionary<'_>, bitrate: usize) {
         let mut bitrate_str = [0u8; 16];
         let bitrate_bps = write_int_to_buffer(bitrate, &mut bitrate_str);
@@ -181,6 +189,9 @@ impl FfmpegEncoder {
         options.set("bufsize", bitrate_bps);
     }
 
+    // TODO(contributor): Needs testing on Intel hardware.
+    // The D3D11→QSV surface mapping via av_hwframe_map is the most likely failure point.
+    // Verify that frames are mapped and encoded correctly on both iGPU and Arc dGPU.
     pub(super) fn encode_qsv_gpu_frame(
         &mut self,
         _frame: &crate::media::CapturedFrame,

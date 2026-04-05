@@ -51,6 +51,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::{error, info, warn};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x01000000;
@@ -130,6 +132,16 @@ async fn main() -> Result<()> {
     // Disable Vulkan SDK validation layer for release-like behavior
     std::env::set_var("VK_LAYER_PATH", "");
 
+    // Initialize error/crash log file and panic hook
+    // Must happen before tracing subscriber init so the layer can be registered
+    let config_dir = liteclip::paths::AppDirs::liteclip()
+        .map(|d| d.config_dir)
+        .unwrap_or_else(|_| {
+            std::path::PathBuf::from(std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string()))
+                .join("liteclip")
+        });
+    let (log_guard, file_log_layer) = liteclip::error_log::init_error_log_shared(&config_dir);
+
     // Initialize compact logger with filters to suppress noisy dependencies
     let filter = tracing_subscriber::filter::EnvFilter::new("info,wgpu=warn,naga=warn");
 
@@ -139,6 +151,8 @@ async fn main() -> Result<()> {
         .without_time()
         .with_level(true)
         .with_env_filter(filter)
+        .finish()
+        .with(file_log_layer)
         .init();
 
     // Timer resolution (timeBeginPeriod) is now managed by AppState:
@@ -409,6 +423,7 @@ async fn main() -> Result<()> {
                                                              tokio_tx.clone(),
                                                              Some(level_monitor),
                                                              config.clone(),
+                                                             log_guard.clone(),
                                                          );
                                                      }
                                                      Err(e) => error!("Failed to read app state for settings: {}", e),

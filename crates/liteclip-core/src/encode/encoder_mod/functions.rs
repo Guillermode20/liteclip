@@ -156,6 +156,10 @@ fn set_encoder_thread_priority() {
 }
 
 // Minimal open probe per codec; NVENC/QSV/AMF arms should stay consistent with `encode/ffmpeg/options.rs`.
+//
+// TODO(contributor): The NVENC and QSV probe arms have never been tested on real hardware.
+// If you have an NVIDIA or Intel GPU, verify that `probe_encoder_available` correctly
+// detects your encoder. Report any issues via the Hardware Encoder Test Report issue template.
 #[cfg(feature = "ffmpeg")]
 fn probe_encoder_available(encoder_name: &str) -> bool {
     let Some(codec) = ffmpeg::encoder::find_by_name(encoder_name) else {
@@ -228,6 +232,10 @@ fn probe_encoder_available(encoder_name: &str) -> bool {
 /// Priority order: NVENC → AMF → QSV
 ///
 /// Changing this order or codec names requires updating the contributor checklist in `encode::ffmpeg`.
+///
+/// TODO(contributor): This detection probes FFmpeg for encoder availability but does NOT verify
+/// that the encoder actually works on real hardware. If you have NVIDIA or Intel hardware,
+/// please verify that detection selects the correct encoder and that encoding succeeds.
 #[cfg(feature = "ffmpeg")]
 pub fn detect_hardware_encoder() -> HardwareEncoder {
     debug!("Detecting hardware encoders for HEVC...");

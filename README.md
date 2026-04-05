@@ -34,15 +34,27 @@ Lightweight Windows screen recorder that captures your best moments retroactivel
 
 ## GPU Testing Needed
 
-**This project relies on hardware-accelerated encoding across all major GPU vendors, but the maintainer only has an AMD GPU for testing.** If you have an NVIDIA or Intel GPU, your help is critical to ensure these encoder paths work correctly.
+> **:warning: Contributor Help Wanted :warning:**
+>
+> LiteClip is developed and tested primarily on **AMD GPUs**. The **NVIDIA NVENC** and **Intel QSV** encoder paths have **never been tested on real hardware** by the maintainer. If you have an NVIDIA or Intel GPU, your help is critical — these paths may contain bugs that only surface on actual hardware.
 
-| Encoder | Status | What needs testing |
-|---------|--------|--------------------|
-| **AMD AMF** | Primary tested | Working well on RDNA/RDNA2/RDNA3 |
-| **NVIDIA NVENC** | Needs testing | D3D11 shared device path, NVENC options, CBR/VBR/CQ rate control, forced IDR, zero-latency preset |
-| **Intel QSV** | Needs testing | D3D11→QSV device derivation, surface mapping, oneVPL/Media SDK compatibility |
+| Encoder | Status | Tested on | What needs testing |
+|---------|--------|-----------|--------------------|
+| **AMD AMF** | :white_check_mark: Tested | RX 6000/7000 series (RDNA/RDNA2/RDNA3) | Working well — this is the reference implementation |
+| **NVIDIA NVENC** | :x: **Needs contributors** | Never tested on real hardware | D3D11 shared device path, NVENC options (preset, tune, zerolatency), CBR/VBR/CQ rate control, forced IDR, b_ref_mode |
+| **Intel QSV** | :x: **Needs contributors** | Never tested on real hardware | D3D11→QSV device derivation via `av_hwdevice_ctx_create_derived`, surface mapping via `av_hwframe_map`, oneVPL/Media SDK compatibility, iGPU and Arc dGPU |
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed testing checklists and how to report results.
+### How to Help
+
+1. **Build and run:** Follow the [build instructions](CONTRIBUTING.md#quick-start)
+2. **Force your encoder:** In settings, select NVENC or QSV (not Auto)
+3. **Record a clip:** Press `Ctrl + Shift + S` to save a 30-second clip
+4. **Check logs:** Run with `$env:RUST_LOG = "debug,liteclip_core=trace"` and look for unexpected CPU fallback warnings or errors
+5. **Report results:** Use the [Hardware Encoder Test Report](https://github.com/Guillermode20/liteclip-recorder/issues/new?template=hardware_encoder_test.yml) issue template
+
+Even a simple "it works" or "it falls back to CPU" report is valuable. Include your GPU model, driver version, and log output.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed testing checklists and per-vendor verification steps.
 
 ## Hotkeys
 

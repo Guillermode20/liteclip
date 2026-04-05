@@ -1,0 +1,113 @@
+name: Hardware Encoder Test Report
+description: Submit test results for NVIDIA NVENC, Intel QSV, or AMD AMF encoder paths
+title: "[Encoder Test]: "
+labels: ["hardware-testing", "help-wanted"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing a hardware encoder path! Your results help ensure LiteClip works across all GPU vendors.
+
+        **Quick test steps:**
+        1. Build LiteClip: `cargo build --release --features ffmpeg`
+        2. Run with verbose logging: `$env:RUST_LOG = "debug,liteclip_core=trace"; cargo run --release --features ffmpeg`
+        3. In settings, select your encoder (NVENC / QSV / AMF) — not Auto
+        4. Press `Ctrl + Shift + S` to save a clip
+        5. Check logs for errors or unexpected CPU fallback
+        6. Verify the output MP4 plays correctly
+
+  - type: dropdown
+    id: encoder
+    attributes:
+      label: Encoder Tested
+      description: Which hardware encoder did you test?
+      options:
+        - NVIDIA NVENC
+        - Intel QSV
+        - AMD AMF
+    validations:
+      required: true
+
+  - type: input
+    id: gpu_model
+    attributes:
+      label: GPU Model
+      description: What GPU did you test on?
+      placeholder: "e.g., RTX 4070, Arc A770, RX 7800 XT, UHD 770 iGPU"
+    validations:
+      required: true
+
+  - type: input
+    id: driver_version
+    attributes:
+      label: Driver Version
+      placeholder: "e.g., 551.86, 31.0.101.5186, 24.2.1"
+    validations:
+      required: true
+
+  - type: input
+    id: ffmpeg_version
+    attributes:
+      label: FFmpeg Version
+      placeholder: "e.g., 7.1.1 shared (from gyan.dev)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: windows_version
+    attributes:
+      label: Windows Version
+      options:
+        - Windows 10
+        - Windows 11
+    validations:
+      required: true
+
+  - type: dropdown
+    id: result
+    attributes:
+      label: Overall Result
+      description: Did the encoder work correctly?
+      options:
+        - "Works perfectly"
+        - "Works with minor issues"
+        - "Falls back to CPU (unexpected)"
+        - "Fails to initialize"
+        - "Crashes or panics"
+        - "Visual artifacts in output"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: tests
+    attributes:
+      label: Test Checklist
+      description: Check the tests you performed
+      options:
+        - label: Encoder initializes without errors
+        - label: No unexpected CPU fallback in logs
+        - label: D3D11 shared device / GPU frame transport works
+        - label: CBR rate control produces valid output
+        - label: VBR rate control produces valid output
+        - label: CQ rate control produces valid output
+        - label: Quality presets (Performance / Balanced / Quality) all work
+        - label: Keyframe / IDR insertion works (clip starts cleanly)
+        - label: Output MP4 plays correctly in media players
+        - label: No visual artifacts in output
+        - label: Memory usage is reasonable
+        - label: Auto-detection selects the correct encoder
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Log Output
+      description: Paste relevant log output from `RUST_LOG=debug,liteclip_core=trace` (especially encoder initialization and frame encoding lines)
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional Context
+      description: Any other observations, workarounds, or suggestions

@@ -12,6 +12,7 @@ pub use liteclip_core::{
 };
 
 pub mod detection;
+pub mod error_log;
 pub mod gui;
 pub mod platform;
 

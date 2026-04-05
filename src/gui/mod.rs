@@ -23,7 +23,9 @@
 //!
 //! ```no_run
 //! use liteclip::gui::{show_settings_gui, init_gui_manager};
-//! use liteclip_core::config::Config;
+//! use liteclip::config::Config;
+//! use liteclip::error_log::FileLogGuard;
+//! use std::sync::Arc;
 //! use tokio::sync::mpsc::channel;
 //!
 //! // Initialize the GUI manager lazily before first use.
@@ -32,7 +34,8 @@
 //! // Show settings window (level_monitor is None for testing)
 //! let (tx, rx) = channel(1);
 //! let config = Config::default();
-//! show_settings_gui(tx, None, config);
+//! let log_guard = Arc::new(FileLogGuard::default_for_test());
+//! show_settings_gui(tx, None, config, log_guard);
 //! ```
 
 pub mod manager;

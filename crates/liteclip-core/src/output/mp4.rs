@@ -257,6 +257,8 @@ impl FfmpegMuxer {
         )
         .max(1);
 
+        let mut last_dts: i64 = -1;
+
         for pkt in &video_packets_ordered {
             // Flush AAC packets whose PTS/DTS is at or before this video packet.
             let video_us = pkt.dts.saturating_sub(base_qpc).saturating_mul(1_000_000) / qpc_freq;
@@ -293,12 +295,21 @@ impl FfmpegMuxer {
                 self.video_time_base.1 as i64,
             );
 
+            // Enforce strictly monotonically increasing DTS to prevent
+            // FFmpeg rejecting the mux with "non monotonically increasing dts".
+            // Integer division in qpc_to_time_base can map two close QPC ticks to
+            // the same time-base value.
+            let dts = dts.max(last_dts + 1).max(0);
+            let pts = pts.max(dts);
+
+            last_dts = dts;
+
             write_borrowed_video_packet(
                 &mut self.format_context,
                 self.video_stream_index,
                 pkt,
-                pts.max(0),
-                dts.max(0),
+                pts,
+                dts,
                 default_duration,
             )?;
             video_count += 1;

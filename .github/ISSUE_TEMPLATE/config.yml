@@ -1,5 +1,8 @@
 blank_issues_enabled: false
 contact_links:
+  - name: Hardware Encoder Test Report
+    url: https://github.com/Guillermode20/liteclip-recorder/issues/new?template=hardware_encoder_test.yml
+    about: Submit test results for NVIDIA NVENC, Intel QSV, or AMD AMF encoder paths. Help us verify hardware encoding across all GPU vendors!
   - name: Security Vulnerability
     url: https://github.com/Guillermode20/liteclip-recorder/security/policy
     about: Please report security vulnerabilities here rather than in a public issue.

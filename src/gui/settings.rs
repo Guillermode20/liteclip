@@ -8,17 +8,20 @@ use crate::config::{config_mod::types::*, Config};
 use crate::config::{
     MAX_REPLAY_MEMORY_LIMIT_MB, MIN_REPLAY_MEMORY_LIMIT_MB, REPLAY_MEMORY_LIMIT_AUTO_MB,
 };
+use crate::error_log::FileLogGuard;
 use crate::platform::AppEvent;
 
 pub fn show_settings_gui(
     event_tx: Sender<AppEvent>,
     level_monitor: Option<AudioLevelMonitor>,
     config: Config,
+    log_guard: Arc<FileLogGuard>,
 ) {
     crate::gui::manager::send_gui_message(crate::gui::manager::GuiMessage::ShowSettings(
         event_tx,
         level_monitor,
         config,
+        log_guard,
     ));
 }
 
@@ -117,6 +120,7 @@ enum SettingsTab {
     Audio,
     Hotkeys,
     Advanced,
+    Logs,
 }
 
 impl SettingsTab {
@@ -127,16 +131,18 @@ impl SettingsTab {
             SettingsTab::Audio => "Audio",
             SettingsTab::Hotkeys => "Hotkeys",
             SettingsTab::Advanced => "Advanced",
+            SettingsTab::Logs => "Logs",
         }
     }
 
-    fn all() -> [SettingsTab; 5] {
+    fn all() -> [SettingsTab; 6] {
         [
             SettingsTab::General,
             SettingsTab::Video,
             SettingsTab::Audio,
             SettingsTab::Hotkeys,
             SettingsTab::Advanced,
+            SettingsTab::Logs,
         ]
     }
 }
@@ -151,6 +157,10 @@ pub struct SettingsApp {
     mic_devices: Vec<(String, String)>,
     current_tab: SettingsTab,
     last_tab: SettingsTab,
+    log_guard: Arc<FileLogGuard>,
+    cached_log: String,
+    log_refresh_time: std::time::Instant,
+    show_clear_confirm: bool,
 }
 
 impl SettingsApp {
@@ -158,6 +168,7 @@ impl SettingsApp {
         config: Config,
         event_tx: Sender<AppEvent>,
         level_monitor: Option<AudioLevelMonitor>,
+        log_guard: Arc<FileLogGuard>,
     ) -> Self {
         let mic_devices = crate::capture::audio::device_info::list_capture_devices();
 
@@ -165,6 +176,8 @@ impl SettingsApp {
         if let Some(ref monitor) = level_monitor {
             monitor.set_gui_active(true);
         }
+
+        let cached_log = log_guard.read_log();
 
         Self {
             config,
@@ -176,6 +189,10 @@ impl SettingsApp {
             mic_devices,
             current_tab: SettingsTab::default(),
             last_tab: SettingsTab::default(),
+            log_guard,
+            cached_log,
+            log_refresh_time: std::time::Instant::now(),
+            show_clear_confirm: false,
         }
     }
 
@@ -235,6 +252,7 @@ impl SettingsApp {
                             SettingsTab::Audio => self.render_audio_settings(ui),
                             SettingsTab::Hotkeys => self.render_hotkeys_settings(ui),
                             SettingsTab::Advanced => self.render_advanced_settings(ui),
+                            SettingsTab::Logs => self.render_logs_settings(ui),
                         });
                 });
 
@@ -280,8 +298,16 @@ impl SettingsApp {
             ui.heading("Settings");
             ui.add_space(16.0);
 
-            for tab in SettingsTab::all() {
-                let is_selected = self.current_tab == tab;
+            let all_tabs = SettingsTab::all();
+            for tab in all_tabs.iter() {
+                // Add a separator before the Logs tab to visually separate it
+                if *tab == SettingsTab::Logs {
+                    ui.add_space(4.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+                }
+
+                let is_selected = self.current_tab == *tab;
                 let button_text = egui::RichText::new(tab.label()).size(14.0);
 
                 let button = if is_selected {
@@ -300,7 +326,7 @@ impl SettingsApp {
                 };
 
                 if ui.add(button).clicked() {
-                    self.current_tab = tab;
+                    self.current_tab = *tab;
                 }
                 ui.add_space(4.0);
             }
@@ -755,6 +781,123 @@ impl SettingsApp {
             estimated_mb, effective_mb
         ));
     }
+
+    fn render_logs_settings(&mut self, ui: &mut egui::Ui) {
+        // Refresh log content every 2 seconds while the tab is visible
+        if self.log_refresh_time.elapsed() >= std::time::Duration::from_secs(2) {
+            self.cached_log = self.log_guard.read_log();
+            self.log_refresh_time = std::time::Instant::now();
+        }
+
+        ui.heading("Error & Crash Logs");
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new(
+                "Shows warnings and errors from this session. Useful for troubleshooting.",
+            )
+            .weak()
+            .small(),
+        );
+
+        ui.add_space(8.0);
+
+        // Action buttons
+        ui.horizontal(|ui| {
+            if ui.button("Copy All Logs").clicked() {
+                let formatted = self.log_guard.formatted_log();
+                ui.ctx().copy_text(formatted);
+                self.save_status = Some("Logs copied to clipboard!".to_string());
+            }
+
+            if ui.button("Open Log Folder").clicked() {
+                let dir = self.log_guard.log_dir().to_path_buf();
+                std::thread::spawn(move || {
+                    let _ = std::process::Command::new("explorer").arg(&dir).spawn();
+                });
+            }
+
+            if self.show_clear_confirm {
+                ui.colored_label(egui::Color32::YELLOW, "Clear all logs?");
+                if ui.button("Yes").clicked() {
+                    if let Err(e) = self.log_guard.clear_log() {
+                        self.save_status = Some(format!("Failed to clear logs: {}", e));
+                    } else {
+                        self.cached_log.clear();
+                        self.save_status = Some("Logs cleared.".to_string());
+                    }
+                    self.show_clear_confirm = false;
+                }
+                if ui.button("No").clicked() {
+                    self.show_clear_confirm = false;
+                }
+            } else if ui.button("Clear Logs").clicked() {
+                self.show_clear_confirm = true;
+            }
+        });
+
+        if let Some(status) = &self.save_status {
+            ui.label(
+                egui::RichText::new(status)
+                    .small()
+                    .color(egui::Color32::GREEN),
+            );
+        }
+
+        ui.add_space(8.0);
+
+        // Log file info
+        let log_path = self.log_guard.log_path();
+        ui.label(
+            egui::RichText::new(format!("Log file: {}", log_path.display()))
+                .small()
+                .weak(),
+        );
+
+        let line_count = self.cached_log.lines().count();
+        let size_label = if self.cached_log.is_empty() {
+            "No errors or warnings logged.".to_string()
+        } else {
+            format!(
+                "{} lines ({:.1} KB)",
+                line_count,
+                self.cached_log.len() as f64 / 1024.0
+            )
+        };
+        ui.label(egui::RichText::new(size_label).small().weak());
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(4.0);
+
+        // Log viewer
+        if self.cached_log.is_empty() {
+            ui.vertical_centered(|ui| {
+                ui.add_space(40.0);
+                ui.label(
+                    egui::RichText::new("No errors or warnings recorded.")
+                        .size(16.0)
+                        .weak(),
+                );
+                ui.label(
+                    egui::RichText::new("Everything is running smoothly!")
+                        .size(13.0)
+                        .weak(),
+                );
+            });
+        } else {
+            egui::ScrollArea::vertical()
+                .max_height(400.0)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::TextEdit::multiline(&mut self.cached_log.as_str())
+                            .font(egui::TextStyle::Monospace)
+                            .interactive(false)
+                            .desired_width(f32::INFINITY),
+                    );
+                });
+        }
+    }
 }
 
 impl eframe::App for SettingsApp {
@@ -778,6 +921,11 @@ impl eframe::App for SettingsApp {
                 }
             }
             ctx.request_repaint_after(std::time::Duration::from_millis(request_ms));
+        }
+
+        // Auto-refresh logs tab every 2 seconds
+        if self.current_tab == SettingsTab::Logs {
+            ctx.request_repaint_after(std::time::Duration::from_secs(2));
         }
     }
 }

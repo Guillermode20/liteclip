@@ -1,5 +1,8 @@
 //! AMD AMF hardware encoding. Primary reference implementation for the D3D11 GPU frame path alongside
 //! [`super::nvenc`](crate::encode::ffmpeg::nvenc) and [`super::qsv`](crate::encode::ffmpeg::qsv).
+//!
+//! **This is the only hardware encoder path tested on real hardware by the maintainer (AMD GPU).**
+//! NVENC and QSV are written to spec but have never been tested on real NVIDIA/Intel hardware.
 //! **Contributor checklist:** See the module-level docs on [`crate::encode::ffmpeg`].
 
 use ffmpeg::format::Pixel;

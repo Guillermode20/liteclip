@@ -41,6 +41,11 @@ fn write_int_to_buffer(mut val: usize, buf: &mut [u8; 16]) -> &str {
 }
 
 impl FfmpegEncoder {
+    // TODO(contributor): Needs testing on NVIDIA hardware.
+    // This function initializes the NVENC encoder using a shared D3D11 device.
+    // It has never been tested on real NVIDIA GPUs by the maintainer.
+    // If you have an NVIDIA GPU, please test and report results via the
+    // Hardware Encoder Test Report issue template.
     pub(super) fn init_nvenc_hardware_encoder(
         &mut self,
         gpu_frame: &crate::media::D3d11Frame,
@@ -108,6 +113,9 @@ impl FfmpegEncoder {
         Ok(())
     }
 
+    // TODO(contributor): Needs testing on NVIDIA hardware.
+    // Verify that NVENC options (preset, tune, zerolatency, strict_gop, b_ref_mode, rc)
+    // are accepted by the encoder without errors on real NVIDIA GPUs.
     pub(super) fn apply_nvenc_options(&self, options: &mut ffmpeg::Dictionary<'_>, bitrate: usize) {
         // Pre-allocate stack string for bitrate to avoid heap allocation
         // bitrate fits in i32 range, so max 11 digits
@@ -146,6 +154,8 @@ impl FfmpegEncoder {
         options.set("forced-idr", "1");
     }
 
+    // TODO(contributor): Needs testing on NVIDIA hardware.
+    // Verify that D3D11 frame transport, keyframe insertion, and forced IDR work correctly.
     pub(super) fn encode_nvenc_gpu_frame(
         &mut self,
         _frame: &crate::media::CapturedFrame,

@@ -1,4 +1,5 @@
 use crate::capture::audio::AudioLevelMonitor;
+use crate::error_log::FileLogGuard;
 use crate::platform::AppEvent;
 use eframe::egui;
 use eframe::UserEvent;
@@ -20,6 +21,7 @@ pub enum GuiMessage {
         TokioSender<AppEvent>,
         Option<AudioLevelMonitor>,
         crate::config::Config,
+        Arc<FileLogGuard>,
     ),
     ShowGallery(TokioSender<AppEvent>, crate::config::Config),
     Toast(ToastKind, String),
@@ -473,10 +475,14 @@ impl eframe::App for GuiManagerApp {
 
             match maybe_msg {
                 Ok(msg) => match msg {
-                    GuiMessage::ShowSettings(tx, level_monitor, config) => {
-                        *self.settings.lock().unwrap_or_else(|e| e.into_inner()) = Some(
-                            crate::gui::settings::SettingsApp::new(config, tx, level_monitor),
-                        );
+                    GuiMessage::ShowSettings(tx, level_monitor, config, log_guard) => {
+                        *self.settings.lock().unwrap_or_else(|e| e.into_inner()) =
+                            Some(crate::gui::settings::SettingsApp::new(
+                                config,
+                                tx,
+                                level_monitor,
+                                log_guard,
+                            ));
                     }
                     GuiMessage::ShowGallery(tx, config) => {
                         *self.gallery.lock().unwrap_or_else(|e| e.into_inner()) =

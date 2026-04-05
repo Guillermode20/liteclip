@@ -54,7 +54,17 @@ cargo run
 path is the reference implementation. **Contributors with NVIDIA and Intel GPUs are strongly encouraged
 to test, report issues, and submit improvements.**
 
-### AMD AMF (Primary Tested)
+### Testing Status
+
+| Encoder | Status | Hardware | Last tested |
+|---------|--------|----------|-------------|
+| AMD AMF | :white_check_mark: **Actively tested** | RX 6000/7000 series (RDNA/RDNA2/RDNA3) | Every release |
+| NVIDIA NVENC | :rotating_light: **Needs contributors** | Never tested on real hardware | Never |
+| Intel QSV | :rotating_light: **Needs contributors** | Never tested on real hardware | Never |
+
+> **Good first issue?** Yes! Testing a hardware encoder is a great way to contribute without deep codebase knowledge. Just build, run, force the encoder, and report what happens.
+
+### AMD AMF (Primary Tested — Reference Implementation)
 
 - **Status:** Actively tested on RDNA/RDNA2/RDNA3 architectures
 - **Key source:** `crates/liteclip-core/src/encode/ffmpeg/amf.rs`
@@ -100,6 +110,41 @@ to test, report issues, and submit improvements.**
 - Falls back to software (libx264/libx265) when no hardware encoder is available
 - Test auto-detection on systems with multiple GPUs (e.g., Intel iGPU + NVIDIA dGPU)
 
+### Contributor Checklist for Hardware Encoder Testing
+
+Use this checklist when testing a hardware encoder path. Submit results via the
+[Hardware Encoder Test Report](https://github.com/Guillermode20/liteclip-recorder/issues/new?template=hardware_encoder_test.yml) issue template.
+
+```markdown
+## Encoder Test Report
+
+**GPU:** (e.g., RTX 4070, Arc A770, UHD 770 iGPU)
+**Driver version:** (e.g., 551.86, 31.0.101.5186)
+**FFmpeg version:** (e.g., 7.1.1 shared)
+**Encoder selected:** (Auto / NVENC / QSV / AMF)
+**Codec:** (HEVC / H.264)
+**Windows version:** (e.g., Windows 11 24H2)
+
+### Test Results
+
+- [ ] Encoder initializes without errors
+- [ ] No unexpected CPU fallback in logs
+- [ ] D3D11 shared device / GPU frame transport works
+- [ ] CBR rate control produces valid output
+- [ ] VBR rate control produces valid output
+- [ ] CQ rate control produces valid output
+- [ ] Quality presets (Performance/Balanced/Quality) all work
+- [ ] Keyframe/IDR insertion works (clip starts with keyframe)
+- [ ] Output plays correctly in media players (VLC, Windows Media Player)
+- [ ] No visual artifacts in output
+- [ ] Memory usage is reasonable (< 512MB for encoder)
+- [ ] Auto-detection selects the correct encoder
+
+### Log Output
+
+(Paste relevant `RUST_LOG=debug,liteclip_core=trace` output here)
+```
+
 ### Reporting Encoder Issues
 
 When reporting encoder-related issues, include:
@@ -122,6 +167,7 @@ PRs that change encoder behavior should include GPU model, driver notes, and rel
 - QSV: `crates/liteclip-core/src/encode/ffmpeg/qsv.rs`
 - AMF: `crates/liteclip-core/src/encode/ffmpeg/amf.rs`
 - Auto-detect: `crates/liteclip-core/src/encode/encoder_mod/functions.rs`
+- Verification tests: `crates/liteclip-core/tests/hardware_encoder_verification.rs`
 
 See [AGENTS.md](AGENTS.md) for full architecture details, threading model, and memory management patterns.
 

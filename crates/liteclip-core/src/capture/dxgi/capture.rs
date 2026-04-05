@@ -705,19 +705,27 @@ impl DxgiCapture {
                         .context("Failed to cast resource to texture")?;
 
                     // GPU-only capture path - always use GPU frames
-                    let frame = DxgiCapture::capture_gpu_frame(
+                    let frame_result = DxgiCapture::capture_gpu_frame(
                         state,
                         &captured_texture,
                         timestamp,
                         gpu_texture_format,
-                    )?;
+                    );
                     if let Err(e) = state.duplication.ReleaseFrame() {
                         debug!(
                             "ReleaseFrame failed after capture: 0x{:08X}",
                             e.code().0 as u32
                         );
                     }
-                    Ok(CaptureOutcome::Frame(frame))
+
+                    match frame_result {
+                        Ok(frame) => Ok(CaptureOutcome::Frame(frame)),
+                        Err(e) if Self::is_transient_nv12_capture_error(&e) => {
+                            debug!("Dropping frame after transient NV12 capture issue: {}", e);
+                            Ok(CaptureOutcome::Dropped)
+                        }
+                        Err(e) => Err(e),
+                    }
                 }
                 Err(e) if e.code().0 == DXGI_ERROR_WAIT_TIMEOUT.0 => Ok(CaptureOutcome::Timeout),
                 Err(e) if e.code().0 == DXGI_ERROR_ACCESS_LOST.0 => {
@@ -726,6 +734,27 @@ impl DxgiCapture {
                 }
                 Err(e) => bail!("AcquireNextFrame failed: 0x{:08X}", e.code().0 as u32),
             }
+        }
+    }
+
+    fn is_transient_nv12_capture_error(error: &anyhow::Error) -> bool {
+        error.chain().any(|cause| {
+            let message = cause.to_string();
+            message.contains("NV12 GPU conversion failed")
+                || message.contains("NV12 texture pool exhausted")
+                || message.contains("in_retry_backoff=true")
+        })
+    }
+
+    fn sleep_with_running_poll(running: &AtomicBool, duration: Duration) {
+        let chunk = Duration::from_millis(100);
+        let mut slept = Duration::ZERO;
+
+        while slept < duration && running.load(Ordering::Acquire) {
+            let remaining = duration.saturating_sub(slept);
+            let sleep_for = remaining.min(chunk);
+            std::thread::sleep(sleep_for);
+            slept += sleep_for;
         }
     }
 
@@ -1033,7 +1062,10 @@ impl DxgiCapture {
                         }
                         Err(e) => {
                             error!("Reinitialization failed: {}", e);
-                            std::thread::sleep(Duration::from_millis(reinit_backoff_ms));
+                            Self::sleep_with_running_poll(
+                                running.as_ref(),
+                                Duration::from_millis(reinit_backoff_ms),
+                            );
                             reinit_backoff_ms = (reinit_backoff_ms * 2).min(MAX_BACKOFF_MS);
                         }
                     }
