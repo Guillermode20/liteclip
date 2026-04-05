@@ -287,6 +287,11 @@ impl Encoder for FfmpegEncoder {
                 self.encode_gpu_frame(frame, gpu_frame, encoder_pts, gop)?;
             }
         } else {
+            // Skip encoding if frame data is empty (e.g., running without display in tests)
+            if frame.bgra.is_empty() {
+                return Ok(());
+            }
+
             let Some(ref mut encoder) = self.encoder else {
                 return Ok(());
             };

@@ -81,8 +81,23 @@ toml = "0.8"
 # Benchmarking
 criterion = { version = "0.5", features = ["html_reports"] }
 
-# Property-based testing
-proptest = "1"
+# Output verification
+mp4parse = "0.12"
+
+# JSON parsing for output verification
+serde_json = "1"
+
+# E2E testing utilities
+tokio-test = "0.4"
+
+# Additional test isolation
+scopeguard = "1"
+
+[[test]]
+name = "e2e"
+path = "tests/e2e.rs"
+harness = true
+required-features = ["ffmpeg"]
 
 [[bench]]
 name = "gui_interactions"
