@@ -15,6 +15,7 @@ pub mod detection;
 pub mod error_log;
 pub mod gui;
 pub mod platform;
+pub mod updater;
 
 #[cfg(test)]
 mod tests {

@@ -377,10 +377,6 @@ async fn main() -> Result<()> {
                                                     }
                                                 }
                                             }
-                                            liteclip::platform::HotkeyAction::Screenshot => {
-                                                info!("Hotkey: screenshot (not implemented)");
-                                                warn!("Screenshot feature not yet implemented");
-                                            }
                                             liteclip::platform::HotkeyAction::OpenGallery => {
                                                 info!("Hotkey: open gallery");
                                                 liteclip::gui::show_gallery_gui(

@@ -23,7 +23,6 @@ const CLASS_NAME: &str = "LiteClip_HotkeyWindow";
 /// Hotkey ID constants.
 const HOTKEY_ID_SAVE_CLIP: i32 = 1000;
 const HOTKEY_ID_TOGGLE_RECORDING: i32 = 1001;
-const HOTKEY_ID_SCREENSHOT: i32 = 1002;
 const HOTKEY_ID_OPEN_GALLERY: i32 = 1003;
 const IDLE_LOOP_SLEEP_MS: u64 = 8;
 
@@ -79,11 +78,8 @@ fn run_platform_loop(
                 match cmd {
                     PlatformCommand::ReRegisterHotkeys(new_cfg) => {
                         info!(
-                            "Re-registering hotkeys: save={} toggle={} screenshot={} gallery={}",
-                            new_cfg.save_clip,
-                            new_cfg.toggle_recording,
-                            new_cfg.screenshot,
-                            new_cfg.open_gallery
+                            "Re-registering hotkeys: save={} toggle={} gallery={}",
+                            new_cfg.save_clip, new_cfg.toggle_recording, new_cfg.open_gallery
                         );
                         if let Err(e) = super::hotkeys::unregister_all_hotkeys(hwnd) {
                             error!("Unregister hotkeys: {e}");
@@ -206,7 +202,6 @@ fn hotkey_id_to_action(id: i32) -> Option<HotkeyAction> {
     match id {
         HOTKEY_ID_SAVE_CLIP => Some(HotkeyAction::SaveClip),
         HOTKEY_ID_TOGGLE_RECORDING => Some(HotkeyAction::ToggleRecording),
-        HOTKEY_ID_SCREENSHOT => Some(HotkeyAction::Screenshot),
         HOTKEY_ID_OPEN_GALLERY => Some(HotkeyAction::OpenGallery),
         _ => {
             debug!("WM_HOTKEY with unknown id={}", id);

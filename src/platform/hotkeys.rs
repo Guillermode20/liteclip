@@ -40,7 +40,6 @@ impl Hotkey {
 /// Hotkey ID constants - must match msg_loop.rs
 const HOTKEY_ID_SAVE_CLIP: i32 = 1000;
 const HOTKEY_ID_TOGGLE_RECORDING: i32 = 1001;
-const HOTKEY_ID_SCREENSHOT: i32 = 1002;
 const HOTKEY_ID_OPEN_GALLERY: i32 = 1003;
 
 /// Register all hotkeys from configuration
@@ -78,18 +77,6 @@ pub fn register_hotkeys(hwnd: HWND, config: &HotkeyConfig) -> Result<()> {
         );
         success_count += 1;
     }
-
-    // Register screenshot hotkey (default: Alt+F8)
-    if let Err(e) = register_single_hotkey(hwnd, HOTKEY_ID_SCREENSHOT, &config.screenshot) {
-        error!(
-            "Failed to register screenshot hotkey '{}': {}",
-            config.screenshot, e
-        );
-    } else {
-        debug!("Registered screenshot hotkey: {}", config.screenshot);
-        success_count += 1;
-    }
-
     // Register open gallery hotkey (default: Ctrl+Shift+S)
     if let Err(e) = register_single_hotkey(hwnd, HOTKEY_ID_OPEN_GALLERY, &config.open_gallery) {
         error!(
@@ -167,7 +154,6 @@ pub fn unregister_all_hotkeys(hwnd: HWND) -> Result<()> {
     let hotkey_ids = [
         HOTKEY_ID_SAVE_CLIP,
         HOTKEY_ID_TOGGLE_RECORDING,
-        HOTKEY_ID_SCREENSHOT,
         HOTKEY_ID_OPEN_GALLERY,
     ];
 

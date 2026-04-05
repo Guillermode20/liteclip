@@ -10,6 +10,7 @@ use crate::config::{
 };
 use crate::error_log::FileLogGuard;
 use crate::platform::AppEvent;
+use crate::updater::UpdateInfo;
 
 pub fn show_settings_gui(
     event_tx: Sender<AppEvent>,
@@ -29,8 +30,21 @@ pub fn show_settings_gui(
 struct HotkeyValidationErrors {
     save_clip: Option<String>,
     toggle_recording: Option<String>,
-    screenshot: Option<String>,
     open_gallery: Option<String>,
+}
+
+/// State for the update checker UI.
+enum UpdateState {
+    /// No check has been performed yet.
+    Idle,
+    /// A check is in progress (running in background).
+    Checking(std::sync::mpsc::Receiver<anyhow::Result<Option<UpdateInfo>>>),
+    /// A newer version is available.
+    Available(UpdateInfo),
+    /// Already running the latest version.
+    UpToDate,
+    /// The check failed.
+    Error(String),
 }
 
 fn validate_hotkey(hotkey: &str) -> Result<(), String> {
@@ -163,6 +177,7 @@ pub struct SettingsApp {
     cached_log_len: u64,
     log_refresh_time: std::time::Instant,
     show_clear_confirm: bool,
+    update_state: UpdateState,
 }
 
 impl SettingsApp {
@@ -201,6 +216,7 @@ impl SettingsApp {
             cached_log_len,
             log_refresh_time: std::time::Instant::now(),
             show_clear_confirm: false,
+            update_state: UpdateState::Idle,
         }
     }
 
@@ -221,6 +237,37 @@ impl SettingsApp {
     /// Refresh microphone device list from system
     fn refresh_mic_devices(&mut self) {
         self.mic_devices = crate::capture::audio::device_info::list_capture_devices();
+    }
+
+    /// Poll the update checker thread for a result.
+    fn poll_update_result(&mut self) {
+        // Take the receiver out to avoid borrowing self.update_state twice.
+        let rx = match std::mem::replace(&mut self.update_state, UpdateState::Idle) {
+            UpdateState::Checking(rx) => rx,
+            other => {
+                self.update_state = other;
+                return;
+            }
+        };
+
+        match rx.try_recv() {
+            Ok(Ok(Some(info))) => {
+                self.update_state = UpdateState::Available(info);
+            }
+            Ok(Ok(None)) => {
+                self.update_state = UpdateState::UpToDate;
+            }
+            Ok(Err(e)) => {
+                self.update_state = UpdateState::Error(e.to_string());
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                // Still in progress — put the receiver back
+                self.update_state = UpdateState::Checking(rx);
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.update_state = UpdateState::Error("Update check thread panicked".to_string());
+            }
+        }
     }
 
     fn render(&mut self, ctx: &egui::Context, is_open: &mut bool) {
@@ -389,6 +436,69 @@ impl SettingsApp {
             &mut self.config.general.use_software_encoder,
             "Use software encoder for export (slower, more compatible)",
         );
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new("Updates").strong());
+        ui.add_space(4.0);
+
+        ui.horizontal(|ui| {
+            ui.label(format!(
+                "Version {} ({})",
+                env!("CARGO_PKG_VERSION"),
+                crate::updater::install_type()
+            ));
+
+            let is_checking = matches!(self.update_state, UpdateState::Checking(_));
+            if ui
+                .add_enabled(!is_checking, egui::Button::new("Check for Updates"))
+                .clicked()
+            {
+                let (tx, rx) = std::sync::mpsc::channel();
+                self.update_state = UpdateState::Checking(rx);
+                std::thread::spawn(move || {
+                    let result = crate::updater::check_for_updates();
+                    let _ = tx.send(result);
+                });
+            }
+        });
+
+        // Poll for result if checking, then render status
+        self.poll_update_result();
+
+        match &self.update_state {
+            UpdateState::Idle => {}
+            UpdateState::Checking(_) => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Checking for updates...");
+                });
+                ui.ctx().request_repaint();
+            }
+            UpdateState::Available(info) => {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!("Update v{} available!", info.version))
+                            .color(egui::Color32::from_rgb(0x23, 0xA5, 0x5A)),
+                    );
+                    if ui.button("Open Download Page").clicked() {
+                        let _ = std::process::Command::new("cmd")
+                            .args(["/c", "start", &info.release_url])
+                            .spawn();
+                    }
+                });
+            }
+            UpdateState::UpToDate => {
+                ui.label(
+                    egui::RichText::new("You're on the latest version.")
+                        .color(egui::Color32::from_rgb(0x23, 0xA5, 0x5A)),
+                );
+            }
+            UpdateState::Error(err) => {
+                ui.label(egui::RichText::new(err).color(egui::Color32::RED));
+            }
+        }
     }
 
     fn render_video_settings(&mut self, ui: &mut egui::Ui) {
@@ -710,15 +820,6 @@ impl SettingsApp {
             "Toggle Recording:",
             &mut self.config.hotkeys.toggle_recording,
             &mut self.hotkey_errors.toggle_recording,
-        );
-
-        ui.add_space(4.0);
-
-        render_hotkey_field(
-            ui,
-            "Screenshot:",
-            &mut self.config.hotkeys.screenshot,
-            &mut self.hotkey_errors.screenshot,
         );
 
         ui.add_space(4.0);

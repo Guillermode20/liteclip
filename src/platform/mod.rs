@@ -43,8 +43,6 @@ pub enum HotkeyAction {
     SaveClip,
     /// Toggle recording hotkey pressed
     ToggleRecording,
-    /// Screenshot hotkey pressed
-    Screenshot,
     /// Open gallery hotkey pressed
     OpenGallery,
 }

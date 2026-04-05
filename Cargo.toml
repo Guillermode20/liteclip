@@ -52,6 +52,11 @@ rodio = "0.20"
 rustc-hash = "2.0"
 ffmpeg-next = { version = "7.1.0", default-features = false, features = ["codec", "format", "software-scaling", "software-resampling"] }
 
+# Update checker
+ureq = { version = "3", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
 [workspace]
 members = ["crates/liteclip-core"]
 

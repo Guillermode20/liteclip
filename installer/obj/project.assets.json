@@ -37,9 +37,9 @@
   "project": {
     "version": "1.0.0",
     "restore": {
-      "projectUniqueName": "C:\\Coding\\liteclip-recorder\\installer\\LiteClipReplay.wixproj",
-      "projectName": "LiteClipReplay",
-      "projectPath": "C:\\Coding\\liteclip-recorder\\installer\\LiteClipReplay.wixproj",
+      "projectUniqueName": "C:\\Coding\\liteclip-recorder\\installer\\LiteClip.wixproj",
+      "projectName": "LiteClip",
+      "projectPath": "C:\\Coding\\liteclip-recorder\\installer\\LiteClip.wixproj",
       "packagesPath": "C:\\Users\\willi\\.nuget\\packages\\",
       "outputPath": "C:\\Coding\\liteclip-recorder\\installer\\obj\\",
       "projectStyle": "PackageReference",
