@@ -13,6 +13,8 @@ pub(super) fn render_editor_ui(app: &mut ClipCompressApp, ui: &mut egui::Ui) -> 
         return outcome;
     };
 
+    editor.refresh_snippet_cache_if_dirty();
+
     let ctx = ui.ctx().clone();
     let received_update = poll_editor_export_updates(editor, &mut outcome, &ctx);
 
@@ -30,6 +32,7 @@ pub(super) fn render_editor_ui(app: &mut ClipCompressApp, ui: &mut egui::Ui) -> 
     update_playback_clock(editor, &mut outcome);
 
     handle_editor_shortcuts(&ctx, editor, &mut outcome, export_active);
+    editor.refresh_snippet_cache_if_dirty();
 
     ui.horizontal(|ui| {
         if ui
@@ -172,6 +175,7 @@ fn handle_editor_shortcuts(
                 editor.selected_cut_point = editor.cut_points.len().checked_sub(1);
             }
         }
+        editor.invalidate_snippet_cache();
         outcome.preview_request = Some(editor.current_time_secs);
     }
 
@@ -253,7 +257,6 @@ fn handle_editor_shortcuts(
         if let Some(flag) = editor.snippet_enabled.get_mut(selected) {
             *flag = !*flag;
 
-            // Ensure playback time stays on an enabled snippet after toggling.
             let clamped_time = crate::gui::gallery::clamp_to_enabled_playback_time(
                 editor.current_time_secs,
                 editor.duration_secs(),
@@ -262,7 +265,7 @@ fn handle_editor_shortcuts(
             );
             editor.current_time_secs = clamped_time;
             editor.playback.pause_at(clamped_time);
-
+            editor.invalidate_snippet_cache();
             outcome.preview_request = Some(editor.current_time_secs);
         }
     }

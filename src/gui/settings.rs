@@ -159,6 +159,8 @@ pub struct SettingsApp {
     last_tab: SettingsTab,
     log_guard: Arc<FileLogGuard>,
     cached_log: String,
+    cached_log_modified: Option<std::time::SystemTime>,
+    cached_log_len: u64,
     log_refresh_time: std::time::Instant,
     show_clear_confirm: bool,
 }
@@ -178,6 +180,10 @@ impl SettingsApp {
         }
 
         let cached_log = log_guard.read_log();
+        let (cached_log_modified, cached_log_len) = log_guard
+            .log_metadata()
+            .map(|(mtime, len)| (Some(mtime), len))
+            .unwrap_or((None, 0));
 
         Self {
             config,
@@ -191,6 +197,8 @@ impl SettingsApp {
             last_tab: SettingsTab::default(),
             log_guard,
             cached_log,
+            cached_log_modified,
+            cached_log_len,
             log_refresh_time: std::time::Instant::now(),
             show_clear_confirm: false,
         }
@@ -783,10 +791,24 @@ impl SettingsApp {
     }
 
     fn render_logs_settings(&mut self, ui: &mut egui::Ui) {
-        // Refresh log content every 2 seconds while the tab is visible
         if self.log_refresh_time.elapsed() >= std::time::Duration::from_secs(2) {
-            self.cached_log = self.log_guard.read_log();
             self.log_refresh_time = std::time::Instant::now();
+            let needs_reread = match self.log_guard.log_metadata() {
+                Some((mtime, len)) => {
+                    self.cached_log_modified != Some(mtime) || self.cached_log_len != len
+                }
+                None => self.cached_log_modified.is_some(),
+            };
+            if needs_reread {
+                self.cached_log = self.log_guard.read_log();
+                if let Some((mtime, len)) = self.log_guard.log_metadata() {
+                    self.cached_log_modified = Some(mtime);
+                    self.cached_log_len = len;
+                } else {
+                    self.cached_log_modified = None;
+                    self.cached_log_len = 0;
+                }
+            }
         }
 
         ui.heading("Error & Crash Logs");
@@ -823,6 +845,8 @@ impl SettingsApp {
                         self.save_status = Some(format!("Failed to clear logs: {}", e));
                     } else {
                         self.cached_log.clear();
+                        self.cached_log_modified = None;
+                        self.cached_log_len = 0;
                         self.save_status = Some("Logs cleared.".to_string());
                     }
                     self.show_clear_confirm = false;

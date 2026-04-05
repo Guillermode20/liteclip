@@ -6,7 +6,7 @@ use rustc_hash::FxHashMap;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::mpsc::Sender as TokioSender;
@@ -184,10 +184,12 @@ struct VideoEntry {
     is_external: bool,
     game: String,
     filename: String,
+    filename_lower: String,
+    game_lower: String,
     size_mb: f64,
     modified: SystemTime,
     metadata: VideoFileMetadata,
-    is_clipped: bool, // True if video came from a "Clipped-" folder
+    is_clipped: bool,
 }
 
 struct ThumbnailResult {
@@ -199,6 +201,16 @@ struct ThumbnailResult {
 enum DialogResult {
     ImportVideo(Option<PathBuf>),
     SaveOutputPath(Option<PathBuf>),
+}
+
+enum ScanState {
+    InProgress { rx: Receiver<ScanResult> },
+    Complete,
+}
+
+struct ScanResult {
+    groups: Vec<(String, Vec<VideoEntry>)>,
+    error: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -257,6 +269,10 @@ pub(super) struct EditorState {
     last_scrub_time: Option<Instant>,
     last_scrub_position: Option<f64>,
     selected_snippet_index: Option<usize>,
+    cached_snippets: Vec<SnippetSegment>,
+    cached_kept_ranges: Vec<TimeRange>,
+    cached_kept_duration_secs: f64,
+    snippets_dirty: bool,
 }
 
 impl EditorState {
@@ -300,6 +316,10 @@ impl EditorState {
             last_scrub_time: None,
             last_scrub_position: None,
             selected_snippet_index: Some(0),
+            cached_snippets: Vec::new(),
+            cached_kept_ranges: Vec::new(),
+            cached_kept_duration_secs: 0.0,
+            snippets_dirty: true,
         }
     }
 
@@ -307,19 +327,38 @@ impl EditorState {
         self.video.metadata.duration_secs
     }
 
-    fn kept_ranges(&self) -> Vec<TimeRange> {
-        enabled_time_ranges(
+    pub(super) fn refresh_snippet_cache_if_dirty(&mut self) {
+        if !self.snippets_dirty {
+            return;
+        }
+        self.cached_snippets = snippet_segments(
             self.duration_secs(),
             &self.cut_points,
             &self.snippet_enabled,
-        )
+        );
+        self.cached_kept_ranges = enabled_time_ranges(
+            self.duration_secs(),
+            &self.cut_points,
+            &self.snippet_enabled,
+        );
+        self.cached_kept_duration_secs = self
+            .cached_kept_ranges
+            .iter()
+            .map(|range| range.duration_secs())
+            .sum();
+        self.snippets_dirty = false;
+    }
+
+    pub(super) fn invalidate_snippet_cache(&mut self) {
+        self.snippets_dirty = true;
+    }
+
+    fn kept_ranges(&self) -> &[TimeRange] {
+        &self.cached_kept_ranges
     }
 
     fn kept_duration_secs(&self) -> f64 {
-        self.kept_ranges()
-            .iter()
-            .map(|range| range.duration_secs())
-            .sum()
+        self.cached_kept_duration_secs
     }
 
     /// Maximum output size in MB based on proportion of enabled segments.
@@ -335,12 +374,8 @@ impl EditorState {
         max_size as u32
     }
 
-    fn snippets(&self) -> Vec<SnippetSegment> {
-        snippet_segments(
-            self.duration_secs(),
-            &self.cut_points,
-            &self.snippet_enabled,
-        )
+    fn snippets(&self) -> &[SnippetSegment] {
+        &self.cached_snippets
     }
 
     fn has_active_export(&self) -> bool {
@@ -416,6 +451,7 @@ pub struct ClipCompressApp {
     collapsed_games: HashSet<String>,
     loaded: bool,
     scan_error: Option<String>,
+    scan_state: Option<ScanState>,
     thumbnails: FxHashMap<PathBuf, egui::TextureHandle>,
     thumbnails_generating: HashSet<PathBuf>,
     thumbnail_tx: Sender<ThumbnailResult>,
@@ -432,6 +468,7 @@ pub struct ClipCompressApp {
     preferred_export_encoder: EncoderType,
     use_software_encoder: bool,
     last_thumbnail_check: Instant,
+    filtered_cache: Option<browser::FilteredCache>,
 }
 
 pub type GalleryApp = ClipCompressApp;
@@ -461,6 +498,7 @@ impl ClipCompressApp {
             collapsed_games: HashSet::new(),
             loaded: false,
             scan_error: None,
+            scan_state: None,
             thumbnails: FxHashMap::default(),
             thumbnails_generating: HashSet::new(),
             thumbnail_tx,
@@ -477,6 +515,7 @@ impl ClipCompressApp {
             preferred_export_encoder: config.video.encoder,
             use_software_encoder: config.general.use_software_encoder,
             last_thumbnail_check: Instant::now(),
+            filtered_cache: None,
         }
     }
 
@@ -488,69 +527,71 @@ impl ClipCompressApp {
             .join(format!("{:016x}.jpg", hasher.finish()))
     }
 
-    fn scan_videos(&mut self, ctx: &egui::Context) {
-        self.scan_error = None;
-        self.videos_by_game.clear();
-        self.thumbnails.clear();
+    fn start_background_scan(&mut self) {
+        let save_directory = self.save_directory.clone();
+        let cache_directory = self.cache_directory.clone();
 
-        if !self.save_directory.exists() {
-            self.loaded = true;
-            return;
-        }
+        let (tx, rx) = mpsc::channel();
 
-        let mut paths = Vec::with_capacity(256);
-        collect_video_paths(&self.save_directory, &self.cache_directory, &mut paths);
-        let base_dir = self.save_directory.clone();
+        std::thread::spawn(move || {
+            if !save_directory.exists() {
+                let _ = tx.send(ScanResult {
+                    groups: Vec::new(),
+                    error: None,
+                });
+                return;
+            }
 
-        let mut entries: Vec<VideoEntry> = paths
-            .into_par_iter()
-            .filter_map(|path| match Self::build_video_entry(&base_dir, path) {
-                Ok(entry) => Some(entry),
-                Err(err) => {
-                    warn!("Skipping video during scan: {err:#}");
-                    None
+            let mut paths = Vec::with_capacity(256);
+            collect_video_paths(&save_directory, &cache_directory, &mut paths);
+
+            let base_dir = save_directory.clone();
+            let mut entries: Vec<VideoEntry> = paths
+                .into_par_iter()
+                .filter_map(|path| match Self::build_video_entry(&base_dir, path) {
+                    Ok(entry) => Some(entry),
+                    Err(err) => {
+                        warn!("Skipping video during scan: {err:#}");
+                        None
+                    }
+                })
+                .collect();
+
+            entries.sort_by(|a, b| {
+                a.game
+                    .cmp(&b.game)
+                    .then_with(|| b.modified.cmp(&a.modified))
+                    .then_with(|| a.filename.cmp(&b.filename))
+            });
+
+            let mut grouped: Vec<(String, Vec<VideoEntry>)> = Vec::with_capacity(16);
+            for entry in entries {
+                if let Some((game, videos)) = grouped.last_mut() {
+                    if *game == entry.game {
+                        videos.push(entry);
+                        continue;
+                    }
                 }
-            })
-            .collect();
+                grouped.push((entry.game.clone(), vec![entry]));
+            }
 
-        entries.sort_by(|a, b| {
-            a.game
-                .cmp(&b.game)
-                .then_with(|| b.modified.cmp(&a.modified))
-                .then_with(|| a.filename.cmp(&b.filename))
+            grouped.sort_by(|a, b| {
+                if a.0 == "Desktop" {
+                    std::cmp::Ordering::Less
+                } else if b.0 == "Desktop" {
+                    std::cmp::Ordering::Greater
+                } else {
+                    a.0.cmp(&b.0)
+                }
+            });
+
+            let _ = tx.send(ScanResult {
+                groups: grouped,
+                error: None,
+            });
         });
 
-        let mut grouped: Vec<(String, Vec<VideoEntry>)> = Vec::with_capacity(16);
-        for entry in entries {
-            if let Some((game, videos)) = grouped.last_mut() {
-                if *game == entry.game {
-                    videos.push(entry);
-                    continue;
-                }
-            }
-            grouped.push((entry.game.clone(), vec![entry]));
-        }
-
-        grouped.sort_by(|a, b| {
-            if a.0 == "Desktop" {
-                std::cmp::Ordering::Less
-            } else if b.0 == "Desktop" {
-                std::cmp::Ordering::Greater
-            } else {
-                a.0.cmp(&b.0)
-            }
-        });
-
-        self.videos_by_game = grouped;
-        if self
-            .videos_by_game
-            .iter()
-            .all(|(game, _)| *game != self.filter_game)
-        {
-            self.filter_game = ALL_GAMES_FILTER.to_string();
-        }
-        self.loaded = true;
-        self.load_cached_thumbnails(ctx);
+        self.scan_state = Some(ScanState::InProgress { rx });
     }
 
     fn build_video_entry(base_dir: &Path, path: PathBuf) -> anyhow::Result<VideoEntry> {
@@ -578,8 +619,10 @@ impl ClipCompressApp {
             path,
             save_root: base_dir.to_path_buf(),
             is_external: false,
-            game,
-            filename,
+            game: game.clone(),
+            filename: filename.clone(),
+            filename_lower: filename.to_lowercase(),
+            game_lower: game.to_lowercase(),
             size_mb: metadata.len() as f64 / (1024.0 * 1024.0),
             modified: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
             metadata: video_metadata,
@@ -609,7 +652,9 @@ impl ClipCompressApp {
             save_root: save_root.to_path_buf(),
             is_external: true,
             game: "External Files".to_string(),
-            filename,
+            filename: filename.clone(),
+            filename_lower: filename.to_lowercase(),
+            game_lower: "external files".to_string(),
             size_mb: metadata.len() as f64 / (1024.0 * 1024.0),
             modified: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
             metadata: video_metadata,
@@ -967,8 +1012,37 @@ impl ClipCompressApp {
         let mut requested_preview = self.poll_background_work(ctx);
         self.apply_dialog_results(&mut requested_preview);
 
-        if !self.loaded {
-            self.scan_videos(ctx);
+        if self.scan_state.is_none() {
+            self.start_background_scan();
+        }
+
+        if let Some(ScanState::InProgress { rx }) = &self.scan_state {
+            match rx.try_recv() {
+                Ok(result) => {
+                    self.scan_error = result.error;
+                    self.videos_by_game = result.groups;
+                    self.filtered_cache = None;
+                    if self
+                        .videos_by_game
+                        .iter()
+                        .all(|(game, _)| *game != self.filter_game)
+                    {
+                        self.filter_game = ALL_GAMES_FILTER.to_string();
+                    }
+                    self.loaded = true;
+                    self.scan_state = Some(ScanState::Complete);
+                    self.load_cached_thumbnails(ctx);
+                }
+                Err(TryRecvError::Disconnected) => {
+                    self.scan_error =
+                        Some("Video scan failed unexpectedly. Click refresh to retry.".to_string());
+                    self.loaded = true;
+                    self.scan_state = Some(ScanState::Complete);
+                }
+                Err(TryRecvError::Empty) => {
+                    ctx.request_repaint_after(Duration::from_millis(100));
+                }
+            }
         }
 
         let mut browser_outcome = BrowserUiOutcome::default();
@@ -1104,13 +1178,15 @@ impl ClipCompressApp {
 
     pub fn refresh(&mut self) {
         self.close_editor();
+        self.unload_browser_thumbnails();
+        self.thumbnails_generating.clear();
         self.loaded = false;
         self.scan_error = None;
         self.videos_by_game.clear();
-        self.thumbnails.clear();
-        self.thumbnails_generating.clear();
+        self.scan_state = None;
         self.delete_hold_started_at = None;
         self.delete_slider_progress = 0.0;
+        self.filtered_cache = None;
     }
 
     fn handle_keyboard_navigation(&mut self, ctx: &egui::Context) {
@@ -1237,7 +1313,7 @@ fn start_export(editor: &mut EditorState) {
         ClipExportRequest {
             input_path: editor.video.path.clone(),
             output_path,
-            keep_ranges: kept_ranges,
+            keep_ranges: kept_ranges.to_vec(),
             target_size_mb: editor.target_size_mb,
             audio_bitrate_kbps: editor.audio_bitrate_kbps,
             use_hardware_acceleration: editor.use_hardware_acceleration,
@@ -1409,14 +1485,20 @@ fn format_timestamp_precise(seconds: f64) -> String {
 
 fn clear_cut_points(editor: &mut EditorState) {
     utils::clear_cut_points_impl(editor);
+    editor.invalidate_snippet_cache();
 }
 
 fn add_cut_point(editor: &mut EditorState, time_secs: f64) -> bool {
-    utils::add_cut_point_impl(editor, time_secs)
+    let result = utils::add_cut_point_impl(editor, time_secs);
+    if result {
+        editor.invalidate_snippet_cache();
+    }
+    result
 }
 
 fn remove_cut_point(editor: &mut EditorState, index: usize) {
     utils::remove_cut_point_impl(editor, index);
+    editor.invalidate_snippet_cache();
 }
 
 fn snippet_segments(

@@ -39,6 +39,13 @@ impl FileLogGuard {
         fs::read_to_string(&self.log_path).unwrap_or_default()
     }
 
+    /// Return `(modified_time, file_length)` via `fs::metadata`.
+    /// Returns `None` if the file does not exist or metadata cannot be read.
+    pub fn log_metadata(&self) -> Option<(std::time::SystemTime, u64)> {
+        let meta = fs::metadata(&self.log_path).ok()?;
+        Some((meta.modified().ok()?, meta.len()))
+    }
+
     /// Truncate the error log to zero length.
     pub fn clear_log(&self) -> Result<()> {
         if self.log_path.exists() {

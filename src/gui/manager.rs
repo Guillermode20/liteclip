@@ -6,6 +6,7 @@ use eframe::UserEvent;
 use egui::ViewportId;
 use egui_notify::{Anchor, Toasts};
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::LazyLock;
 use std::sync::{Arc, Mutex};
@@ -301,8 +302,9 @@ struct GuiManagerApp {
     pending_messages: VecDeque<GuiMessage>,
     settings: Arc<Mutex<Option<crate::gui::settings::SettingsApp>>>,
     gallery: Arc<Mutex<Option<crate::gui::gallery::GalleryApp>>>,
+    settings_open_flag: Arc<AtomicBool>,
+    gallery_open_flag: Arc<AtomicBool>,
     toasts: Toasts,
-    /// `true` when the viewport uses [`TOAST_WINDOW_SIZE`]; `false` when it is [`TOAST_WINDOW_IDLE_SIZE`].
     overlay_toast_area: bool,
     last_mouse_passthrough: Option<bool>,
     idle_since: Option<std::time::Instant>,
@@ -320,6 +322,8 @@ impl GuiManagerApp {
             pending_messages: VecDeque::from([first_msg]),
             settings: Arc::new(Mutex::new(None)),
             gallery: Arc::new(Mutex::new(None)),
+            settings_open_flag: Arc::new(AtomicBool::new(false)),
+            gallery_open_flag: Arc::new(AtomicBool::new(false)),
             toasts: Toasts::default().with_anchor(Anchor::TopRight),
             overlay_toast_area: false,
             last_mouse_passthrough: None,
@@ -343,6 +347,8 @@ impl GuiManagerApp {
             pending_messages: VecDeque::from([first_msg]),
             settings: Arc::new(Mutex::new(None)),
             gallery: Arc::new(Mutex::new(None)),
+            settings_open_flag: Arc::new(AtomicBool::new(false)),
+            gallery_open_flag: Arc::new(AtomicBool::new(false)),
             toasts: Toasts::default().with_anchor(Anchor::TopRight),
             overlay_toast_area: false,
             last_mouse_passthrough: None,
@@ -401,20 +407,9 @@ impl GuiManagerApp {
     }
 
     fn activity_state(&self) -> GuiActivityState {
-        let settings_open = self
-            .settings
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_some();
-        let gallery_open = self
-            .gallery
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_some();
-
         GuiActivityState {
-            settings_open,
-            gallery_open,
+            settings_open: self.settings_open_flag.load(Ordering::Acquire),
+            gallery_open: self.gallery_open_flag.load(Ordering::Acquire),
             has_toasts: !self.toasts.is_empty(),
         }
     }
@@ -423,16 +418,8 @@ impl GuiManagerApp {
         if !self.toasts.is_empty() {
             return;
         }
-        let settings_open = self
-            .settings
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_some();
-        let gallery_open = self
-            .gallery
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_some();
+        let settings_open = self.settings_open_flag.load(Ordering::Acquire);
+        let gallery_open = self.gallery_open_flag.load(Ordering::Acquire);
         if settings_open || gallery_open {
             return;
         }
@@ -483,10 +470,12 @@ impl eframe::App for GuiManagerApp {
                                 level_monitor,
                                 log_guard,
                             ));
+                        self.settings_open_flag.store(true, Ordering::Release);
                     }
                     GuiMessage::ShowGallery(tx, config) => {
                         *self.gallery.lock().unwrap_or_else(|e| e.into_inner()) =
                             Some(crate::gui::gallery::GalleryApp::new(&config, tx));
+                        self.gallery_open_flag.store(true, Ordering::Release);
                     }
                     GuiMessage::Toast(kind, message) => {
                         match kind {
@@ -531,12 +520,9 @@ impl eframe::App for GuiManagerApp {
             .frame(frame)
             .show(ctx, |_ui| {});
 
-        let settings_clone = self.settings.clone();
-        let show_settings = settings_clone
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_some();
-        if show_settings {
+        if self.settings_open_flag.load(Ordering::Acquire) {
+            let settings_clone = self.settings.clone();
+            let settings_flag = self.settings_open_flag.clone();
             ctx.show_viewport_deferred(
                 egui::ViewportId::from_hash_of("settings"),
                 egui::ViewportBuilder::default()
@@ -556,18 +542,16 @@ impl eframe::App for GuiManagerApp {
                         if !is_open || ctx.input(|i| i.viewport().close_requested()) {
                             settings.release_resources();
                             *lock = None;
+                            settings_flag.store(false, Ordering::Release);
                         }
                     }
                 },
             );
         }
 
-        let gallery_clone = self.gallery.clone();
-        let show_gallery = gallery_clone
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_some();
-        if show_gallery {
+        if self.gallery_open_flag.load(Ordering::Acquire) {
+            let gallery_clone = self.gallery.clone();
+            let gallery_flag = self.gallery_open_flag.clone();
             ctx.show_viewport_deferred(
                 egui::ViewportId::from_hash_of("gallery"),
                 egui::ViewportBuilder::default()
@@ -587,6 +571,7 @@ impl eframe::App for GuiManagerApp {
                         if ctx.input(|i| i.viewport().close_requested()) {
                             gallery.release_all_gui_resources();
                             *lock = None;
+                            gallery_flag.store(false, Ordering::Release);
                         }
                     }
                 },

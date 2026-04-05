@@ -156,6 +156,7 @@ fn render_timeline_panel(
             }
             if ui.button("Clear All Splits").clicked() {
                 super::clear_cut_points(editor);
+                editor.invalidate_snippet_cache();
                 outcome.preview_request = Some(editor.current_time_secs);
             }
         });
@@ -454,13 +455,13 @@ fn render_snippet_list(ui: &mut egui::Ui, editor: &mut EditorState, outcome: &mu
         ui.label(egui::RichText::new("Snippets").strong());
         ui.label(egui::RichText::new("Use the timeline and add cuts at the playhead to split the clip into snippets. Disabled snippets are skipped in preview/export.").weak());
 
-        let snippets = editor.snippets();
+        let snippets = editor.snippets().to_vec();
         let snippet_max_height = (ui.available_height() * 0.5).clamp(180.0, 420.0);
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .max_height(snippet_max_height)
             .show(ui, |ui| {
-                for (index, snippet) in snippets.iter().copied().enumerate() {
+                for (index, snippet) in snippets.into_iter().enumerate() {
                     let snippet_frame = egui::Frame::group(ui.style()).inner_margin(egui::Margin::same(8));
 
                     snippet_frame
@@ -473,6 +474,7 @@ fn render_snippet_list(ui: &mut egui::Ui, editor: &mut EditorState, outcome: &mu
                                     if let Some(flag) = editor.snippet_enabled.get_mut(index) {
                                         *flag = enabled;
                                     }
+                                    editor.invalidate_snippet_cache();
                                     outcome.preview_request = Some(editor.current_time_secs);
                                 }
                                 ui.label(format!(
@@ -496,11 +498,10 @@ fn render_snippet_list(ui: &mut egui::Ui, editor: &mut EditorState, outcome: &mu
 
 fn render_size_section(ui: &mut egui::Ui, editor: &mut EditorState) {
     let kept_duration = editor.kept_duration_secs();
-    let kept_ranges = editor.kept_ranges();
+    let kept_ranges_len = editor.kept_ranges().len();
     let max_output_size_mb = editor.max_output_size_mb();
     let total_duration = editor.duration_secs();
 
-    // Compute the effective auto target size based on kept proportion
     let kept_proportion = if total_duration > 0.0 {
         (kept_duration / total_duration).clamp(0.0, 1.0)
     } else {
@@ -508,7 +509,6 @@ fn render_size_section(ui: &mut egui::Ui, editor: &mut EditorState) {
     };
     let auto_target_size_mb = (editor.video.size_mb * kept_proportion).ceil().max(1.0) as u32;
 
-    // Clamp target size to max allowed based on enabled segments
     if editor.target_size_mb > max_output_size_mb {
         editor.target_size_mb = max_output_size_mb;
     }
@@ -518,7 +518,7 @@ fn render_size_section(ui: &mut egui::Ui, editor: &mut EditorState) {
         kept_duration,
         editor.video.metadata.has_audio,
         editor.audio_bitrate_kbps,
-        kept_ranges.len(),
+        kept_ranges_len,
         editor.use_hardware_acceleration,
     );
     let (quality_label, bars) = super::quality_estimate(&editor.video.metadata, video_kbps);

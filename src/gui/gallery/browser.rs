@@ -7,238 +7,53 @@ use super::{
 };
 use crate::gui::manager::{show_toast, ToastKind};
 
-pub(super) fn render_browser_ui(app: &mut ClipCompressApp, ui: &mut egui::Ui) -> BrowserUiOutcome {
-    let mut outcome = BrowserUiOutcome::default();
-
-    // Apply filters first to get filtered groups and count
-    let display_groups = apply_filters(app);
-    let filtered_count: usize = display_groups.iter().map(|(_, videos)| videos.len()).sum();
-
-    // Header with title, count, and main actions
-    ui.horizontal(|ui| {
-        ui.heading("Clip & Compress");
-        ui.label(format!("({} videos)", filtered_count));
-
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            // Card size toggle
-            let (_width, _height) = app.card_size.dimensions();
-            let size_btn_text = match app.card_size {
-                CardSize::Small => "Small",
-                CardSize::Medium => "Medium",
-                CardSize::Large => "Large",
-                CardSize::XLarge => "XL",
-            };
-            if ui.button(size_btn_text).clicked() {
-                app.card_size = app.card_size.next();
-            }
-
-            if ui.button("Refresh").clicked() {
-                outcome.refresh_requested = true;
-            }
-            if ui
-                .toggle_value(&mut app.selection_mode, "Select...")
-                .clicked()
-                && !app.selection_mode
-            {
-                app.selected_videos.clear();
-                app.delete_slider_progress = 0.0;
-                app.delete_hold_started_at = None;
-            }
-            if ui.button("Open Folder").clicked() {
-                if let Err(err) = utils::open_path_impl(&app.save_directory) {
-                    show_toast(ToastKind::Error, format!("Failed to open folder: {err:#}"));
-                }
-            }
-            if ui.button("Open Video File...").clicked() {
-                outcome.request_import_video_dialog = true;
-            }
-        });
-    });
-
-    ui.separator();
-
-    // Filter bar with search and filter controls
-    render_filter_bar(app, ui);
-
-    ui.separator();
-
-    if let Some(error) = &app.scan_error {
-        ui.colored_label(egui::Color32::LIGHT_RED, error);
-    }
-
-    // Apply all filters to get display groups
-    let display_groups = apply_filters(app);
-
-    if display_groups.is_empty() {
-        render_empty_state(ui, app.search_query.is_empty());
-        return outcome;
-    }
-
-    // Card sizing from app state
-    let (tile_width, thumb_height) = app.card_size.dimensions();
-    let tile_spacing = 12.0;
-    let columns_count = ((ui.available_width() + tile_spacing) / (tile_width + tile_spacing))
-        .floor()
-        .max(1.0) as usize;
-
-    // Delete panel for selection mode
-    if app.selection_mode && !app.selected_videos.is_empty() {
-        render_delete_panel(app, ui, &mut outcome);
-    }
-
-    // Scrollable video grid
-    egui::ScrollArea::vertical()
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            for (game, videos) in display_groups {
-                render_game_section(
-                    app,
-                    ui,
-                    &game,
-                    &videos,
-                    tile_width,
-                    thumb_height,
-                    tile_spacing,
-                    columns_count,
-                    &mut outcome,
-                );
-            }
-        });
-
-    outcome
+pub(super) struct FilteredGroup {
+    pub(super) game: String,
+    pub(super) videos: Vec<VideoEntry>,
 }
 
-fn render_filter_bar(app: &mut ClipCompressApp, ui: &mut egui::Ui) {
-    ui.horizontal(|ui| {
-        // Search box
-        let _search_response = ui.add(
-            egui::TextEdit::singleline(&mut app.search_query)
-                .hint_text("Search videos...")
-                .desired_width(200.0),
-        );
-
-        ui.add_space(8.0);
-
-        // Game filter
-        egui::ComboBox::from_id_salt("clip_filter_game")
-            .selected_text(&app.filter_game)
-            .width(140.0)
-            .show_ui(ui, |ui| {
-                ui.selectable_value(
-                    &mut app.filter_game,
-                    ALL_GAMES_FILTER.to_string(),
-                    ALL_GAMES_FILTER,
-                );
-                for (game, _) in &app.videos_by_game {
-                    ui.selectable_value(&mut app.filter_game, game.clone(), game);
-                }
-            });
-
-        ui.add_space(8.0);
-
-        // Date filter
-        egui::ComboBox::from_id_salt("clip_filter_date")
-            .selected_text(app.date_filter.label())
-            .width(120.0)
-            .show_ui(ui, |ui| {
-                for filter in [
-                    DateFilter::AllTime,
-                    DateFilter::Last24Hours,
-                    DateFilter::Last7Days,
-                    DateFilter::Last30Days,
-                ] {
-                    ui.selectable_value(&mut app.date_filter, filter, filter.label());
-                }
-            });
-
-        ui.add_space(8.0);
-
-        // Duration filter
-        egui::ComboBox::from_id_salt("clip_filter_duration")
-            .selected_text(app.duration_filter.label())
-            .width(130.0)
-            .show_ui(ui, |ui| {
-                for filter in [
-                    DurationFilter::All,
-                    DurationFilter::Short,
-                    DurationFilter::Medium,
-                    DurationFilter::Long,
-                ] {
-                    ui.selectable_value(&mut app.duration_filter, filter, filter.label());
-                }
-            });
-
-        ui.add_space(8.0);
-
-        // Size filter
-        egui::ComboBox::from_id_salt("clip_filter_size")
-            .selected_text(app.size_filter.label())
-            .width(130.0)
-            .show_ui(ui, |ui| {
-                for filter in [
-                    SizeFilter::All,
-                    SizeFilter::Small,
-                    SizeFilter::Medium,
-                    SizeFilter::Large,
-                ] {
-                    ui.selectable_value(&mut app.size_filter, filter, filter.label());
-                }
-            });
-
-        ui.add_space(8.0);
-
-        // Sort dropdown
-        egui::ComboBox::from_id_salt("clip_sort_by")
-            .selected_text(app.sort_by.label())
-            .width(160.0)
-            .show_ui(ui, |ui| {
-                for sort in [
-                    SortBy::DateNewest,
-                    SortBy::DateOldest,
-                    SortBy::NameAZ,
-                    SortBy::NameZA,
-                    SortBy::SizeLarge,
-                    SortBy::SizeSmall,
-                    SortBy::DurationLong,
-                    SortBy::DurationShort,
-                ] {
-                    ui.selectable_value(&mut app.sort_by, sort, sort.label());
-                }
-            });
-
-        ui.add_space(8.0);
-
-        // Clipped only toggle
-        ui.checkbox(&mut app.show_clipped_only, "Clips Only");
-
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            // Clear all filters button
-            let has_filters = !app.search_query.is_empty()
-                || app.filter_game != ALL_GAMES_FILTER
-                || app.date_filter != DateFilter::AllTime
-                || app.duration_filter != DurationFilter::All
-                || app.size_filter != SizeFilter::All
-                || app.show_clipped_only;
-
-            if has_filters && ui.button("Clear Filters").clicked() {
-                app.search_query.clear();
-                app.filter_game = ALL_GAMES_FILTER.to_string();
-                app.date_filter = DateFilter::AllTime;
-                app.duration_filter = DurationFilter::All;
-                app.size_filter = SizeFilter::All;
-                app.show_clipped_only = false;
-            }
-        });
-    });
+pub(super) struct FilteredCache {
+    pub(super) groups: Vec<FilteredGroup>,
+    pub(super) total_count: usize,
+    search_query: String,
+    filter_game: String,
+    date_filter: DateFilter,
+    duration_filter: DurationFilter,
+    size_filter: SizeFilter,
+    sort_by: SortBy,
+    show_clipped_only: bool,
 }
 
-fn apply_filters(app: &ClipCompressApp) -> Vec<(String, Vec<VideoEntry>)> {
+impl FilteredCache {
+    pub(super) fn matches(&self, app: &ClipCompressApp) -> bool {
+        self.search_query == app.search_query
+            && self.filter_game == app.filter_game
+            && self.date_filter == app.date_filter
+            && self.duration_filter == app.duration_filter
+            && self.size_filter == app.size_filter
+            && self.sort_by == app.sort_by
+            && self.show_clipped_only == app.show_clipped_only
+    }
+}
+
+pub(super) fn ensure_filter_cache(app: &mut ClipCompressApp) {
+    let needs_recompute = match &app.filtered_cache {
+        None => true,
+        Some(cache) => !cache.matches(app),
+    };
+    if needs_recompute {
+        app.filtered_cache = Some(compute_filtered_cache(app));
+    }
+}
+
+fn compute_filtered_cache(app: &ClipCompressApp) -> FilteredCache {
     let now = SystemTime::now();
+    let query_lower = app.search_query.to_lowercase();
 
-    app.videos_by_game
+    let groups: Vec<FilteredGroup> = app
+        .videos_by_game
         .iter()
         .filter_map(|(game, videos)| {
-            // Game name filter
             if app.filter_game != ALL_GAMES_FILTER && *game != app.filter_game {
                 return None;
             }
@@ -246,17 +61,13 @@ fn apply_filters(app: &ClipCompressApp) -> Vec<(String, Vec<VideoEntry>)> {
             let filtered: Vec<VideoEntry> = videos
                 .iter()
                 .filter(|video| {
-                    // Search filter
-                    if !app.search_query.is_empty() {
-                        let query = app.search_query.to_lowercase();
-                        if !video.filename.to_lowercase().contains(&query)
-                            && !video.game.to_lowercase().contains(&query)
-                        {
-                            return false;
-                        }
+                    if !app.search_query.is_empty()
+                        && !video.filename_lower.contains(&query_lower)
+                        && !video.game_lower.contains(&query_lower)
+                    {
+                        return false;
                     }
 
-                    // Date filter
                     match app.date_filter {
                         DateFilter::Last24Hours => {
                             let day_ago = now - Duration::from_secs(24 * 60 * 60);
@@ -279,7 +90,6 @@ fn apply_filters(app: &ClipCompressApp) -> Vec<(String, Vec<VideoEntry>)> {
                         DateFilter::AllTime => {}
                     }
 
-                    // Duration filter
                     match app.duration_filter {
                         DurationFilter::Short => {
                             if video.metadata.duration_secs >= 30.0 {
@@ -299,7 +109,6 @@ fn apply_filters(app: &ClipCompressApp) -> Vec<(String, Vec<VideoEntry>)> {
                         DurationFilter::All => {}
                     }
 
-                    // Size filter
                     match app.size_filter {
                         SizeFilter::Small => {
                             if video.size_mb >= 10.0 {
@@ -319,7 +128,6 @@ fn apply_filters(app: &ClipCompressApp) -> Vec<(String, Vec<VideoEntry>)> {
                         SizeFilter::All => {}
                     }
 
-                    // Clipped only filter
                     if app.show_clipped_only && !video.is_clipped {
                         return false;
                     }
@@ -329,7 +137,6 @@ fn apply_filters(app: &ClipCompressApp) -> Vec<(String, Vec<VideoEntry>)> {
                 .cloned()
                 .collect();
 
-            // Apply sorting
             let mut sorted = filtered;
             match app.sort_by {
                 SortBy::DateNewest => {
@@ -379,10 +186,251 @@ fn apply_filters(app: &ClipCompressApp) -> Vec<(String, Vec<VideoEntry>)> {
             if sorted.is_empty() {
                 None
             } else {
-                Some((game.clone(), sorted))
+                Some(FilteredGroup {
+                    game: game.clone(),
+                    videos: sorted,
+                })
             }
         })
-        .collect()
+        .collect();
+
+    let total_count: usize = groups.iter().map(|g| g.videos.len()).sum();
+
+    FilteredCache {
+        groups,
+        total_count,
+        search_query: app.search_query.clone(),
+        filter_game: app.filter_game.clone(),
+        date_filter: app.date_filter,
+        duration_filter: app.duration_filter,
+        size_filter: app.size_filter,
+        sort_by: app.sort_by,
+        show_clipped_only: app.show_clipped_only,
+    }
+}
+
+pub(super) fn render_browser_ui(app: &mut ClipCompressApp, ui: &mut egui::Ui) -> BrowserUiOutcome {
+    let mut outcome = BrowserUiOutcome::default();
+
+    ensure_filter_cache(app);
+
+    let filtered_count = app
+        .filtered_cache
+        .as_ref()
+        .map_or(0, |cache| cache.total_count);
+
+    ui.horizontal(|ui| {
+        ui.heading("Clip & Compress");
+        ui.label(format!("({} videos)", filtered_count));
+
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let size_btn_text = match app.card_size {
+                CardSize::Small => "Small",
+                CardSize::Medium => "Medium",
+                CardSize::Large => "Large",
+                CardSize::XLarge => "XL",
+            };
+            if ui.button(size_btn_text).clicked() {
+                app.card_size = app.card_size.next();
+            }
+            if ui.button("Refresh").clicked() {
+                outcome.refresh_requested = true;
+            }
+            if ui
+                .toggle_value(&mut app.selection_mode, "Select...")
+                .clicked()
+                && !app.selection_mode
+            {
+                app.selected_videos.clear();
+                app.delete_slider_progress = 0.0;
+                app.delete_hold_started_at = None;
+            }
+            if ui.button("Open Folder").clicked() {
+                if let Err(err) = utils::open_path_impl(&app.save_directory) {
+                    show_toast(ToastKind::Error, format!("Failed to open folder: {err:#}"));
+                }
+            }
+            if ui.button("Open Video File...").clicked() {
+                outcome.request_import_video_dialog = true;
+            }
+        });
+    });
+
+    ui.separator();
+
+    render_filter_bar(app, ui);
+
+    ui.separator();
+
+    if let Some(error) = &app.scan_error {
+        ui.colored_label(egui::Color32::LIGHT_RED, error);
+    }
+
+    let cache = app.filtered_cache.take().unwrap();
+
+    if !app.loaded {
+        app.filtered_cache = Some(cache);
+        ui.vertical_centered(|ui| {
+            ui.add_space(64.0);
+            ui.add(egui::Spinner::new().size(32.0));
+            ui.add_space(8.0);
+            ui.label(egui::RichText::new("Scanning for videos...").weak());
+        });
+        return outcome;
+    }
+
+    if cache.groups.is_empty() {
+        app.filtered_cache = Some(cache);
+        render_empty_state(ui, app.search_query.is_empty());
+        return outcome;
+    }
+
+    let (tile_width, thumb_height) = app.card_size.dimensions();
+    let tile_spacing = 12.0;
+    let columns_count = ((ui.available_width() + tile_spacing) / (tile_width + tile_spacing))
+        .floor()
+        .max(1.0) as usize;
+
+    if app.selection_mode && !app.selected_videos.is_empty() {
+        render_delete_panel(app, ui, &mut outcome);
+    }
+
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            for group in &cache.groups {
+                render_game_section(
+                    app,
+                    ui,
+                    &group.game,
+                    &group.videos,
+                    tile_width,
+                    thumb_height,
+                    tile_spacing,
+                    columns_count,
+                    &mut outcome,
+                );
+            }
+        });
+
+    app.filtered_cache = Some(cache);
+    outcome
+}
+
+fn render_filter_bar(app: &mut ClipCompressApp, ui: &mut egui::Ui) {
+    ui.horizontal(|ui| {
+        let _search_response = ui.add(
+            egui::TextEdit::singleline(&mut app.search_query)
+                .hint_text("Search videos...")
+                .desired_width(200.0),
+        );
+
+        ui.add_space(8.0);
+
+        egui::ComboBox::from_id_salt("clip_filter_game")
+            .selected_text(&app.filter_game)
+            .width(140.0)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut app.filter_game,
+                    ALL_GAMES_FILTER.to_string(),
+                    ALL_GAMES_FILTER,
+                );
+                for (game, _) in &app.videos_by_game {
+                    ui.selectable_value(&mut app.filter_game, game.clone(), game);
+                }
+            });
+
+        ui.add_space(8.0);
+
+        egui::ComboBox::from_id_salt("clip_filter_date")
+            .selected_text(app.date_filter.label())
+            .width(120.0)
+            .show_ui(ui, |ui| {
+                for filter in [
+                    DateFilter::AllTime,
+                    DateFilter::Last24Hours,
+                    DateFilter::Last7Days,
+                    DateFilter::Last30Days,
+                ] {
+                    ui.selectable_value(&mut app.date_filter, filter, filter.label());
+                }
+            });
+
+        ui.add_space(8.0);
+
+        egui::ComboBox::from_id_salt("clip_filter_duration")
+            .selected_text(app.duration_filter.label())
+            .width(130.0)
+            .show_ui(ui, |ui| {
+                for filter in [
+                    DurationFilter::All,
+                    DurationFilter::Short,
+                    DurationFilter::Medium,
+                    DurationFilter::Long,
+                ] {
+                    ui.selectable_value(&mut app.duration_filter, filter, filter.label());
+                }
+            });
+
+        ui.add_space(8.0);
+
+        egui::ComboBox::from_id_salt("clip_filter_size")
+            .selected_text(app.size_filter.label())
+            .width(130.0)
+            .show_ui(ui, |ui| {
+                for filter in [
+                    SizeFilter::All,
+                    SizeFilter::Small,
+                    SizeFilter::Medium,
+                    SizeFilter::Large,
+                ] {
+                    ui.selectable_value(&mut app.size_filter, filter, filter.label());
+                }
+            });
+
+        ui.add_space(8.0);
+
+        egui::ComboBox::from_id_salt("clip_sort_by")
+            .selected_text(app.sort_by.label())
+            .width(160.0)
+            .show_ui(ui, |ui| {
+                for sort in [
+                    SortBy::DateNewest,
+                    SortBy::DateOldest,
+                    SortBy::NameAZ,
+                    SortBy::NameZA,
+                    SortBy::SizeLarge,
+                    SortBy::SizeSmall,
+                    SortBy::DurationLong,
+                    SortBy::DurationShort,
+                ] {
+                    ui.selectable_value(&mut app.sort_by, sort, sort.label());
+                }
+            });
+
+        ui.add_space(8.0);
+
+        ui.checkbox(&mut app.show_clipped_only, "Clips Only");
+
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let has_filters = !app.search_query.is_empty()
+                || app.filter_game != ALL_GAMES_FILTER
+                || app.date_filter != DateFilter::AllTime
+                || app.duration_filter != DurationFilter::All
+                || app.size_filter != SizeFilter::All
+                || app.show_clipped_only;
+
+            if has_filters && ui.button("Clear Filters").clicked() {
+                app.search_query.clear();
+                app.filter_game = ALL_GAMES_FILTER.to_string();
+                app.date_filter = DateFilter::AllTime;
+                app.duration_filter = DurationFilter::All;
+                app.size_filter = SizeFilter::All;
+                app.show_clipped_only = false;
+            }
+        });
+    });
 }
 
 fn render_empty_state(ui: &mut egui::Ui, no_search_results: bool) {
@@ -473,9 +521,7 @@ fn render_game_section(
 
     ui.add_space(8.0);
 
-    // Section header with collapse toggle
     ui.horizontal(|ui| {
-        // Collapse/expand button
         let collapse_text = if is_collapsed { "▶" } else { "▼" };
         if ui.button(collapse_text).clicked() {
             if is_collapsed {
@@ -485,7 +531,6 @@ fn render_game_section(
             }
         }
 
-        // Game heading with count badge
         ui.heading(format!("{} ({})", game, video_count));
 
         if app.selection_mode {
@@ -598,7 +643,6 @@ fn render_video_card(
 
                     ui.add_space(6.0);
 
-                    // Filename with clipped indicator
                     let filename_text = if video.is_clipped {
                         format!("[C] {}", video.filename)
                     } else {
