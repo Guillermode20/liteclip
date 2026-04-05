@@ -7,15 +7,16 @@
     Scope="perMachine">
 
     <MajorUpgrade DowngradeErrorMessage="A newer version of LiteClip is already installed." Schedule="afterInstallValidate" AllowSameVersionUpgrades="no" />
-    <MediaTemplate />
+    <MediaTemplate EmbedCab="yes" />
     <Property Id="ARPNOREMOVE" Value="0" />
     <Icon Id="AppIcon" SourceFile="..\logo.ico" />
     <Property Id="ARPPRODUCTICON" Value="AppIcon" />
 
     <!-- Feature tree references component groups declared elsewhere -->
-    <Feature Id="ProductFeature" Title="$(var.ProductName)" Level="1">
+    <Feature Id="ProductFeature" Title="$(var.ProductName)" Level="1" Display="expand">
       <ComponentGroupRef Id="CoreComponents" />
       <ComponentGroupRef Id="FFmpegComponents" />
+      <FeatureRef Id="DesktopShortcutFeature" />
     </Feature>
   </Package>
 </Wix>

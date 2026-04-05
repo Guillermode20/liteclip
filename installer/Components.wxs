@@ -5,7 +5,7 @@
       <File Id="filLiteClipExe" Source="..\target\release\liteclip.exe" KeyPath="yes" />
     </Component>
 
-    <!-- Core component group contains required runtime components + shortcuts/registry (refs supplied below) -->
+    <!-- Core component group contains required runtime components + shortcuts/registry -->
     <ComponentGroup Id="CoreComponents">
       <ComponentRef Id="cmpLiteClipExe" />
       <ComponentRef Id="cmpStartMenuShortcut" />
@@ -13,7 +13,6 @@
       <ComponentRef Id="cmpDesktopShortcut" />
       <ComponentRef Id="cmpFileAssocHKLM" />
       <ComponentRef Id="cmpARP" />
-      <ComponentGroupRef Id="AppHarvestedComponents" />
     </ComponentGroup>
 
     <!-- FFmpeg DLLs for native ffmpeg-next linking -->
@@ -35,6 +34,5 @@
       </Component>
     </ComponentGroup>
 
-    <ComponentGroup Id="AppHarvestedComponents" />
   </Fragment>
 </Wix>

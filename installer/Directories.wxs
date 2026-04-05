@@ -2,9 +2,7 @@
   <Fragment>
     <!-- Program Files (x64) install location -->
     <StandardDirectory Id="ProgramFiles64Folder">
-      <Directory Id="LiteClipFolder" Name="LiteClip">
-        <Directory Id="INSTALLDIR" Name="LiteClip" />
-      </Directory>
+      <Directory Id="INSTALLDIR" Name="LiteClip" />
     </StandardDirectory>
 
     <!-- Start Menu shortcuts -->
@@ -16,12 +14,5 @@
 
     <!-- Optional desktop shortcut -->
     <StandardDirectory Id="DesktopFolder" />
-
-    <!-- ffmpeg sub-folder under application directory -->
-    <DirectoryRef Id="INSTALLDIR">
-      <Directory Id="FFMPEGDIR" Name="ffmpeg">
-        <Directory Id="FFMPEGBINDIR" Name="bin" />
-      </Directory>
-    </DirectoryRef>
   </Fragment>
 </Wix>

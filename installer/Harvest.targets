@@ -1,54 +1,7 @@
-<!-- Harvest.targets: runs heat.exe to harvest FFmpeg binaries into WiX fragments before build -->
+<!-- Harvest.targets: placeholder for future heat-based harvesting if needed.
+     FFmpeg components are defined directly in Components.wxs to avoid duplicate IDs. -->
 <Project>
-  <Target Name="HarvestBinaries" BeforeTargets="Candle">
-    <Message Importance="high" Text="Running heat harvest for FFmpeg DLLs..." />
-
-    <!-- ensure generated folder exists -->
+  <Target Name="EnsureGeneratedDir" BeforeTargets="Candle">
     <MakeDir Directories="$(MSBuildThisFileDirectory)Generated" />
-
-    <!-- Harvest only required FFmpeg DLLs from ffmpeg_dev/sdk/bin -->
-    <ItemGroup>
-      <FFmpegDlls Include="..\ffmpeg_dev\sdk\bin\avcodec-61.dll" />
-      <FFmpegDlls Include="..\ffmpeg_dev\sdk\bin\avformat-61.dll" />
-      <FFmpegDlls Include="..\ffmpeg_dev\sdk\bin\avutil-59.dll" />
-      <FFmpegDlls Include="..\ffmpeg_dev\sdk\bin\swresample-5.dll" />
-      <FFmpegDlls Include="..\ffmpeg_dev\sdk\bin\swscale-8.dll" />
-    </ItemGroup>
-
-    <!-- Create component for each DLL -->
-    <PropertyGroup>
-      <FFmpegComponents>
-<![CDATA[
-<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
-  <Fragment>
-    <ComponentGroup Id="FFmpegHarvestedComponents" Directory="INSTALLDIR">
-      <Component Id="cmp_avcodec_61" Guid="{B1A2C3D4-E5F6-7890-ABCD-EF1234567890}">
-        <File Id="fil_avcodec_61" Source="..\ffmpeg_dev\sdk\bin\avcodec-61.dll" />
-      </Component>
-      <Component Id="cmp_avformat_61" Guid="{C2B3D4E5-F6A7-8901-BCDE-F23456789012}">
-        <File Id="fil_avformat_61" Source="..\ffmpeg_dev\sdk\bin\avformat-61.dll" />
-      </Component>
-      <Component Id="cmp_avutil_59" Guid="{D3C4E5F6-A7B8-9012-CDEF-345678901234}">
-        <File Id="fil_avutil_59" Source="..\ffmpeg_dev\sdk\bin\avutil-59.dll" />
-      </Component>
-      <Component Id="cmp_swresample_5" Guid="{A5B6C7D8-E9F0-1234-5678-9ABCDEF01234}">
-        <File Id="fil_swresample_5" Source="..\ffmpeg_dev\sdk\bin\swresample-5.dll" />
-      </Component>
-      <Component Id="cmp_swscale_8" Guid="{E4D5F6A7-B8C9-0123-DEF0-456789012345}">
-        <File Id="fil_swscale_8" Source="..\ffmpeg_dev\sdk\bin\swscale-8.dll" />
-      </Component>
-    </ComponentGroup>
-  </Fragment>
-</Wix>
-]]>
-      </FFmpegComponents>
-    </PropertyGroup>
-
-    <WriteLinesToFile File="Generated\FFmpegFiles.wxs" Lines="$(FFmpegComponents)" Overwrite="true" />
-
-    <!-- include the generated fragments in the compilation -->
-    <ItemGroup>
-      <Wix Include="Generated\FFmpegFiles.wxs" Condition="Exists('Generated\FFmpegFiles.wxs')" />
-    </ItemGroup>
   </Target>
 </Project>

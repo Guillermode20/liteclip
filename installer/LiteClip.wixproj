@@ -25,10 +25,6 @@
   <!-- Optional: run Harvest.targets if present to generate components for binaries/ffmpeg -->
   <Import Project="Harvest.targets" Condition="Exists('Harvest.targets')" />
 
-  <Target Name="EnsureGeneratedDir" BeforeTargets="Candle">
-    <MakeDir Directories="$(MSBuildThisFileDirectory)Generated" />
-  </Target>
-
   <Target Name="AfterBuild">
     <Message Importance="high" Text="WiX build finished. Outputs are in: $(OutputPath)" />
   </Target>
