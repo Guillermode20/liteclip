@@ -40,7 +40,7 @@ windows-core = "0.58"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "ico"] }
 
 # Tray / GUI
-tray-icon = "0.19"
+tray-icon = "0.22"
 eframe = { version = "0.33.3", features = ["glow"] }
 egui = "0.33.3"
 egui-notify = "0.21"
