@@ -501,11 +501,7 @@ pub(crate) fn attempt_export(
 
     let output_width = request.output_width.unwrap_or(request.metadata.width);
     let output_height = request.output_height.unwrap_or(request.metadata.height);
-
-    // When crop is active, the source region for the scaler is the crop rectangle.
     let crop = request.crop;
-    let scaler_src_w = crop.map_or(output_width, |c| c.width);
-    let scaler_src_h = crop.map_or(output_height, |c| c.height);
 
     let output_fps_i32 = super::video_file::normalize_output_fps(
         request.output_fps.unwrap_or(request.metadata.fps),
@@ -703,10 +699,16 @@ pub(crate) fn attempt_export(
             .with_context(|| format!("missing video stream {} after seek", video_stream_idx))?;
         let v_ctx = ffmpeg::codec::context::Context::from_parameters(v_stream.parameters())?;
         let mut video_decoder = v_ctx.decoder().video()?;
+        // When crop is active, source is the crop rectangle. Otherwise, source is the decoder's
+        // actual frame dimensions (not the output dimensions - the scaler needs to know the input
+        // frame size to properly scale from input to output).
+        let (src_w, src_h) = crop.map_or((video_decoder.width(), video_decoder.height()), |c| {
+            (c.width, c.height)
+        });
         let mut video_scaler = ffmpeg::software::scaling::Context::get(
             video_decoder.format(),
-            scaler_src_w,
-            scaler_src_h,
+            src_w,
+            src_h,
             ffmpeg::format::Pixel::YUV420P,
             output_width,
             output_height,
