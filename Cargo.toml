@@ -36,7 +36,7 @@ windows = { version = "0.58", features = ["Win32_Media", "Win32_Graphics_Dxgi", 
 
 # Utilities
 chrono = "0.4"
-windows-core = "0.58"
+windows-core = "0.62"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "ico"] }
 
 # Tray / GUI
