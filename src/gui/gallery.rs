@@ -24,7 +24,7 @@ use crate::config::{Config, EncoderType};
 use crate::gui::manager::{show_toast, ToastKind};
 use crate::output::{
     generate_thumbnail, probe_video_file, spawn_clip_export, ClipExportRequest, ClipExportUpdate,
-    TimeRange, VideoFileMetadata,
+    CropRect, TimeRange, VideoFileMetadata,
 };
 use crate::platform::AppEvent;
 
@@ -273,6 +273,10 @@ pub(super) struct EditorState {
     cached_kept_ranges: Vec<TimeRange>,
     cached_kept_duration_secs: f64,
     snippets_dirty: bool,
+    /// Spatial crop rectangle in source video pixel coordinates. None = no crop.
+    crop: Option<CropRect>,
+    /// Whether the visual crop overlay is visible on the preview.
+    crop_editor_visible: bool,
 }
 
 impl EditorState {
@@ -320,6 +324,8 @@ impl EditorState {
             cached_kept_ranges: Vec::new(),
             cached_kept_duration_secs: 0.0,
             snippets_dirty: true,
+            crop: None,
+            crop_editor_visible: false,
         }
     }
 
@@ -383,14 +389,19 @@ impl EditorState {
     }
 
     /// Compute effective output resolution.
-    /// If use_auto_resolution is true, calculates based on target size vs original.
+    ///
+    /// If crop is set, base resolution is crop dimensions (never upscaled beyond them).
+    /// If use_auto_resolution is true, calculates based on target size vs original,
+    /// accounting for crop pixel reduction and FPS changes.
     /// Otherwise returns manually set resolution or original if not set.
     fn effective_output_resolution(&self) -> (u32, u32) {
-        let orig_w = self.video.metadata.width;
-        let orig_h = self.video.metadata.height;
+        let (orig_w, orig_h) = if let Some(c) = self.crop {
+            (c.width, c.height)
+        } else {
+            (self.video.metadata.width, self.video.metadata.height)
+        };
 
         if self.use_auto_resolution {
-            // Calculate resolution scale based on target size vs original size
             let kept_duration = self.kept_duration_secs();
             let total_duration = self.duration_secs();
             let kept_ratio = if total_duration > 0.0 {
@@ -403,10 +414,34 @@ impl EditorState {
             let effective_orig_mb = self.video.size_mb * kept_ratio;
             let target_mb = self.target_size_mb as f64;
 
-            // Scale factor: if target is smaller, reduce resolution
-            // Use square root since video compression is roughly proportional to pixel count
-            let scale = if effective_orig_mb > 0.0 && target_mb < effective_orig_mb {
-                (target_mb / effective_orig_mb).sqrt().clamp(0.5, 1.0)
+            // Adjust for crop: fewer pixels means fewer bits needed at the same quality,
+            // so the cropped video is inherently "smaller" than the original file suggests.
+            let pixel_ratio = if let Some(c) = self.crop {
+                let full = self.video.metadata.width as f64 * self.video.metadata.height as f64;
+                let cropped = c.width as f64 * c.height as f64;
+                (cropped / full).clamp(0.1, 1.0)
+            } else {
+                1.0
+            };
+
+            // Adjust for FPS: fewer frames per second means more bits per frame,
+            // allowing higher resolution at the same total bitrate.
+            let output_fps = self.effective_output_fps();
+            let orig_fps = self.video.metadata.fps;
+            let fps_ratio = if output_fps > 0.0 && orig_fps > 0.0 {
+                (orig_fps / output_fps).clamp(0.25, 4.0)
+            } else {
+                1.0
+            };
+
+            let adjusted_orig_mb = effective_orig_mb * pixel_ratio;
+
+            // Scale factor: if target is smaller, reduce resolution.
+            // Use square root since video compression is roughly proportional to pixel count.
+            let scale = if adjusted_orig_mb > 0.0 && target_mb < adjusted_orig_mb {
+                (target_mb / adjusted_orig_mb * fps_ratio)
+                    .sqrt()
+                    .clamp(0.5, 1.0)
             } else {
                 1.0
             };
@@ -1319,7 +1354,8 @@ fn start_export(editor: &mut EditorState) {
             use_hardware_acceleration: editor.use_hardware_acceleration,
             preferred_encoder: editor.preferred_encoder,
             metadata: editor.video.metadata.clone(),
-            stream_copy: !editor.target_size_manually_adjusted,
+            // Cropping requires re-encoding, so force stream_copy off when crop is active.
+            stream_copy: !editor.target_size_manually_adjusted && editor.crop.is_none(),
             output_width: if editor.use_auto_resolution {
                 let (w, _h) = editor.effective_output_resolution();
                 Some(w)
@@ -1333,6 +1369,7 @@ fn start_export(editor: &mut EditorState) {
                 editor.output_height
             },
             output_fps: Some(editor.effective_output_fps()),
+            crop: editor.crop,
         },
         progress_tx,
         cancel_flag.clone(),
@@ -1549,8 +1586,13 @@ fn estimate_export_bitrates_from_editor(
     )
 }
 
-fn quality_estimate(metadata: &VideoFileMetadata, video_kbps: u32) -> (&'static str, usize) {
-    utils::quality_estimate_impl(metadata, video_kbps)
+fn quality_estimate(
+    output_width: u32,
+    output_height: u32,
+    output_fps: f64,
+    video_kbps: u32,
+) -> (&'static str, usize) {
+    utils::quality_estimate_impl(output_width, output_height, output_fps, video_kbps)
 }
 
 fn time_to_x(rect: egui::Rect, time_secs: f64, duration_secs: f64) -> f32 {

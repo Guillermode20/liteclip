@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::os::windows::process::CommandExt;
 
 use super::{EditorState, SnippetSegment, TimeRange, VideoEntry, MIN_RANGE_SECS};
-use crate::output::{estimate_export_bitrates, VideoFileMetadata};
+use crate::output::estimate_export_bitrates;
 
 #[cfg(all(target_os = "windows", not(feature = "ffmpeg")))]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -342,12 +342,14 @@ pub(super) fn estimate_export_bitrates_from_editor_impl(
 }
 
 pub(super) fn quality_estimate_impl(
-    metadata: &VideoFileMetadata,
+    output_width: u32,
+    output_height: u32,
+    output_fps: f64,
     video_kbps: u32,
 ) -> (&'static str, usize) {
-    let pixel_factor = (metadata.width as f64 * metadata.height as f64) / (1920.0 * 1080.0);
+    let pixel_factor = (output_width as f64 * output_height as f64) / (1920.0 * 1080.0);
 
-    let fps_factor = (metadata.fps / 30.0).clamp(0.5, 3.0);
+    let fps_factor = (output_fps / 30.0).clamp(0.5, 3.0);
 
     let combined_factor = pixel_factor * fps_factor;
 

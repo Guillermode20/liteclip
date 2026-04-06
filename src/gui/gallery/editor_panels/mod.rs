@@ -8,6 +8,11 @@ use super::{
     SCRUB_SAMPLE_MIN_DT_SECS,
 };
 
+use crate::output::CropRect;
+
+const CROP_HANDLE_SIZE: f32 = 10.0;
+const CROP_MIN_PIXELS: u32 = 64;
+
 pub(super) fn render_preview_panel_impl(
     ui: &mut egui::Ui,
     editor: &mut EditorState,
@@ -31,6 +36,18 @@ pub(super) fn render_preview_panel_impl(
         preview_height = preview_height.min(max_preview_height);
         let preview_size = egui::vec2(available_width, preview_height);
 
+        // Determine the actual image rect (may be smaller than preview_size
+        // when maintaining aspect ratio).
+        let img_w = (preview_height * aspect_ratio).min(available_width);
+        let img_h = img_w / aspect_ratio;
+        let image_rect = {
+            let x_offset = (available_width - img_w) * 0.5;
+            let top_left = ui.cursor().min + egui::vec2(x_offset, 0.0);
+            egui::Rect::from_min_size(top_left, egui::vec2(img_w, img_h))
+        };
+
+        let show_crop_overlay = editor.crop_editor_visible && editor.crop.is_some();
+
         if let Some(texture) = &editor.preview_texture {
             let response = ui.add(
                 egui::Image::from_texture(texture)
@@ -38,6 +55,12 @@ pub(super) fn render_preview_panel_impl(
                     .maintain_aspect_ratio(true),
             );
             let _rect = response.rect;
+
+            if show_crop_overlay {
+                if let Some(crop) = editor.crop {
+                    paint_crop_overlay(ui, image_rect, crop, editor);
+                }
+            }
         } else {
             let (rect, _) = ui.allocate_exact_size(preview_size, egui::Sense::hover());
             ui.painter().rect_filled(
@@ -374,6 +397,8 @@ fn render_editor_sidebar(
             ui.add_space(10.0);
             render_size_section(ui, editor);
             ui.add_space(10.0);
+            render_crop_section_impl(ui, editor);
+            ui.add_space(10.0);
             render_action_section(ui, editor, outcome);
         };
 
@@ -521,14 +546,18 @@ fn render_size_section(ui: &mut egui::Ui, editor: &mut EditorState) {
         kept_ranges_len,
         editor.use_hardware_acceleration,
     );
-    let (quality_label, bars) = super::quality_estimate(&editor.video.metadata, video_kbps);
+    let (quality_label, bars) = {
+        let (w, h) = editor.effective_output_resolution();
+        let fps = editor.effective_output_fps();
+        super::quality_estimate(w, h, fps, video_kbps)
+    };
 
     egui::Frame::group(ui.style()).show(ui, |ui| {
         ui.label(egui::RichText::new("Export Settings").strong());
         ui.add_space(6.0);
 
-        // Show stream copy mode when size hasn't been manually adjusted
-        if !editor.target_size_manually_adjusted {
+        // Show stream copy mode when size hasn't been manually adjusted and no crop
+        if !editor.target_size_manually_adjusted && editor.crop.is_none() {
             ui.horizontal_wrapped(|ui| {
                 ui.label("Output Size:");
                 ui.label(
@@ -545,6 +574,12 @@ fn render_size_section(ui: &mut egui::Ui, editor: &mut EditorState) {
                 editor.target_size_manually_adjusted = true;
             }
         } else {
+            if editor.crop.is_some() {
+                ui.label(
+                    egui::RichText::new("Re-encoding required (crop active)")
+                        .color(egui::Color32::from_rgb(255, 180, 80)),
+                );
+            }
             ui.horizontal_wrapped(|ui| {
                 ui.label("Target Output Size:");
                 let prev_size = editor.target_size_mb;
@@ -663,4 +698,254 @@ fn render_size_section(ui: &mut egui::Ui, editor: &mut EditorState) {
             format_compact_duration(kept_duration)
         ));
     });
+}
+
+/// Render crop controls in the editor sidebar.
+pub(super) fn render_crop_section_impl(ui: &mut egui::Ui, editor: &mut EditorState) {
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.label(egui::RichText::new("Crop").strong());
+        ui.add_space(4.0);
+
+        let mut enable_crop = editor.crop.is_some();
+        if ui.checkbox(&mut enable_crop, "Enable Crop").changed() {
+            if enable_crop {
+                // Default: center crop at 80% of original size
+                let w = editor.video.metadata.width;
+                let h = editor.video.metadata.height;
+                let crop_w = (w * 4 / 5) & !1;
+                let crop_h = (h * 4 / 5) & !1;
+                let crop_x = ((w - crop_w) / 2) & !1;
+                let crop_y = ((h - crop_h) / 2) & !1;
+                editor.crop = Some(CropRect {
+                    x: crop_x,
+                    y: crop_y,
+                    width: crop_w,
+                    height: crop_h,
+                });
+                editor.crop_editor_visible = true;
+            } else {
+                editor.crop = None;
+                editor.crop_editor_visible = false;
+            }
+        }
+
+        if let Some(crop) = editor.crop {
+            ui.checkbox(&mut editor.crop_editor_visible, "Show crop overlay");
+
+            ui.horizontal_wrapped(|ui| {
+                ui.label("X:");
+                let mut x = crop.x;
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut x)
+                            .range(0..=editor.video.metadata.width)
+                            .speed(2),
+                    )
+                    .changed()
+                {
+                    editor.crop = Some(CropRect { x: x & !1, ..crop });
+                }
+                ui.label("Y:");
+                let mut y = crop.y;
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut y)
+                            .range(0..=editor.video.metadata.height)
+                            .speed(2),
+                    )
+                    .changed()
+                {
+                    editor.crop = Some(CropRect { y: y & !1, ..crop });
+                }
+            });
+
+            ui.horizontal_wrapped(|ui| {
+                ui.label("W:");
+                let mut w = crop.width;
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut w)
+                            .range(
+                                CROP_MIN_PIXELS
+                                    ..=editor.video.metadata.width.saturating_sub(crop.x),
+                            )
+                            .speed(2),
+                    )
+                    .changed()
+                {
+                    let clamped = w.max(CROP_MIN_PIXELS) & !1;
+                    editor.crop = Some(CropRect {
+                        width: clamped,
+                        ..editor.crop.unwrap()
+                    });
+                }
+                ui.label("H:");
+                let mut h = crop.height;
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut h)
+                            .range(
+                                CROP_MIN_PIXELS
+                                    ..=editor.video.metadata.height.saturating_sub(crop.y),
+                            )
+                            .speed(2),
+                    )
+                    .changed()
+                {
+                    let clamped = h.max(CROP_MIN_PIXELS) & !1;
+                    editor.crop = Some(CropRect {
+                        height: clamped,
+                        ..editor.crop.unwrap()
+                    });
+                }
+            });
+
+            ui.horizontal(|ui| {
+                if ui.button("Reset to Full Frame").clicked() {
+                    editor.crop = None;
+                    editor.crop_editor_visible = false;
+                }
+                if ui.button("Center 80%").clicked() {
+                    let w = editor.video.metadata.width;
+                    let h = editor.video.metadata.height;
+                    let crop_w = (w * 4 / 5) & !1;
+                    let crop_h = (h * 4 / 5) & !1;
+                    editor.crop = Some(CropRect {
+                        x: ((w - crop_w) / 2) & !1,
+                        y: ((h - crop_h) / 2) & !1,
+                        width: crop_w,
+                        height: crop_h,
+                    });
+                }
+                if ui.button("16:9").clicked() {
+                    let vid_w = editor.video.metadata.width;
+                    let vid_h = editor.video.metadata.height;
+                    let target_ratio = 16.0 / 9.0;
+                    let cur_w = crop.width as f64;
+                    let cur_h = crop.height as f64;
+                    let cur_center_x = crop.x as f64 + cur_w / 2.0;
+                    let cur_center_y = crop.y as f64 + cur_h / 2.0;
+                    let (crop_w, crop_h) = if cur_w / cur_h > target_ratio {
+                        let ch = cur_h.round() as u32;
+                        let cw = ((cur_h * target_ratio).round() as u32) & !1;
+                        (cw.max(CROP_MIN_PIXELS), ch & !1)
+                    } else {
+                        let cw = cur_w.round() as u32;
+                        let ch = ((cur_w / target_ratio).round() as u32) & !1;
+                        (cw & !1, ch.max(CROP_MIN_PIXELS))
+                    };
+                    let new_x = ((cur_center_x - crop_w as f64 / 2.0).round() as i32)
+                        .clamp(0, vid_w as i32 - crop_w as i32)
+                        & !1;
+                    let new_y = ((cur_center_y - crop_h as f64 / 2.0).round() as i32)
+                        .clamp(0, vid_h as i32 - crop_h as i32)
+                        & !1;
+                    editor.crop = Some(CropRect {
+                        x: new_x as u32,
+                        y: new_y as u32,
+                        width: crop_w,
+                        height: crop_h,
+                    });
+                }
+            });
+
+            ui.label(
+                egui::RichText::new("Crop requires re-encoding (stream copy disabled)")
+                    .small()
+                    .color(egui::Color32::from_rgb(255, 180, 80)),
+            );
+        }
+    });
+}
+
+/// Convert a CropRect from video pixel coordinates to the preview image rect.
+fn crop_to_preview_rect(
+    image_rect: egui::Rect,
+    crop: CropRect,
+    video_w: u32,
+    video_h: u32,
+) -> egui::Rect {
+    let x_min = image_rect.min.x + (crop.x as f32 / video_w.max(1) as f32) * image_rect.width();
+    let y_min = image_rect.min.y + (crop.y as f32 / video_h.max(1) as f32) * image_rect.height();
+    let x_max = image_rect.min.x
+        + ((crop.x + crop.width) as f32 / video_w.max(1) as f32) * image_rect.width();
+    let y_max = image_rect.min.y
+        + ((crop.y + crop.height) as f32 / video_h.max(1) as f32) * image_rect.height();
+    egui::Rect::from_min_max(egui::pos2(x_min, y_min), egui::pos2(x_max, y_max))
+}
+
+/// Paint the crop overlay: dim outside region, draw border and corner handles.
+fn paint_crop_overlay(
+    ui: &mut egui::Ui,
+    image_rect: egui::Rect,
+    crop: CropRect,
+    _editor: &mut EditorState,
+) {
+    let video_w = _editor.video.metadata.width;
+    let video_h = _editor.video.metadata.height;
+    let crop_rect = crop_to_preview_rect(image_rect, crop, video_w, video_h);
+    let painter = ui.painter_at(image_rect.expand(2.0));
+
+    // Dim outside the crop region with 4 rectangles (top, bottom, left, right)
+    let dim_color = egui::Color32::from_rgba_unmultiplied(0, 0, 0, 140);
+
+    // Top
+    let top = egui::Rect::from_min_max(
+        image_rect.min,
+        egui::pos2(image_rect.max.x, crop_rect.min.y),
+    );
+    painter.rect_filled(top, egui::CornerRadius::ZERO, dim_color);
+
+    // Bottom
+    let bottom = egui::Rect::from_min_max(
+        egui::pos2(image_rect.min.x, crop_rect.max.y),
+        image_rect.max,
+    );
+    painter.rect_filled(bottom, egui::CornerRadius::ZERO, dim_color);
+
+    // Left
+    let left = egui::Rect::from_min_max(
+        egui::pos2(image_rect.min.x, crop_rect.min.y),
+        egui::pos2(crop_rect.min.x, crop_rect.max.y),
+    );
+    painter.rect_filled(left, egui::CornerRadius::ZERO, dim_color);
+
+    // Right
+    let right = egui::Rect::from_min_max(
+        egui::pos2(crop_rect.max.x, crop_rect.min.y),
+        egui::pos2(image_rect.max.x, crop_rect.max.y),
+    );
+    painter.rect_filled(right, egui::CornerRadius::ZERO, dim_color);
+
+    // Crop border
+    painter.rect_stroke(
+        crop_rect,
+        egui::CornerRadius::ZERO,
+        egui::Stroke::new(2.0, egui::Color32::WHITE),
+        egui::StrokeKind::Outside,
+    );
+
+    // Corner handles
+    let _handle_half = CROP_HANDLE_SIZE / 2.0;
+    let handle_color = egui::Color32::from_rgb(255, 220, 100);
+    let corners = [
+        crop_rect.min,
+        egui::pos2(crop_rect.max.x, crop_rect.min.y),
+        egui::pos2(crop_rect.min.x, crop_rect.max.y),
+        crop_rect.max,
+    ];
+    for corner in corners {
+        let handle_rect =
+            egui::Rect::from_center_size(corner, egui::vec2(CROP_HANDLE_SIZE, CROP_HANDLE_SIZE));
+        painter.rect_filled(handle_rect, egui::CornerRadius::same(2), handle_color);
+    }
+
+    // Dimension label at top-left of crop
+    painter.text(
+        crop_rect.min + egui::vec2(4.0, 14.0),
+        egui::Align2::LEFT_BOTTOM,
+        format!("{}x{}", crop.width, crop.height),
+        egui::FontId::proportional(12.0),
+        egui::Color32::WHITE,
+    );
 }

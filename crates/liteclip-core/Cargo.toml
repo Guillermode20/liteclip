@@ -29,7 +29,7 @@ default = ["ffmpeg"]
 # FFmpeg encoding/muxing via `ffmpeg-next` (linked SDK/DLLs). No `ffmpeg.exe` required at runtime.
 # This is the only supported backend; the previous ffmpeg-cli feature has been removed in favor of
 # native ffmpeg-next filter graphs for all operations including clip export.
-ffmpeg = ["dep:ffmpeg-next"]
+ffmpeg = ["dep:ffmpeg-next", "dep:libc"]
 # In release builds, also walk ancestors for `ffmpeg_dev/...` (debug builds always may).
 dev-ffmpeg-paths = []
 
@@ -49,6 +49,7 @@ dirs = "6"
 chrono = "0.4"
 windows-core = "0.58"
 ffmpeg-next = { version = "7.1.0", default-features = false, features = ["codec", "format", "filter", "software-scaling", "software-resampling", "device"], optional = true }
+libc = { version = "0.2", optional = true }
 # parakeet-rs = { version = "0.3.4", optional = true }
 # # Same version as `parakeet-rs`; features merged so we use dynamic ORT (see `parakeet` feature).
 # ort = { version = "2.0.0-rc.12", optional = true, default-features = false, features = [

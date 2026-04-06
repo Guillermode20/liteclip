@@ -59,6 +59,6 @@ pub use saver::{spawn_clip_saver, SKIP_THUMBNAIL_ENV};
 pub use types::{Muxer, MuxerConfig};
 pub use video_file::{
     estimate_export_bitrates, extract_preview_frame, probe_video_file, spawn_clip_export,
-    ClipExportPhase, ClipExportRequest, ClipExportUpdate, ExportBitrateEstimate, TimeRange,
-    VideoFileMetadata,
+    ClipExportPhase, ClipExportRequest, ClipExportUpdate, CropRect, ExportBitrateEstimate,
+    TimeRange, VideoFileMetadata,
 };

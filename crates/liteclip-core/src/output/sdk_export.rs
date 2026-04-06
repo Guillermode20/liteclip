@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result};
 use ffmpeg_next as ffmpeg;
+use libc::c_int;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{
@@ -13,12 +14,100 @@ use std::time::Instant;
 use tracing::info;
 
 use super::video_file::{
-    ClipExportPhase, ClipExportRequest, ClipExportUpdate, ExportAttemptResult, ExportOutcome,
-    ExportVideoEncoder,
+    ClipExportPhase, ClipExportRequest, ClipExportUpdate, CropRect, ExportAttemptResult,
+    ExportOutcome, ExportVideoEncoder,
 };
 
 const AAC_FRAME_SAMPLES: i64 = 1024;
 const INVALID_DURATION: i64 = i64::MIN;
+
+/// Scale a decoded video frame into `output`, optionally cropping first.
+///
+/// When `crop` is `Some`, only the specified rectangle from `input` is extracted
+/// and scaled to fill `output`. This uses `sws_scale` directly so we can pass
+/// adjusted source data pointers for the horizontal crop offset.
+fn scale_with_crop(
+    scaler: &mut ffmpeg::software::scaling::context::Context,
+    input: &ffmpeg::util::frame::video::Video,
+    output: &mut ffmpeg::util::frame::video::Video,
+    crop: Option<CropRect>,
+) -> Result<()> {
+    match crop {
+        None => {
+            scaler
+                .run(input, output)
+                .map_err(|_| anyhow::anyhow!("Failed to scale video frame"))?;
+        }
+        Some(c) => {
+            // The scaler was created with source dimensions = crop size.
+            // We call sws_scale directly with adjusted source pointers so it
+            // reads starting from (crop.x, crop.y) in the original frame.
+            //
+            // SAFETY: We operate on valid, non-null AVFrame pointers obtained from
+            // ffmpeg-next's safe API. The source frame is guaranteed to be populated
+            // by the decoder, and the destination is allocated below. Pointer offsets
+            // stay within the frame's allocated planes because the crop rect is
+            // clamped to video dimensions before export.
+            let result = unsafe {
+                if output.is_empty() {
+                    output.alloc(
+                        scaler.output().format,
+                        scaler.output().width,
+                        scaler.output().height,
+                    );
+                }
+
+                let src_frame = input.as_ptr();
+                let dst_frame = output.as_mut_ptr();
+
+                let src_format = input.format();
+                let src_linesizes = &(*src_frame).linesize;
+                let src_data = &(*src_frame).data;
+
+                // Calculate per-plane chroma subsampling factors.
+                // For YUV420P: log2_chroma_w=1, log2_chroma_h=1 meaning chroma
+                // planes are half width and half height.
+                let desc = ffmpeg::ffi::av_pix_fmt_desc_get(src_format.into());
+                let (log2_chroma_w, log2_chroma_h) = if !desc.is_null() {
+                    ((*desc).log2_chroma_w as u32, (*desc).log2_chroma_h as u32)
+                } else {
+                    (0, 0)
+                };
+
+                let mut src_slices: [*const u8; 4] = [std::ptr::null(); 4];
+                for i in 0..4 {
+                    if src_data[i].is_null() {
+                        continue;
+                    }
+                    let linesize = src_linesizes[i].abs();
+                    // Chroma planes are subsampled: shift X/Y by the chroma factors.
+                    let x_px = if i == 0 { c.x } else { c.x >> log2_chroma_w };
+                    let y_px = if i == 0 { c.y } else { c.y >> log2_chroma_h };
+                    src_slices[i] = src_data[i]
+                        .wrapping_offset(y_px as isize * linesize as isize + x_px as isize);
+                }
+
+                ffmpeg::ffi::sws_scale(
+                    scaler.as_mut_ptr(),
+                    src_slices.as_ptr(),
+                    src_linesizes.as_ptr() as *const _,
+                    0,
+                    c.height as c_int,
+                    (*dst_frame).data.as_ptr(),
+                    (*dst_frame).linesize.as_ptr() as *mut _,
+                )
+            };
+
+            if result < 0 {
+                return Err(anyhow::anyhow!(
+                    "sws_scale failed with crop (error code {})",
+                    result
+                ));
+            }
+        }
+    }
+    Ok(())
+}
 
 fn seek_to_seconds(input_ctx: &mut ffmpeg::format::context::Input, position_secs: f64) {
     let ts = (position_secs.max(0.0) * f64::from(ffmpeg::ffi::AV_TIME_BASE)).round() as i64;
@@ -412,6 +501,12 @@ pub(crate) fn attempt_export(
 
     let output_width = request.output_width.unwrap_or(request.metadata.width);
     let output_height = request.output_height.unwrap_or(request.metadata.height);
+
+    // When crop is active, the source region for the scaler is the crop rectangle.
+    let crop = request.crop;
+    let scaler_src_w = crop.map_or(output_width, |c| c.width);
+    let scaler_src_h = crop.map_or(output_height, |c| c.height);
+
     let output_fps_i32 = super::video_file::normalize_output_fps(
         request.output_fps.unwrap_or(request.metadata.fps),
         request.metadata.fps,
@@ -610,8 +705,8 @@ pub(crate) fn attempt_export(
         let mut video_decoder = v_ctx.decoder().video()?;
         let mut video_scaler = ffmpeg::software::scaling::Context::get(
             video_decoder.format(),
-            video_decoder.width(),
-            video_decoder.height(),
+            scaler_src_w,
+            scaler_src_h,
             ffmpeg::format::Pixel::YUV420P,
             output_width,
             output_height,
@@ -707,8 +802,7 @@ pub(crate) fn attempt_export(
                     }
 
                     let scale_started_at = Instant::now();
-                    video_scaler
-                        .run(&decoded_video, &mut scaled_video)
+                    scale_with_crop(&mut video_scaler, &decoded_video, &mut scaled_video, crop)
                         .context("Failed to scale video frame during export")?;
                     scale_elapsed_secs += scale_started_at.elapsed().as_secs_f64();
                     scaled_video.set_pts(Some(next_video_frame_pts));
@@ -892,8 +986,7 @@ pub(crate) fn attempt_export(
                 continue;
             }
             let scale_started_at = Instant::now();
-            video_scaler
-                .run(&decoded_video, &mut scaled_video)
+            scale_with_crop(&mut video_scaler, &decoded_video, &mut scaled_video, crop)
                 .context("Failed to scale video frame during export")?;
             scale_elapsed_secs += scale_started_at.elapsed().as_secs_f64();
             scaled_video.set_pts(Some(next_video_frame_pts));
