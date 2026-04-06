@@ -217,10 +217,14 @@ impl RecordingPipeline {
             drop(audio_manager);
         }
 
-        if let Some(capture) = self.capture.take() {
-            drop(capture);
+        // CRITICAL: Stop capture BEFORE joining encoder.
+        // Capture owns the frame_tx; when capture thread joins, frame_tx drops,
+        // closing the channel. Encoder then sees RecvTimeoutError::Disconnected and exits.
+        if let Some(mut capture) = self.capture.take() {
+            capture.stop();
         }
 
+        // Now safe to join encoder - channel is closed, encoder will exit
         if let Some(handle) = self.encoder_handle.take() {
             let crate::encode::EncoderHandle {
                 thread,

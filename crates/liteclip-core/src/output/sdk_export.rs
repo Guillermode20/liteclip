@@ -28,7 +28,7 @@ const INVALID_DURATION: i64 = i64::MIN;
 /// Computed filter strengths for the adaptive post-processing filter chain.
 ///
 /// These values are derived from the bits-per-pixel metric and determine
-/// how aggressively the `unsharp` and `hqdn3d` filters process each frame.
+/// how aggressively each filter processes frames at a given quality level.
 #[derive(Debug, Clone, Copy)]
 struct AdaptiveFilterStrengths {
     /// Luma sharpening amount for the `unsharp` filter (0.0 – 2.0).
@@ -37,23 +37,33 @@ struct AdaptiveFilterStrengths {
     unsharp_size_x: u32,
     unsharp_size_y: u32,
     /// Chroma sharpening amount (typically lower than luma).
-    #[allow(dead_code)]
     unsharp_chroma: f64,
     /// Spatial denoising strength for `hqdn3d` luma plane (0.0 – 10.0).
     hqdn3d_luma_spatial: f64,
     /// Temporal denoising strength for `hqdn3d` luma plane (0.0 – 8.0).
     hqdn3d_luma_temporal: f64,
     /// Spatial denoising strength for `hqdn3d` chroma planes.
-    #[allow(dead_code)]
     hqdn3d_chroma_spatial: f64,
     /// Temporal denoising strength for `hqdn3d` chroma planes.
-    #[allow(dead_code)]
     hqdn3d_chroma_temporal: f64,
+    /// Enable `pp` (postprocessing) deblock+dering filter. Best for blocking
+    /// artifacts at low BPP where block boundaries are clearly visible.
+    pp_enable: bool,
+    /// Contrast boost via `eq` filter (1.0 = no change; >1.0 = more contrast).
+    /// Applied at very low BPP to partially compensate for washed-out appearance.
+    eq_contrast: f64,
 }
 
 /// Bits-per-pixel thresholds for adaptive filter strength selection.
+/// HIGH  (≥0.15): well-encoded — only gentle sharpening, no deblock needed.
+/// MEDIUM (0.06–0.15): moderate compression — light denoise + sharpen.
+/// LOW   (<0.06): heavy compression — full deblock/denoise/sharpen/contrast.
 const HIGH_BPP_THRESHOLD: f64 = 0.15;
 const MEDIUM_BPP_THRESHOLD: f64 = 0.06;
+/// Below this threshold the `pp` deblock filter is activated.
+const DEBLOCK_BPP_THRESHOLD: f64 = 0.10;
+/// Below this threshold mild contrast boosting via `eq` is applied.
+const EQ_CONTRAST_BPP_THRESHOLD: f64 = 0.04;
 
 fn compute_filter_strengths(
     video_bitrate_kbps: u32,
@@ -63,6 +73,14 @@ fn compute_filter_strengths(
 ) -> AdaptiveFilterStrengths {
     let pixel_rate = f64::from(width) * f64::from(height) * fps.max(1.0);
     let bpp = (f64::from(video_bitrate_kbps) * 1000.0) / pixel_rate;
+
+    let pp_enable = bpp < DEBLOCK_BPP_THRESHOLD;
+    // Mild contrast lift at very low BPP: 1.0 (none) → 1.08 (max) below EQ threshold.
+    let eq_contrast = if bpp < EQ_CONTRAST_BPP_THRESHOLD {
+        1.0 + 0.08 * (1.0 - (bpp / EQ_CONTRAST_BPP_THRESHOLD).clamp(0.0, 1.0))
+    } else {
+        1.0
+    };
 
     if bpp >= HIGH_BPP_THRESHOLD {
         AdaptiveFilterStrengths {
@@ -74,6 +92,8 @@ fn compute_filter_strengths(
             hqdn3d_luma_temporal: 0.0,
             hqdn3d_chroma_spatial: 0.0,
             hqdn3d_chroma_temporal: 0.0,
+            pp_enable,
+            eq_contrast,
         }
     } else if bpp >= MEDIUM_BPP_THRESHOLD {
         let t = ((bpp - MEDIUM_BPP_THRESHOLD) / (HIGH_BPP_THRESHOLD - MEDIUM_BPP_THRESHOLD))
@@ -82,11 +102,13 @@ fn compute_filter_strengths(
             unsharp_luma: 0.5 + 0.5 * (1.0 - t),
             unsharp_size_x: 5,
             unsharp_size_y: 5,
-            unsharp_chroma: 0.2 * (1.0 - t),
+            unsharp_chroma: 0.15 * (1.0 - t),
             hqdn3d_luma_spatial: 2.0 + 2.0 * (1.0 - t),
             hqdn3d_luma_temporal: 1.5 + 2.0 * (1.0 - t),
             hqdn3d_chroma_spatial: 1.5 + 1.5 * (1.0 - t),
             hqdn3d_chroma_temporal: 1.0 + 1.5 * (1.0 - t),
+            pp_enable,
+            eq_contrast,
         }
     } else {
         let t = (bpp / MEDIUM_BPP_THRESHOLD).clamp(0.0, 1.0);
@@ -94,11 +116,13 @@ fn compute_filter_strengths(
             unsharp_luma: 0.6 + 0.3 * t,
             unsharp_size_x: 5,
             unsharp_size_y: 5,
-            unsharp_chroma: 0.1 * t,
+            unsharp_chroma: 0.15 * t,
             hqdn3d_luma_spatial: 4.0 + 2.0 * (1.0 - t),
             hqdn3d_luma_temporal: 3.0 + 2.0 * (1.0 - t),
             hqdn3d_chroma_spatial: 3.0 + 1.5 * (1.0 - t),
             hqdn3d_chroma_temporal: 2.0 + 1.5 * (1.0 - t),
+            pp_enable,
+            eq_contrast,
         }
     }
 }
@@ -106,7 +130,15 @@ fn compute_filter_strengths(
 /// Wrapper around an FFmpeg filter graph that applies post-processing filters
 /// to scaled YUV420P frames before encoding.
 ///
-/// Filter chain: `buffer → unsharp → hqdn3d → buffersink`
+/// Filter chain (active filters depend on BPP):
+///   `buffer → [pp] → [hqdn3d] → unsharp → [eq] → buffersink`
+///
+/// - `pp`     — H.264 postprocessing deblock + dering (spatial, no latency).
+/// - `hqdn3d` — High-quality 3D denoise; temporal mode adds 1-frame latency
+///   but process_into() drains the sink in a loop so no frames
+///   are ever dropped.
+/// - `unsharp`— Adaptive sharpen/blur to recover perceived detail.
+/// - `eq`     — Mild contrast lift at very low BPP.
 struct PostProcessFilterGraph {
     #[allow(dead_code)]
     graph: ffmpeg::filter::Graph,
@@ -119,7 +151,7 @@ impl PostProcessFilterGraph {
     /// Build the adaptive post-processing filter graph.
     ///
     /// The graph takes YUV420P frames at `(width, height)` and outputs
-    /// sharpened, denoised frames at the same resolution.
+    /// processed frames at the same resolution.
     fn new(width: u32, height: u32, fps: f64, strengths: AdaptiveFilterStrengths) -> Result<Self> {
         let mut graph = ffmpeg::filter::Graph::new();
 
@@ -135,46 +167,101 @@ impl PostProcessFilterGraph {
         let mut source = graph
             .add(&source_filter, "in", &args)
             .context("Failed to add buffer filter to graph")?;
-
         let mut sink = graph
             .add(&sink_filter, "out", "")
             .context("Failed to add buffersink filter to graph")?;
 
-        // Build the filter chain description.
-        // unsharp filter options (short aliases): lx, ly, la, cx, cy, ca
-        let unsharp_args = format!(
-            "lx={}:ly={}:la={:.2}",
-            strengths.unsharp_size_x, strengths.unsharp_size_y, strengths.unsharp_luma,
-        );
+        // pp (postprocessing) deblock + dering — spatial, zero extra latency.
+        // ha/va = horizontal/vertical deblock; dr = dering.
+        // Only inserted when BPP is below the deblock threshold.
+        let pp_args = if strengths.pp_enable { "ha:va:dr" } else { "" };
 
-        // hqdn3d options: luma_spatial, chroma_spatial, luma_tmp, chroma_tmp
-        // Note: temporal denoising (luma_tmp/chroma_tmp) is disabled because hqdn3d
-        // buffers frames temporally and may not flush properly in seek-based export
-        // where the graph processes finite frame sequences. Spatial-only denoising
-        // still effectively smooths blocking artifacts.
-        //
-        // TODO: hqdn3d spatial mode causes frames to be dropped. Temporal filters
-        // buffer frames and av_buffersink_get_frame returns EAGAIN. Until we can
-        // reliably flush, we disable hqdn3d and rely on unsharp alone.
-        let hqdn3d_args = "";
+        // hqdn3d denoise — luma_spatial:chroma_spatial:luma_tmp:chroma_tmp.
+        // Temporal mode (luma_tmp/chroma_tmp > 0) buffers 1 frame but
+        // process_into() loops on the sink so no frames are dropped.
+        let hqdn3d_args = if strengths.hqdn3d_luma_spatial > 0.0 {
+            format!(
+                "{ls:.2}:{cs:.2}:{lt:.2}:{ct:.2}",
+                ls = strengths.hqdn3d_luma_spatial,
+                cs = strengths.hqdn3d_chroma_spatial,
+                lt = strengths.hqdn3d_luma_temporal,
+                ct = strengths.hqdn3d_chroma_temporal,
+            )
+        } else {
+            String::new()
+        };
 
-        // Manually add each filter and link them together.
-        // Chain: source("in") → unsharp → [hqdn3d →] sink("out")
+        // unsharp — lx:ly:la:cx:cy:ca
+        let unsharp_args = if strengths.unsharp_chroma > 0.0 {
+            format!(
+                "lx={}:ly={}:la={:.2}:cx={}:cy={}:ca={:.2}",
+                strengths.unsharp_size_x,
+                strengths.unsharp_size_y,
+                strengths.unsharp_luma,
+                strengths.unsharp_size_x,
+                strengths.unsharp_size_y,
+                strengths.unsharp_chroma,
+            )
+        } else {
+            format!(
+                "lx={}:ly={}:la={:.2}",
+                strengths.unsharp_size_x, strengths.unsharp_size_y, strengths.unsharp_luma,
+            )
+        };
+
+        // eq contrast boost — only active at very low BPP.
+        let eq_args = if strengths.eq_contrast > 1.0 {
+            format!("contrast={:.3}", strengths.eq_contrast)
+        } else {
+            String::new()
+        };
+
+        // Wire up the filter chain: source → [pp →] [hqdn3d →] unsharp → [eq →] sink
         let unsharp_filter = ffmpeg::filter::find("unsharp").context("unsharp filter not found")?;
         let mut unsharp_ctx = graph
             .add(&unsharp_filter, "unsharp", &unsharp_args)
             .context("Failed to add unsharp filter")?;
 
-        source.link(0, &mut unsharp_ctx, 0);
+        // prev_ctx tracks the tail of the chain for sequential linking.
+        let mut chain_tail: Option<ffmpeg::filter::Context> = None;
+
+        if !pp_args.is_empty() {
+            let pp_filter = ffmpeg::filter::find("pp").context("pp filter not found")?;
+            let mut pp_ctx = graph
+                .add(&pp_filter, "pp", pp_args)
+                .context("Failed to add pp filter")?;
+            source.link(0, &mut pp_ctx, 0);
+            chain_tail = Some(pp_ctx);
+        }
 
         if !hqdn3d_args.is_empty() {
             let hqdn3d_filter =
                 ffmpeg::filter::find("hqdn3d").context("hqdn3d filter not found")?;
             let mut hqdn3d_ctx = graph
-                .add(&hqdn3d_filter, "hqdn3d", hqdn3d_args)
+                .add(&hqdn3d_filter, "hqdn3d", &hqdn3d_args)
                 .context("Failed to add hqdn3d filter")?;
-            unsharp_ctx.link(0, &mut hqdn3d_ctx, 0);
-            hqdn3d_ctx.link(0, &mut sink, 0);
+            if let Some(ref mut tail) = chain_tail {
+                tail.link(0, &mut hqdn3d_ctx, 0);
+            } else {
+                source.link(0, &mut hqdn3d_ctx, 0);
+            }
+            chain_tail = Some(hqdn3d_ctx);
+        }
+
+        // Link previous tail (or source if no prior filters) into unsharp.
+        if let Some(ref mut tail) = chain_tail {
+            tail.link(0, &mut unsharp_ctx, 0);
+        } else {
+            source.link(0, &mut unsharp_ctx, 0);
+        }
+
+        if !eq_args.is_empty() {
+            let eq_filter = ffmpeg::filter::find("eq").context("eq filter not found")?;
+            let mut eq_ctx = graph
+                .add(&eq_filter, "eq", &eq_args)
+                .context("Failed to add eq filter")?;
+            unsharp_ctx.link(0, &mut eq_ctx, 0);
+            eq_ctx.link(0, &mut sink, 0);
         } else {
             unsharp_ctx.link(0, &mut sink, 0);
         }
@@ -187,8 +274,10 @@ impl PostProcessFilterGraph {
             width,
             height,
             fps = format!("{:.1}", fps),
-            unsharp = %unsharp_args,
+            pp = %pp_args,
             hqdn3d = %hqdn3d_args,
+            unsharp = %unsharp_args,
+            eq = %eq_args,
             "Post-processing filter graph created"
         );
 
@@ -200,27 +289,25 @@ impl PostProcessFilterGraph {
         })
     }
 
-    /// Process a scaled frame through the filter chain and return the filtered frame.
-    /// Returns `None` if the filter chain has no output frame yet (e.g., temporal
-    /// buffering). The caller should skip encoding in that case.
-    fn process(&mut self, input: &ffmpeg::frame::Video) -> Result<Option<&ffmpeg::frame::Video>> {
+    /// Push `input` into the filter graph and call `callback` for every
+    /// output frame the sink makes available.
+    ///
+    /// Temporal filters (e.g. `hqdn3d`) buffer one frame internally before
+    /// producing output, so this may call `callback` zero or more times per
+    /// invocation.  The loop drains all ready frames so no output is lost.
+    fn process_into<F>(&mut self, input: &ffmpeg::frame::Video, mut callback: F) -> Result<()>
+    where
+        F: FnMut(&mut ffmpeg::frame::Video) -> Result<()>,
+    {
         self.source
             .source()
             .add(input)
             .context("Failed to push frame into filter graph")?;
 
-        // av_buffersink_get_frame returns AVERROR(EAGAIN) when no frame is ready.
-        // We need to handle this for temporal filters that buffer frames.
-        let result = self.sink.sink().frame(&mut self.filtered_frame);
-
-        match result {
-            Ok(()) => Ok(Some(&self.filtered_frame)),
-            Err(e) => {
-                let err_code = format!("{e}");
-                tracing::debug!(error = %err_code, "Filter sink returned error");
-                Ok(None)
-            }
+        while let Ok(()) = self.sink.sink().frame(&mut self.filtered_frame) {
+            callback(&mut self.filtered_frame)?;
         }
+        Ok(())
     }
 
     /// Signal end-of-stream to the filter graph and drain all buffered frames,
@@ -956,6 +1043,8 @@ pub(crate) fn attempt_export(
                             format!("{}x{}", strengths.unsharp_size_x, strengths.unsharp_size_y),
                         hqdn3d_luma_spatial = strengths.hqdn3d_luma_spatial,
                         hqdn3d_luma_temporal = strengths.hqdn3d_luma_temporal,
+                        pp_enable = strengths.pp_enable,
+                        eq_contrast = format!("{:.3}", strengths.eq_contrast),
                         bpp = format!(
                             "{:.4}",
                             (f64::from(video_bitrate_kbps) * 1000.0)
@@ -1083,19 +1172,14 @@ pub(crate) fn attempt_export(
                     let video_encode_started_at = Instant::now();
 
                     // Apply post-processing filters if enabled, otherwise encode
-                    // the scaled frame directly. If the filter has no output yet
-                    // (temporal buffering), skip encoding this frame.
+                    // the scaled frame directly.  process_into() drains all frames
+                    // the filter makes available (temporal filters may output 0 or
+                    // more frames per push), so no frames are ever silently lost.
                     if let Some(ref mut filter_graph) = post_process_graph {
-                        match filter_graph.process(&scaled_video) {
-                            Ok(Some(filtered)) => {
-                                opened_video_encoder.send_frame(filtered)?;
-                            }
-                            Ok(None) => {
-                                // Filter buffered the frame, nothing to encode yet.
-                                continue;
-                            }
-                            Err(err) => return Err(err),
-                        }
+                        filter_graph.process_into(&scaled_video, |filtered| {
+                            opened_video_encoder.send_frame(filtered)?;
+                            Ok(())
+                        })?;
                     } else {
                         opened_video_encoder.send_frame(&scaled_video)?;
                     }
@@ -1271,13 +1355,12 @@ pub(crate) fn attempt_export(
                 next_video_frame_pts.saturating_add(video_enc_ticks_per_frame.max(1));
             let video_encode_started_at = Instant::now();
             if let Some(ref mut filter_graph) = post_process_graph {
-                match filter_graph
-                    .process(&scaled_video)
-                    .context("Post-processing filter failed during flush")?
-                {
-                    Some(filtered) => opened_video_encoder.send_frame(filtered)?,
-                    None => continue,
-                }
+                filter_graph
+                    .process_into(&scaled_video, |filtered| {
+                        opened_video_encoder.send_frame(filtered)?;
+                        Ok(())
+                    })
+                    .context("Post-processing filter failed during flush")?;
             } else {
                 opened_video_encoder.send_frame(&scaled_video)?;
             }

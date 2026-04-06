@@ -310,8 +310,6 @@ pub fn create_encoder(_config: &ResolvedEncoderConfig) -> EncodeResult<Box<dyn E
         "FFmpeg support is disabled; rebuild with `--features ffmpeg`",
     ))
 }
-
-/// Spawn an encoder that receives frames from an existing receiver
 ///
 /// This is used when the capture provides its own frame channel.
 /// The encoder thread reads frames from frame_rx and pushes encoded packets
@@ -323,6 +321,7 @@ pub fn spawn_encoder_with_receiver(
 ) -> EncodeResult<EncoderHandle> {
     const MAX_CONSECUTIVE_ENCODE_ERRORS: u32 = 8;
     let thread_config = effective_config.clone();
+    let skip_flush_on_disconnect = thread_config.supports_gpu_frame_transport();
     let (health_tx, health_rx) = bounded(8);
     let thread = std::thread::Builder::new()
         .name("encoder".to_string())
@@ -473,22 +472,26 @@ pub fn spawn_encoder_with_receiver(
                 }
             }
             debug!("Encoder thread shutting down");
-            match encoder.flush() {
-                Ok(packets) => {
-                    for packet in packets {
-                        packet_batch.push(packet);
-                        if packet_batch.len() >= MAX_PACKET_BATCH_LEN {
-                            flush_packet_batch(
-                                &buffer,
-                                &mut packet_batch,
-                                &mut flush_batches,
-                                &mut last_packet_flush,
-                            );
+            if skip_flush_on_disconnect {
+                debug!("Skipping hardware encoder flush after frame channel disconnect");
+            } else {
+                match encoder.flush() {
+                    Ok(packets) => {
+                        for packet in packets {
+                            packet_batch.push(packet);
+                            if packet_batch.len() >= MAX_PACKET_BATCH_LEN {
+                                flush_packet_batch(
+                                    &buffer,
+                                    &mut packet_batch,
+                                    &mut flush_batches,
+                                    &mut last_packet_flush,
+                                );
+                            }
                         }
                     }
-                }
-                Err(e) => {
-                    warn!("Failed to flush encoder: {}", e);
+                    Err(e) => {
+                        warn!("Failed to flush encoder: {}", e);
+                    }
                 }
             }
             total_forwarded_packets = total_forwarded_packets.saturating_add(drain_ready_packets(
