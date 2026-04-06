@@ -245,6 +245,7 @@ fn run_clip_export_benchmark(
         output_height: None,
         output_fps: None,
         crop: None,
+        post_process_filters: true,
     };
 
     // Spawn progress monitor

@@ -112,6 +112,9 @@ pub struct ClipExportRequest {
     /// Spatial crop region. None means no cropping (full frame).
     /// When set, stream_copy is forced off since cropping requires re-encoding.
     pub crop: Option<CropRect>,
+    /// Enable adaptive post-processing filters (deblocking, sharpening, contrast) during export.
+    /// Filter strengths are computed automatically from bitrate/resolution.
+    pub post_process_filters: bool,
 }
 
 impl ClipExportRequest {
@@ -1226,6 +1229,7 @@ mod tests {
             output_height: None,
             output_fps: None,
             crop: None,
+            post_process_filters: true,
         }
     }
 

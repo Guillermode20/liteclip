@@ -1370,6 +1370,7 @@ fn start_export(editor: &mut EditorState) {
             },
             output_fps: Some(editor.effective_output_fps()),
             crop: editor.crop,
+            post_process_filters: true,
         },
         progress_tx,
         cancel_flag.clone(),
