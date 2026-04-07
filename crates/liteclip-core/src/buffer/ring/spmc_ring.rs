@@ -882,9 +882,18 @@ impl LockFreeReplayBuffer {
         let first_video_is_param_set = inner
             .first_video_info
             .lock()
-            .unwrap()
-            .map(|(_, kind)| kind.is_parameter_set())
-            .unwrap_or(true);
+            .map(|guard| {
+                guard
+                    .map(|(_, kind)| kind.is_parameter_set())
+                    .unwrap_or(true)
+            })
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    "first_video_info mutex poisoned: {}, assuming parameter set",
+                    e
+                );
+                true
+            });
 
         if !first_video_is_param_set && !result.is_empty() {
             let first_video_pts = result

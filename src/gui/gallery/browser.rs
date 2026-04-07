@@ -266,7 +266,10 @@ pub(super) fn render_browser_ui(app: &mut ClipCompressApp, ui: &mut egui::Ui) ->
         ui.colored_label(egui::Color32::LIGHT_RED, error);
     }
 
-    let cache = app.filtered_cache.take().unwrap();
+    let cache = app
+        .filtered_cache
+        .take()
+        .expect("filtered_cache should always be initialized before browser render");
 
     if !app.loaded {
         app.filtered_cache = Some(cache);

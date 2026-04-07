@@ -314,7 +314,7 @@ mod tests {
         let log_path = temp.path().join("error.log");
         fs::write(&log_path, "test log line\n").unwrap();
 
-        let guard = FileLogGuard { log_path: log_path };
+        let guard = FileLogGuard { log_path };
         assert_eq!(guard.read_log(), "test log line\n");
     }
 
@@ -324,7 +324,7 @@ mod tests {
         let log_path = temp.path().join("error.log");
         fs::write(&log_path, "some content").unwrap();
 
-        let guard = FileLogGuard { log_path: log_path };
+        let guard = FileLogGuard { log_path };
         guard.clear_log().unwrap();
         assert_eq!(guard.read_log(), "");
     }
@@ -342,7 +342,7 @@ mod tests {
     fn guard_log_dir_returns_parent() {
         let temp = TempDir::new().unwrap();
         let log_path = temp.path().join("error.log");
-        let guard = FileLogGuard { log_path: log_path };
+        let guard = FileLogGuard { log_path };
         assert_eq!(guard.log_dir(), temp.path());
     }
 
@@ -362,7 +362,7 @@ mod tests {
         let log_path = temp.path().join("error.log");
         fs::write(&log_path, "[test] ERROR - something broke\n").unwrap();
 
-        let guard = FileLogGuard { log_path: log_path };
+        let guard = FileLogGuard { log_path };
         let formatted = guard.formatted_log();
 
         assert!(formatted.contains("LiteClip v"));

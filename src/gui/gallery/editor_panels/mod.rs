@@ -776,7 +776,7 @@ pub(super) fn render_crop_section_impl(ui: &mut egui::Ui, editor: &mut EditorSta
                     let clamped = w.max(CROP_MIN_PIXELS) & !1;
                     editor.crop = Some(CropRect {
                         width: clamped,
-                        ..editor.crop.unwrap()
+                        ..crop
                     });
                 }
                 ui.label("H:");
@@ -795,7 +795,7 @@ pub(super) fn render_crop_section_impl(ui: &mut egui::Ui, editor: &mut EditorSta
                     let clamped = h.max(CROP_MIN_PIXELS) & !1;
                     editor.crop = Some(CropRect {
                         height: clamped,
-                        ..editor.crop.unwrap()
+                        ..crop
                     });
                 }
             });

@@ -24,8 +24,8 @@ const STREAM_BALANCE_MAX_CUT_DB: f32 = 3.0;
 const STREAM_BALANCE_CUT_RATIO: f32 = 0.5;
 const NORMALIZATION_MIN_GAIN: f32 = 0.25;
 const NORMALIZATION_MAX_GAIN: f32 = 3.0;
-const NORMALIZER_ATTACK_COEFF: f32 = 0.38;
-const NORMALIZER_RELEASE_COEFF: f32 = 0.08;
+const NORMALIZER_ATTACK_COEFF: f32 = 0.15;
+const NORMALIZER_RELEASE_COEFF: f32 = 0.03;
 const PROGRAM_LEVEL_ATTACK_COEFF: f32 = 0.08;
 const PROGRAM_LEVEL_RELEASE_COEFF: f32 = 0.02;
 const LIMITER_ATTACK_COEFF: f32 = 0.85;
@@ -192,18 +192,20 @@ impl AudioMixer {
         }
     }
 
-    fn update_normalization_gain(&mut self, mix_rms: f32, master_gain: f32) -> f32 {
+    /// Returns `(prev_gain, new_gain)` so the caller can interpolate per-sample.
+    fn update_normalization_gain(&mut self, mix_rms: f32, master_gain: f32) -> (f32, f32) {
         if !self.config.normalization_enabled {
             self.normalization_gain = 1.0;
-            return 1.0;
+            return (1.0, 1.0);
         }
 
         if mix_rms <= SILENCE_RMS_FLOOR {
+            let prev = self.normalization_gain;
             self.normalization_gain += (1.0 - self.normalization_gain) * NORMALIZER_RELEASE_COEFF;
             self.normalization_gain = self
                 .normalization_gain
                 .clamp(NORMALIZATION_MIN_GAIN, NORMALIZATION_MAX_GAIN);
-            return self.normalization_gain;
+            return (prev, self.normalization_gain);
         }
 
         Self::update_program_level(&mut self.program_rms_ema, mix_rms);
@@ -214,6 +216,7 @@ impl AudioMixer {
             (target_level / master_gain.max(SILENCE_RMS_FLOOR)).clamp(SILENCE_RMS_FLOOR, 1.0);
         let desired_gain = (adjusted_target / self.program_rms_ema)
             .clamp(NORMALIZATION_MIN_GAIN, NORMALIZATION_MAX_GAIN);
+        let prev = self.normalization_gain;
         let coeff = if desired_gain < self.normalization_gain {
             NORMALIZER_ATTACK_COEFF
         } else {
@@ -223,7 +226,7 @@ impl AudioMixer {
         self.normalization_gain = self
             .normalization_gain
             .clamp(NORMALIZATION_MIN_GAIN, NORMALIZATION_MAX_GAIN);
-        self.normalization_gain
+        (prev, self.normalization_gain)
     }
 
     fn apply_limiter_frame(&mut self, left: f32, right: f32, ceiling_linear: f32) -> (f32, f32) {
@@ -500,16 +503,23 @@ impl AudioMixer {
         } else {
             SILENCE_RMS_FLOOR
         };
-        let normalization_gain = self.update_normalization_gain(unbalanced_rms, master_gain);
-        let global_gain = normalization_gain * master_gain;
+        let (norm_gain_start, norm_gain_end) =
+            self.update_normalization_gain(unbalanced_rms, master_gain);
 
         // Apply output gain and transparent limiter (linked across stereo channels).
+        // Normalization gain is linearly interpolated per stereo frame to eliminate
+        // the amplitude step at packet boundaries that would otherwise cause clicks.
         self.mixed_samples_buf.clear();
         self.mixed_samples_buf.reserve(max_samples);
         let limiter_enabled = self.config.true_peak_limiter_enabled;
         let limiter_ceiling = db_to_linear(self.config.true_peak_limit_dbtp as f32).clamp(0.2, 1.0);
+        let stereo_frames = (max_samples as f32 / 2.0).max(1.0);
         let mut i = 0;
         while i < max_samples {
+            // Interpolation parameter: 0.0 at first frame, 1.0 at last frame.
+            let t = (i / 2) as f32 / stereo_frames;
+            let interp_norm_gain = norm_gain_start + (norm_gain_end - norm_gain_start) * t;
+            let global_gain = interp_norm_gain * master_gain;
             let left = self.mixed_float_buf[i] * global_gain;
             let right = if i + 1 < max_samples {
                 self.mixed_float_buf[i + 1] * global_gain

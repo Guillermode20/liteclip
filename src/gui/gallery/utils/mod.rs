@@ -375,6 +375,14 @@ pub(super) fn time_to_x_impl(rect: egui::Rect, time_secs: f64, duration_secs: f6
     egui::lerp(rect.left()..=rect.right(), ratio)
 }
 
+pub(super) fn x_to_time_impl(rect: egui::Rect, x: f32, duration_secs: f64) -> f64 {
+    if rect.width() <= 0.0 || duration_secs <= 0.0 {
+        return 0.0;
+    }
+    let ratio = ((x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+    duration_secs * f64::from(ratio)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -383,12 +391,4 @@ mod tests {
     fn timestamp_precise_roundtrip() {
         assert_eq!(format_timestamp_precise_impl(3661.5), "01:01:01.500");
     }
-}
-
-pub(super) fn x_to_time_impl(rect: egui::Rect, x: f32, duration_secs: f64) -> f64 {
-    if rect.width() <= 0.0 || duration_secs <= 0.0 {
-        return 0.0;
-    }
-    let ratio = ((x - rect.left()) / rect.width()).clamp(0.0, 1.0);
-    duration_secs * f64::from(ratio)
 }
