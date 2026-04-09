@@ -298,6 +298,15 @@ impl PostProcessFilterGraph {
     }
 }
 
+fn export_encoder_pixel_format(encoder: ExportVideoEncoder) -> ffmpeg::format::Pixel {
+    match encoder {
+        ExportVideoEncoder::SoftwareHevc => ffmpeg::format::Pixel::YUV420P,
+        ExportVideoEncoder::HevcNvenc
+        | ExportVideoEncoder::HevcAmf
+        | ExportVideoEncoder::HevcQsv => ffmpeg::format::Pixel::NV12,
+    }
+}
+
 impl Drop for PostProcessFilterGraph {
     fn drop(&mut self) {
         // Explicitly release frame data before the graph is dropped
@@ -822,6 +831,7 @@ pub(crate) fn attempt_export(
     let codec_name = video_encoder.ffmpeg_name();
     let codec = ffmpeg::encoder::find_by_name(codec_name)
         .with_context(|| format!("Encoder {} not found", codec_name))?;
+    let encoder_pixel_format = export_encoder_pixel_format(video_encoder);
 
     let output_width = request.output_width.unwrap_or(request.metadata.width);
     let output_height = request.output_height.unwrap_or(request.metadata.height);
@@ -845,7 +855,7 @@ pub(crate) fn attempt_export(
     ffmpeg_video_enc.set_frame_rate(Some((output_fps_i32, 1)));
     ffmpeg_video_enc.set_bit_rate((video_bitrate_kbps * 1000) as usize);
     ffmpeg_video_enc.set_max_bit_rate((video_bitrate_kbps * 1000) as usize);
-    ffmpeg_video_enc.set_format(ffmpeg::format::Pixel::YUV420P);
+    ffmpeg_video_enc.set_format(encoder_pixel_format);
     ffmpeg_video_enc.set_max_b_frames(0);
 
     // Set codec-specific options
@@ -855,7 +865,7 @@ pub(crate) fn attempt_export(
             opts.set("preset", "slow");
         }
         ExportVideoEncoder::HevcNvenc => {
-            opts.set("preset", "p7");
+            opts.set("preset", "p5");
             opts.set("tune", "hq");
             opts.set("rc", "vbr");
         }
@@ -865,7 +875,8 @@ pub(crate) fn attempt_export(
         }
         ExportVideoEncoder::HevcQsv => {
             opts.set("preset", "medium");
-            opts.set("look_ahead", "1");
+            opts.set("look_ahead", "0");
+            opts.set("rc", "vbr");
         }
     }
 
@@ -996,11 +1007,8 @@ pub(crate) fn attempt_export(
     let mut range_process_elapsed_secs = 0.0f64;
     // Reuse frame allocations across ranges to reduce per-range allocation churn.
     let mut decoded_video = ffmpeg::util::frame::video::Video::empty();
-    let mut scaled_video = ffmpeg::util::frame::video::Video::new(
-        ffmpeg::format::Pixel::YUV420P,
-        output_width,
-        output_height,
-    );
+    let mut scaled_video =
+        ffmpeg::util::frame::video::Video::new(encoder_pixel_format, output_width, output_height);
     let mut decoded_audio = ffmpeg::util::frame::audio::Audio::empty();
     let mut output_cursor_secs = 0.0f64;
 
@@ -1034,7 +1042,7 @@ pub(crate) fn attempt_export(
             video_decoder.format(),
             src_w,
             src_h,
-            ffmpeg::format::Pixel::YUV420P,
+            encoder_pixel_format,
             output_width,
             output_height,
             ffmpeg::software::scaling::flag::Flags::BILINEAR,
@@ -1045,7 +1053,7 @@ pub(crate) fn attempt_export(
         // The graph cannot be reused across ranges because flushing signals EOF
         // to the buffer source, after which no more frames can be pushed.
         let mut post_process_graph: Option<PostProcessFilterGraph> = None;
-        if request.post_process_filters {
+        if request.post_process_filters && encoder_pixel_format == ffmpeg::format::Pixel::YUV420P {
             let strengths = compute_filter_strengths(
                 video_bitrate_kbps,
                 output_width,
@@ -1077,6 +1085,12 @@ pub(crate) fn attempt_export(
                     warn!("Failed to create post-processing filter graph, disabling: {err:#}");
                 }
             }
+        } else if request.post_process_filters {
+            warn!(
+                encoder = video_encoder.ffmpeg_name(),
+                "Skipping export post-processing filters because this encoder expects {:?} input frames",
+                encoder_pixel_format
+            );
         }
 
         let mut audio_decoder = None;
@@ -1610,6 +1624,28 @@ pub(crate) fn attempt_export(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hardware_export_encoders_use_nv12_input_frames() {
+        for encoder in [
+            ExportVideoEncoder::HevcNvenc,
+            ExportVideoEncoder::HevcAmf,
+            ExportVideoEncoder::HevcQsv,
+        ] {
+            assert_eq!(
+                export_encoder_pixel_format(encoder),
+                ffmpeg::format::Pixel::NV12
+            );
+        }
+    }
+
+    #[test]
+    fn software_export_encoder_uses_yuv420p_input_frames() {
+        assert_eq!(
+            export_encoder_pixel_format(ExportVideoEncoder::SoftwareHevc),
+            ffmpeg::format::Pixel::YUV420P
+        );
+    }
 
     #[test]
     fn high_bpp_produces_minimal_filtering() {

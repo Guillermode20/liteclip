@@ -1,4 +1,5 @@
 use crate::config::EncoderType;
+use crate::encode::{resolve_effective_encoder_config, EncoderConfig};
 use crate::quality_contracts::{validate_export_validity, ExportValidationInput};
 use anyhow::{bail, Context, Result};
 use image::RgbaImage;
@@ -770,7 +771,10 @@ pub fn estimate_export_bitrates(
     use_hardware_acceleration: bool,
 ) -> ExportBitrateEstimate {
     let encoder = if use_hardware_acceleration {
-        ExportVideoEncoder::HevcAmf
+        ordered_hardware_encoder_preferences(EncoderType::Auto)
+            .into_iter()
+            .next()
+            .unwrap_or(ExportVideoEncoder::SoftwareHevc)
     } else {
         ExportVideoEncoder::SoftwareHevc
     };
@@ -1111,25 +1115,6 @@ impl ExportVideoEncoder {
         MIN_VIDEO_BITRATE_KBPS
     }
 }
-/// Query available encoders via ffmpeg-next SDK.
-#[cfg(feature = "ffmpeg")]
-fn query_sdk_codecs() -> Vec<&'static str> {
-    use ffmpeg_next as ffmpeg;
-
-    let mut available = Vec::new();
-    if ffmpeg::encoder::find_by_name("hevc_nvenc").is_some() {
-        available.push("hevc_nvenc");
-    }
-    if ffmpeg::encoder::find_by_name("hevc_amf").is_some() {
-        available.push("hevc_amf");
-    }
-    if ffmpeg::encoder::find_by_name("hevc_qsv").is_some() {
-        available.push("hevc_qsv");
-    }
-    available.push("libx265");
-    available
-}
-
 fn ordered_hardware_encoder_preferences(preferred: EncoderType) -> Vec<ExportVideoEncoder> {
     let mut order = Vec::with_capacity(3);
     match preferred {
@@ -1140,8 +1125,8 @@ fn ordered_hardware_encoder_preferences(preferred: EncoderType) -> Vec<ExportVid
     }
 
     for encoder in [
-        ExportVideoEncoder::HevcAmf,
         ExportVideoEncoder::HevcNvenc,
+        ExportVideoEncoder::HevcAmf,
         ExportVideoEncoder::HevcQsv,
     ] {
         if !order.contains(&encoder) {
@@ -1151,26 +1136,42 @@ fn ordered_hardware_encoder_preferences(preferred: EncoderType) -> Vec<ExportVid
     order
 }
 
+fn export_encoder_type(encoder: ExportVideoEncoder) -> EncoderType {
+    match encoder {
+        ExportVideoEncoder::SoftwareHevc => EncoderType::Software,
+        ExportVideoEncoder::HevcNvenc => EncoderType::Nvenc,
+        ExportVideoEncoder::HevcAmf => EncoderType::Amf,
+        ExportVideoEncoder::HevcQsv => EncoderType::Qsv,
+    }
+}
+
+fn export_encoder_is_available(encoder: ExportVideoEncoder) -> bool {
+    if encoder == ExportVideoEncoder::SoftwareHevc {
+        return true;
+    }
+
+    #[cfg(not(feature = "ffmpeg"))]
+    {
+        let _ = encoder;
+        return false;
+    }
+
+    let config = EncoderConfig::new(8, 60, (1280, 720), export_encoder_type(encoder), 2);
+    resolve_effective_encoder_config(&config).is_ok()
+}
+
 fn select_export_video_encoder(request: &ClipExportRequest) -> Result<ExportVideoEncoder> {
     if !request.use_hardware_acceleration {
         return Ok(ExportVideoEncoder::SoftwareHevc);
     }
 
-    #[cfg(feature = "ffmpeg")]
-    {
-        let available_codecs = query_sdk_codecs();
-        for encoder in ordered_hardware_encoder_preferences(request.preferred_encoder) {
-            if available_codecs.contains(&encoder.ffmpeg_name()) {
-                return Ok(encoder);
-            }
+    for encoder in ordered_hardware_encoder_preferences(request.preferred_encoder) {
+        if export_encoder_is_available(encoder) {
+            return Ok(encoder);
         }
-        Ok(ExportVideoEncoder::SoftwareHevc)
     }
 
-    #[cfg(not(feature = "ffmpeg"))]
-    {
-        Ok(ExportVideoEncoder::SoftwareHevc)
-    }
+    Ok(ExportVideoEncoder::SoftwareHevc)
 }
 
 fn should_fallback_to_software_encoder(err: &anyhow::Error) -> bool {
@@ -1337,6 +1338,30 @@ mod tests {
         );
         assert!(next > under.video_bitrate_kbps);
         assert!(next < over.video_bitrate_kbps);
+    }
+
+    #[test]
+    fn auto_export_hardware_order_matches_runtime_detection_priority() {
+        assert_eq!(
+            ordered_hardware_encoder_preferences(EncoderType::Auto),
+            vec![
+                ExportVideoEncoder::HevcNvenc,
+                ExportVideoEncoder::HevcAmf,
+                ExportVideoEncoder::HevcQsv,
+            ]
+        );
+    }
+
+    #[test]
+    fn explicit_preference_is_tried_first_then_uses_common_fallback_order() {
+        assert_eq!(
+            ordered_hardware_encoder_preferences(EncoderType::Qsv),
+            vec![
+                ExportVideoEncoder::HevcQsv,
+                ExportVideoEncoder::HevcNvenc,
+                ExportVideoEncoder::HevcAmf,
+            ]
+        );
     }
 
     #[test]

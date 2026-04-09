@@ -161,6 +161,16 @@ fn set_encoder_thread_priority() {
 // If you have an NVIDIA or Intel GPU, verify that `probe_encoder_available` correctly
 // detects your encoder. Report any issues via the Hardware Encoder Test Report issue template.
 #[cfg(feature = "ffmpeg")]
+fn probe_pixel_format_for_encoder(encoder_name: &str) -> Pixel {
+    match encoder_name {
+        "h264_amf" | "hevc_amf" | "h264_nvenc" | "hevc_nvenc" | "h264_qsv" | "hevc_qsv" => {
+            Pixel::NV12
+        }
+        _ => Pixel::YUV420P,
+    }
+}
+
+#[cfg(feature = "ffmpeg")]
 fn probe_encoder_available(encoder_name: &str) -> bool {
     let Some(codec) = ffmpeg::encoder::find_by_name(encoder_name) else {
         debug!(
@@ -184,7 +194,7 @@ fn probe_encoder_available(encoder_name: &str) -> bool {
 
     encoder.set_width(320);
     encoder.set_height(240);
-    encoder.set_format(Pixel::YUV420P);
+    encoder.set_format(probe_pixel_format_for_encoder(encoder_name));
     encoder.set_frame_rate(Some((30, 1)));
     encoder.set_time_base((1, 30));
     encoder.set_bit_rate(2_000_000);
@@ -661,5 +671,19 @@ mod tests {
             ResolvedEncoderType::Software.ffmpeg_hevc_codec_name(),
             "libx265"
         );
+    }
+
+    #[cfg(feature = "ffmpeg")]
+    #[test]
+    fn hardware_probe_prefers_nv12_input_format() {
+        for encoder_name in ["hevc_nvenc", "hevc_amf", "hevc_qsv"] {
+            assert_eq!(probe_pixel_format_for_encoder(encoder_name), Pixel::NV12);
+        }
+    }
+
+    #[cfg(feature = "ffmpeg")]
+    #[test]
+    fn software_probe_uses_yuv420p_input_format() {
+        assert_eq!(probe_pixel_format_for_encoder("libx265"), Pixel::YUV420P);
     }
 }
