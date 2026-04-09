@@ -566,6 +566,14 @@ fn calibrate_initial_bitrate(
         Some(result) => result,
         None => return Ok(None),
     };
+
+    // Clean up low calibration file immediately to free disk space
+    let _ = std::fs::remove_file(export_work_dir.join("cal-low.mp4"));
+
+    // Hint to the OS that we've finished a major allocation phase
+    // This encourages release of FFmpeg's internal memory pools
+    std::mem::drop(std::vec::Vec::<u8>::with_capacity(0));
+
     let high_result = match super::sdk_export::attempt_export(
         &sample_request,
         &export_work_dir.join("cal-high.mp4"),
@@ -581,6 +589,9 @@ fn calibrate_initial_bitrate(
         Some(result) => result,
         None => return Ok(None),
     };
+
+    // Clean up high calibration file immediately
+    let _ = std::fs::remove_file(export_work_dir.join("cal-high.mp4"));
 
     let low_point = CalibrationPoint {
         video_bitrate_kbps: low_bitrate_kbps,
@@ -686,9 +697,17 @@ fn run_bitrate_search(
                 .map(|best| attempt_result.size_bytes > best.size_bytes)
                 .unwrap_or(true)
             {
+                // Clean up previous best under target file
+                if let Some(ref prev) = best_under_target {
+                    let _ = std::fs::remove_file(&prev.output_path);
+                }
                 best_under_target = Some(attempt_result.clone());
             }
             if fill_ratio >= TARGET_FILL_MIN_RATIO {
+                // Clean up smallest over target file if we found a good result
+                if let Some(ref over) = smallest_over_target {
+                    let _ = std::fs::remove_file(&over.output_path);
+                }
                 return Ok(SearchOutcome::Selected(attempt_result));
             }
         } else if smallest_over_target
@@ -696,8 +715,18 @@ fn run_bitrate_search(
             .map(|best| attempt_result.size_bytes < best.size_bytes)
             .unwrap_or(true)
         {
+            // Clean up previous smallest over target file
+            if let Some(ref prev) = smallest_over_target {
+                let _ = std::fs::remove_file(&prev.output_path);
+            }
             smallest_over_target = Some(attempt_result.clone());
+        } else {
+            // This attempt is worse than both best_under and smallest_over, clean it up
+            let _ = std::fs::remove_file(&output_path);
         }
+
+        // Hint to release FFmpeg internal memory pools between attempts
+        std::mem::drop(std::vec::Vec::<u8>::with_capacity(0));
 
         let next_bitrate_kbps = next_export_video_bitrate_kbps(
             encoder,

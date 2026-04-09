@@ -289,6 +289,23 @@ impl PostProcessFilterGraph {
         })
     }
 
+    /// Explicitly release resources before dropping.
+    /// FFmpeg's internal memory pools may not immediately return memory to the OS,
+    /// so we unreference the filtered frame to release its data buffers.
+    fn release(&mut self) {
+        // Unreference the filtered frame to release its data buffers
+        self.filtered_frame = ffmpeg::frame::Video::empty();
+    }
+}
+
+impl Drop for PostProcessFilterGraph {
+    fn drop(&mut self) {
+        // Explicitly release frame data before the graph is dropped
+        self.release();
+    }
+}
+
+impl PostProcessFilterGraph {
     /// Push `input` into the filter graph and call `callback` for every
     /// output frame the sink makes available.
     ///
@@ -1568,6 +1585,16 @@ pub(crate) fn attempt_export(
         audio_encode_elapsed_secs,
         "Export attempt stage timings"
     );
+
+    // Explicitly release frame buffers to free memory pools
+    drop(decoded_video);
+    drop(scaled_video);
+    drop(decoded_audio);
+
+    // Flush input context to release any buffered packets
+    unsafe {
+        ffmpeg::ffi::avformat_flush(input_ctx.as_mut_ptr());
+    }
 
     let size_bytes = std::fs::metadata(output_path)
         .with_context(|| format!("Failed to get size of export output file {:?}", output_path))?

@@ -53,6 +53,13 @@ impl FramePool {
             guard.pop_back();
         }
     }
+
+    /// Completely clear all buffers from the pool, deallocating all memory.
+    /// Call this when the editor is closed to ensure no frame buffers remain allocated.
+    pub(super) fn clear(&self) {
+        let mut guard = self.buffers.lock().unwrap_or_else(|e| e.into_inner());
+        guard.clear();
+    }
 }
 
 /// A buffer that returns to its pool on drop.

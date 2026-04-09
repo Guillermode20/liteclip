@@ -97,11 +97,11 @@ struct PlaybackClock {
 struct AudioBuffer {
     sample_rate: u32,
     channels: u16,
-    samples: Arc<Vec<i16>>,
+    samples: Vec<i16>,
 }
 
 struct AudioSliceSource {
-    samples: Arc<Vec<i16>>,
+    samples: Vec<i16>,
     next_index: usize,
     channels: u16,
     sample_rate: u32,
@@ -398,7 +398,8 @@ impl PlaybackController {
         let _ = self.shared.audio_buffer.lock().map(|mut g| *g = None);
         self.shared.playback_empty_polls.store(0, Ordering::SeqCst);
         self.shared.playback_drop_bursts.store(0, Ordering::SeqCst);
-        self.shared.frame_pool.trim_to(FRAME_POOL_IDLE_TRIM_TARGET);
+        // Completely clear the frame pool to deallocate all frame buffers
+        self.shared.frame_pool.clear();
     }
 
     pub fn is_frame_request_in_flight(&self) -> bool {
@@ -868,10 +869,26 @@ impl PlaybackController {
 
 impl Drop for PlaybackController {
     fn drop(&mut self) {
-        self.release_idle_resources();
-        let _ = self.shared.playing_since.lock().map(|mut g| *g = None);
+        // Stop playback first
+        self.shared
+            .playing_since
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
         self.shared.audio_generation.fetch_add(1, Ordering::SeqCst);
+
+        // Clear audio buffer early to free memory
+        let _ = self.shared.audio_buffer.lock().map(|mut g| *g = None);
+
+        // Stop decoder and clear frame queue
+        self.decoder.stop();
+        let _ = self.shared.frame_queue.lock().map(|mut g| g.clear());
+        let _ = self.shared.latest_frame.lock().map(|mut g| *g = None);
+
+        // Signal audio thread to stop
         self._audio_shutdown_tx.take();
+
+        // Join audio threads
         if let Ok(mut guard) = self.audio_preload_thread.lock() {
             if let Some(handle) = guard.take() {
                 let _ = handle.join();
@@ -887,6 +904,16 @@ impl Drop for PlaybackController {
                 let _ = handle.join();
             }
         }
+
+        // Note: decoder is dropped automatically after this method returns.
+        // DecodePipeline::drop() will drain frame_rx and join the worker thread.
+        // After decoder is dropped, all Arc<FramePool> references from the worker
+        // are released, and only SharedPlaybackState holds a reference.
+        //
+        // We clear the pool here to free the VecDeque contents. Any frames that
+        // were in flight will return buffers to the pool when dropped, but those
+        // buffers will be deallocated when SharedPlaybackState is dropped.
+        self.shared.frame_pool.clear();
     }
 }
 
@@ -960,7 +987,15 @@ impl DecodePipeline {
 
 impl Drop for DecodePipeline {
     fn drop(&mut self) {
+        // Send shutdown command first
         let _ = self.command_tx.send(DecoderCommand::Shutdown);
+
+        // Drain any pending frames from the channel to ensure they're dropped
+        // before joining the worker thread (prevents Arc reference leaks)
+        while self.frame_rx.try_recv().is_ok() {}
+        while self.error_rx.try_recv().is_ok() {}
+
+        // Now join the worker thread
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
@@ -1062,7 +1097,16 @@ fn decoder_worker_loop(
 
         match command {
             DecoderCommand::Shutdown => {
-                tracing::info!("Decoder worker received shutdown, exiting");
+                tracing::info!("Decoder worker received shutdown, cleaning up");
+                // Flush decoder to release any buffered hardware frames
+                session.decoder.send_eof().ok();
+                // Flush buffers to release hardware resources
+                unsafe {
+                    ffmpeg::ffi::avcodec_flush_buffers(session.decoder.as_mut_ptr());
+                }
+                // Explicitly drop session to release FFmpeg resources before exiting
+                drop(session);
+                tracing::debug!("Decoder worker cleanup complete, exiting");
                 return;
             }
             DecoderCommand::Stop => {
@@ -2035,14 +2079,14 @@ fn decode_audio_track(video_path: &PathBuf) -> Result<AudioBuffer> {
         return Ok(AudioBuffer {
             sample_rate: 48_000,
             channels: 2,
-            samples: Arc::new(vec![]),
+            samples: vec![],
         });
     }
 
     Ok(AudioBuffer {
         sample_rate: 48_000,
         channels: 2,
-        samples: Arc::new(samples),
+        samples,
     })
 }
 
