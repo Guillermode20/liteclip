@@ -22,13 +22,21 @@ const STREAM_BALANCE_TOLERANCE_DB: f32 = 3.0;
 const STREAM_BALANCE_MAX_BOOST_DB: f32 = 6.0;
 const STREAM_BALANCE_MAX_CUT_DB: f32 = 3.0;
 const STREAM_BALANCE_CUT_RATIO: f32 = 0.5;
+#[allow(dead_code)]
 const NORMALIZATION_MIN_GAIN: f32 = 0.25;
+#[allow(dead_code)]
 const NORMALIZATION_MAX_GAIN: f32 = 3.0;
+#[allow(dead_code)]
 const NORMALIZER_ATTACK_COEFF: f32 = 0.15;
+#[allow(dead_code)]
 const NORMALIZER_RELEASE_COEFF: f32 = 0.03;
+#[allow(dead_code)]
 const PROGRAM_LEVEL_ATTACK_COEFF: f32 = 0.08;
+#[allow(dead_code)]
 const PROGRAM_LEVEL_RELEASE_COEFF: f32 = 0.02;
+#[allow(dead_code)]
 const LIMITER_ATTACK_COEFF: f32 = 0.85;
+#[allow(dead_code)]
 const LIMITER_RELEASE_COEFF: f32 = 0.02;
 const PCM_SCALE: f32 = 32768.0;
 
@@ -117,6 +125,7 @@ impl AudioMixer {
         (self.system_packets.len(), self.mic_packets.len())
     }
 
+    #[allow(dead_code)]
     fn update_stream_level(current: &mut f32, measured: f32) {
         let coeff = if measured > *current {
             STREAM_LEVEL_ATTACK_COEFF
@@ -127,6 +136,7 @@ impl AudioMixer {
         *current = (*current).max(SILENCE_RMS_FLOOR);
     }
 
+    #[allow(dead_code)]
     fn update_smoothed_stream_levels(
         &mut self,
         has_system: bool,
@@ -148,6 +158,7 @@ impl AudioMixer {
         }
     }
 
+    #[allow(dead_code)]
     fn update_program_level(current: &mut f32, measured: f32) {
         let coeff = if measured > *current {
             PROGRAM_LEVEL_ATTACK_COEFF
@@ -158,6 +169,7 @@ impl AudioMixer {
         *current = (*current).max(SILENCE_RMS_FLOOR);
     }
 
+    #[allow(dead_code)]
     fn source_balance_gains(&self, has_system: bool, has_mic: bool) -> (f32, f32) {
         if !self.config.normalization_enabled || !has_system || !has_mic {
             return (1.0, 1.0);
@@ -193,6 +205,7 @@ impl AudioMixer {
     }
 
     /// Returns `(prev_gain, new_gain)` so the caller can interpolate per-sample.
+    #[allow(dead_code)]
     fn update_normalization_gain(&mut self, mix_rms: f32, master_gain: f32) -> (f32, f32) {
         if !self.config.normalization_enabled {
             self.normalization_gain = 1.0;
@@ -229,6 +242,7 @@ impl AudioMixer {
         (prev, self.normalization_gain)
     }
 
+    #[allow(dead_code)]
     fn apply_limiter_frame(&mut self, left: f32, right: f32, ceiling_linear: f32) -> (f32, f32) {
         let frame_peak = left.abs().max(right.abs());
         let target_gain = if frame_peak > ceiling_linear && frame_peak > SILENCE_RMS_FLOOR {
@@ -450,7 +464,7 @@ impl AudioMixer {
             self.source_balance_gains(has_system, has_mic);
         let system_gain = system_user_gain * system_balance_gain;
         let mic_gain = mic_user_gain * mic_balance_gain;
-        let master_gain = (self.config.master_volume as f32 / 100.0).clamp(0.0, 2.0);
+        let _master_gain = (self.config.master_volume as f32 / 100.0).clamp(0.0, 2.0);
 
         // Calculate balance (stereo only)
         let (left_balance, right_balance) = if self.config.balance < 0 {
@@ -468,8 +482,6 @@ impl AudioMixer {
         self.mixed_float_buf.reserve(max_samples);
 
         // Track unbalanced mix RMS for normalization (before panning attenuates one channel)
-        let mut unbalanced_sum_sq = 0.0f64;
-
         // Mix and process audio in normalized float domain
         for i in 0..max_samples {
             let system_sample = self.system_decode_buf[i];
@@ -482,9 +494,6 @@ impl AudioMixer {
             // Mix samples
             let mixed = system_scaled + mic_scaled;
 
-            // Track unbalanced RMS for normalization
-            unbalanced_sum_sq += f64::from(mixed) * f64::from(mixed);
-
             // Apply balance if stereo (even indices are left, odd are right)
             let mut balanced = mixed;
             if i % 2 == 0 {
@@ -496,49 +505,15 @@ impl AudioMixer {
             self.mixed_float_buf.push(balanced);
         }
 
-        // Loudness normalization targets integrated output level in a live-friendly, smoothed way.
-        // Use unbalanced RMS so panning doesn't affect the loudness target.
-        let unbalanced_rms = if max_samples > 0 {
-            ((unbalanced_sum_sq / max_samples as f64).sqrt() as f32).max(SILENCE_RMS_FLOOR)
-        } else {
-            SILENCE_RMS_FLOOR
-        };
-        let (norm_gain_start, norm_gain_end) =
-            self.update_normalization_gain(unbalanced_rms, master_gain);
-
-        // Apply output gain and transparent limiter (linked across stereo channels).
-        // Normalization gain is linearly interpolated per stereo frame to eliminate
-        // the amplitude step at packet boundaries that would otherwise cause clicks.
+        // M2: Simplified mixer — output raw combined PCM WITHOUT normalization,
+        // soft-clipping, or limiting. The muxer handles final loudness processing
+        // when saving clips, preventing double-processing distortion.
         self.mixed_samples_buf.clear();
         self.mixed_samples_buf.reserve(max_samples);
-        let limiter_enabled = self.config.true_peak_limiter_enabled;
-        let limiter_ceiling = db_to_linear(self.config.true_peak_limit_dbtp as f32).clamp(0.2, 1.0);
-        let stereo_frames = (max_samples as f32 / 2.0).max(1.0);
-        let mut i = 0;
-        while i < max_samples {
-            // Interpolation parameter: 0.0 at first frame, 1.0 at last frame.
-            let t = (i / 2) as f32 / stereo_frames;
-            let interp_norm_gain = norm_gain_start + (norm_gain_end - norm_gain_start) * t;
-            let global_gain = interp_norm_gain * master_gain;
-            let left = self.mixed_float_buf[i] * global_gain;
-            let right = if i + 1 < max_samples {
-                self.mixed_float_buf[i + 1] * global_gain
-            } else {
-                left
-            };
-
-            let (left_out, right_out) = if limiter_enabled {
-                self.apply_limiter_frame(left, right, limiter_ceiling)
-            } else {
-                self.limiter_gain += (1.0 - self.limiter_gain) * LIMITER_RELEASE_COEFF;
-                (left.clamp(-1.0, 1.0), right.clamp(-1.0, 1.0))
-            };
-
-            self.mixed_samples_buf.push(float_to_i16(left_out));
-            if i + 1 < max_samples {
-                self.mixed_samples_buf.push(float_to_i16(right_out));
-            }
-            i += 2;
+        for &sample in &self.mixed_float_buf {
+            // Simple hard clamp at -1.0 to 1.0, then scale to i16
+            let clamped = sample.clamp(-1.0, 1.0);
+            self.mixed_samples_buf.push(float_to_i16(clamped));
         }
 
         // Encode back to bytes

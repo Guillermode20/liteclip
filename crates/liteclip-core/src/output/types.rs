@@ -208,14 +208,89 @@ fn normalize_video_packets_for_mp4(video_packets: &[&EncodedPacket]) -> Vec<Enco
     normalized
 }
 
+/// Returns `true` if the packet contains **only** parameter-set NAL units
+/// (SPS/PPS for H.264 or VPS/SPS/PPS for HEVC) and **no** coded slice / frame data.
+///
+/// Some encoders (e.g. libx265) may bundle VPS+SPS+PPS+IDR into a single AVPacket.
+/// This function correctly identifies those as **not** standalone parameter sets
+/// by scanning all NAL units in the packet: if any VCL (coded slice) NAL appears,
+/// the packet is a complete frame and must not be split off.
 #[cfg(feature = "ffmpeg")]
 fn is_parameter_set_packet(packet: &EncodedPacket) -> bool {
     if !matches!(packet.stream, StreamType::Video) {
         return false;
     }
-
     let data = packet.data.as_ref();
-    matches!(h264_nal_type(data), Some(7 | 8)) || matches!(hevc_nal_type(data), Some(32..=34))
+    if data.is_empty() {
+        return false;
+    }
+
+    let mut offset = 0usize;
+    let mut has_param = false;
+
+    while offset < data.len() {
+        // Locate next start code (0x00 0x00 0x01 or 0x00 0x00 0x00 0x01).
+        let sc_len =
+            if offset + 4 <= data.len() && data[offset..offset + 4] == [0x00, 0x00, 0x00, 0x01] {
+                4
+            } else if offset + 3 <= data.len() && data[offset..offset + 3] == [0x00, 0x00, 0x01] {
+                3
+            } else {
+                offset += 1;
+                continue;
+            };
+
+        let hdr = offset + sc_len;
+        if hdr >= data.len() {
+            break;
+        }
+
+        // Determine NAL type for HEVC (2-byte header) and H.264 (1-byte header).
+        // HEVC: type in bits[7:1] of first byte, i.e. (byte >> 1) & 0x3f
+        let hevc_type = (data[hdr] >> 1) & 0x3f;
+        // H.264: type in bits[4:0] of first byte, i.e.  byte & 0x1f
+        let h264_type = data[hdr] & 0x1f;
+
+        // HEVC VCL (coded slice) types:
+        //   0  = TRAIL_N (non-IDR)
+        //   1  = TRAIL_R
+        //   16 = IDR_W_RADL
+        //   17 = IDR_N_LP
+        //   18 = CRA_NUT
+        //   19 = IDR_W_RADL  (duplicate in spec, but inclusive)
+        //   20 = IDR_N_LP
+        //   21 = CRA_NUT
+        // etc.  Types 0-9 are VCL in HEVC, but in practice 16-21 cover IDR/CRA.
+        let is_hevc_vcl = matches!(hevc_type, 0..=9 | 16..=21);
+        // H.264 VCL types: 1 (non-IDR), 2-4 (A/B/C), 5 (IDR).
+        let is_h264_vcl = matches!(h264_type, 1..=5);
+
+        if is_hevc_vcl || is_h264_vcl {
+            // Found frame data — this is not a standalone parameter-set packet.
+            return false;
+        }
+
+        if matches!(hevc_type, 32..=34) || matches!(h264_type, 7 | 8) {
+            has_param = true;
+        }
+
+        // Advance past this NAL unit to the next start code or end of data.
+        let mut nal_end = hdr + 1;
+        while nal_end < data.len() {
+            let next_sc3 =
+                nal_end + 3 <= data.len() && data[nal_end..nal_end + 3] == [0x00, 0x00, 0x01];
+            let next_sc4 =
+                nal_end + 4 <= data.len() && data[nal_end..nal_end + 4] == [0x00, 0x00, 0x00, 0x01];
+            if next_sc3 || next_sc4 {
+                break;
+            }
+            nal_end += 1;
+        }
+        offset = nal_end;
+    }
+
+    // True only if we saw at least one parameter set and zero VCL NALs.
+    has_param
 }
 
 /// Configuration for the MP4 muxer.

@@ -20,6 +20,9 @@ pub struct BackpressureState {
     pub max_queued_frames: AtomicU32,
     /// Global flag indicating the encoder is consistently falling behind.
     pub encoder_overloaded: AtomicBool,
+    /// Smoothed drop rate via EMA (fixed-point: u32 value / 1000 = 0.0–1.0).
+    /// Updated on every frame result (success or drop) to prevent flag oscillation.
+    pub drop_rate_ema: AtomicU32,
     /// When greater than 1, capture loop will only process 1 out of every `N` frames.
     /// This effectively reduces capture FPS to prevent stutter and RAM growth.
     pub fps_divisor: AtomicU32,
@@ -32,6 +35,7 @@ impl BackpressureState {
             queued_frames: AtomicU32::new(0),
             max_queued_frames: AtomicU32::new(8),
             encoder_overloaded: AtomicBool::new(false),
+            drop_rate_ema: AtomicU32::new(0),
             fps_divisor: AtomicU32::new(0),
         }
     }
@@ -50,6 +54,20 @@ impl BackpressureState {
 
     pub fn set_encoder_overloaded(&self, overloaded: bool) {
         self.encoder_overloaded.store(overloaded, Ordering::Relaxed);
+    }
+
+    /// Reports a frame result (success or drop) to update the EMA drop rate.
+    /// O4: Prevents the overloaded flag from oscillating on every frame drop/success.
+    pub fn report_frame_result(&self, was_dropped: bool) {
+        const ALPHA: u32 = 100; // 0.1 in fixed-point (100/1000)
+        let prev = self.drop_rate_ema.load(Ordering::Relaxed);
+        let new_drop = if was_dropped { 1000u32 } else { 0u32 }; // 1.0 or 0.0
+                                                                 // EMA: new = prev + alpha * (sample - prev) / 1000
+        let diff = (new_drop as i32 - prev as i32) * ALPHA as i32 / 1000;
+        let new = (prev as i32 + diff).clamp(0, 1000) as u32;
+        self.drop_rate_ema.store(new, Ordering::Relaxed);
+        // Update overloaded flag based on smoothed rate (10% threshold)
+        self.encoder_overloaded.store(new > 100, Ordering::Relaxed);
     }
 }
 

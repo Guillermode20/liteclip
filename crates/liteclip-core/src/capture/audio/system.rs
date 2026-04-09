@@ -262,24 +262,34 @@ impl WasapiSystemCapture {
                 .context("IAudioCaptureClient::GetBuffer failed")?;
 
                 let byte_count = frame_count as usize * block_align as usize;
-                audio_buffer.resize(byte_count, 0);
+                // O5: Use extend_from_slice instead of resize+copy to skip
+                // redundant zero-fill — the WASAPI buffer is immediately overwritten.
+                audio_buffer.clear();
+                audio_buffer.reserve(byte_count);
                 unsafe {
                     if flags & (AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) == 0 && !data_ptr.is_null() {
-                        std::ptr::copy_nonoverlapping(
-                            data_ptr,
-                            audio_buffer.as_mut_ptr(),
+                        audio_buffer.extend_from_slice(std::slice::from_raw_parts(
+                            data_ptr as *const u8,
                             byte_count,
-                        );
+                        ));
+                    } else {
+                        audio_buffer.resize(byte_count, 0);
                     }
                 }
 
                 unsafe { capture_client.ReleaseBuffer(frame_count) }
                     .context("IAudioCaptureClient::ReleaseBuffer failed")?;
 
-                let pts = if qpc_position > 0 {
-                    qpc_position.min(i64::MAX as u64) as i64
+                // M1: Use saturating arithmetic to prevent PTS overflow during
+                // very long capture sessions or when device position is unavailable.
+                let pts = if qpc_position > 0 && qpc_position <= i64::MAX as u64 {
+                    qpc_position as i64
+                } else if qpc_position > 0 {
+                    i64::MAX
                 } else {
-                    start_qpc + ((total_frames as f64 / sample_rate) * qpc_freq) as i64
+                    start_qpc
+                        .saturating_add(((total_frames as f64 / sample_rate) * qpc_freq) as i64)
+                        .max(0)
                 };
                 total_frames = total_frames.saturating_add(frame_count as u64);
 
@@ -361,17 +371,31 @@ struct ComApartment {
 }
 
 impl ComApartment {
+    /// H4: Initialize COM, tolerating `RPC_E_CHANGED_MODE` (already in a different
+    /// apartment, e.g., STA inherited from parent thread). We can still use COM.
     fn initialize() -> Result<Self> {
         let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
         if hr.is_err() {
+            const RPC_E_CHANGED_MODE: windows_core::HRESULT =
+                windows_core::HRESULT(0x80010106u32 as i32);
+            if hr == RPC_E_CHANGED_MODE {
+                warn!("COM already initialized in a different apartment; using existing");
+                return Ok(Self {
+                    initialized_by_us: false,
+                });
+            }
             return Err(anyhow::anyhow!(
                 "CoInitializeEx failed for WASAPI system capture: {:?}",
                 hr
             ));
         }
-        Ok(Self {
-            initialized_by_us: hr.is_ok(),
-        })
+        // S_OK (code == 0) means we transitioned from uninitialized.
+        // S_FALSE (code != 0) means already initialized in same apartment.
+        let initialized_by_us = hr.0 == 0;
+        if !initialized_by_us {
+            debug!("COM was already initialized on this thread (S_FALSE)");
+        }
+        Ok(Self { initialized_by_us })
     }
 }
 

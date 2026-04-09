@@ -3,11 +3,11 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Rust](https://img.shields.io/badge/Rust-1.94%2B-blue.svg)](https://www.rust-lang.org)
 
-Lightweight Windows screen recorder that captures your best moments retroactively. Never miss an epic play again.
+Lightweight Windows screen recorder that captures your best moments retroactively. 
 
 ## Features
 
-- **Always-On Replay Buffer** — Continuously records in RAM with zero disk writes until you save. Capture that clutch moment even if you weren't recording.
+- **Always-On Replay Buffer** — Continuously records in RAM with zero disk writes until you save. 
 
 - **Hardware-Accelerated Encoding** — First-class support for NVIDIA NVENC, AMD AMF, and Intel QSV with D3D11 zero-copy frame transport. Falls back to software encoding automatically.
 

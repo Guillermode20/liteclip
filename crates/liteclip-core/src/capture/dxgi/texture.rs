@@ -323,6 +323,13 @@ impl DxgiCapture {
                 .as_ref()
                 .context("NV12 pooled output view is missing")?;
 
+            // H3: Periodically clear the input_view_cache to prevent stale entries
+            // when pooled textures are recycled at the same address after release.
+            if state.nv12_fence_value % 64 == 0 && !state.input_view_cache.is_empty() {
+                state.input_view_cache.clear();
+                state.input_view_cache_fifo.clear();
+            }
+
             let input_texture_ptr = bgra_texture.as_raw() as isize;
             let input_view = if let Some(view) = state.input_view_cache.get(&input_texture_ptr) {
                 view.clone()

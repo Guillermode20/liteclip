@@ -611,13 +611,17 @@ impl ClipCompressApp {
             }
 
             grouped.sort_by(|a, b| {
-                if a.0 == "Desktop" {
-                    std::cmp::Ordering::Less
-                } else if b.0 == "Desktop" {
-                    std::cmp::Ordering::Greater
-                } else {
-                    a.0.cmp(&b.0)
-                }
+                let a_newest =
+                    a.1.iter()
+                        .map(|e| e.modified)
+                        .max()
+                        .unwrap_or(SystemTime::UNIX_EPOCH);
+                let b_newest =
+                    b.1.iter()
+                        .map(|e| e.modified)
+                        .max()
+                        .unwrap_or(SystemTime::UNIX_EPOCH);
+                b_newest.cmp(&a_newest)
             });
 
             let _ = tx.send(ScanResult {

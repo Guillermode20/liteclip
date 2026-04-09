@@ -43,7 +43,7 @@
 use crate::buffer::BufferResult;
 use crate::encode::{EncodedPacket, StreamType};
 use bytes::Bytes;
-use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, info, trace, warn};
@@ -248,8 +248,10 @@ struct LockFreeInner {
     total_bytes: AtomicUsize,
     keyframe_count: AtomicUsize,
     newest_pts: AtomicI64,
+    has_wrapped: AtomicBool,
+    restart_generation: AtomicUsize,
     param_cache: std::sync::Mutex<ParameterCache>,
-    param_cache_complete: std::sync::atomic::AtomicBool,
+    param_cache_complete: AtomicBool,
     param_cache_pushes_since_complete: AtomicUsize,
     first_video_info: std::sync::Mutex<Option<(usize, FirstVideoKind)>>,
     outstanding_snapshot_bytes: AtomicUsize,
@@ -341,8 +343,10 @@ impl LockFreeReplayBuffer {
                 total_bytes: AtomicUsize::new(0),
                 keyframe_count: AtomicUsize::new(0),
                 newest_pts: AtomicI64::new(0),
+                has_wrapped: AtomicBool::new(false),
+                restart_generation: AtomicUsize::new(0),
                 param_cache: std::sync::Mutex::new(ParameterCache::default()),
-                param_cache_complete: std::sync::atomic::AtomicBool::new(false),
+                param_cache_complete: AtomicBool::new(false),
                 param_cache_pushes_since_complete: AtomicUsize::new(0),
                 first_video_info: std::sync::Mutex::new(None),
                 outstanding_snapshot_bytes: AtomicUsize::new(0),
@@ -453,7 +457,12 @@ impl LockFreeReplayBuffer {
         };
 
         inner.newest_pts.store(packet_pts, Ordering::Release);
-        self.evict_packets_older_than(packet_pts);
+
+        // RC1: Only run duration-based eviction after the ring has wrapped at least once.
+        // Before the first wrap, all packets are within the replay window.
+        if inner.has_wrapped.load(Ordering::Relaxed) {
+            self.evict_packets_older_than(packet_pts);
+        }
 
         // Update evict_frontier to track the oldest valid packet after ring wrap.
         // After fetch_add, the next write will be at write_idx + 1.
@@ -465,6 +474,7 @@ impl LockFreeReplayBuffer {
             let current_frontier = inner.evict_frontier.load(Ordering::Relaxed);
             if current_frontier < oldest_valid {
                 inner.evict_frontier.store(oldest_valid, Ordering::Release);
+                inner.has_wrapped.store(true, Ordering::Release);
                 trace!(
                     "Ring wrap: write_idx={}, capacity={}, evict_frontier {}->{}",
                     write_idx,
@@ -547,7 +557,10 @@ impl LockFreeReplayBuffer {
 
                     for _ in 0..EVICTION_BATCH_SIZE {
                         let evict = inner.evict_frontier.load(Ordering::Relaxed);
-                        if evict >= write_idx {
+                        // RC1: Only stop eviction at head when the ring has wrapped.
+                        // Before the first wrap, evict_frontier=0 and write_idx=0 both,
+                        // but all slots are valid — eviction should not drop packets.
+                        if evict >= write_idx && inner.has_wrapped.load(Ordering::Relaxed) {
                             stopped_at_head = true;
                             warn!(
                                 "Eviction: evict_frontier={} >= write_idx={}; no older slots to free",
@@ -644,7 +657,10 @@ impl LockFreeReplayBuffer {
 
     fn evict_packets_older_than(&self, newest_pts: i64) {
         let inner = &self.inner;
-        if inner.max_duration_qpc <= 0 || newest_pts <= 0 {
+        if inner.max_duration_qpc <= 0
+            || newest_pts <= 0
+            || !inner.has_wrapped.load(Ordering::Relaxed)
+        {
             return;
         }
 
@@ -879,6 +895,9 @@ impl LockFreeReplayBuffer {
             }
         }
 
+        // RC2: Lock param_cache FIRST, then first_video_info — matching push_single's
+        // lock order to prevent AB-BA deadlock. Hold both locks concurrently.
+        let cache = inner.param_cache.lock().unwrap_or_else(|e| e.into_inner());
         let first_video_is_param_set = inner
             .first_video_info
             .lock()
@@ -895,7 +914,15 @@ impl LockFreeReplayBuffer {
                 true
             });
 
-        if !first_video_is_param_set && !result.is_empty() {
+        // M3: If cache was cleared between reading first_video_info and locking param_cache,
+        // the prepend data may be gone — skip the prepend to avoid stale reference.
+        let cache_cleared = cache.h264_sps.is_none()
+            && cache.h264_pps.is_none()
+            && cache.hevc_vps.is_none()
+            && cache.hevc_sps.is_none()
+            && cache.hevc_pps.is_none();
+
+        if !first_video_is_param_set && !result.is_empty() && !cache_cleared {
             let first_video_pts = result
                 .iter()
                 .find_map(|p| {
@@ -907,7 +934,7 @@ impl LockFreeReplayBuffer {
                 })
                 .unwrap_or(0);
 
-            let cache = inner.param_cache.lock().unwrap_or_else(|e| e.into_inner());
+            // cache is already locked above (RC2 lock order fix) — reuse it.
             let mut prepend = Vec::new();
 
             match cache.codec_kind {
@@ -1011,6 +1038,10 @@ impl LockFreeReplayBuffer {
             return Ok(TrackedSnapshot::new(vec![], Arc::clone(inner)));
         }
 
+        // H1: Capture restart generation BEFORE Pass 1 so we can detect concurrent
+        // restarts between Pass 1 metadata collection and Pass 2 data cloning.
+        let gen_before = inner.restart_generation.load(Ordering::Acquire);
+
         // Check outstanding snapshot bytes limit before proceeding
         let current_outstanding = inner.outstanding_snapshot_bytes.load(Ordering::Relaxed);
         let max_outstanding = inner.max_memory_bytes.min(MAX_OUTSTANDING_SNAPSHOT_BYTES);
@@ -1085,13 +1116,14 @@ impl LockFreeReplayBuffer {
             .or(first_keyframe_at_or_after)
             .unwrap_or(first_idx);
 
-        // Derive video_start_pts from the metadata (no clones yet).
-        let video_start_pts = metas
+        // H2: Compute the FIRST video PTS to clamp audio lead-in.
+        // Only include audio that accompanies actual video frames.
+        let first_video_pts = metas
             .iter()
             .filter(|m| matches!(m.stream, StreamType::Video))
             .find(|m| m.ring_idx >= start_idx)
             .map(|m| m.pts)
-            .unwrap_or(start_pts);
+            .unwrap_or(i64::MAX);
 
         // Collect included ring indices directly instead of using a bool Vec.
         // This avoids allocating a potentially large Vec<bool> (50K+ elements for large buffers).
@@ -1100,7 +1132,9 @@ impl LockFreeReplayBuffer {
             let dominated = m.ring_idx >= start_idx;
             let audio_in_range = !dominated
                 && matches!(m.stream, StreamType::SystemAudio | StreamType::Microphone)
-                && m.pts >= video_start_pts;
+                // H2: Only include audio at or after first_video_pts, preventing
+                // unbounded audio-only lead-in before the first video keyframe.
+                && m.pts >= first_video_pts;
             if dominated || audio_in_range {
                 included_indices.push(m.ring_idx);
             }
@@ -1303,6 +1337,16 @@ impl LockFreeReplayBuffer {
             }
         }
 
+        // H1: Check if buffer was restarted between Pass 1 and Pass 2.
+        let gen_after = inner.restart_generation.load(Ordering::Acquire);
+        if gen_before != gen_after {
+            warn!(
+                "snapshot_from: buffer restarted between passes (gen {} -> {}); returning empty",
+                gen_before, gen_after
+            );
+            return Ok(TrackedSnapshot::new(vec![], Arc::clone(inner)));
+        }
+
         Ok(TrackedSnapshot::new(result, Arc::clone(inner)))
     }
 
@@ -1343,6 +1387,8 @@ impl LockFreeReplayBuffer {
         inner.total_bytes.store(0, Ordering::Release);
         inner.keyframe_count.store(0, Ordering::Release);
         inner.newest_pts.store(0, Ordering::Release);
+        inner.has_wrapped.store(false, Ordering::Release);
+        inner.restart_generation.store(0, Ordering::Release);
         inner.param_cache_complete.store(false, Ordering::Release);
         inner
             .param_cache_pushes_since_complete
@@ -1401,6 +1447,8 @@ impl LockFreeReplayBuffer {
         inner.total_bytes.store(0, Ordering::Release);
         inner.keyframe_count.store(0, Ordering::Release);
         inner.newest_pts.store(0, Ordering::Release);
+        inner.has_wrapped.store(false, Ordering::Release);
+        inner.restart_generation.fetch_add(1, Ordering::Release);
         inner.param_cache_complete.store(false, Ordering::Release);
         inner
             .param_cache_pushes_since_complete
@@ -1410,21 +1458,25 @@ impl LockFreeReplayBuffer {
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = None;
 
-        // Clear cached parameter sets as part of a full restart
-        {
-            let mut cache = inner.param_cache.lock().unwrap_or_else(|e| e.into_inner());
-            cache.h264_sps = None;
-            cache.h264_pps = None;
-            cache.hevc_vps = None;
-            cache.hevc_sps = None;
-            cache.hevc_pps = None;
-            cache.codec_kind = CodecKind::H264;
-        }
+        // O1: Preserve param_cache during restart so the next keyframe immediately
+        // produces save-able clips — no need to wait for parameter set collection again.
+        let cache_summary = {
+            let cache = inner.param_cache.lock().unwrap_or_else(|e| e.into_inner());
+            format!(
+                "H.264 SPS: {}, PPS: {} | HEVC VPS: {}, SPS: {}, PPS: {}",
+                cache.h264_sps.is_some(),
+                cache.h264_pps.is_some(),
+                cache.hevc_vps.is_some(),
+                cache.hevc_sps.is_some(),
+                cache.hevc_pps.is_some()
+            )
+        };
 
         debug!(
-            "Buffer restart DONE: cleared {} packets ({:.1}MB), parameter cache cleared",
+            "Buffer restart DONE: cleared {} packets ({:.1}MB), param cache preserved ({})",
             packets_before,
-            bytes_before as f64 / 1_048_576.0
+            bytes_before as f64 / 1_048_576.0,
+            cache_summary
         );
     }
 
