@@ -174,7 +174,7 @@ impl PostProcessFilterGraph {
         // pp (postprocessing) deblock + dering — spatial, zero extra latency.
         // ha/va = horizontal/vertical deblock; dr = dering.
         // Only inserted when BPP is below the deblock threshold.
-        let pp_args = if strengths.pp_enable { "ha:va:dr" } else { "" };
+        let pp_args = if strengths.pp_enable { "ha/va/dr" } else { "" };
 
         // hqdn3d denoise — luma_spatial:chroma_spatial:luma_tmp:chroma_tmp.
         // Temporal mode (luma_tmp/chroma_tmp > 0) buffers 1 frame but
