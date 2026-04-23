@@ -42,7 +42,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 # Tray / GUI
 tray-icon = "0.19"
 eframe = { version = "0.33.3", features = ["glow"] }
-egui = "0.33.3"
+egui = "0.34.1"
 egui-notify = "0.21"
 rfd = "0.17.2"
 winit = "0.30"
