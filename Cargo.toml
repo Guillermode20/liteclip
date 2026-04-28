@@ -70,7 +70,7 @@ panic = "abort"
 strip = true
 
 [build-dependencies]
-ico = "0.4"
+ico = "0.5"
 image = { version = "0.25", default-features = false, features = ["ico"] }
 winres = "0.1"
 
