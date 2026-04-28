@@ -55,7 +55,7 @@ jobs:
         run: .\installer\build.ps1 -Configuration Release -Platform x64 -ProductVersion "${{ env.PRODUCT_VERSION }}"
 
       - name: Upload MSI artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: LiteClip-msi
           path: installer/output/en-US/LiteClip.msi
@@ -63,7 +63,7 @@ jobs:
           retention-days: 30
 
       - name: Upload portable artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: LiteClip-portable
           path: installer/output/portable/LiteClip-portable.zip
