@@ -145,6 +145,7 @@ pub fn resolve_effective_encoder_config(
 fn set_encoder_thread_priority() {
     #[cfg(windows)]
     {
+        use windows::Win32::System::Threading::SetThreadIdealProcessor;
         use windows::Win32::System::Threading::THREAD_PRIORITY_BELOW_NORMAL;
         unsafe {
             // Use BELOW_NORMAL priority to ensure encoder never competes with game
@@ -152,6 +153,14 @@ fn set_encoder_thread_priority() {
                 warn!("Failed to set encoder thread priority: {}", e);
             } else {
                 debug!("Encoder thread priority set to BELOW_NORMAL");
+            }
+
+            // Provide a scheduling hint: prefer a non-boot processor to isolate
+            // the encoder thread from critical interactive work.  This is a soft
+            // hint (not a hard affinity mask) — the scheduler uses it when deciding
+            // which processor to run the thread on, avoiding unnecessary migration.
+            if SetThreadIdealProcessor(GetCurrentThread(), 1) == u32::MAX {
+                debug!("Failed to set encoder thread ideal processor (non-critical)");
             }
         }
     }
@@ -482,14 +491,6 @@ pub fn spawn_encoder_with_receiver(
                                 } else {
                                     consecutive_encode_errors = 0;
                                 }
-                                total_forwarded_packets =
-                                    total_forwarded_packets.saturating_add(drain_ready_packets(
-                                        &packet_rx,
-                                        &buffer,
-                                        &mut packet_batch,
-                                        &mut flush_batches,
-                                        &mut last_packet_flush,
-                                    ));
                                 Ok(())
                             };
 
@@ -501,6 +502,19 @@ pub fn spawn_encoder_with_receiver(
                             };
                             encode_one(frame)?;
                         }
+
+                        // Drain ready packets once after the entire burst loop rather than
+                        // after every individual frame. Each drain polls try_recv() on the
+                        // packet channel, and doing it only once per burst reduces atomic
+                        // operations and syscall-like overhead in the hot path.
+                        total_forwarded_packets =
+                            total_forwarded_packets.saturating_add(drain_ready_packets(
+                                &packet_rx,
+                                &buffer,
+                                &mut packet_batch,
+                                &mut flush_batches,
+                                &mut last_packet_flush,
+                            ));
                     }
                     Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                         total_forwarded_packets =

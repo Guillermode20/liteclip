@@ -151,7 +151,7 @@ impl FfmpegEncoder {
             dst_frame: None,
             hw_context: None,
             last_input_res: (0, 0),
-            pending_packet_timestamps: VecDeque::with_capacity(256),
+            pending_packet_timestamps: VecDeque::with_capacity(64),
             last_gpu_frame_arc_ptr: None,
             last_duplicate_template: Vec::new(),
             qsv_mapped_frame: std::ptr::null_mut(),

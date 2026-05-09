@@ -129,39 +129,44 @@ impl FfmpegEncoder {
                 .pop_front()
                 .unwrap_or(fallback_timestamp);
 
-            let hevc_nal: Option<u8> = if data.len() >= 5 && data[0..4] == [0x00, 0x00, 0x00, 0x01]
-            {
-                Some((data[4] >> 1) & 0x3f)
-            } else if data.len() >= 4 && data[0..3] == [0x00, 0x00, 0x01] {
-                Some((data[3] >> 1) & 0x3f)
-            } else {
-                None
-            };
+            // Only parse NAL headers and emit debug logging when debug-level tracing
+            // is enabled. This avoids unnecessary byte comparisons and bit shifting
+            // on every single packet in the hot path when debug logging is disabled.
+            if tracing::enabled!(tracing::Level::DEBUG) {
+                let hevc_nal: Option<u8> =
+                    if data.len() >= 5 && data[0..4] == [0x00, 0x00, 0x00, 0x01] {
+                        Some((data[4] >> 1) & 0x3f)
+                    } else if data.len() >= 4 && data[0..3] == [0x00, 0x00, 0x01] {
+                        Some((data[3] >> 1) & 0x3f)
+                    } else {
+                        None
+                    };
 
-            if self.frame_count % 60 == 0 || is_keyframe || idx == 0 {
-                let pts_ms = if qpc_freq > 0 {
-                    pts * 1000 / qpc_freq
-                } else {
-                    0
-                };
-                let nal_name = match hevc_nal {
-                    Some(32) => "VPS".to_string(),
-                    Some(33) => "SPS".to_string(),
-                    Some(34) => "PPS".to_string(),
-                    Some(19) => "IDR_W_RADL".to_string(),
-                    Some(20) => "IDR_N_LP".to_string(),
-                    Some(1) => "TRAIL_R".to_string(),
-                    Some(n) => format!("NAL{}", n),
-                    None => "unknown".to_string(),
-                };
-                tracing::debug!(
-                    "encoder packet: frame={} pts={}ms ({}B) nal={} keyframe={}",
-                    self.frame_count,
-                    pts_ms,
-                    data.len(),
-                    nal_name,
-                    is_keyframe
-                );
+                if self.frame_count % 60 == 0 || is_keyframe || idx == 0 {
+                    let pts_ms = if qpc_freq > 0 {
+                        pts * 1000 / qpc_freq
+                    } else {
+                        0
+                    };
+                    let nal_name = match hevc_nal {
+                        Some(32) => "VPS".to_string(),
+                        Some(33) => "SPS".to_string(),
+                        Some(34) => "PPS".to_string(),
+                        Some(19) => "IDR_W_RADL".to_string(),
+                        Some(20) => "IDR_N_LP".to_string(),
+                        Some(1) => "TRAIL_R".to_string(),
+                        Some(n) => format!("NAL{}", n),
+                        None => "unknown".to_string(),
+                    };
+                    tracing::debug!(
+                        "encoder packet: frame={} pts={}ms ({}B) nal={} keyframe={}",
+                        self.frame_count,
+                        pts_ms,
+                        data.len(),
+                        nal_name,
+                        is_keyframe
+                    );
+                }
             }
 
             let mut encoded_packet =

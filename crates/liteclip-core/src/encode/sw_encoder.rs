@@ -264,49 +264,63 @@ impl SoftwareEncoder {
             let ow = out_w as usize;
             let oh = out_h as usize;
 
-            worker_threads.push(thread::spawn(move || {
-                debug!("Encoder worker {id} started");
-
-                // Each worker keeps its own RGB scratch buffer that is reused
-                // across frames, eliminating repeated heap allocation.
-                let mut rgb_buf: Vec<u8> = Vec::with_capacity(ow * oh * 3);
-
-                while let Ok(item) = rx.recv() {
-                    // Use native resolution if flag is set, otherwise use config resolution
-                    let (target_w, target_h) = if item.use_native_resolution {
-                        (item.src_w as usize, item.src_h as usize)
-                    } else {
-                        (ow, oh)
-                    };
-
-                    match bgra_to_jpeg_reuse(
-                        &item.bgra,
-                        item.src_w as usize,
-                        item.src_h as usize,
-                        target_w,
-                        target_h,
-                        quality,
-                        &mut rgb_buf,
-                    ) {
-                        Ok(jpeg) => {
-                            let mut pkt = EncodedPacket::new(
-                                jpeg,
-                                item.timestamp,
-                                item.timestamp,
-                                true, // Every MJPEG frame is a keyframe
-                                super::StreamType::Video,
-                            );
-                            pkt.resolution = Some(item.resolution);
-                            if tx.send(pkt).is_err() {
-                                break;
-                            }
-                        }
-                        Err(e) => warn!("Worker {id} encode error: {e}"),
+            let handle = std::thread::Builder::new()
+                .name(format!("sw-encoder-{}", id))
+                .spawn(move || {
+                    // Set BELOW_NORMAL priority so software encoder workers
+                    // don't compete with the game or capture thread for CPU time.
+                    #[cfg(windows)]
+                    unsafe {
+                        use windows::Win32::System::Threading::{
+                            GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL,
+                        };
+                        let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
                     }
-                }
 
-                debug!("Encoder worker {id} exiting");
-            }));
+                    debug!("Encoder worker {id} started");
+
+                    // Each worker keeps its own RGB scratch buffer that is reused
+                    // across frames, eliminating repeated heap allocation.
+                    let mut rgb_buf: Vec<u8> = Vec::with_capacity(ow * oh * 3);
+
+                    while let Ok(item) = rx.recv() {
+                        // Use native resolution if flag is set, otherwise use config resolution
+                        let (target_w, target_h) = if item.use_native_resolution {
+                            (item.src_w as usize, item.src_h as usize)
+                        } else {
+                            (ow, oh)
+                        };
+
+                        match bgra_to_jpeg_reuse(
+                            &item.bgra,
+                            item.src_w as usize,
+                            item.src_h as usize,
+                            target_w,
+                            target_h,
+                            quality,
+                            &mut rgb_buf,
+                        ) {
+                            Ok(jpeg) => {
+                                let mut pkt = EncodedPacket::new(
+                                    jpeg,
+                                    item.timestamp,
+                                    item.timestamp,
+                                    true, // Every MJPEG frame is a keyframe
+                                    super::StreamType::Video,
+                                );
+                                pkt.resolution = Some(item.resolution);
+                                if tx.send(pkt).is_err() {
+                                    break;
+                                }
+                            }
+                            Err(e) => warn!("Worker {id} encode error: {e}"),
+                        }
+                    }
+
+                    debug!("Encoder worker {id} exiting");
+                })
+                .map_err(EncodeError::Io)?;
+            worker_threads.push(handle);
         }
 
         Ok(Self {
