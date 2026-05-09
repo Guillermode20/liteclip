@@ -194,12 +194,12 @@ impl DxgiCapture {
         }
 
         if at_capacity {
-            warn!("BGRA texture pool at capacity, waiting for texture to return");
             let pool = state
                 .bgra_pool
                 .as_mut()
                 .context("BGRA pool is not initialized")?;
-            match pool.return_rx.recv_timeout(Duration::from_millis(100)) {
+            // Non-blocking: try to receive a returned texture, drop the frame if pool is empty
+            match pool.return_rx.try_recv() {
                 Ok(item) => return Ok(item),
                 Err(_) => bail!("BGRA texture pool exhausted, cannot acquire texture"),
             }
@@ -243,12 +243,12 @@ impl DxgiCapture {
         }
 
         if at_capacity {
-            warn!("NV12 texture pool at capacity, waiting for texture to return");
             let pool = state
                 .nv12_pool
                 .as_mut()
                 .context("NV12 pool is not initialized")?;
-            match pool.return_rx.recv_timeout(Duration::from_millis(100)) {
+            // Non-blocking: try to receive a returned texture, drop the frame if pool is empty
+            match pool.return_rx.try_recv() {
                 Ok(item) => return Ok(item),
                 Err(_) => bail!("NV12 texture pool exhausted, cannot acquire texture"),
             }

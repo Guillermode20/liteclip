@@ -1190,15 +1190,16 @@ impl DxgiCapture {
         #[cfg(windows)]
         {
             use windows::Win32::System::Threading::{
-                GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_NORMAL,
+                GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL,
             };
             unsafe {
-                // Use NORMAL priority to avoid competing with game
+                // Use BELOW_NORMAL priority to avoid competing with game thread
                 // Game typically runs at HIGH or TIME_CRITICAL
-                if let Err(e) = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL) {
+                if let Err(e) = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL)
+                {
                     warn!("Failed to set capture thread priority: {}", e);
                 } else {
-                    debug!("Capture thread priority set to NORMAL");
+                    debug!("Capture thread priority set to BELOW_NORMAL");
                 }
             }
         }
