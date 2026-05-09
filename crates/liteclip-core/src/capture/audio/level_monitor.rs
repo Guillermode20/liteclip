@@ -155,13 +155,13 @@ pub fn calculate_levels_stereo(samples: &[i16]) -> (f32, f32) {
         return (0.0, 0.0);
     }
 
-    let mut sum_left: f64 = 0.0;
-    let mut sum_right: f64 = 0.0;
+    let mut sum_left: f32 = 0.0;
+    let mut sum_right: f32 = 0.0;
     let mut count: usize = 0;
 
     for chunk in samples.chunks_exact(2) {
-        sum_left += (chunk[0] as f64).powi(2);
-        sum_right += (chunk[1] as f64).powi(2);
+        sum_left += (chunk[0] as f32).powi(2);
+        sum_right += (chunk[1] as f32).powi(2);
         count += 1;
     }
 
@@ -169,15 +169,15 @@ pub fn calculate_levels_stereo(samples: &[i16]) -> (f32, f32) {
         return (0.0, 0.0);
     }
 
-    let rms_left = (sum_left / count as f64).sqrt();
-    let rms_right = (sum_right / count as f64).sqrt();
+    let rms_left = (sum_left / count as f32).sqrt();
+    let rms_right = (sum_right / count as f32).sqrt();
 
-    let max_val = 32768.0f64;
+    let max_val = 32768.0f32;
 
     let level_left = rms_left / max_val;
     let level_right = rms_right / max_val;
 
-    (level_left.min(1.0) as f32, level_right.min(1.0) as f32)
+    (level_left.min(1.0), level_right.min(1.0))
 }
 
 pub fn calculate_levels_stereo_bytes(samples: &[u8]) -> (f32, f32) {
@@ -186,15 +186,15 @@ pub fn calculate_levels_stereo_bytes(samples: &[u8]) -> (f32, f32) {
         return (0.0, 0.0);
     }
 
-    let mut sum_left: f64 = 0.0;
-    let mut sum_right: f64 = 0.0;
+    let mut sum_left: f32 = 0.0;
+    let mut sum_right: f32 = 0.0;
     let mut count: usize = 0;
 
     for chunk in &mut chunks {
         let left = i16::from_le_bytes([chunk[0], chunk[1]]);
         let right = i16::from_le_bytes([chunk[2], chunk[3]]);
-        sum_left += (left as f64).powi(2);
-        sum_right += (right as f64).powi(2);
+        sum_left += (left as f32).powi(2);
+        sum_right += (right as f32).powi(2);
         count += 1;
     }
 
@@ -202,14 +202,14 @@ pub fn calculate_levels_stereo_bytes(samples: &[u8]) -> (f32, f32) {
         return (0.0, 0.0);
     }
 
-    let rms_left = (sum_left / count as f64).sqrt();
-    let rms_right = (sum_right / count as f64).sqrt();
-    let max_val = 32768.0f64;
+    let rms_left = (sum_left / count as f32).sqrt();
+    let rms_right = (sum_right / count as f32).sqrt();
+    let max_val = 32768.0f32;
 
     let level_left = rms_left / max_val;
     let level_right = rms_right / max_val;
 
-    (level_left.min(1.0) as f32, level_right.min(1.0) as f32)
+    (level_left.min(1.0), level_right.min(1.0))
 }
 
 pub fn calculate_levels_mono(samples: &[i16]) -> (f32, f32) {
@@ -217,13 +217,13 @@ pub fn calculate_levels_mono(samples: &[i16]) -> (f32, f32) {
         return (0.0, 0.0);
     }
 
-    let mut sum: f64 = 0.0;
+    let mut sum: f32 = 0.0;
     for &sample in samples {
-        sum += (sample as f64).powi(2);
+        sum += (sample as f32).powi(2);
     }
 
-    let rms = (sum / samples.len() as f64).sqrt();
-    let level = (rms / 32768.0).min(1.0) as f32;
+    let rms = (sum / samples.len() as f32).sqrt();
+    let level = (rms / 32768.0).min(1.0);
 
     (level, level)
 }

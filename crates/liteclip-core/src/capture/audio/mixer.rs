@@ -5,6 +5,7 @@
 use bytes::BytesMut;
 use std::collections::VecDeque;
 use tracing::warn;
+use wide::f32x4;
 
 use crate::config::AudioConfig;
 use crate::encode::EncodedPacket;
@@ -63,10 +64,7 @@ pub struct AudioMixer {
     /// Reusable buffers for decoding packets
     system_decode_buf: Vec<i16>,
     mic_decode_buf: Vec<i16>,
-    /// Reusable buffer for mixed floating-point samples in [-1, 1] domain before quantization
-    mixed_float_buf: Vec<f32>,
-    /// Reusable buffer for mixed samples
-    mixed_samples_buf: Vec<i16>,
+
     /// Count of evicted packets for telemetry
     evicted_packets: u64,
     /// Pending outputs from timeout processing (later packets that need separate processing)
@@ -104,8 +102,6 @@ impl AudioMixer {
             last_processed_pts: -1,
             system_decode_buf: Vec::with_capacity(4096 / 2), // 2 bytes per sample
             mic_decode_buf: Vec::with_capacity(4096 / 2),
-            mixed_float_buf: Vec::with_capacity(4096 / 2),
-            mixed_samples_buf: Vec::with_capacity(4096 / 2),
             evicted_packets: 0,
             extra_outputs: Vec::new(),
             system_rms_ema: SILENCE_RMS_FLOOR,
@@ -439,9 +435,14 @@ impl AudioMixer {
         // Compute user gains first so EMA reflects post-user-gain levels for balance decisions
         let system_user_gain = (self.config.system_volume as f32 / 100.0).clamp(0.0, 2.0);
         let mic_user_gain = (self.config.mic_volume as f32 / 100.0).clamp(0.0, 4.0);
-        let system_rms = calculate_rms_i16(&self.system_decode_buf) * system_user_gain;
-        let mic_rms = calculate_rms_i16(&self.mic_decode_buf) * mic_user_gain;
-        self.update_smoothed_stream_levels(has_system, system_rms, has_mic, mic_rms);
+
+        // Gate RMS calculation and EMA update behind normalization_enabled.
+        // When normalization is off (default), skip entirely to save CPU.
+        if self.config.normalization_enabled {
+            let system_rms = calculate_rms_i16(&self.system_decode_buf) * system_user_gain;
+            let mic_rms = calculate_rms_i16(&self.mic_decode_buf) * mic_user_gain;
+            self.update_smoothed_stream_levels(has_system, system_rms, has_mic, mic_rms);
+        }
 
         // Determine the maximum buffer size
         let max_samples = self.system_decode_buf.len().max(self.mic_decode_buf.len());
@@ -477,48 +478,65 @@ impl AudioMixer {
             (1.0 - bias, 1.0)
         };
 
-        // Reuse floating mix buffer
-        self.mixed_float_buf.clear();
-        self.mixed_float_buf.reserve(max_samples);
+        // Fused SIMD mixing + quantization pass: process 4 samples (2 stereo frames)
+        // per f32x4 lane, writing directly to output_buffer. This eliminates the
+        // mixed_float_buf intermediate allocation and the second quantization loop.
+        self.output_buffer.clear();
+        self.output_buffer.reserve(max_samples * 2);
 
-        // Track unbalanced mix RMS for normalization (before panning attenuates one channel)
-        // Mix and process audio in normalized float domain
-        for i in 0..max_samples {
-            let system_sample = self.system_decode_buf[i];
-            let mic_sample = self.mic_decode_buf[i];
+        const INV_PCM_SCALE: f32 = 1.0 / PCM_SCALE;
+        let sys_gain_v = f32x4::splat(system_gain * INV_PCM_SCALE);
+        let mic_gain_v = f32x4::splat(mic_gain * INV_PCM_SCALE);
+        let balance_v = f32x4::new([left_balance, right_balance, left_balance, right_balance]);
+        let clamp_max = f32x4::splat(1.0);
+        let clamp_min = f32x4::splat(-1.0);
+        let scale_v = f32x4::splat(PCM_SCALE - 1.0);
 
-            // Apply per-stream gains
-            let system_scaled = (system_sample as f32 / PCM_SCALE) * system_gain;
-            let mic_scaled = (mic_sample as f32 / PCM_SCALE) * mic_gain;
+        let mut i = 0;
+        while i + 4 <= max_samples {
+            // Load 4 system samples (2 stereo frames)
+            let sys = f32x4::new([
+                self.system_decode_buf[i] as f32,
+                self.system_decode_buf[i + 1] as f32,
+                self.system_decode_buf[i + 2] as f32,
+                self.system_decode_buf[i + 3] as f32,
+            ]);
+            // Load 4 mic samples
+            let mic = f32x4::new([
+                self.mic_decode_buf[i] as f32,
+                self.mic_decode_buf[i + 1] as f32,
+                self.mic_decode_buf[i + 2] as f32,
+                self.mic_decode_buf[i + 3] as f32,
+            ]);
 
-            // Mix samples
-            let mixed = system_scaled + mic_scaled;
+            // Scale by PCM_SCALE, apply stream gains, mix, balance, clamp, quantize
+            let mixed = sys * sys_gain_v + mic * mic_gain_v;
+            let balanced = mixed * balance_v;
+            let clamped = f32x4::max(f32x4::min(balanced, clamp_max), clamp_min);
+            let quantized: [f32; 4] = (clamped * scale_v).into();
 
-            // Apply balance if stereo (even indices are left, odd are right)
-            let mut balanced = mixed;
-            if i % 2 == 0 {
-                balanced *= left_balance;
-            } else {
-                balanced *= right_balance;
+            for &v in &quantized {
+                self.output_buffer
+                    .extend_from_slice(&(v as i16).to_le_bytes());
             }
 
-            self.mixed_float_buf.push(balanced);
+            i += 4;
         }
 
-        // M2: Simplified mixer — output raw combined PCM WITHOUT normalization,
-        // soft-clipping, or limiting. The muxer handles final loudness processing
-        // when saving clips, preventing double-processing distortion.
-        self.mixed_samples_buf.clear();
-        self.mixed_samples_buf.reserve(max_samples);
-        for &sample in &self.mixed_float_buf {
-            // Simple hard clamp at -1.0 to 1.0, then scale to i16
-            let clamped = sample.clamp(-1.0, 1.0);
-            self.mixed_samples_buf.push(float_to_i16(clamped));
-        }
-
-        // Encode back to bytes
-        self.output_buffer.clear();
-        for sample in &self.mixed_samples_buf {
+        // Handle remaining 0-3 samples with scalar fused path
+        for idx in i..max_samples {
+            let system_sample = self.system_decode_buf[idx];
+            let mic_sample = self.mic_decode_buf[idx];
+            let system_scaled = (system_sample as f32 * INV_PCM_SCALE) * system_gain;
+            let mic_scaled = (mic_sample as f32 * INV_PCM_SCALE) * mic_gain;
+            let mixed = system_scaled + mic_scaled;
+            let balanced = if idx % 2 == 0 {
+                mixed * left_balance
+            } else {
+                mixed * right_balance
+            };
+            let clamped = balanced.clamp(-1.0, 1.0);
+            let sample = (clamped * (PCM_SCALE - 1.0)).round() as i16;
             self.output_buffer.extend_from_slice(&sample.to_le_bytes());
         }
 
@@ -598,11 +616,11 @@ fn calculate_rms_i16(samples: &[i16]) -> f32 {
         return SILENCE_RMS_FLOOR;
     }
 
-    let sum_sq = samples.iter().fold(0.0f64, |acc, &sample| {
-        let normalized = f64::from(sample) / f64::from(PCM_SCALE);
+    let sum_sq = samples.iter().fold(0.0f32, |acc, &sample| {
+        let normalized = sample as f32 / PCM_SCALE;
         acc + normalized * normalized
     });
-    ((sum_sq / samples.len() as f64).sqrt() as f32).max(SILENCE_RMS_FLOOR)
+    ((sum_sq / samples.len() as f32).sqrt()).max(SILENCE_RMS_FLOOR)
 }
 
 fn db_to_linear(db: f32) -> f32 {
@@ -611,11 +629,6 @@ fn db_to_linear(db: f32) -> f32 {
 
 fn linear_to_db(linear: f32) -> f32 {
     20.0 * linear.max(SILENCE_RMS_FLOOR).log10()
-}
-
-fn float_to_i16(sample: f32) -> i16 {
-    let scaled = (sample.clamp(-1.0, 1.0) * (PCM_SCALE - 1.0)).round();
-    scaled as i16
 }
 
 #[cfg(test)]

@@ -63,6 +63,7 @@ libc = { version = "0.2", optional = true }
 nnnoiseless = "0.5.2"
 parking_lot = "0.12"
 memchr = "2"
+wide = "1"
 
 [[example]]
 name = "minimal_engine"
