@@ -3,11 +3,12 @@ use crate::encode::{resolve_effective_encoder_config, EncoderConfig};
 use crate::quality_contracts::{validate_export_validity, ExportValidationInput};
 use anyhow::{bail, Context, Result};
 use image::RgbaImage;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc::Sender,
-    Arc,
+    Arc, Mutex, OnceLock,
 };
 use std::thread;
 use std::time::Instant;
@@ -210,7 +211,7 @@ const TARGET_FILL_MAX_RATIO: f64 = 1.00;
 const INITIAL_TARGET_FILL_RATIO: f64 = 0.96;
 const CALIBRATION_TARGET_FILL_RATIO: f64 = 0.97;
 const RETRY_TARGET_FILL_RATIO: f64 = 0.985;
-const CALIBRATION_MIN_CLIP_DURATION_SECS: f64 = 6.0;
+const CALIBRATION_MIN_CLIP_DURATION_SECS: f64 = 15.0;
 const CALIBRATION_SAMPLE_RATIO: f64 = 0.25;
 const CALIBRATION_MIN_SAMPLE_SECS: f64 = 4.0;
 const CALIBRATION_MAX_SAMPLE_SECS: f64 = 18.0;
@@ -222,6 +223,37 @@ const MAX_EXPORT_ATTEMPTS: usize = 8;
 const BITRATE_NUDGE_KBPS: u32 = 24;
 const COMPLEXITY_RATIO_MIN: f64 = 0.10;
 const COMPLEXITY_RATIO_MAX: f64 = 2.0;
+/// Multiplier applied to the initial bitrate estimate for short clips
+/// that skip calibration, ensuring a conservative (higher) bitrate
+/// for better quality when file size is less of a concern.
+const CONSERVATIVE_BITRATE_MULTIPLIER: f64 = 1.20;
+
+/// Cache key for calibration results.
+///
+/// Keyed by `(input_path, encoder, output_width, output_height, output_fps)` so that
+/// re-exporting the same source clip with identical encoder settings skips redundant
+/// calibration passes.
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+struct CalibrationCacheKey {
+    input_path: PathBuf,
+    encoder: ExportVideoEncoder,
+    output_width: u32,
+    output_height: u32,
+    /// Bits of `f64::to_bits()` — fp value that is never NaN.
+    output_fps_bits: u64,
+}
+
+/// Global cache mapping calibration keys to their computed video bitrate (kbps).
+///
+/// Uses `std::sync::Mutex` for thread-safe access across export threads. The cache
+/// is lazily initialized on first access and persists for the lifetime of the process,
+/// avoiding redundant calibration on repeated exports of the same clip.
+static CALIBRATION_CACHE: OnceLock<Mutex<HashMap<CalibrationCacheKey, u32>>> = OnceLock::new();
+
+/// Returns a reference to the calibration cache, initializing it on first access.
+fn calibration_cache() -> &'static Mutex<HashMap<CalibrationCacheKey, u32>> {
+    CALIBRATION_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 fn source_dimensions_for_export(request: &ClipExportRequest) -> (u32, u32) {
     let (width, height) = if let Some(crop) = request.crop {
@@ -522,8 +554,51 @@ fn calibrate_initial_bitrate(
     progress_tx: &Sender<ClipExportUpdate>,
     cancel_flag: &Arc<AtomicBool>,
 ) -> Result<Option<u32>> {
+    // Short clips (< 15s): skip calibration entirely and use a conservative
+    // bitrate estimate directly. The size error is bounded by the small
+    // duration, so quality is prioritized over precise file size matching.
     if request.output_duration_secs() < CALIBRATION_MIN_CLIP_DURATION_SECS {
-        return Ok(Some(budget.initial_video_bitrate_kbps));
+        let conservative = ((budget.initial_video_bitrate_kbps as f64)
+            * CONSERVATIVE_BITRATE_MULTIPLIER)
+            .round() as u32;
+        let conservative =
+            conservative.clamp(encoder.min_video_bitrate_kbps(), MAX_VIDEO_BITRATE_KBPS);
+        info!(
+            encoder = encoder.ffmpeg_name(),
+            duration_secs = request.output_duration_secs(),
+            initial_bitrate_kbps = budget.initial_video_bitrate_kbps,
+            conservative_bitrate_kbps = conservative,
+            "Clip under {}s, skipping calibration and using conservative bitrate estimate",
+            CALIBRATION_MIN_CLIP_DURATION_SECS
+        );
+        return Ok(Some(conservative));
+    }
+
+    // Build cache key from export parameters so re-exports of the same clip
+    // with identical settings skip redundant calibration.
+    let (output_width, output_height) = resolved_output_dimensions(request);
+    let output_fps = resolved_output_fps_for_request(request);
+    let cache_key = CalibrationCacheKey {
+        input_path: request.input_path.clone(),
+        encoder,
+        output_width,
+        output_height,
+        output_fps_bits: output_fps.to_bits(),
+    };
+
+    // Check cache before running expensive calibration
+    {
+        let cache = calibration_cache()
+            .lock()
+            .expect("Calibration cache lock poisoned");
+        if let Some(&cached_bitrate) = cache.get(&cache_key) {
+            info!(
+                encoder = encoder.ffmpeg_name(),
+                cached_bitrate_kbps = cached_bitrate,
+                "Using cached calibration result"
+            );
+            return Ok(Some(cached_bitrate));
+        }
     }
 
     let sample_request =
@@ -631,6 +706,14 @@ fn calibrate_initial_bitrate(
         MAX_VIDEO_BITRATE_KBPS,
     )
     .unwrap_or(budget.initial_video_bitrate_kbps);
+
+    // Store the calibrated result in cache for future reuse
+    {
+        let mut cache = calibration_cache()
+            .lock()
+            .expect("Calibration cache lock poisoned");
+        cache.insert(cache_key, calibrated);
+    }
 
     info!(
         encoder = encoder.ffmpeg_name(),
@@ -1089,7 +1172,7 @@ fn solve_power_bitrate(
     )
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum ExportVideoEncoder {
     SoftwareHevc,
     HevcNvenc,
