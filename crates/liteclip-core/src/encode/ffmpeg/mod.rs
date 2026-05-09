@@ -76,6 +76,10 @@ pub struct FfmpegEncoder {
     last_gpu_frame_arc_ptr: Option<usize>,
     /// Bitstream template from the last real encode: reused when the GPU frame is unchanged.
     last_duplicate_template: Vec<(Bytes, bool)>,
+    /// Pre-allocated QSV mapped frame to avoid per-frame av_frame_alloc / av_frame_free.
+    qsv_mapped_frame: *mut ffmpeg::ffi::AVFrame,
+    /// Raw pointer to the last D3D11Frame used for QSV mapping (avoids redundant av_hwframe_map).
+    qsv_last_source_ptr: usize,
 }
 
 const WARMUP_FRAMES: i64 = 60;
@@ -87,6 +91,16 @@ const WARMUP_FRAMES: i64 = 60;
 // 4. The hardware context (D3d11HardwareContext) is only accessed from the encoder thread
 // 5. All shared state uses proper synchronization (atomics for running flag)
 unsafe impl Send for FfmpegEncoder {}
+
+impl Drop for FfmpegEncoder {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.qsv_mapped_frame.is_null() {
+                ffmpeg::ffi::av_frame_free(&mut self.qsv_mapped_frame);
+            }
+        }
+    }
+}
 
 impl FfmpegEncoder {
     fn apply_bt709_encoder_metadata(encoder: &mut ffmpeg::encoder::video::Video) {
@@ -140,6 +154,8 @@ impl FfmpegEncoder {
             pending_packet_timestamps: VecDeque::with_capacity(256),
             last_gpu_frame_arc_ptr: None,
             last_duplicate_template: Vec::new(),
+            qsv_mapped_frame: std::ptr::null_mut(),
+            qsv_last_source_ptr: 0,
         })
     }
 

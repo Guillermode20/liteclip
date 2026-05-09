@@ -170,6 +170,16 @@ impl FfmpegEncoder {
             self.pending_packet_timestamps.clear();
             self.clear_gpu_duplicate_state();
 
+            // Pre-allocate QSV mapped frame to avoid per-frame av_frame_alloc / av_frame_free
+            if !self.qsv_mapped_frame.is_null() {
+                ffmpeg::ffi::av_frame_free(&mut self.qsv_mapped_frame);
+            }
+            self.qsv_mapped_frame = ffmpeg::ffi::av_frame_alloc();
+            if self.qsv_mapped_frame.is_null() {
+                return Err(EncodeError::msg("Failed to allocate QSV mapped frame"));
+            }
+            self.qsv_last_source_ptr = 0;
+
             info!(
                 "QSV hardware encoder initialized (derived from D3D11): {} ({}x{})",
                 codec_name, out_w, out_h
@@ -224,27 +234,40 @@ impl FfmpegEncoder {
             let d3d11_frame = hw_context.reusable_hw_frame;
             Self::prepare_hw_frame(hw_context, d3d11_frame, gpu_frame)?;
 
-            // Allocate a QSV surface
-            let mut qsv_frame = ffmpeg::ffi::av_frame_alloc();
+            let qsv_frame = self.qsv_mapped_frame;
             if qsv_frame.is_null() {
-                return Err(EncodeError::msg("Failed to allocate QSV frame"));
+                return Err(EncodeError::msg(
+                    "QSV mapped frame is null (re-init needed)",
+                ));
             }
 
-            // Map D3D11 surface to QSV surface
-            let map_res = ffmpeg::ffi::av_hwframe_map(
-                qsv_frame,
-                d3d11_frame,
-                0, // AV_HWFRAME_MAP_DIRECT?
-            );
+            // Check if the source texture changed since the last frame.
+            // When the same Arc<D3d11Frame> is reused (GPU duplicate optimization),
+            // the pointer address will be identical and we can skip the remap.
+            let current_source_ptr = gpu_frame as *const crate::media::D3d11Frame as usize;
+            let source_changed = current_source_ptr != self.qsv_last_source_ptr;
+            self.qsv_last_source_ptr = current_source_ptr;
 
-            if map_res < 0 {
-                ffmpeg::ffi::av_frame_free(&mut qsv_frame);
-                return Err(EncodeError::msg(format!(
-                    "Failed to map D3D11 surface to QSV: {}",
-                    map_res
-                )));
+            if source_changed {
+                // Unmap the old mapping so av_hwframe_map can create a fresh one
+                ffmpeg::ffi::av_frame_unref(qsv_frame);
+
+                // Map D3D11 surface to QSV surface using the pre-allocated frame
+                let map_res = ffmpeg::ffi::av_hwframe_map(
+                    qsv_frame,
+                    d3d11_frame,
+                    0, // AV_HWFRAME_MAP_DIRECT?
+                );
+
+                if map_res < 0 {
+                    return Err(EncodeError::msg(format!(
+                        "Failed to map D3D11 surface to QSV: {}",
+                        map_res
+                    )));
+                }
             }
 
+            // Update per-frame metadata on the reused mapped frame
             (*qsv_frame).pts = pts;
             if gop > 0 && self.encoder_frame_count % gop == 0 {
                 (*qsv_frame).pict_type = ffmpeg::picture::Type::I.into();
@@ -255,8 +278,11 @@ impl FfmpegEncoder {
             }
             Self::apply_bt709_raw_frame_metadata(qsv_frame);
 
+            // Send the mapped frame to the encoder.
+            // avcodec_send_frame internally refs the data buffers, so we can keep
+            // qsv_frame mapped across calls — only av_frame_unref + av_hwframe_map
+            // when the source texture changes.
             let send_result = ffmpeg::ffi::avcodec_send_frame(encoder.as_mut_ptr(), qsv_frame);
-            ffmpeg::ffi::av_frame_free(&mut qsv_frame);
 
             if send_result < 0 {
                 return Err(EncodeError::msg(format!(

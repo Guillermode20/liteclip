@@ -11,6 +11,16 @@ use super::{EncodedPacket, FfmpegEncoder, StreamType};
 
 impl FfmpegEncoder {
     pub(super) fn init_encoder(&mut self, width: u32, height: u32) -> EncodeResult<()> {
+        // Free any stale QSV mapped frame when switching to software encoder path.
+        // The QSV frame holds mappings tied to the D3D11 hardware context, which is
+        // no longer valid after transitioning away from GPU frame transport.
+        if !self.qsv_mapped_frame.is_null() {
+            unsafe {
+                ffmpeg::ffi::av_frame_free(&mut self.qsv_mapped_frame);
+            }
+        }
+        self.qsv_last_source_ptr = 0;
+
         let codec_name = self.config.ffmpeg_codec_name();
         let codec = ffmpeg::encoder::find_by_name(codec_name)
             .ok_or_else(|| EncodeError::msg(format!("Failed to find encoder: {}", codec_name)))?;
