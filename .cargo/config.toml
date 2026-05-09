@@ -1,3 +1,21 @@
+# CI / Developer Profile Override Strategy
+# --------------------------------------------
+# Release profile settings in Cargo.toml are tuned for maximum runtime
+# performance (lto = "thin", codegen-units = 1, panic = "abort").
+# These can be overridden via environment variables in CI or developer
+# builds — set them in your CI pipeline YAML, shell profile, or .env.
+#
+# For faster CI builds (at the cost of runtime performance):
+#   CARGO_PROFILE_RELEASE_LTO=thin     # faster than fat LTO (already default)
+#   CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16  # parallel codegen (faster link)
+#   CARGO_PROFILE_RELEASE_OPT_LEVEL=2       # O2 instead of O3
+#   CARGO_PROFILE_RELEASE_STRIP=none        # skip stripping
+#   CARGO_PROFILE_RELEASE_PANIC=unwind      # faster compile than abort
+#
+# For developer debug builds where Cargo.toml profiles are sufficient,
+# no overrides are needed — see [profile.dev] in Cargo.toml for per-crate
+# optimization levels (opt-level = 2 for liteclip-core).
+
 [target.'cfg(target_os = "windows")']
 # Enable CPU-specific instructions (AVX2, FMA, BMI2) for ~10-20% runtime perf
 # Makes binary non-portable to older CPUs — build machine must match min target
