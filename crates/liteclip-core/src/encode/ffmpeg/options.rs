@@ -100,6 +100,13 @@ impl FfmpegEncoder {
         options.set("tune", "zerolatency");
         // No B-frames for simpler playback compatibility
         options.set("bf", "0");
+        // Limit x265 thread pool to prevent CPU oversubscription with other
+        // concurrent work (capture, audio, game). Use at most 1/3 of available
+        // parallelism, minimum 1 thread.
+        let pools = std::thread::available_parallelism()
+            .map(|n| (n.get().max(3) / 3).to_string())
+            .unwrap_or_else(|_| "2".to_string());
+        options.set("pools", &pools);
         // CRF/CQ mode if rate_control is Cq, otherwise bitrate-based
         if matches!(self.config.rate_control, RateControl::Cq) {
             options.set("crf", &self.cq_value().to_string());

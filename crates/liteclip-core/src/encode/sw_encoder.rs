@@ -53,25 +53,35 @@ fn bgra_to_jpeg_reuse(
             dst_idx += 3;
         }
     } else {
-        // Optimized bilinear scaling using floating-point arithmetic for better performance
-        let x_ratio = src_w as f32 / out_w as f32;
-        let y_ratio = src_h as f32 / out_h as f32;
-
+        // Bilinear scaling using fixed-point integer arithmetic.
+        // Compute source coordinates using Q16.16 fixed-point to match the
+        // original float formula: src = (dst + 0.5) * ratio - 0.5
+        // The multiplication factor 0x10000 = 65536 (Q16.16).
         for dst_y in 0..out_h {
-            let src_y = (dst_y as f32 + 0.5) * y_ratio - 0.5;
-            let src_y_clamped = src_y.max(0.0).min((src_h - 1) as f32);
-            let src_y0 = src_y_clamped.floor() as usize;
+            // src_y = (dst_y + 0.5) * src_h / out_h - 0.5
+            //       = ((2*dst_y + 1) * src_h << 16) / (2*out_h) - 32768
+            let y_num = (2 * dst_y + 1) as u64 * src_h as u64;
+            let y_den = 2 * out_h as u64;
+            let src_y_fp = (y_num << 16) / y_den;
+            let src_y_fp = src_y_fp.saturating_sub(32768);
+            let src_y_fp = src_y_fp.min(((src_h - 1) as u64) << 16);
+
+            let src_y0 = (src_y_fp >> 16) as usize;
             let src_y1 = (src_y0 + 1).min(src_h - 1);
-            let y_frac = src_y_clamped - src_y0 as f32;
+            let y_frac = src_y_fp & 0xFFFF;
 
             let dst_row_base = dst_y * out_w * 3;
 
             for dst_x in 0..out_w {
-                let src_x = (dst_x as f32 + 0.5) * x_ratio - 0.5;
-                let src_x_clamped = src_x.max(0.0).min((src_w - 1) as f32);
-                let src_x0 = src_x_clamped.floor() as usize;
+                let x_num = (2 * dst_x + 1) as u64 * src_w as u64;
+                let x_den = 2 * out_w as u64;
+                let src_x_fp = (x_num << 16) / x_den;
+                let src_x_fp = src_x_fp.saturating_sub(32768);
+                let src_x_fp = src_x_fp.min(((src_w - 1) as u64) << 16);
+
+                let src_x0 = (src_x_fp >> 16) as usize;
                 let src_x1 = (src_x0 + 1).min(src_w - 1);
-                let x_frac = src_x_clamped - src_x0 as f32;
+                let x_frac = src_x_fp & 0xFFFF;
 
                 // Get the four neighboring pixels in BGRA
                 let i00 = (src_y0 * src_w + src_x0) * 4;
@@ -81,21 +91,29 @@ fn bgra_to_jpeg_reuse(
 
                 let di = dst_row_base + dst_x * 3;
 
-                // Bilinear interpolation
+                // Bilinear interpolation using Q16.16 fixed-point arithmetic.
+                // Weights: w_x0 = 1 - x_frac, w_x1 = x_frac (in Q16.16)
+                // Combined: result = sum(pixel * w_x * w_y) >> 32
+                let w_x0 = 0x10000u64 - x_frac;
+                let w_x1 = x_frac;
+                let w_y0 = 0x10000u64 - y_frac;
+                let w_y1 = y_frac;
+
                 for c in 0..3 {
                     let src_c = 2 - c; // Map RGB (0,1,2) to BGRA (2,1,0)
 
-                    let v00 = bgra[i00 + src_c] as f32;
-                    let v10 = bgra[i10 + src_c] as f32;
-                    let v01 = bgra[i01 + src_c] as f32;
-                    let v11 = bgra[i11 + src_c] as f32;
+                    let v00 = bgra[i00 + src_c] as u64;
+                    let v10 = bgra[i10 + src_c] as u64;
+                    let v01 = bgra[i01 + src_c] as u64;
+                    let v11 = bgra[i11 + src_c] as u64;
 
-                    // Interpolate x first, then y
-                    let v_top = v00 + (v10 - v00) * x_frac;
-                    let v_bot = v01 + (v11 - v01) * x_frac;
-                    let v = v_top + (v_bot - v_top) * y_frac;
+                    let v = (v00 * w_x0 * w_y0
+                        + v10 * w_x1 * w_y0
+                        + v01 * w_x0 * w_y1
+                        + v11 * w_x1 * w_y1)
+                        >> 32;
 
-                    rgb_buf[di + c] = v.clamp(0.0, 255.0) as u8;
+                    rgb_buf[di + c] = v as u8;
                 }
             }
         }
