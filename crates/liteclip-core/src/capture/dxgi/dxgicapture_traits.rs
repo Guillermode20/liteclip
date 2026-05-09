@@ -11,7 +11,7 @@
 
 use crate::capture::{CaptureBackend, CaptureConfig, CapturedFrame};
 use anyhow::{bail, Result};
-use crossbeam::channel::Receiver;
+use crossbeam_channel::Receiver;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::thread::spawn;

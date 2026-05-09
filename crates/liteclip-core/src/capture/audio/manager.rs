@@ -1,7 +1,7 @@
 /// WASAPI audio manager that coordinates system and microphone capture with mixing.
 use anyhow::Result;
 
-use crossbeam::channel::{Receiver, Sender, TryRecvError};
+use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -37,8 +37,8 @@ impl WasapiAudioManager {
 
     /// Create a new WASAPI audio manager with an optional level monitor
     pub fn with_level_monitor(level_monitor: Option<AudioLevelMonitor>) -> Result<Self> {
-        let (packet_tx, packet_rx) = crossbeam::channel::bounded(64);
-        let (config_update_tx, config_update_rx) = crossbeam::channel::bounded(16);
+        let (packet_tx, packet_rx) = crossbeam_channel::bounded(64);
+        let (config_update_tx, config_update_rx) = crossbeam_channel::bounded(16);
 
         Ok(Self {
             system_capture: None,
@@ -303,7 +303,7 @@ impl WasapiAudioManager {
             } else {
                 match (system_rx.as_ref(), mic_rx.as_ref()) {
                     (Some(system), Some(mic)) => {
-                        crossbeam::channel::select! {
+                        crossbeam_channel::select! {
                             recv(config_update_rx) -> msg => {
                                 if let Ok(new_config) = msg {
                                     mixer.update_config(&new_config);
@@ -338,7 +338,7 @@ impl WasapiAudioManager {
                         }
                     }
                     (Some(system), None) => {
-                        crossbeam::channel::select! {
+                        crossbeam_channel::select! {
                             recv(config_update_rx) -> msg => {
                                 if let Ok(new_config) = msg {
                                     mixer.update_config(&new_config);
@@ -361,7 +361,7 @@ impl WasapiAudioManager {
                         }
                     }
                     (None, Some(mic)) => {
-                        crossbeam::channel::select! {
+                        crossbeam_channel::select! {
                             recv(config_update_rx) -> msg => {
                                 if let Ok(new_config) = msg {
                                     mixer.update_config(&new_config);

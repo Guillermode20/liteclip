@@ -4,7 +4,7 @@
 
 use anyhow::{Context, Result};
 use bytes::BytesMut;
-use crossbeam::channel::{bounded, Receiver, Sender};
+use crossbeam_channel::{bounded, Receiver, Sender};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -376,8 +376,8 @@ impl ComApartment {
     fn initialize() -> Result<Self> {
         let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
         if hr.is_err() {
-            const RPC_E_CHANGED_MODE: windows_core::HRESULT =
-                windows_core::HRESULT(0x80010106u32 as i32);
+            const RPC_E_CHANGED_MODE: windows::core::HRESULT =
+                windows::core::HRESULT(0x80010106u32 as i32);
             if hr == RPC_E_CHANGED_MODE {
                 warn!("COM already initialized in a different apartment; using existing");
                 return Ok(Self {

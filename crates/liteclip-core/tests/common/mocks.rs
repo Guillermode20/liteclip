@@ -4,7 +4,7 @@
 //! actual hardware encoding or screen capture. They produce deterministic
 //! output suitable for verifying buffer behavior, pipeline flow, and error handling.
 
-use crossbeam::channel::{bounded, Receiver, Sender};
+use crossbeam_channel::{bounded, Receiver, Sender};
 use liteclip_core::encode::{
     EncodeResult, EncodedPacket, Encoder, EncoderFactory, EncoderHandle, EncoderHealthEvent,
     ResolvedEncoderConfig,
@@ -140,7 +140,7 @@ impl MockEncoderHandle {
     pub fn send_frame(
         &self,
         frame: CapturedFrame,
-    ) -> Result<(), crossbeam::channel::SendError<CapturedFrame>> {
+    ) -> Result<(), crossbeam_channel::SendError<CapturedFrame>> {
         self.frame_tx.send(frame)
     }
 
@@ -235,7 +235,7 @@ impl EncoderFactory for MockEncoderFactory {
 /// assert_eq!(capture.frame_count(), 60);
 /// ```
 pub struct MockCaptureSource {
-    frame_tx: crossbeam::channel::Sender<CapturedFrame>,
+    frame_tx: crossbeam_channel::Sender<CapturedFrame>,
     frame_count: Arc<AtomicUsize>,
     running: Arc<AtomicBool>,
     width: u32,

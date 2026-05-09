@@ -1,5 +1,5 @@
 use anyhow::{anyhow, bail, Context, Result};
-use crossbeam::channel::{bounded, Receiver, Sender, TryRecvError};
+use crossbeam_channel::{bounded, Receiver, Sender, TryRecvError};
 use ffmpeg_next as ffmpeg;
 use ffmpeg_next::packet::Mut;
 use rodio::{Sink, Source};
@@ -1018,11 +1018,11 @@ fn send_playback_frame(
     frame_tx: &Sender<DecoderFrame>,
     frame: DecoderFrame,
 ) -> Result<SendFrameOutcome> {
-    crossbeam::channel::select! {
+    crossbeam_channel::select! {
         send(frame_tx, frame) -> send_result => {
             match send_result {
                 Ok(()) => Ok(SendFrameOutcome::Sent),
-                Err(crossbeam::channel::SendError(_)) => {
+                Err(crossbeam_channel::SendError(_)) => {
                     bail!("Playback frame channel disconnected");
                 }
             }

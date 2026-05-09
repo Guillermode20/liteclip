@@ -1,7 +1,7 @@
 //! Encoder spawn, resolution, and trait definitions.
 
 use crate::encode::{EncodeError, EncodeResult};
-use crossbeam::channel::{bounded, Receiver};
+use crossbeam_channel::{bounded, Receiver};
 #[cfg(feature = "ffmpeg")]
 use ffmpeg_next as ffmpeg;
 #[cfg(feature = "ffmpeg")]
@@ -459,7 +459,7 @@ pub fn spawn_encoder_with_receiver(
                             encode_one(frame)?;
                         }
                     }
-                    Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
+                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                         total_forwarded_packets =
                             total_forwarded_packets.saturating_add(drain_ready_packets(
                                 &packet_rx,
@@ -475,7 +475,7 @@ pub fn spawn_encoder_with_receiver(
                             &mut last_packet_flush,
                         );
                     }
-                    Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
+                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
                         debug!("Frame channel closed, shutting down encoder");
                         break;
                     }

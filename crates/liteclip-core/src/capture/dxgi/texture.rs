@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 use bytes::Bytes;
 use tracing::{debug, info, warn};
+use windows::core::Interface;
 use windows::Win32::Foundation::BOOL;
 use windows::Win32::Graphics::Direct3D11::{
     ID3D11Device, ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoDevice,
@@ -17,7 +18,6 @@ use windows::Win32::Graphics::Direct3D11::{
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12};
 use windows::Win32::Graphics::Dxgi::IDXGIResource;
-use windows_core::Interface;
 
 use crate::capture::{CapturedFrame, D3d11Frame, D3d11TexturePoolItem, GpuTextureFormat};
 

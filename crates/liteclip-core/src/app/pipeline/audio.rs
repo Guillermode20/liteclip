@@ -27,7 +27,7 @@ pub struct AudioForwardHandle {
     /// Tracks whether the forwarding thread is expected to be alive
     running: Arc<AtomicBool>,
     /// Shutdown notifier to wake the forwarding thread immediately
-    shutdown_tx: Option<crossbeam::channel::Sender<()>>,
+    shutdown_tx: Option<crossbeam_channel::Sender<()>>,
 }
 
 impl AudioForwardHandle {
@@ -35,7 +35,7 @@ impl AudioForwardHandle {
     fn new(
         thread: JoinHandle<()>,
         running: Arc<AtomicBool>,
-        shutdown_tx: crossbeam::channel::Sender<()>,
+        shutdown_tx: crossbeam_channel::Sender<()>,
     ) -> Self {
         Self {
             thread: Some(thread),
@@ -158,14 +158,14 @@ pub fn start_audio_capture(
     // Shutdown coordination
     let running = Arc::new(AtomicBool::new(true));
     let running_clone = Arc::clone(&running);
-    let (shutdown_tx, shutdown_rx) = crossbeam::channel::bounded::<()>(1);
+    let (shutdown_tx, shutdown_rx) = crossbeam_channel::bounded::<()>(1);
 
     let thread = std::thread::spawn(move || {
         let mut forwarded_packets = 0u64;
         let mut packet_batch = Vec::with_capacity(32);
 
         while running_clone.load(Ordering::SeqCst) {
-            crossbeam::channel::select! {
+            crossbeam_channel::select! {
                 recv(shutdown_rx) -> _ => {
                     break;
                 }

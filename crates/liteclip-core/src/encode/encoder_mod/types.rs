@@ -6,7 +6,7 @@
 #[cfg(windows)]
 use crate::media::GpuTextureFormat;
 use bytes::Bytes;
-use crossbeam::channel::{Receiver, Sender};
+use crossbeam_channel::{Receiver, Sender};
 
 /// Encoder health events for error propagation.
 #[derive(Debug, Clone)]

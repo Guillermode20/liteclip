@@ -6,12 +6,13 @@ use crate::capture::{
 use crate::runtime_budget::{RuntimeBudgetGovernor, RuntimeBudgetInput};
 use anyhow::{bail, Context, Result};
 use bytes::Bytes;
-use crossbeam::channel::{bounded, Receiver, Sender};
+use crossbeam_channel::{bounded, Receiver, Sender};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
+use windows::core::Interface;
 use windows::Win32::Foundation::{CloseHandle, BOOL, HANDLE};
 use windows::Win32::Graphics::Direct3D11::{
     ID3D11Device, ID3D11Device5, ID3D11DeviceContext, ID3D11Fence, ID3D11Multithread,
@@ -29,7 +30,6 @@ use windows::Win32::Graphics::Dxgi::{
     DXGI_OUTDUPL_FRAME_INFO,
 };
 use windows::Win32::System::Performance::QueryPerformanceCounter;
-use windows_core::Interface;
 
 pub(super) struct Nv12TexturePool {
     pub(super) available: Vec<D3d11TexturePoolItem>,
@@ -311,7 +311,7 @@ impl DxgiCaptureState {
                             Some(fence) => match fence.CreateSharedHandle(
                                 None,
                                 0x1000_0000u32,
-                                windows_core::PCWSTR::null(),
+                                windows::core::PCWSTR::null(),
                             ) {
                                 Ok(handle) => {
                                     info!("BGRA sync fence created for cross-device GPU copies");
@@ -358,7 +358,7 @@ impl DxgiCaptureState {
                                     match fence.CreateSharedHandle(
                                         None,
                                         0x1000_0000u32,
-                                        windows_core::PCWSTR::null(),
+                                        windows::core::PCWSTR::null(),
                                     ) {
                                         Ok(handle) => {
                                             info!("NV12 sync fence created (GPU-side cross-device ordering)");
@@ -962,7 +962,7 @@ impl DxgiCapture {
                                 }
                             }
                         }
-                        Err(crossbeam::channel::TrySendError::Full(_frame)) => {
+                        Err(crossbeam_channel::TrySendError::Full(_frame)) => {
                             dropped_count += 1;
                             window_drops += 1;
                             error_count = 0;
@@ -971,7 +971,7 @@ impl DxgiCapture {
                                 warn!("Dropped {} frames (encoder behind)", dropped_count);
                             }
                         }
-                        Err(crossbeam::channel::TrySendError::Disconnected(_)) => {
+                        Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
                             info!("Frame channel closed, stopping capture");
                             break;
                         }
@@ -1022,7 +1022,7 @@ impl DxgiCapture {
                             error_count = 0;
                             backpressure.set_encoder_overloaded(false);
                         }
-                        Err(crossbeam::channel::TrySendError::Full(_frame)) => {
+                        Err(crossbeam_channel::TrySendError::Full(_frame)) => {
                             dropped_count += 1;
                             window_drops += 1;
                             error_count = 0;
@@ -1031,7 +1031,7 @@ impl DxgiCapture {
                                 warn!("Dropped {} frames (encoder behind)", dropped_count);
                             }
                         }
-                        Err(crossbeam::channel::TrySendError::Disconnected(_)) => {
+                        Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
                             info!("Frame channel closed, stopping capture");
                             break;
                         }

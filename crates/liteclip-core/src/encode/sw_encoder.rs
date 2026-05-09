@@ -8,7 +8,7 @@
 use super::{EncodedPacket, Encoder, ResolvedEncoderConfig};
 use crate::encode::{EncodeError, EncodeResult};
 use bytes::Bytes;
-use crossbeam::channel::{bounded, Receiver, Sender, TrySendError};
+use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
 use image::{codecs::jpeg::JpegEncoder, ExtendedColorType};
 use std::thread;
 use tracing::{debug, info, warn};
@@ -409,7 +409,7 @@ impl Drop for SoftwareEncoder {
     fn drop(&mut self) {
         // Drop the sender half first: workers blocked on `rx.recv()` will receive a
         // disconnected error and exit their loops cleanly.
-        let (dummy_tx, _) = crossbeam::channel::bounded(0);
+        let (dummy_tx, _) = crossbeam_channel::bounded(0);
         let _ = std::mem::replace(&mut self.worker_tx, dummy_tx);
 
         // Now join every worker so their stacks and `rgb_buf` scratch buffers are freed

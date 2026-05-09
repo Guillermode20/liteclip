@@ -17,7 +17,7 @@
 //! - **Autostart**: Logic for registering the app to run on Windows startup.
 
 use anyhow::Result;
-use crossbeam::channel::{Receiver, Sender};
+use crossbeam_channel::{Receiver, Sender};
 use std::sync::Arc;
 
 pub mod autostart;

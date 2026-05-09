@@ -44,7 +44,7 @@ use self::context::D3d11HardwareContext;
 use super::{EncodedPacket, Encoder, ResolvedEncoderConfig, ResolvedEncoderType, StreamType};
 use crate::encode::{EncodeError, EncodeResult};
 use bytes::Bytes;
-use crossbeam::channel::{bounded, Receiver, Sender};
+use crossbeam_channel::{bounded, Receiver, Sender};
 use ffmpeg::color::{Primaries, Range, Space, TransferCharacteristic};
 use ffmpeg_next as ffmpeg;
 use std::collections::VecDeque;

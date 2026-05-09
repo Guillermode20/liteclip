@@ -8,7 +8,7 @@ use crate::{
     },
 };
 use anyhow::{bail, Context, Result};
-use crossbeam::channel::Receiver;
+use crossbeam_channel::Receiver;
 use tracing::{info, warn};
 
 pub fn start_video_pipeline(

@@ -3,7 +3,7 @@
 use crate::encode::{
     EncodeError, EncodeResult, EncodedPacket, Encoder, ResolvedEncoderConfig, StreamType,
 };
-use crossbeam::channel::{bounded, Receiver, Sender};
+use crossbeam_channel::{bounded, Receiver, Sender};
 use ffmpeg_next as ffmpeg;
 use ffmpeg_next::format::Pixel;
 use std::thread::JoinHandle;

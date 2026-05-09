@@ -3,13 +3,27 @@
 //! Queries the GitHub API for the latest release and compares the tag version
 //! against the compiled-in `CARGO_PKG_VERSION`. Designed for manual invocation
 //! from the Settings GUI.
+//!
+//! This module requires the "updater" feature (enables `ureq`).
+//! Without the feature, stubs return no-update-available.
 
-use anyhow::{Context, Result};
+#[cfg(any(feature = "updater", test))]
+use anyhow::Context;
+use anyhow::Result;
+#[cfg(feature = "updater")]
 use serde::Deserialize;
-use tracing::{debug, info};
+#[cfg(feature = "updater")]
+use tracing::debug;
+use tracing::info;
 
+#[cfg(any(feature = "updater", test))]
+#[cfg_attr(not(feature = "updater"), allow(dead_code))]
 const REPO_OWNER: &str = "Guillermode20";
+#[cfg(any(feature = "updater", test))]
+#[cfg_attr(not(feature = "updater"), allow(dead_code))]
 const REPO_NAME: &str = "liteclip-recorder";
+
+#[cfg(feature = "updater")]
 const API_URL: &str =
     "https://api.github.com/repos/Guillermode20/liteclip-recorder/releases/latest";
 
@@ -22,6 +36,7 @@ pub struct UpdateInfo {
     pub release_url: String,
 }
 
+#[cfg(feature = "updater")]
 /// Parsed subset of the GitHub release API response.
 #[derive(Debug, Deserialize)]
 struct GitHubRelease {
@@ -34,6 +49,7 @@ struct GitHubRelease {
 ///
 /// Returns `Ok(Some(info))` if a newer release is found, `Ok(None)` if
 /// the current version is up to date.
+#[cfg(feature = "updater")]
 pub fn check_for_updates() -> Result<Option<UpdateInfo>> {
     let current = env!("CARGO_PKG_VERSION");
     info!("Checking for updates (current: {})", current);
@@ -76,6 +92,13 @@ pub fn check_for_updates() -> Result<Option<UpdateInfo>> {
     }
 }
 
+/// Stub when the "updater" feature is disabled.
+#[cfg(not(feature = "updater"))]
+pub fn check_for_updates() -> Result<Option<UpdateInfo>> {
+    info!("Update checker disabled (enable 'updater' feature)");
+    Ok(None)
+}
+
 /// Detect whether the app is installed via MSI (Program Files) or is portable.
 ///
 /// Returns `"MSI"` or `"Portable"`.
@@ -93,6 +116,7 @@ pub fn install_type() -> &'static str {
     }
 }
 
+#[cfg(any(feature = "updater", test))]
 /// Compare two semver-like version strings.
 ///
 /// Returns `true` if `latest > current`.
@@ -102,6 +126,7 @@ fn is_newer(latest: &str, current: &str) -> Result<bool> {
     Ok(l > c)
 }
 
+#[cfg(any(feature = "updater", test))]
 fn parse_version(v: &str) -> Result<[u64; 3]> {
     // Strip any pre-release suffix for comparison
     let base = v.split('-').next().unwrap_or(v);
@@ -114,6 +139,7 @@ fn parse_version(v: &str) -> Result<[u64; 3]> {
     ])
 }
 
+#[cfg(any(feature = "updater", test))]
 fn is_prerelease(v: &str) -> bool {
     v.contains("-alpha") || v.contains("-beta") || v.contains("-rc")
 }

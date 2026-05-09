@@ -5,7 +5,7 @@
 
 use super::{AppEvent, HotkeyAction, HotkeyConfig, PlatformCommand, PlatformHandle};
 use anyhow::{Context, Result};
-use crossbeam::channel::{Receiver, Sender};
+use crossbeam_channel::{Receiver, Sender};
 use tracing::{debug, error, info, trace};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -30,8 +30,8 @@ const IDLE_LOOP_SLEEP_MS: u64 = 8;
 pub fn spawn_platform_thread(
     hotkey_config: HotkeyConfig,
 ) -> Result<(PlatformHandle, Receiver<AppEvent>)> {
-    let (event_tx, event_rx) = crossbeam::channel::unbounded::<AppEvent>();
-    let (command_tx, command_rx) = crossbeam::channel::unbounded::<PlatformCommand>();
+    let (event_tx, event_rx) = crossbeam_channel::unbounded::<AppEvent>();
+    let (command_tx, command_rx) = crossbeam_channel::unbounded::<PlatformCommand>();
 
     let handle = std::thread::spawn(move || {
         if let Err(e) = run_platform_loop(event_tx, command_rx, hotkey_config) {

@@ -13,6 +13,8 @@ default-run = "liteclip"
 default = ["ffmpeg"]
 # Forward to engine; gallery also uses ffmpeg-next directly when this is on.
 ffmpeg = ["liteclip-core/ffmpeg"]
+# Update checker (enables ureq dependency)
+updater = ["dep:ureq"]
 # parakeet = ["liteclip-core/parakeet"]
 
 [dependencies]
@@ -22,7 +24,7 @@ liteclip-core = { path = "crates/liteclip-core", default-features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "fs"] }
 
 # Concurrency (platform bridge, gallery decode pipeline)
-crossbeam = "0.8"
+crossbeam-channel = "0.5"
 
 # Logging
 tracing = "0.1"
@@ -31,13 +33,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Error handling
 anyhow = "1"
 
-# Windows APIs (main, platform, detection, gallery D3D decode)
-windows = { version = "0.58", features = ["Win32_Media", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Direct3D11", "Win32_Graphics_Direct3D", "Win32_Graphics_Gdi", "Win32_Media_Audio", "Win32_Media_Audio_Endpoints", "Win32_Media_MediaFoundation", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell_PropertiesSystem", "Win32_Foundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Threading", "Win32_System_Performance", "Win32_System_LibraryLoader", "Win32_Devices_FunctionDiscovery", "Win32_System_JobObjects", "Win32_Security", "Win32_System_Registry", "Win32_System_ProcessStatus"] }
+# Windows APIs (main, platform, detection)
+windows = { version = "0.58", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_System_JobObjects", "Win32_System_Registry"] }
 
 # Utilities
 chrono = "0.4"
-windows-core = "0.58"
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "ico"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "ico"] }
 
 # Tray / GUI
 tray-icon = "0.19"
@@ -52,8 +53,8 @@ rodio = "0.20"
 rustc-hash = "2.0"
 ffmpeg-next = { version = "7.1.0", default-features = false, features = ["codec", "format", "software-scaling", "software-resampling"] }
 
-# Update checker
-ureq = { version = "3", features = ["json"] }
+# Update checker (optional, enabled via "updater" feature)
+ureq = { version = "3", features = ["json"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

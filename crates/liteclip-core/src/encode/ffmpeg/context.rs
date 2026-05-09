@@ -2,11 +2,11 @@ use std::ffi::c_void;
 
 use ffmpeg::format::Pixel;
 use ffmpeg_next as ffmpeg;
+use windows::core::Interface;
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Graphics::Direct3D11::{
     ID3D11Device, ID3D11DeviceContext, ID3D11Fence, ID3D11Texture2D,
 };
-use windows_core::Interface;
 
 use crate::encode::{EncodeError, EncodeResult};
 

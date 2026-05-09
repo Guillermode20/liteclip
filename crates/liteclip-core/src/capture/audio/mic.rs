@@ -4,7 +4,7 @@
 
 use anyhow::{Context, Result};
 use bytes::BytesMut;
-use crossbeam::channel::{bounded, Receiver, Sender};
+use crossbeam_channel::{bounded, Receiver, Sender};
 use nnnoiseless::DenoiseState;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -327,13 +327,13 @@ impl WasapiMicCapture {
             config.channels
         );
 
-        let noise_tx: Option<crossbeam::channel::Sender<RawMicFrame>> =
+        let noise_tx: Option<crossbeam_channel::Sender<RawMicFrame>> =
             if config.bits_per_sample == 16 && config.noise_reduction_enabled {
                 tracing::warn!(
                     "RNNoise: Starting noise thread for {} channels",
                     config.channels
                 );
-                let (tx, rx) = crossbeam::channel::bounded::<RawMicFrame>(64);
+                let (tx, rx) = crossbeam_channel::bounded::<RawMicFrame>(64);
                 let processor = RNNoiseProcessor::new(config.channels as usize);
                 let packet_tx_noise = packet_tx.clone();
                 let running_noise = running.clone();
@@ -654,7 +654,7 @@ struct RawMicFrame {
 }
 
 fn run_noise_thread(
-    raw_rx: crossbeam::channel::Receiver<RawMicFrame>,
+    raw_rx: crossbeam_channel::Receiver<RawMicFrame>,
     packet_tx: Sender<EncodedPacket>,
     mut processor: RNNoiseProcessor,
     running: Arc<AtomicBool>,
@@ -684,7 +684,7 @@ fn run_noise_thread(
                     break;
                 }
             }
-            Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                 if !running.load(Ordering::Relaxed) {
                     break;
                 }

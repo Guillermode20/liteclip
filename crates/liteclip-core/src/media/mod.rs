@@ -48,7 +48,7 @@ pub struct D3d11Frame {
     pub fence_value: u64,
     pub fence_shared_handle: Option<HANDLE>,
     pub pool_item: Option<D3d11TexturePoolItem>,
-    pub return_tx: Option<crossbeam::channel::Sender<D3d11TexturePoolItem>>,
+    pub return_tx: Option<crossbeam_channel::Sender<D3d11TexturePoolItem>>,
 }
 
 #[cfg(windows)]
@@ -86,7 +86,7 @@ impl D3d11Frame {
         pool_item: D3d11TexturePoolItem,
         fence_value: u64,
         fence_shared_handle: Option<HANDLE>,
-        return_tx: crossbeam::channel::Sender<D3d11TexturePoolItem>,
+        return_tx: crossbeam_channel::Sender<D3d11TexturePoolItem>,
     ) -> Self {
         Self {
             device,

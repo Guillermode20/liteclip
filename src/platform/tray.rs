@@ -6,7 +6,7 @@
 //! `update()` loop to drain them.
 
 use anyhow::{Context, Result};
-use crossbeam::channel::Sender;
+use crossbeam_channel::Sender;
 use tracing::warn;
 use tracing::{debug, error, info, trace};
 use tray_icon::{
@@ -106,8 +106,8 @@ impl TrayManager {
                         }
                     }
                 }
-                Err(crossbeam::channel::TryRecvError::Empty) => break,
-                Err(crossbeam::channel::TryRecvError::Disconnected) => {
+                Err(crossbeam_channel::TryRecvError::Empty) => break,
+                Err(crossbeam_channel::TryRecvError::Disconnected) => {
                     warn!("Menu event channel disconnected");
                     break;
                 }
