@@ -624,11 +624,10 @@ impl WasapiMicCapture {
         #[cfg(windows)]
         {
             use windows::Win32::System::Threading::{
-                GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_ABOVE_NORMAL,
+                GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_HIGHEST,
             };
             unsafe {
-                if let Err(e) = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL)
-                {
+                if let Err(e) = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST) {
                     warn!("Failed to set microphone audio thread priority: {}", e);
                 }
             }

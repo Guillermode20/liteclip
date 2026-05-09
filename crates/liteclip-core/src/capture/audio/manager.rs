@@ -222,8 +222,8 @@ impl WasapiAudioManager {
         level_monitor: Option<AudioLevelMonitor>,
     ) {
         let mut mixer = AudioMixer::new(&config);
-        let mut system_packet: Option<EncodedPacket> = None;
-        let mut mic_packet: Option<EncodedPacket> = None;
+        let mut pending_system: Option<EncodedPacket> = None;
+        let mut pending_mic: Option<EncodedPacket> = None;
         let mut forwarded_total: u64 = 0;
         let mut last_peak_decay = Instant::now();
         let mut last_telemetry = Instant::now();
@@ -238,35 +238,41 @@ impl WasapiAudioManager {
             let mut system_disconnected = false;
             let mut mic_disconnected = false;
 
-            // Try to receive system audio packet
-            if system_packet.is_none() {
-                if let Some(rx) = system_rx.as_ref() {
+            // ── Drain-batch: collect ALL available packets from both channels ──
+            let mut batch_system: Vec<EncodedPacket> = pending_system.take().into_iter().collect();
+            let mut batch_mic: Vec<EncodedPacket> = pending_mic.take().into_iter().collect();
+
+            // Drain all available system packets
+            if let Some(rx) = system_rx.as_ref() {
+                loop {
                     match rx.try_recv() {
                         Ok(packet) => {
                             Self::update_system_monitor(level_monitor.as_ref(), &packet);
-                            system_packet = Some(packet);
+                            batch_system.push(packet);
                         }
-                        Err(TryRecvError::Empty) => {}
+                        Err(TryRecvError::Empty) => break,
                         Err(TryRecvError::Disconnected) => {
                             warn!("System audio capture channel disconnected");
                             system_disconnected = true;
+                            break;
                         }
                     }
                 }
             }
 
-            // Try to receive microphone audio packet
-            if mic_packet.is_none() {
-                if let Some(rx) = mic_rx.as_ref() {
+            // Drain all available mic packets
+            if let Some(rx) = mic_rx.as_ref() {
+                loop {
                     match rx.try_recv() {
                         Ok(packet) => {
                             Self::update_mic_monitor(level_monitor.as_ref(), &packet);
-                            mic_packet = Some(packet);
+                            batch_mic.push(packet);
                         }
-                        Err(TryRecvError::Empty) => {}
+                        Err(TryRecvError::Empty) => break,
                         Err(TryRecvError::Disconnected) => {
                             warn!("Microphone capture channel disconnected");
                             mic_disconnected = true;
+                            break;
                         }
                     }
                 }
@@ -280,27 +286,32 @@ impl WasapiAudioManager {
                 }
             }
 
-            // Mix as soon as any packet is available.
-            // The mixer itself handles timestamp alignment and timeout behavior.
-            if system_packet.is_some() || mic_packet.is_some() {
-                let mixed_packets = mixer.mix_packets(system_packet.take(), mic_packet.take());
+            // ── Batch process: mix all collected packet pairs ──
+            if !batch_system.is_empty() || !batch_mic.is_empty() {
+                let max_pairs = batch_system.len().max(batch_mic.len());
+                for i in 0..max_pairs {
+                    let sys = batch_system.get(i).cloned();
+                    let mic = batch_mic.get(i).cloned();
+                    let mixed_packets = mixer.mix_packets(sys, mic);
 
-                for mixed_packet in mixed_packets {
-                    if packet_tx.send(mixed_packet).is_err() {
-                        warn!("Audio manager output channel disconnected while forwarding mixed audio");
-                        running.store(false, Ordering::SeqCst);
-                        break 'forward;
-                    }
-                    forwarded_total = forwarded_total.saturating_add(1);
+                    for mixed_packet in mixed_packets {
+                        if packet_tx.send(mixed_packet).is_err() {
+                            warn!("Audio manager output channel disconnected while forwarding mixed audio");
+                            running.store(false, Ordering::SeqCst);
+                            break 'forward;
+                        }
+                        forwarded_total = forwarded_total.saturating_add(1);
 
-                    if forwarded_total == 1 || forwarded_total % 500 == 0 {
-                        debug!(
-                            "Audio forward: {} total packets mixed and forwarded",
-                            forwarded_total
-                        );
+                        if forwarded_total == 1 || forwarded_total % 500 == 0 {
+                            debug!(
+                                "Audio forward: {} total packets mixed and forwarded",
+                                forwarded_total
+                            );
+                        }
                     }
                 }
             } else {
+                // No packets available via try_recv — use blocking select! to wait.
                 match (system_rx.as_ref(), mic_rx.as_ref()) {
                     (Some(system), Some(mic)) => {
                         crossbeam_channel::select! {
@@ -314,7 +325,7 @@ impl WasapiAudioManager {
                                 match msg {
                                     Ok(packet) => {
                                         Self::update_system_monitor(level_monitor.as_ref(), &packet);
-                                        system_packet = Some(packet);
+                                        pending_system = Some(packet);
                                     }
                                     Err(_) => {
                                         warn!("System audio capture channel disconnected");
@@ -326,7 +337,7 @@ impl WasapiAudioManager {
                                 match msg {
                                     Ok(packet) => {
                                         Self::update_mic_monitor(level_monitor.as_ref(), &packet);
-                                        mic_packet = Some(packet);
+                                        pending_mic = Some(packet);
                                     }
                                     Err(_) => {
                                         warn!("Microphone capture channel disconnected");
@@ -349,7 +360,7 @@ impl WasapiAudioManager {
                                 match msg {
                                     Ok(packet) => {
                                         Self::update_system_monitor(level_monitor.as_ref(), &packet);
-                                        system_packet = Some(packet);
+                                        pending_system = Some(packet);
                                     }
                                     Err(_) => {
                                         warn!("System audio capture channel disconnected");
@@ -372,7 +383,7 @@ impl WasapiAudioManager {
                                 match msg {
                                     Ok(packet) => {
                                         Self::update_mic_monitor(level_monitor.as_ref(), &packet);
-                                        mic_packet = Some(packet);
+                                        pending_mic = Some(packet);
                                     }
                                     Err(_) => {
                                         warn!("Microphone capture channel disconnected");

@@ -420,11 +420,10 @@ impl WasapiSystemCapture {
         #[cfg(windows)]
         {
             use windows::Win32::System::Threading::{
-                GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_ABOVE_NORMAL,
+                GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_HIGHEST,
             };
             unsafe {
-                if let Err(e) = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL)
-                {
+                if let Err(e) = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST) {
                     warn!("Failed to set system audio thread priority: {}", e);
                 }
             }
