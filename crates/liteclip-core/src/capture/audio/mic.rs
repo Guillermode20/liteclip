@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use bytes::BytesMut;
 use crossbeam_channel::{bounded, Receiver, Sender};
 use nnnoiseless::DenoiseState;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -638,8 +639,9 @@ impl WasapiMicCapture {
 const AUDIO_FRAME_SIZE: usize = 480;
 const MIC_BUFFER_SHRINK_INTERVAL_PACKETS: u64 = 1024;
 const MIC_BUFFER_SHRINK_MULTIPLIER: usize = 2;
-const RNNOISE_QUEUE_BASE_CAPACITY: usize = AUDIO_FRAME_SIZE * 16;
-const RNNOISE_QUEUE_SHRINK_THRESHOLD: usize = AUDIO_FRAME_SIZE * 64;
+/// Maximum number of RNNoise frames (each 10ms) to buffer in the input queue.
+/// 64 frames = 640ms backlog before discarding oldest frames.
+const MAX_RNNOISE_QUEUE_FRAMES: usize = 64;
 const MIC_STARTUP_WAIT_INTERVAL_MS: u64 = 50;
 const MIC_STARTUP_TIMEOUT_ATTEMPTS: u32 = 120;
 const MIC_RECOVERY_MAX_ATTEMPTS: u32 = 8;
@@ -713,10 +715,16 @@ struct RNNoiseProcessor {
     channels: usize,
     /// Single RNNoise pass — chaining two passes doubles CPU cost without quality gain.
     state: Box<DenoiseState<'static>>,
-    in_buf: Vec<f32>,
-    in_head: usize,
-    out_buf: Vec<f32>,
-    out_head: usize,
+    /// Buffer for mono samples that haven't formed a complete frame yet (< AUDIO_FRAME_SIZE).
+    pending_in: Vec<f32>,
+    /// Queue of complete input frames (each 480 f32 samples) ready for RNNoise processing.
+    /// Eliminates per-call Vec compaction (compact_queue) by using O(1) push_back/pop_front.
+    in_queue: VecDeque<[f32; AUDIO_FRAME_SIZE]>,
+    /// Queue of processed output frames from RNNoise, ready to be written back.
+    /// Each element is a complete 480-sample frame; out_offset tracks partial consumption.
+    out_queue: VecDeque<[f32; AUDIO_FRAME_SIZE]>,
+    /// Read offset within the front element of out_queue (0..AUDIO_FRAME_SIZE).
+    out_offset: usize,
     /// Discord-style adaptive noise gate state
     gate_gain: f32,
     /// Smoothed speech probability for adaptive behavior
@@ -768,15 +776,13 @@ impl RNNoiseProcessor {
     const HP_COEFF: f32 = 0.9895;
 
     fn new(channels: usize) -> Self {
-        let in_buf = Vec::with_capacity(AUDIO_FRAME_SIZE * 16);
-        let out_buf = Vec::with_capacity(AUDIO_FRAME_SIZE * 16);
         Self {
             channels,
             state: DenoiseState::new(),
-            in_buf,
-            in_head: 0,
-            out_buf,
-            out_head: 0,
+            pending_in: Vec::new(),
+            in_queue: VecDeque::with_capacity(MAX_RNNOISE_QUEUE_FRAMES),
+            out_queue: VecDeque::with_capacity(MAX_RNNOISE_QUEUE_FRAMES),
+            out_offset: 0,
             gate_gain: Self::GATE_MAX_GAIN,
             speech_presence: 0.0,
             hold_counter: 0,
@@ -788,60 +794,93 @@ impl RNNoiseProcessor {
     }
 
     #[inline]
-    fn compact_queue(buf: &mut Vec<f32>, head: &mut usize) {
-        if *head > 0 && *head >= buf.len() / 2 {
-            let remaining = buf.len() - *head;
-            buf.copy_within(*head.., 0);
-            buf.truncate(remaining);
-            *head = 0;
-        }
-
-        if buf.capacity() > RNNOISE_QUEUE_SHRINK_THRESHOLD
-            && buf.len().saturating_mul(4) < buf.capacity()
-        {
-            buf.shrink_to(buf.len().max(RNNOISE_QUEUE_BASE_CAPACITY));
-        }
-    }
-
-    #[inline]
     fn clamp_i16(sample: f32) -> i16 {
         sample.clamp(-32768.0, 32767.0).round() as i16
     }
 
     /// Write denoised+gated mono output directly to all channels.
     /// Mic audio is effectively mono — broadcasting preserves quality.
+    /// Consumes up to `available` f32 samples from the front of `out_queue`,
+    /// popping frames and advancing `out_offset` as they are fully consumed.
     #[inline]
     fn write_denoised_output(&mut self, samples: &mut [i16], available: usize) {
-        let oh = self.out_head;
-        let out_slice = &self.out_buf[oh..oh + available];
-
         // Fast path: if gate is fully closed, just zero out the samples
         if self.gate_gain <= Self::GATE_FLOOR + 0.0001 {
             let total_samples = available * self.channels;
             samples[..total_samples].fill(0);
+            self.advance_out_queue(available);
             return;
         }
 
-        match self.channels {
-            1 => {
-                for (s, &v) in samples.iter_mut().zip(out_slice) {
-                    *s = Self::clamp_i16(v);
-                }
-            }
-            2 => {
-                for (chunk, &v) in samples.chunks_exact_mut(2).zip(out_slice) {
-                    let s = Self::clamp_i16(v);
-                    chunk[0] = s;
-                    chunk[1] = s;
-                }
-            }
-            _ => {
-                for (chunk, &v) in samples.chunks_exact_mut(self.channels).zip(out_slice) {
-                    let s = Self::clamp_i16(v);
-                    for ch in chunk {
-                        *ch = s;
+        let mut remaining = available;
+        let mut write_idx = 0;
+
+        while remaining > 0 {
+            let Some(frame) = self.out_queue.front() else {
+                break;
+            };
+            let frame_available = AUDIO_FRAME_SIZE - self.out_offset;
+            let to_consume = remaining.min(frame_available);
+            let out_slice = &frame[self.out_offset..self.out_offset + to_consume];
+
+            match self.channels {
+                1 => {
+                    for (s, &v) in samples[write_idx..write_idx + to_consume]
+                        .iter_mut()
+                        .zip(out_slice)
+                    {
+                        *s = Self::clamp_i16(v);
                     }
                 }
+                2 => {
+                    for (chunk, &v) in samples[write_idx..write_idx + to_consume * 2]
+                        .chunks_exact_mut(2)
+                        .zip(out_slice)
+                    {
+                        let s = Self::clamp_i16(v);
+                        chunk[0] = s;
+                        chunk[1] = s;
+                    }
+                }
+                _ => {
+                    for (chunk, &v) in samples[write_idx..write_idx + to_consume * self.channels]
+                        .chunks_exact_mut(self.channels)
+                        .zip(out_slice)
+                    {
+                        let s = Self::clamp_i16(v);
+                        for ch in chunk {
+                            *ch = s;
+                        }
+                    }
+                }
+            }
+
+            write_idx += to_consume * self.channels;
+            self.out_offset += to_consume;
+            remaining -= to_consume;
+
+            if self.out_offset >= AUDIO_FRAME_SIZE {
+                self.out_queue.pop_front();
+                self.out_offset = 0;
+            }
+        }
+    }
+
+    /// Advance out_queue by `count` f32 samples without writing (used by silent path).
+    #[inline]
+    fn advance_out_queue(&mut self, count: usize) {
+        let mut remaining = count;
+        while remaining > 0 {
+            if self.out_queue.is_empty() {
+                break;
+            }
+            let frame_available = AUDIO_FRAME_SIZE - self.out_offset;
+            let to_consume = remaining.min(frame_available);
+            self.out_offset += to_consume;
+            remaining -= to_consume;
+            if self.out_offset >= AUDIO_FRAME_SIZE {
+                self.out_queue.pop_front();
+                self.out_offset = 0;
             }
         }
     }
@@ -862,10 +901,10 @@ impl RNNoiseProcessor {
         let samples =
             unsafe { std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut i16, sample_count) };
 
-        // Convert interleaved input to mono and apply HP filter directly into in_buf
-        let start_idx = self.in_buf.len();
-        self.in_buf.resize(start_idx + frame_count, 0.0);
-        let dest = &mut self.in_buf[start_idx..];
+        // Convert interleaved input to mono and apply HP filter into pending_in buffer.
+        let prev_len = self.pending_in.len();
+        self.pending_in.resize(prev_len + frame_count, 0.0);
+        let dest = &mut self.pending_in[prev_len..];
 
         let mut hp_x = self.hp_x_prev;
         let mut hp_y = self.hp_y_prev;
@@ -907,23 +946,29 @@ impl RNNoiseProcessor {
         self.hp_x_prev = hp_x;
         self.hp_y_prev = hp_y;
 
-        // Hard cap: if the write-ahead backlog exceeds 640 ms (64 × 480-sample frames),
-        // discard the oldest frames to prevent in_buf from growing unboundedly under
-        // sustained mic input when the consumer is slow.
-        const MAX_IN_BUF_FRAMES: usize = AUDIO_FRAME_SIZE * 64;
-        let backlog = self.in_buf.len().saturating_sub(self.in_head);
-        if backlog > MAX_IN_BUF_FRAMES {
-            self.in_head = self.in_buf.len() - MAX_IN_BUF_FRAMES;
-            Self::compact_queue(&mut self.in_buf, &mut self.in_head);
+        // Form complete RNNoise frames (480 samples each) from pending_in and push to in_queue.
+        // Partial frames (< AUDIO_FRAME_SIZE) remain in pending_in for the next call.
+        let mut read_idx = 0;
+        while read_idx + AUDIO_FRAME_SIZE <= self.pending_in.len() {
+            let mut frame = [0.0; AUDIO_FRAME_SIZE];
+            frame.copy_from_slice(&self.pending_in[read_idx..read_idx + AUDIO_FRAME_SIZE]);
+            self.in_queue.push_back(frame);
+            read_idx += AUDIO_FRAME_SIZE;
+        }
+        // Keep any leftover partial frame data for next time.
+        self.pending_in.drain(..read_idx);
+
+        // Hard cap: if the write-ahead backlog exceeds MAX_RNNOISE_QUEUE_FRAMES (640ms),
+        // discard the oldest frames to prevent unbounded growth under sustained mic input.
+        while self.in_queue.len() > MAX_RNNOISE_QUEUE_FRAMES {
+            self.in_queue.pop_front();
         }
 
         // Process complete RNNoise frames (480 samples = 10 ms each)
-        while (self.in_buf.len() - self.in_head) >= AUDIO_FRAME_SIZE {
-            let start = self.in_head;
+        while let Some(frame) = self.in_queue.pop_front() {
             // nnnoiseless process_frame expects exactly 480 samples.
             // We use frame_in and frame_out to ensure memory alignment and contiguous slices.
-            self.frame_in
-                .copy_from_slice(&self.in_buf[start..start + AUDIO_FRAME_SIZE]);
+            self.frame_in.copy_from_slice(&frame);
 
             let speech_prob = self
                 .state
@@ -938,23 +983,14 @@ impl RNNoiseProcessor {
                     *s *= g;
                 }
             }
-            self.out_buf.extend_from_slice(self.frame_out.as_slice());
-
-            self.in_head += AUDIO_FRAME_SIZE;
+            self.out_queue.push_back(*self.frame_out);
         }
-        Self::compact_queue(&mut self.in_buf, &mut self.in_head);
 
         // Write denoised mono directly to all output channels.
-        let available = (self.out_buf.len() - self.out_head).min(frame_count);
+        // Available output is limited by both what's in out_queue and frame_count.
+        let out_available = self.out_queue.len() * AUDIO_FRAME_SIZE - self.out_offset;
+        let available = out_available.min(frame_count);
         self.write_denoised_output(samples, available);
-
-        if available > 0 {
-            self.out_head += available;
-            Self::compact_queue(&mut self.out_buf, &mut self.out_head);
-        }
-
-        // For remaining frames with no denoised output yet, we leave original as is.
-        // HP filter is already applied to input but only for RNNoise queue.
     }
 
     /// Discord-style adaptive noise gate.
