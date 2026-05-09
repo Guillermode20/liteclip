@@ -8,9 +8,8 @@ use windows::Win32::Graphics::Direct3D11::{
     ID3D11Device, ID3D11DeviceContext, ID3D11Fence, ID3D11Texture2D,
 };
 
-use crate::encode::{EncodeError, EncodeResult};
-
 use super::FfmpegEncoder;
+use crate::encode::{EncodeError, EncodeResult};
 
 const MAX_CACHED_SHARED_TEXTURES: usize = 32;
 
@@ -66,6 +65,91 @@ impl Drop for D3d11HardwareContext {
     }
 }
 
+/// Create a new FFmpeg D3D11 hardware frames context from an existing device context.
+///
+/// This is a free function so it can be used both during full context creation
+/// and when recreating only the frames context on resolution change.
+pub(super) fn create_hw_frames_ctx_with_pool_size(
+    device_ctx_ref: *mut ffmpeg::ffi::AVBufferRef,
+    width: u32,
+    height: u32,
+    sw_format: Pixel,
+    initial_pool_size: i32,
+) -> EncodeResult<*mut ffmpeg::ffi::AVBufferRef> {
+    unsafe {
+        let frames_ctx_ref = ffmpeg::ffi::av_hwframe_ctx_alloc(device_ctx_ref);
+        if frames_ctx_ref.is_null() {
+            return Err(EncodeError::msg(
+                "Failed to allocate FFmpeg D3D11 frame context",
+            ));
+        }
+
+        let frames_ctx = (*frames_ctx_ref).data as *mut ffmpeg::ffi::AVHWFramesContext;
+        (*frames_ctx).format = Pixel::D3D11.into();
+        (*frames_ctx).sw_format = sw_format.into();
+        (*frames_ctx).width = width as i32;
+        (*frames_ctx).height = height as i32;
+        (*frames_ctx).initial_pool_size = initial_pool_size;
+
+        let init_frames_result = ffmpeg::ffi::av_hwframe_ctx_init(frames_ctx_ref);
+        if init_frames_result < 0 {
+            let mut frames_ctx_ref = frames_ctx_ref;
+            ffmpeg::ffi::av_buffer_unref(&mut frames_ctx_ref);
+            return Err(EncodeError::msg(format!(
+                "Failed to initialize FFmpeg D3D11 frame context with pool size {}: {}",
+                initial_pool_size, init_frames_result
+            )));
+        }
+
+        Ok(frames_ctx_ref)
+    }
+}
+
+impl D3d11HardwareContext {
+    /// Recreate only the frames context (and reusable hw frame) when the resolution changes
+    /// but the D3D11 device remains the same.
+    ///
+    /// This avoids the expensive `av_hwdevice_ctx_alloc` + `av_hwdevice_ctx_init` calls
+    /// that typically involve D3D11 device queries and driver negotiation.
+    pub(super) fn recreate_frames_context(&mut self, width: u32, height: u32) -> EncodeResult<()> {
+        unsafe {
+            if !self.reusable_hw_frame.is_null() {
+                ffmpeg::ffi::av_frame_free(&mut self.reusable_hw_frame);
+            }
+            if !self.frames_ctx_ref.is_null() {
+                ffmpeg::ffi::av_buffer_unref(&mut self.frames_ctx_ref);
+            }
+        }
+
+        // Create new frames context from the existing device context
+        let frames_ctx_ref = create_hw_frames_ctx_with_pool_size(
+            self.device_ctx_ref,
+            width,
+            height,
+            Pixel::NV12,
+            0,
+        )?;
+
+        let reusable_hw_frame = unsafe { ffmpeg::ffi::av_frame_alloc() };
+        if reusable_hw_frame.is_null() {
+            unsafe {
+                let mut frames_ctx_ref = frames_ctx_ref;
+                ffmpeg::ffi::av_buffer_unref(&mut frames_ctx_ref);
+            }
+            return Err(EncodeError::msg(
+                "Failed to allocate reusable hardware frame",
+            ));
+        }
+
+        // Clear cached shared textures since resolution changed
+        self.cached_shared_textures.clear();
+        self.frames_ctx_ref = frames_ctx_ref;
+        self.reusable_hw_frame = reusable_hw_frame;
+
+        Ok(())
+    }
+}
+
 impl FfmpegEncoder {
     pub(super) fn create_d3d11_hardware_context_from_device(
         &self,
@@ -108,7 +192,7 @@ impl FfmpegEncoder {
                 )));
             }
 
-            let mut frames_ctx_ref = Self::create_hw_frames_ctx_with_pool_size(
+            let mut frames_ctx_ref = create_hw_frames_ctx_with_pool_size(
                 device_ctx_ref,
                 width,
                 height,
@@ -135,42 +219,6 @@ impl FfmpegEncoder {
                 cached_shared_textures: Vec::new(),
                 is_shared_device: true,
             })
-        }
-    }
-
-    pub(super) fn create_hw_frames_ctx_with_pool_size(
-        device_ctx_ref: *mut ffmpeg::ffi::AVBufferRef,
-        width: u32,
-        height: u32,
-        sw_format: Pixel,
-        initial_pool_size: i32,
-    ) -> EncodeResult<*mut ffmpeg::ffi::AVBufferRef> {
-        unsafe {
-            let frames_ctx_ref = ffmpeg::ffi::av_hwframe_ctx_alloc(device_ctx_ref);
-            if frames_ctx_ref.is_null() {
-                return Err(EncodeError::msg(
-                    "Failed to allocate FFmpeg D3D11 frame context",
-                ));
-            }
-
-            let frames_ctx = (*frames_ctx_ref).data as *mut ffmpeg::ffi::AVHWFramesContext;
-            (*frames_ctx).format = Pixel::D3D11.into();
-            (*frames_ctx).sw_format = sw_format.into();
-            (*frames_ctx).width = width as i32;
-            (*frames_ctx).height = height as i32;
-            (*frames_ctx).initial_pool_size = initial_pool_size;
-
-            let init_frames_result = ffmpeg::ffi::av_hwframe_ctx_init(frames_ctx_ref);
-            if init_frames_result < 0 {
-                let mut frames_ctx_ref = frames_ctx_ref;
-                ffmpeg::ffi::av_buffer_unref(&mut frames_ctx_ref);
-                return Err(EncodeError::msg(format!(
-                    "Failed to initialize FFmpeg D3D11 frame context with pool size {}: {}",
-                    initial_pool_size, init_frames_result
-                )));
-            }
-
-            Ok(frames_ctx_ref)
         }
     }
 

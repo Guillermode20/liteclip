@@ -9,6 +9,8 @@ use ffmpeg_next::format::Pixel;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 #[cfg(windows)]
+use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1};
+#[cfg(windows)]
 use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority};
 
 use super::types::{
@@ -237,9 +239,48 @@ fn probe_encoder_available(encoder_name: &str) -> bool {
     }
 }
 
+/// Lightweight GPU vendor pre-check via DXGI adapter enumeration.
+///
+/// Checks if any DXGI adapter has the given PCI vendor ID. This avoids
+/// the overhead of a full FFmpeg encoder probe (which creates D3D11 devices
+/// and opens encoder contexts) when the vendor's GPU is not present.
+///
+/// Vendor IDs:
+/// - NVIDIA: 0x10DE
+/// - AMD:    0x1002
+/// - Intel:  0x8086
+#[cfg(windows)]
+fn has_gpu_vendor(vendor_id: u32) -> bool {
+    let factory: IDXGIFactory1 = match unsafe { CreateDXGIFactory1() } {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+
+    let mut index = 0u32;
+    loop {
+        let adapter: IDXGIAdapter1 = match unsafe { factory.EnumAdapters1(index) } {
+            Ok(a) => a,
+            Err(_) => break,
+        };
+        index += 1;
+
+        // SAFETY: GetDesc1 returns DXGI_ADAPTER_DESC1 which contains VendorId.
+        let Ok(desc) = (unsafe { adapter.GetDesc1() }) else {
+            continue;
+        };
+        if desc.VendorId == vendor_id {
+            return true;
+        }
+    }
+    false
+}
+
 /// Detect available hardware encoder (HEVC-only)
 ///
 /// Priority order: NVENC → AMF → QSV
+///
+/// Uses a lightweight DXGI vendor pre-check before the full FFmpeg encoder probe
+/// to skip non-existent vendors entirely, avoiding expensive GPU driver interactions.
 ///
 /// Changing this order or codec names requires updating the contributor checklist in `encode::ffmpeg`.
 ///
@@ -251,19 +292,21 @@ pub fn detect_hardware_encoder() -> HardwareEncoder {
     debug!("Detecting hardware encoders for HEVC...");
 
     // HEVC encoders only
-    let nvenc_name = "hevc_nvenc";
-    let amf_name = "hevc_amf";
-    let qsv_name = "hevc_qsv";
+    const NVIDIA_VENDOR_ID: u32 = 0x10DE;
+    const AMD_VENDOR_ID: u32 = 0x1002;
+    const INTEL_VENDOR_ID: u32 = 0x8086;
 
-    if probe_encoder_available(nvenc_name) {
+    // Lightweight GPU vendor pre-checks: skip FFmpeg probe if the vendor's GPU
+    // isn't present in the system, avoids expensive driver interaction per probe.
+    if has_gpu_vendor(NVIDIA_VENDOR_ID) && probe_encoder_available("hevc_nvenc") {
         info!("Using NVIDIA NVENC encoder");
         return HardwareEncoder::Nvenc;
     }
-    if probe_encoder_available(amf_name) {
+    if has_gpu_vendor(AMD_VENDOR_ID) && probe_encoder_available("hevc_amf") {
         info!("Using AMD AMF encoder");
         return HardwareEncoder::Amf;
     }
-    if probe_encoder_available(qsv_name) {
+    if has_gpu_vendor(INTEL_VENDOR_ID) && probe_encoder_available("hevc_qsv") {
         info!("Using Intel QSV encoder");
         return HardwareEncoder::Qsv;
     }

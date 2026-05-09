@@ -110,9 +110,23 @@ impl FfmpegEncoder {
             self.config.resolution
         };
 
-        // Reuse capture device (Optimization 4)
-        let hw_context =
-            self.create_d3d11_hardware_context_from_device(&gpu_frame.device, out_w, out_h)?;
+        // Cache D3D11 hardware context across encoder re-initializations.
+        // When the source device is the same, only recreate the frames context
+        // on resolution change — avoids expensive av_hwdevice_ctx_alloc + init.
+        let hw_context = if self.hw_context.is_some() {
+            // Source device is the same (single capture device), reuse device part
+            let ctx = self.hw_context.as_mut().unwrap();
+            if ctx.is_shared_device {
+                info!(
+                    "AMF resolution change ({}x{}), reusing cached D3D11 device context",
+                    out_w, out_h
+                );
+                ctx.recreate_frames_context(out_w, out_h)?;
+            }
+            self.hw_context.take().unwrap()
+        } else {
+            self.create_d3d11_hardware_context_from_device(&gpu_frame.device, out_w, out_h)?
+        };
 
         let mut encoder = ffmpeg::codec::context::Context::new_with_codec(codec)
             .encoder()
