@@ -237,24 +237,31 @@ pub struct LockFreeReplayBuffer {
     inner: Arc<LockFreeInner>,
 }
 
+#[repr(align(128))]
 struct LockFreeInner {
-    slots: Box<[Slot]>,
-    capacity: usize,
-    mask: usize,
-    max_duration_qpc: i64,
+    // ── Producer-hot atomics (frequently written by the single producer thread) ──
     write_idx: AtomicUsize,
     evict_frontier: AtomicUsize,
-    max_memory_bytes: usize,
     total_bytes: AtomicUsize,
     keyframe_count: AtomicUsize,
     newest_pts: AtomicI64,
     has_wrapped: AtomicBool,
-    restart_generation: AtomicUsize,
-    param_cache: std::sync::Mutex<ParameterCache>,
     param_cache_complete: AtomicBool,
     param_cache_pushes_since_complete: AtomicUsize,
-    first_video_info: std::sync::Mutex<Option<(usize, FirstVideoKind)>>,
+    // Pad to 128 bytes so consumer-cold group starts on a separate cache line,
+    // preventing false sharing between producer-witten atomics and consumer-read fields.
+    _pad1: [u8; 72],
+
+    // ── Consumer-cold fields (read-only after init, rarely written, or mutex-protected) ──
+    slots: Box<[Slot]>,
+    capacity: usize,
+    mask: usize,
+    max_duration_qpc: i64,
+    max_memory_bytes: usize,
+    restart_generation: AtomicUsize,
     outstanding_snapshot_bytes: AtomicUsize,
+    param_cache: std::sync::Mutex<ParameterCache>,
+    first_video_info: std::sync::Mutex<Option<(usize, FirstVideoKind)>>,
 }
 
 #[repr(align(64))]
@@ -333,23 +340,24 @@ impl LockFreeReplayBuffer {
 
         Ok(Self {
             inner: Arc::new(LockFreeInner {
-                slots: slots.into_boxed_slice(),
-                capacity,
-                mask,
-                max_duration_qpc,
                 write_idx: AtomicUsize::new(0),
                 evict_frontier: AtomicUsize::new(0),
-                max_memory_bytes,
                 total_bytes: AtomicUsize::new(0),
                 keyframe_count: AtomicUsize::new(0),
                 newest_pts: AtomicI64::new(0),
                 has_wrapped: AtomicBool::new(false),
-                restart_generation: AtomicUsize::new(0),
-                param_cache: std::sync::Mutex::new(ParameterCache::default()),
                 param_cache_complete: AtomicBool::new(false),
                 param_cache_pushes_since_complete: AtomicUsize::new(0),
-                first_video_info: std::sync::Mutex::new(None),
+                _pad1: [0u8; 72],
+                slots: slots.into_boxed_slice(),
+                capacity,
+                mask,
+                max_duration_qpc,
+                max_memory_bytes,
+                restart_generation: AtomicUsize::new(0),
                 outstanding_snapshot_bytes: AtomicUsize::new(0),
+                param_cache: std::sync::Mutex::new(ParameterCache::default()),
+                first_video_info: std::sync::Mutex::new(None),
             }),
         })
     }
@@ -441,17 +449,18 @@ impl LockFreeReplayBuffer {
             let old_was_keyframe = old.as_ref().is_some_and(|p| p.is_keyframe);
             *packet_guard = Some(packet);
             // Account for new packet bytes immediately, inside the lock.
-            // Use Release ordering to "publish" the packet write to other threads.
-            inner.total_bytes.fetch_add(packet_size, Ordering::Release);
+            // The parking_lot::Mutex already provides sequential consistency for
+            // the critical section, so Relaxed ordering is sufficient here.
+            inner.total_bytes.fetch_add(packet_size, Ordering::Relaxed);
             if old.is_some() {
-                // Release ordering ensures the packet removal is visible before counter update
-                inner.total_bytes.fetch_sub(old_size, Ordering::Release);
+                // The mutex ensures visibility of the packet removal before counter update
+                inner.total_bytes.fetch_sub(old_size, Ordering::Relaxed);
                 if old_was_keyframe {
-                    inner.keyframe_count.fetch_sub(1, Ordering::Release);
+                    inner.keyframe_count.fetch_sub(1, Ordering::Relaxed);
                 }
             }
             if is_keyframe {
-                inner.keyframe_count.fetch_add(1, Ordering::Release);
+                inner.keyframe_count.fetch_add(1, Ordering::Relaxed);
             }
             old_size
         };
@@ -526,8 +535,10 @@ impl LockFreeReplayBuffer {
         // Batch eviction acquires multiple slot locks in a tight loop to reduce
         // contention compared to one-by-one eviction with full push path overhead.
         if inner.max_memory_bytes > 0 {
-            // Use Acquire ordering to see latest writes from producer thread
-            let current_total = inner.total_bytes.load(Ordering::Acquire);
+            // Use Relaxed ordering — the parking_lot::Mutex lock/unlock in the eviction
+            // loop below provides the necessary happens-before synchronization. Exact
+            // memory pressure tracking doesn't require sequential consistency.
+            let current_total = inner.total_bytes.load(Ordering::Relaxed);
             let memory_ratio = current_total as f32 / inner.max_memory_bytes as f32;
 
             // Determine if we need eviction and how aggressively
@@ -550,8 +561,10 @@ impl LockFreeReplayBuffer {
                 };
                 let target_bytes = (inner.max_memory_bytes as f32 * target_ratio) as usize;
 
-                // Batch eviction loop - Acquire to see latest counter updates
-                while inner.total_bytes.load(Ordering::Acquire) > target_bytes {
+                // Batch eviction loop — Relaxed ordering is sufficient because the
+                // parking_lot::Mutex lock/unlock inside each iteration provides
+                // the happens-before synchronization needed for memory accounting.
+                while inner.total_bytes.load(Ordering::Relaxed) > target_bytes {
                     // Collect a batch of slots to evict
                     let mut batch_evicted = 0usize;
 
@@ -577,10 +590,11 @@ impl LockFreeReplayBuffer {
                             let mut guard = slot.packet.lock();
                             if let Some(old) = guard.take() {
                                 let old_len = old.data.len();
-                                // Release ordering ensures packet removal is visible before counter update
-                                inner.total_bytes.fetch_sub(old_len, Ordering::Release);
+                                // The parking_lot::Mutex provides sequential consistency,
+                                // so Relaxed ordering is sufficient for counter updates.
+                                inner.total_bytes.fetch_sub(old_len, Ordering::Relaxed);
                                 if old.is_keyframe {
-                                    inner.keyframe_count.fetch_sub(1, Ordering::Release);
+                                    inner.keyframe_count.fetch_sub(1, Ordering::Relaxed);
                                     evicted_keyframes += 1;
                                 }
                                 evicted_bytes += old_len;
@@ -639,10 +653,11 @@ impl LockFreeReplayBuffer {
                     let mut guard = slot.packet.lock();
                     if let Some(removed) = guard.take() {
                         let rm = removed.data.len();
-                        // Release ordering ensures packet removal is visible before counter update
-                        inner.total_bytes.fetch_sub(rm, Ordering::Release);
+                        // The parking_lot::Mutex provides sequential consistency,
+                        // so Relaxed ordering is sufficient for counter updates.
+                        inner.total_bytes.fetch_sub(rm, Ordering::Relaxed);
                         if removed.is_keyframe {
-                            inner.keyframe_count.fetch_sub(1, Ordering::Release);
+                            inner.keyframe_count.fetch_sub(1, Ordering::Relaxed);
                         }
                         warn!(
                             "Buffer: dropped newest packet ({:.1}KB) to enforce memory cap {:.1}MB",
@@ -691,10 +706,11 @@ impl LockFreeReplayBuffer {
 
             if let Some(old) = guard.take() {
                 let old_len = old.data.len();
-                // Release ordering ensures packet removal is visible before counter update
-                inner.total_bytes.fetch_sub(old_len, Ordering::Release);
+                // The parking_lot::Mutex provides sequential consistency,
+                // so Relaxed ordering is sufficient for counter updates.
+                inner.total_bytes.fetch_sub(old_len, Ordering::Relaxed);
                 if old.is_keyframe {
-                    inner.keyframe_count.fetch_sub(1, Ordering::Release);
+                    inner.keyframe_count.fetch_sub(1, Ordering::Relaxed);
                     duration_evicted_keyframes += 1;
                 }
                 duration_evicted_bytes += old_len;
@@ -1157,9 +1173,11 @@ impl LockFreeReplayBuffer {
             );
         }
 
-        // Aggressively release metas — we no longer need it.
+        // Release metas — we no longer need it.
+        // Note: clear() + drop() is sufficient. Calling shrink_to_fit() before
+        // drop() would only add cost by reallocating a Vec that is about to be
+        // freed anyway.
         metas.clear();
-        metas.shrink_to_fit();
         drop(metas);
 
         // ── Pass 2: selective clone ────────────────────────────────────────
