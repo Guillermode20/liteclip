@@ -1,4 +1,7 @@
+use std::collections::HashMap;
 use std::fs;
+use std::hash::{DefaultHasher, Hasher};
+use std::io::Read;
 use std::path::PathBuf;
 
 /// Where `liteclip.exe` / `liteclip_core.dll` tests land: `target/debug` or `target/release`.
@@ -12,11 +15,64 @@ fn cargo_target_profile_dir() -> Option<PathBuf> {
     out_dir.ancestors().nth(3).map(PathBuf::from)
 }
 
+/// Compute a deterministic hash of a file's contents using DefaultHasher.
+/// Used for change detection: if the hash matches the cached value, the file hasn't changed.
+fn compute_file_hash(path: &std::path::Path) -> u64 {
+    let mut file = fs::File::open(path).expect("Failed to open DLL for hash computation");
+    let mut hasher = DefaultHasher::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let bytes_read = file
+            .read(&mut buf)
+            .expect("Failed to read DLL for hash computation");
+        if bytes_read == 0 {
+            break;
+        }
+        hasher.write(&buf[..bytes_read]);
+    }
+    hasher.finish()
+}
+
+/// Load previously cached DLL hashes from a simple text file format: `filename=hexhash\n`.
+/// Returns an empty map if no cache file exists yet (first build or cache cleared).
+fn load_hash_cache(path: &std::path::Path) -> HashMap<String, u64> {
+    let content = match fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return HashMap::new(),
+    };
+
+    let mut hashes = HashMap::new();
+    for line in content.lines() {
+        if let Some((name, hash_str)) = line.split_once('=') {
+            if let Ok(hash) = u64::from_str_radix(hash_str.trim(), 16) {
+                hashes.insert(name.to_string(), hash);
+            }
+        }
+    }
+    hashes
+}
+
+/// Save DLL hashes to a cache file for comparison on the next build.
+/// Format: `filename=016x-hex-hash\n` (sorted by filename for deterministic output).
+fn save_hash_cache(path: &std::path::Path, hashes: &HashMap<String, u64>) {
+    let mut content = String::new();
+    let mut sorted: Vec<_> = hashes.iter().collect();
+    sorted.sort_by_key(|(k, _)| *k);
+    for (name, hash) in &sorted {
+        content.push_str(&format!("{}={:016x}\n", name, hash));
+    }
+    let _ = fs::write(path, content);
+}
+
 /// `ffmpeg-next` links `FFmpeg` DLLs dynamically on Windows. The loader must find them next to the
 /// `.exe` or on `PATH`, otherwise the process exits with **`STATUS_DLL_NOT_FOUND` (0xc0000135)**
 /// before `main`.
 ///
 /// Copies every `*.dll` from the `FFmpeg` SDK `bin` directory into `target/<profile>/`.
+///
+/// Uses hash-based change detection: each source DLL is hashed and compared against a cached hash
+/// from the previous build. DLLs are only re-copied when their content actually changes, saving
+/// ~20-40 MB of I/O on every `cargo build` that has no FFmpeg changes.
 #[cfg(windows)]
 fn copy_runtime_dlls() {
     println!("cargo:rerun-if-env-changed=FFMPEG_DIR");
@@ -46,11 +102,13 @@ STATUS_DLL_NOT_FOUND (0xc0000135).",
         return;
     }
 
-    println!("cargo:rerun-if-changed={}", ffmpeg_bin_dir.display());
-
     let deps_dir = profile_dir.join("deps");
     let _ = fs::create_dir_all(&profile_dir);
     let _ = fs::create_dir_all(&deps_dir);
+
+    // Load cached hashes from previous build for change detection
+    let cache_path = profile_dir.join(".ffmpeg_dll_hashes");
+    let cached_hashes = load_hash_cache(&cache_path);
 
     let entries = match fs::read_dir(&ffmpeg_bin_dir) {
         Ok(e) => e,
@@ -67,6 +125,7 @@ STATUS_DLL_NOT_FOUND (0xc0000135).",
     let mut copied = 0usize;
     let mut failed = 0usize;
     let mut skipped = 0usize;
+    let mut new_hashes = HashMap::new();
 
     for entry in entries.flatten() {
         let path = entry.path();
@@ -80,12 +139,25 @@ STATUS_DLL_NOT_FOUND (0xc0000135).",
         let Some(name) = path.file_name().map(PathBuf::from) else {
             continue;
         };
+        let name_str = name.to_string_lossy().to_string();
+
+        // Track individual DLL paths so cargo only re-runs this script when a DLL actually changes
+        println!("cargo:rerun-if-changed={}", path.display());
+
+        // Compute hash of source DLL for change detection
+        let source_hash = compute_file_hash(&path);
+        new_hashes.insert(name_str.clone(), source_hash);
+
+        // Check whether the source content has changed since last build
+        let source_unchanged = cached_hashes.get(&name_str) == Some(&source_hash);
+
         // Main binary (e.g. liteclip.exe) loads DLLs from target/debug/.
         for dest_dir in [&profile_dir, &deps_dir] {
             let destination = dest_dir.join(&name);
 
-            // Skip if destination exists (avoids warnings when DLL is locked by running process)
-            if destination.exists() {
+            // Skip if source content is unchanged and destination already exists.
+            // This avoids unnecessary I/O and warnings when DLL is locked by a running process.
+            if source_unchanged && destination.exists() {
                 skipped += 1;
                 continue;
             }
@@ -104,6 +176,9 @@ STATUS_DLL_NOT_FOUND (0xc0000135).",
             }
         }
     }
+
+    // Persist hashes so next build can skip unchanged DLLs
+    save_hash_cache(&cache_path, &new_hashes);
 
     if copied == 0 && skipped == 0 {
         println!(
