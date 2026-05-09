@@ -952,7 +952,7 @@ impl DxgiCapture {
                             frame_count += 1;
                             window_frames += 1;
                             error_count = 0;
-                            backpressure.set_encoder_overloaded(false);
+                            backpressure.report_frame_result(false);
                             if frame_count % LOG_INTERVAL == 0 {
                                 log_counter += 1;
                                 if log_counter % 10 == 0 {
@@ -966,7 +966,7 @@ impl DxgiCapture {
                             dropped_count += 1;
                             window_drops += 1;
                             error_count = 0;
-                            backpressure.set_encoder_overloaded(true);
+                            backpressure.report_frame_result(true);
                             if dropped_count % DROP_LOG_INTERVAL == 0 {
                                 warn!("Dropped {} frames (encoder behind)", dropped_count);
                             }
@@ -981,12 +981,14 @@ impl DxgiCapture {
                     dropped_count += 1;
                     window_drops += 1;
                     error_count = 0;
+                    backpressure.report_frame_result(true);
                 }
                 Ok(CaptureOutcome::Timeout) => {
                     let Some(ref last) = last_frame else {
                         continue;
                     };
                     if backpressure.is_encoder_overloaded() || !frame_tx.is_empty() {
+                        backpressure.report_frame_result(true);
                         continue;
                     }
                     let fps_divisor = backpressure.current_fps_divisor();
@@ -995,6 +997,7 @@ impl DxgiCapture {
                         if adaptive_skip_counter % (fps_divisor + 1) != 0 {
                             dropped_count += 1;
                             window_drops += 1;
+                            backpressure.report_frame_result(true);
                             continue;
                         }
                     }
@@ -1020,13 +1023,13 @@ impl DxgiCapture {
                             window_frames += 1;
                             window_duplicates += 1;
                             error_count = 0;
-                            backpressure.set_encoder_overloaded(false);
+                            backpressure.report_frame_result(false);
                         }
                         Err(crossbeam_channel::TrySendError::Full(_frame)) => {
                             dropped_count += 1;
                             window_drops += 1;
                             error_count = 0;
-                            backpressure.set_encoder_overloaded(true);
+                            backpressure.report_frame_result(true);
                             if dropped_count % DROP_LOG_INTERVAL == 0 {
                                 warn!("Dropped {} frames (encoder behind)", dropped_count);
                             }

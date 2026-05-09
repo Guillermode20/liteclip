@@ -14,10 +14,6 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 /// Shared state for monitoring and responding to encoder saturation.
 pub struct BackpressureState {
-    /// Number of frames currently in the pipeline (captured but not encoded).
-    pub queued_frames: AtomicU32,
-    /// Maximum number of frames allowed in the pipeline before applying pressure.
-    pub max_queued_frames: AtomicU32,
     /// Global flag indicating the encoder is consistently falling behind.
     pub encoder_overloaded: AtomicBool,
     /// Smoothed drop rate via EMA (fixed-point: u32 value / 1000 = 0.0–1.0).
@@ -32,8 +28,6 @@ impl BackpressureState {
     /// Creates a new backpressure tracker with default limits.
     pub fn new() -> Self {
         Self {
-            queued_frames: AtomicU32::new(0),
-            max_queued_frames: AtomicU32::new(8),
             encoder_overloaded: AtomicBool::new(false),
             drop_rate_ema: AtomicU32::new(0),
             fps_divisor: AtomicU32::new(0),
