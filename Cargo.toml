@@ -70,6 +70,15 @@ lto = "off"         # No LTO, fastest link
 [profile.dev.package.nnnoiseless]
 opt-level = 3
 
+[profile.dev.package.liteclip-core]
+opt-level = 2
+
+[profile.dev.package.crossbeam-channel]
+opt-level = 1
+
+[profile.dev.package.parking_lot]
+opt-level = 1
+
 [profile.release]
 codegen-units = 1
 lto = "thin"
