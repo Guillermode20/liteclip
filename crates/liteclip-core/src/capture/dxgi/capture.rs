@@ -844,8 +844,7 @@ impl DxgiCapture {
         let mut last_real_timestamp: i64 = 0;
 
         // Adaptive capture rate: scene change detection
-        let mut last_present_qpc: i64 = 0;
-        let low_power_frame_period = Duration::from_nanos(1_000_000_000u64 / LOW_POWER_FPS as u64);
+        let low_power_timeout_ms = (1000u32 / LOW_POWER_FPS).max(1);
         let mut is_low_power_mode = false;
 
         while running.load(Ordering::Acquire) {
@@ -861,50 +860,43 @@ impl DxgiCapture {
                 drop_before_process = true;
             }
 
-            // Check for scene changes when in low-power mode.
-            // Sleep FIRST so the peek happens at the low-power rate, not at full
-            // loop speed (which was causing hundreds of AcquireNextFrame calls/sec).
-            let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
+            // Low-power mode: use AcquireNextFrame with a full low-power-period timeout
+            // for zero-latency scene change detection.  When the scene is static,
+            // AcquireNextFrame waits the full timeout and we send a duplicate frame at the
+            // low-power rate.  When a new frame arrives, AcquireNextFrame returns immediately,
+            // providing instant scene change response — no CPU spin or sleep latency.
             if is_low_power_mode {
-                std::thread::sleep(low_power_frame_period);
-                next_frame_time = std::time::Instant::now() + low_power_frame_period;
-
-                // Peek at frame info without acquiring
+                let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
+                let mut desktop_resource: Option<IDXGIResource> = None;
                 let hr = unsafe {
                     state.duplication.AcquireNextFrame(
-                        1, // 1ms timeout for quick check
+                        low_power_timeout_ms,
                         &mut frame_info,
-                        &mut None,
+                        &mut desktop_resource,
                     )
                 };
 
-                if hr.is_ok() {
-                    let current_present_qpc = frame_info.LastPresentTime;
-                    let is_new_content =
-                        current_present_qpc != last_present_qpc && current_present_qpc != 0;
-
-                    if let Err(e) = unsafe { state.duplication.ReleaseFrame() } {
-                        debug!(
-                            "ReleaseFrame failed in low-power peek path: 0x{:08X}",
-                            e.code().0 as u32
-                        );
-                    }
-
-                    if is_new_content {
-                        // Scene changed, exit low-power mode
+                match hr {
+                    Ok(()) => {
+                        // A new frame is available — scene changed.
+                        // Release it (the next loop iteration will capture at full rate)
+                        // and exit low-power mode.
+                        if let Err(e) = unsafe { state.duplication.ReleaseFrame() } {
+                            debug!(
+                                "ReleaseFrame failed in low-power scene change: 0x{:08X}",
+                                e.code().0 as u32
+                            );
+                        }
                         is_low_power_mode = false;
-                        last_present_qpc = current_present_qpc;
                         frame_period = Duration::from_nanos(1_000_000_000u64 / base_fps as u64);
                         info!(
                             "Adaptive capture: resumed full-rate capture (scene change detected)"
                         );
-                    } else {
-                        // Still static, continue low-power mode.
-                        // Re-use cached timestamp — avoids QueryPerformanceCounter on duplicate frames.
+                    }
+                    Err(e) if e.code().0 == DXGI_ERROR_WAIT_TIMEOUT.0 => {
+                        // Timeout — scene is still static. Send a duplicate frame.
                         if let Some(ref last) = last_frame {
-                            if backpressure.is_encoder_overloaded() || frame_tx.is_full() {
-                                // Encoder busy, skip this frame
-                            } else {
+                            if !backpressure.is_encoder_overloaded() && !frame_tx.is_full() {
                                 let frame = CapturedFrame {
                                     bgra: if last.d3d11.is_some() {
                                         Bytes::new()
@@ -925,9 +917,13 @@ impl DxgiCapture {
                         }
                         continue;
                     }
-                } else {
-                    // No frame available — scene still static
-                    continue;
+                    Err(e) => {
+                        debug!(
+                            "AcquireNextFrame failed in low-power mode: 0x{:08X}",
+                            e.code().0 as u32
+                        );
+                        continue;
+                    }
                 }
             }
 
