@@ -260,7 +260,7 @@ struct LockFreeInner {
     max_memory_bytes: usize,
     restart_generation: AtomicUsize,
     outstanding_snapshot_bytes: AtomicUsize,
-    param_cache: std::sync::Mutex<ParameterCache>,
+    param_cache: parking_lot::Mutex<ParameterCache>,
     first_video_info: std::sync::Mutex<Option<(usize, FirstVideoKind)>>,
 }
 
@@ -274,6 +274,26 @@ impl Slot {
         Self {
             packet: parking_lot::Mutex::new(None),
         }
+    }
+
+    /// Attempt to lock with spin-retry to mitigate starvation under memory pressure.
+    ///
+    /// Under unfair `parking_lot` behavior, a snapshot consumer's `try_lock()` may be
+    /// repeatedly denied if the producer (push/eviction path) keeps re-acquiring the
+    /// same slot's lock via blocking `lock()`. A short spin-retry loop with CPU pause
+    /// (via `std::hint::spin_loop()`) increases the chance of acquiring the lock without
+    /// blocking the snapshot consumer thread. Falls through to a final `try_lock()` after
+    /// all retries are exhausted.
+    #[must_use]
+    fn try_lock_snapshot(&self) -> Option<parking_lot::MutexGuard<'_, Option<EncodedPacket>>> {
+        const SPIN_RETRIES: usize = 4;
+        for _ in 0..SPIN_RETRIES {
+            if let Some(guard) = self.packet.try_lock() {
+                return Some(guard);
+            }
+            std::hint::spin_loop();
+        }
+        self.packet.try_lock()
     }
 }
 
@@ -356,7 +376,7 @@ impl LockFreeReplayBuffer {
                 max_memory_bytes,
                 restart_generation: AtomicUsize::new(0),
                 outstanding_snapshot_bytes: AtomicUsize::new(0),
-                param_cache: std::sync::Mutex::new(ParameterCache::default()),
+                param_cache: parking_lot::Mutex::new(ParameterCache::default()),
                 first_video_info: std::sync::Mutex::new(None),
             }),
         })
@@ -414,9 +434,9 @@ impl LockFreeReplayBuffer {
                 .param_cache_pushes_since_complete
                 .fetch_add(1, Ordering::Relaxed)
                 + 1;
-            // Periodic cache clear every 1000 pushes to prevent stale parameter sets
+            // Periodic cache clear every 5000 pushes to prevent stale parameter sets
             // and to handle encoder reconfiguration (resolution changes, etc.)
-            if pushes >= 1000 {
+            if pushes >= 5000 {
                 self.clear_parameter_cache();
             }
         }
@@ -745,7 +765,7 @@ impl LockFreeReplayBuffer {
         let inner = &self.inner;
         let data = packet.data.as_ref();
 
-        let mut cache = inner.param_cache.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cache = inner.param_cache.lock();
 
         // Early exit if we already have all parameters for current codec
         let has_all_params = match cache.codec_kind {
@@ -894,7 +914,7 @@ impl LockFreeReplayBuffer {
             let slot_idx = i & inner.mask;
             let slot = &inner.slots[slot_idx];
 
-            if let Some(packet_guard) = slot.packet.try_lock() {
+            if let Some(packet_guard) = slot.try_lock_snapshot() {
                 if let Some(ref packet) = *packet_guard {
                     // Zero-copy clone: Bytes uses Arc internally, so clone() just bumps
                     // the refcount. Ring eviction still works because the slot is cleared
@@ -913,7 +933,7 @@ impl LockFreeReplayBuffer {
 
         // RC2: Lock param_cache FIRST, then first_video_info — matching push_single's
         // lock order to prevent AB-BA deadlock. Hold both locks concurrently.
-        let cache = inner.param_cache.lock().unwrap_or_else(|e| e.into_inner());
+        let cache = inner.param_cache.lock();
         let first_video_is_param_set = inner
             .first_video_info
             .lock()
@@ -1108,7 +1128,7 @@ impl LockFreeReplayBuffer {
             let slot_idx = i & inner.mask;
             let slot = &inner.slots[slot_idx];
 
-            if let Some(packet_guard) = slot.packet.try_lock() {
+            if let Some(packet_guard) = slot.try_lock_snapshot() {
                 if let Some(ref packet) = *packet_guard {
                     if packet.is_keyframe {
                         if packet.pts >= start_pts && first_keyframe_at_or_after.is_none() {
@@ -1141,9 +1161,12 @@ impl LockFreeReplayBuffer {
             .map(|m| m.pts)
             .unwrap_or(i64::MAX);
 
-        // Collect included ring indices directly instead of using a bool Vec.
-        // This avoids allocating a potentially large Vec<bool> (50K+ elements for large buffers).
-        let mut included_indices: Vec<usize> = Vec::with_capacity(metas.len());
+        // Build inclusion bitmask for O(1) lookup in Pass 2.
+        // Vec<bool> is space-efficient (1 bit per element) and avoids the O(log n)
+        // binary_search cost of Vec<usize>. Total memory for typical 13K slot buffers
+        // is ~1.6 KB, negligible compared to Vec<usize>'s ~104 KB.
+        let range_len = write_idx - first_idx;
+        let mut included_bits = vec![false; range_len];
         for m in &metas {
             let dominated = m.ring_idx >= start_idx;
             let audio_in_range = !dominated
@@ -1152,7 +1175,7 @@ impl LockFreeReplayBuffer {
                 // unbounded audio-only lead-in before the first video keyframe.
                 && m.pts >= first_video_pts;
             if dominated || audio_in_range {
-                included_indices.push(m.ring_idx);
+                included_bits[m.ring_idx - first_idx] = true;
             }
         }
 
@@ -1162,6 +1185,7 @@ impl LockFreeReplayBuffer {
                 .filter(|m| matches!(m.stream, StreamType::Video))
                 .count();
             let keyframe_count = metas.iter().filter(|m| m.is_keyframe).count();
+            let included_count = included_bits.iter().filter(|&&b| b).count();
             debug!(
                 "snapshot_from: all_packets={} ({} video, {} keyframes), start_pts={}, start_idx={}, included={}",
                 metas.len(),
@@ -1169,7 +1193,7 @@ impl LockFreeReplayBuffer {
                 keyframe_count,
                 start_pts,
                 start_idx,
-                included_indices.len()
+                included_count
             );
         }
 
@@ -1181,19 +1205,19 @@ impl LockFreeReplayBuffer {
         drop(metas);
 
         // ── Pass 2: selective clone ────────────────────────────────────────
-        // Use a sorted included_indices Vec for O(log n) lookup without large allocation
-        // The Vec is already sorted from construction since we iterate in order
-        let mut result: Vec<EncodedPacket> = Vec::with_capacity(included_indices.len());
+        // Use the inclusion bitmask for O(1) lookup per slot.
+        let included_count = included_bits.iter().filter(|&&b| b).count();
+        let mut result: Vec<EncodedPacket> = Vec::with_capacity(included_count);
 
         for i in first_idx..write_idx {
-            // Binary search to check if this index is included
-            if included_indices.binary_search(&i).is_err() {
+            // O(1) check via bitmask instead of O(log n) binary_search
+            if !included_bits[i - first_idx] {
                 continue;
             }
             let slot_idx = i & inner.mask;
             let slot = &inner.slots[slot_idx];
 
-            if let Some(packet_guard) = slot.packet.try_lock() {
+            if let Some(packet_guard) = slot.try_lock_snapshot() {
                 if let Some(ref packet) = *packet_guard {
                     // Zero-copy clone: Bytes uses Arc internally, so clone() just bumps
                     // the refcount. Ring eviction still works because the slot is cleared
@@ -1210,10 +1234,8 @@ impl LockFreeReplayBuffer {
             }
         }
 
-        // Release included_indices after loop completes.
-        included_indices.clear();
-        included_indices.shrink_to_fit();
-        drop(included_indices);
+        // Release included_bits after loop completes.
+        drop(included_bits);
 
         result.sort_by_key(|p| {
             (
@@ -1268,11 +1290,7 @@ impl LockFreeReplayBuffer {
                 );
 
                 if first_is_keyframe && !first_nal_is_vps && !first_nal_is_sps {
-                    let cache = self
-                        .inner
-                        .param_cache
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner());
+                    let cache = self.inner.param_cache.lock();
                     info!(
                         "snapshot_from: prepending param sets (codec={:?}, vps={}, sps={}, pps={})",
                         cache.codec_kind,
@@ -1416,7 +1434,7 @@ impl LockFreeReplayBuffer {
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = None;
 
-        let cache = inner.param_cache.lock().unwrap_or_else(|e| e.into_inner());
+        let cache = inner.param_cache.lock();
         debug!(
             "Buffer clear DONE: cleared {} packets ({:.1}MB), param cache preserved (H.264 SPS: {}, PPS: {} | HEVC VPS: {}, SPS: {}, PPS: {})",
             packets_before,
@@ -1479,7 +1497,7 @@ impl LockFreeReplayBuffer {
         // O1: Preserve param_cache during restart so the next keyframe immediately
         // produces save-able clips — no need to wait for parameter set collection again.
         let cache_summary = {
-            let cache = inner.param_cache.lock().unwrap_or_else(|e| e.into_inner());
+            let cache = inner.param_cache.lock();
             format!(
                 "H.264 SPS: {}, PPS: {} | HEVC VPS: {}, SPS: {}, PPS: {}",
                 cache.h264_sps.is_some(),
@@ -1510,7 +1528,7 @@ impl LockFreeReplayBuffer {
 
         // Clear the cached parameter data
         {
-            let mut cache = inner.param_cache.lock().unwrap_or_else(|e| e.into_inner());
+            let mut cache = inner.param_cache.lock();
             cache.h264_sps = None;
             cache.h264_pps = None;
             cache.hevc_vps = None;
