@@ -81,6 +81,7 @@ impl MockEncoder {
             is_keyframe,
             stream: liteclip_core::encode::StreamType::Video,
             resolution: Some(frame.resolution),
+            codec: None,
         };
         // Ignore send errors - channel might be closed during test teardown
         let _ = self.packet_tx.send(packet);

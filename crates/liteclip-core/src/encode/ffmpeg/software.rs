@@ -172,6 +172,9 @@ impl FfmpegEncoder {
             let mut encoded_packet =
                 EncodedPacket::new(data, pts, pts, is_keyframe, StreamType::Video);
 
+            // Propagate codec type so detect_video_codec is O(1) instead of scanning all packets.
+            encoded_packet.codec = Some(self.config.encoder_type.into());
+
             if !self.config.use_native_resolution {
                 encoded_packet.resolution = Some(self.config.resolution);
             }

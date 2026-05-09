@@ -18,6 +18,7 @@ impl std::fmt::Debug for EncodedPacket {
             .field("dts", &self.dts)
             .field("is_keyframe", &self.is_keyframe)
             .field("stream", &self.stream)
+            .field("codec", &self.codec)
             .field("resolution", &self.resolution)
             .finish()
     }

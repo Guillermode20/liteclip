@@ -66,6 +66,7 @@ pub fn make_test_packet(pts: i64, is_keyframe: bool, size: usize) -> EncodedPack
         is_keyframe,
         stream: StreamType::Video,
         resolution: None,
+        codec: None,
     }
 }
 

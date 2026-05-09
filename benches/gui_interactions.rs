@@ -106,6 +106,7 @@ fn bench_capture_pipeline_latency(c: &mut Criterion) {
             is_keyframe: i % 30 == 0, // GOP = 30
             stream: StreamType::Video,
             resolution: None,
+            codec: None,
         })
         .collect();
 

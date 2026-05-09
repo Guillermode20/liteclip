@@ -313,13 +313,14 @@ fn ffmpeg_frame_to_rgba(frame: &ffmpeg::util::frame::video::Video) -> Result<Rgb
 
 /// Gallery thumbnail at ~1s; same cache path scheme as the CLI implementation.
 pub fn generate_thumbnail(video_path: &Path, save_directory: &Path) -> Result<std::path::PathBuf> {
+    use rustc_hash::FxHasher;
     use std::hash::{Hash, Hasher};
 
     let cache_dir = save_directory.join(".cache");
     std::fs::create_dir_all(&cache_dir)
         .with_context(|| format!("Failed to create cache directory: {:?}", cache_dir))?;
 
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut hasher = FxHasher::default();
     video_path.hash(&mut hasher);
     let hash = hasher.finish();
     let thumb_path = cache_dir.join(format!("{:016x}.jpg", hash));

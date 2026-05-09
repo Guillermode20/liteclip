@@ -646,9 +646,8 @@ fn calibrate_initial_bitrate(
     // Clean up low calibration file immediately to free disk space
     let _ = std::fs::remove_file(export_work_dir.join("cal-low.mp4"));
 
-    // Hint to the OS that we've finished a major allocation phase
-    // This encourages release of FFmpeg's internal memory pools
-    std::mem::drop(std::vec::Vec::<u8>::with_capacity(0));
+    // Release FFmpeg internal memory pools before the high calibration run
+    super::sdk_export::release_ffmpeg_frame_pools();
 
     let high_result = match super::sdk_export::attempt_export(
         &sample_request,
@@ -809,8 +808,8 @@ fn run_bitrate_search(
             let _ = std::fs::remove_file(&output_path);
         }
 
-        // Hint to release FFmpeg internal memory pools between attempts
-        std::mem::drop(std::vec::Vec::<u8>::with_capacity(0));
+        // Release FFmpeg internal memory pools between attempts
+        super::sdk_export::release_ffmpeg_frame_pools();
 
         let next_bitrate_kbps = next_export_video_bitrate_kbps(
             encoder,

@@ -926,6 +926,7 @@ impl LockFreeReplayBuffer {
                         stream: packet.stream,
                         is_keyframe: packet.is_keyframe,
                         resolution: packet.resolution,
+                        codec: packet.codec,
                     });
                 }
             }
@@ -983,6 +984,7 @@ impl LockFreeReplayBuffer {
                             stream: StreamType::Video,
                             is_keyframe: false,
                             resolution: None,
+                            codec: Some(crate::encode::VideoCodec::H264),
                         });
                     }
                     if let Some(ref pps_data) = cache.h264_pps {
@@ -993,6 +995,7 @@ impl LockFreeReplayBuffer {
                             stream: StreamType::Video,
                             is_keyframe: false,
                             resolution: None,
+                            codec: Some(crate::encode::VideoCodec::H264),
                         });
                     }
                 }
@@ -1005,6 +1008,7 @@ impl LockFreeReplayBuffer {
                             stream: StreamType::Video,
                             is_keyframe: false,
                             resolution: None,
+                            codec: Some(crate::encode::VideoCodec::Hevc),
                         });
                     }
                     if let Some(ref sps_data) = cache.hevc_sps {
@@ -1015,6 +1019,7 @@ impl LockFreeReplayBuffer {
                             stream: StreamType::Video,
                             is_keyframe: false,
                             resolution: None,
+                            codec: Some(crate::encode::VideoCodec::Hevc),
                         });
                     }
                     if let Some(ref pps_data) = cache.hevc_pps {
@@ -1025,6 +1030,7 @@ impl LockFreeReplayBuffer {
                             stream: StreamType::Video,
                             is_keyframe: false,
                             resolution: None,
+                            codec: Some(crate::encode::VideoCodec::Hevc),
                         });
                     }
                 }
@@ -1229,6 +1235,7 @@ impl LockFreeReplayBuffer {
                         stream: packet.stream,
                         is_keyframe: packet.is_keyframe,
                         resolution: packet.resolution,
+                        codec: packet.codec,
                     });
                 }
             }
@@ -1311,6 +1318,7 @@ impl LockFreeReplayBuffer {
                                     stream: StreamType::Video,
                                     is_keyframe: false,
                                     resolution: None,
+                                    codec: Some(crate::encode::VideoCodec::H264),
                                 });
                             }
                             if let Some(ref pps_data) = cache.h264_pps {
@@ -1321,6 +1329,7 @@ impl LockFreeReplayBuffer {
                                     stream: StreamType::Video,
                                     is_keyframe: false,
                                     resolution: None,
+                                    codec: Some(crate::encode::VideoCodec::H264),
                                 });
                             }
                         }
@@ -1333,6 +1342,7 @@ impl LockFreeReplayBuffer {
                                     stream: StreamType::Video,
                                     is_keyframe: false,
                                     resolution: None,
+                                    codec: Some(crate::encode::VideoCodec::Hevc),
                                 });
                             }
                             if let Some(ref sps_data) = cache.hevc_sps {
@@ -1343,6 +1353,7 @@ impl LockFreeReplayBuffer {
                                     stream: StreamType::Video,
                                     is_keyframe: false,
                                     resolution: None,
+                                    codec: Some(crate::encode::VideoCodec::Hevc),
                                 });
                             }
                             if let Some(ref pps_data) = cache.hevc_pps {
@@ -1353,6 +1364,7 @@ impl LockFreeReplayBuffer {
                                     stream: StreamType::Video,
                                     is_keyframe: false,
                                     resolution: None,
+                                    codec: Some(crate::encode::VideoCodec::Hevc),
                                 });
                             }
                         }

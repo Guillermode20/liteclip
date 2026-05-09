@@ -11,28 +11,27 @@ pub struct Muxer;
 impl Muxer {
     #[cfg(feature = "ffmpeg")]
     fn detect_video_codec(video_packets: &[&EncodedPacket], fallback: &str) -> String {
-        let mut saw_h264_parameter_sets = false;
-        let mut saw_hevc_parameter_sets = false;
+        // O(1) path: check the codec field from the first packet.
+        // All live encoders now propagate codec through EncodedPacket,
+        // so this is a single field access instead of scanning all packets.
+        if let Some(packet) = video_packets.first() {
+            if let Some(codec) = packet.codec {
+                return codec.name().to_string();
+            }
+        }
 
+        // Fallback: scan packets for NAL type markers (for packets that
+        // predate the codec field, e.g. from older ring buffer snapshots).
         for packet in video_packets {
             let data = packet.data.as_ref();
 
-            match h264_nal_type(data) {
-                Some(7 | 8) => saw_h264_parameter_sets = true,
-                Some(1 | 5) if saw_hevc_parameter_sets => {}
-                Some(1 | 5) => return "h264".to_string(),
-                _ => {}
-            }
-
-            if matches!(hevc_nal_type(data), Some(32..=34)) {
-                saw_hevc_parameter_sets = true;
-            }
-
-            if saw_h264_parameter_sets {
+            if matches!(h264_nal_type(data), Some(1 | 5)) {
                 return "h264".to_string();
             }
-
-            if saw_hevc_parameter_sets {
+            if matches!(h264_nal_type(data), Some(7 | 8)) {
+                return "h264".to_string();
+            }
+            if matches!(hevc_nal_type(data), Some(32..=34)) {
                 return "hevc".to_string();
             }
         }

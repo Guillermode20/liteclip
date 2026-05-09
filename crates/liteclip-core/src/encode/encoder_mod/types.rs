@@ -15,6 +15,44 @@ pub enum EncoderHealthEvent {
     Fatal(String),
 }
 
+/// Video codec type for encoded packets.
+///
+/// Used to avoid scanning all packets to detect the codec at mux time.
+///
+/// # Memory
+///
+/// Single-byte repr, fits in `Option<VideoCodec>` via niche optimization (1 byte).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoCodec {
+    /// H.264 / AVC.
+    H264,
+    /// H.265 / HEVC.
+    Hevc,
+}
+
+impl VideoCodec {
+    /// Returns the FFmpeg codec name string for this codec.
+    pub fn name(&self) -> &'static str {
+        match self {
+            VideoCodec::H264 => "h264",
+            VideoCodec::Hevc => "hevc",
+        }
+    }
+}
+
+impl From<ResolvedEncoderType> for VideoCodec {
+    fn from(encoder_type: ResolvedEncoderType) -> Self {
+        // All current hardware/software HEVC encoders produce HEVC.
+        // H.264 path (cli_pipe) is set separately.
+        match encoder_type {
+            ResolvedEncoderType::Software
+            | ResolvedEncoderType::Nvenc
+            | ResolvedEncoderType::Amf
+            | ResolvedEncoderType::Qsv => VideoCodec::Hevc,
+        }
+    }
+}
+
 /// Encoded packet data from video or audio encoder.
 ///
 /// Uses `Bytes` for reference-counted data, making clones cheap (just a ref count bump).
@@ -28,7 +66,7 @@ pub enum EncoderHealthEvent {
 /// # Memory Layout
 ///
 /// Fields are ordered by size to minimize padding waste (largest to smallest).
-/// Total size: 64 bytes on 64-bit platforms.
+/// Total size: 64 bytes on 64-bit platforms (unchanged after adding 1-byte codec field).
 #[derive(Clone)]
 pub struct EncodedPacket {
     /// Reference-counted byte buffer (cheap clone) - 24 bytes
@@ -37,12 +75,14 @@ pub struct EncodedPacket {
     pub pts: i64,
     /// Decode timestamp - 8 bytes
     pub dts: i64,
-    /// Stream type (video or audio) - 1 byte + 7 padding
+    /// Optional frame resolution for raw video payloads - 16 bytes (Option<(u32,u32)>)
+    pub resolution: Option<(u32, u32)>,
+    /// Stream type (video or audio) - 1 byte + 3 padding
     pub stream: StreamType,
     /// True if this is a keyframe (IDR frame for video) - 1 byte
     pub is_keyframe: bool,
-    /// Optional frame resolution for raw video payloads - 16 bytes (Option<(u32,u32)>)
-    pub resolution: Option<(u32, u32)>,
+    /// Video codec for O(1) detection at mux time (None for audio) - 1 byte
+    pub codec: Option<VideoCodec>,
 }
 
 impl EncodedPacket {
@@ -69,6 +109,7 @@ impl EncodedPacket {
             stream,
             is_keyframe,
             resolution: None,
+            codec: None,
         }
     }
 }

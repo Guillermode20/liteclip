@@ -169,13 +169,14 @@ impl Encoder for CliPipeEncoder {
         while encoder.receive_packet(&mut pkt).is_ok() {
             let is_key = pkt.is_key();
             let data = pkt.data().unwrap_or_default().to_vec();
-            let encoded = EncodedPacket::new(
+            let mut encoded = EncodedPacket::new(
                 data,
                 self.frame_count,
                 self.frame_count,
                 is_key,
                 StreamType::Video,
             );
+            encoded.codec = Some(crate::encode::VideoCodec::H264);
             let _ = self.packet_tx.send(encoded);
         }
 
@@ -197,13 +198,14 @@ impl Encoder for CliPipeEncoder {
             while encoder.receive_packet(&mut pkt).is_ok() {
                 let is_key = pkt.is_key();
                 let data = pkt.data().unwrap_or_default().to_vec();
-                let encoded = EncodedPacket::new(
+                let mut encoded = EncodedPacket::new(
                     data,
                     self.frame_count,
                     self.frame_count,
                     is_key,
                     StreamType::Video,
                 );
+                encoded.codec = Some(crate::encode::VideoCodec::H264);
                 out.push(encoded);
             }
         }

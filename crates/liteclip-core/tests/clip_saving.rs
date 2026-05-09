@@ -81,6 +81,7 @@ fn buffer_snapshot_maintains_keyframe_alignment() -> anyhow::Result<()> {
             is_keyframe,
             stream: StreamType::Video,
             resolution: Some((1920, 1080)),
+            codec: None,
         };
         buffer.push(packet);
     }
@@ -207,6 +208,7 @@ fn clip_duration_windowing() -> anyhow::Result<()> {
             is_keyframe: i % 30 == 0,
             stream: StreamType::Video,
             resolution: Some((1920, 1080)),
+            codec: None,
         };
         buffer.push(packet);
     }
@@ -352,6 +354,7 @@ fn make_packet_sequence_with_resolution(
             is_keyframe: i % keyframe_interval == 0,
             stream: StreamType::Video,
             resolution: Some(resolution),
+            codec: None,
         })
         .collect()
 }

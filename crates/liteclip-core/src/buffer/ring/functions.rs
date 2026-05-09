@@ -73,6 +73,7 @@ mod tests {
             is_keyframe,
             stream: StreamType::Video,
             resolution: None,
+            codec: None,
         }
     }
 
@@ -160,6 +161,7 @@ mod tests {
             is_keyframe: true,
             stream: StreamType::Video,
             resolution: None,
+            codec: None,
         };
         buffer.push(packet);
         let snapshot = buffer.snapshot().unwrap();
@@ -241,6 +243,7 @@ mod tests {
             is_keyframe: false,
             stream: StreamType::Video,
             resolution: None,
+            codec: None,
         }
     }
 
@@ -252,6 +255,7 @@ mod tests {
             is_keyframe: false,
             stream: StreamType::Video,
             resolution: None,
+            codec: None,
         }
     }
 
@@ -263,6 +267,7 @@ mod tests {
             is_keyframe: false,
             stream: StreamType::Video,
             resolution: None,
+            codec: None,
         }
     }
 
@@ -274,6 +279,7 @@ mod tests {
             is_keyframe: true,
             stream: StreamType::Video,
             resolution: None,
+            codec: None,
         }
     }
 

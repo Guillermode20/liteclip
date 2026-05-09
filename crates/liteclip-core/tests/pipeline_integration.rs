@@ -134,6 +134,7 @@ fn buffer_evicts_old_packets_under_memory_pressure() -> anyhow::Result<()> {
             is_keyframe: i % 30 == 0,
             stream: liteclip_core::encode::StreamType::Video,
             resolution: None,
+            codec: None,
         };
         buffer.push(packet);
     }
@@ -181,6 +182,7 @@ fn buffer_concurrent_readers_and_writers() -> anyhow::Result<()> {
                 is_keyframe: i % 30 == 0,
                 stream: liteclip_core::encode::StreamType::Video,
                 resolution: None,
+                codec: None,
             };
             buffer_writer.push(packet);
             std::thread::yield_now();

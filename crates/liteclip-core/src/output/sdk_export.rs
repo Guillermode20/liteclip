@@ -3,7 +3,6 @@
 use anyhow::{Context, Result};
 use ffmpeg_next as ffmpeg;
 use libc::c_int;
-use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -20,6 +19,23 @@ use super::video_file::{
 
 const AAC_FRAME_SAMPLES: i64 = 1024;
 const INVALID_DURATION: i64 = i64::MIN;
+
+/// Releases FFmpeg internal buffer pools by allocating and immediately freeing
+/// an AVFrame. This replaces the previous no-op `drop(Vec::with_capacity(0))`
+/// pattern, which had no effect on FFmpeg's internal memory management.
+///
+/// Call after major allocation phases (e.g., between calibration attempts) to
+/// encourage FFmpeg to release pooled buffers back to the system allocator.
+pub(crate) fn release_ffmpeg_frame_pools() {
+    unsafe {
+        // Allocate a temporary AVFrame and free it immediately to trigger
+        // FFmpeg's internal buffer pool cleanup.
+        let mut frame = ffmpeg::ffi::av_frame_alloc();
+        if !frame.is_null() {
+            ffmpeg::ffi::av_frame_free(&mut frame);
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Adaptive post-processing filters
@@ -545,20 +561,8 @@ pub fn run_stream_copy_export_sdk(
         }
     }
 
-    // Collect time bases for each stream before we start the packet iterator
-    let time_bases: std::collections::HashMap<usize, ffmpeg::Rational> = input_ctx
-        .streams()
-        .map(|s| (s.index(), s.time_base()))
-        .collect();
-
-    // Set faststart
-    let mut opts = ffmpeg::Dictionary::new();
-    opts.set("movflags", "+faststart");
-    output_ctx
-        .write_header_with(opts)
-        .with_context(|| "Failed to write MP4 header for stream copy")?;
-
-    // Build stream lookup once so packet processing doesn't repeatedly scan stream mappings.
+    // Build stream lookup Vec once so packet processing doesn't repeatedly scan stream mappings.
+    // Uses dense Vec indexed by input stream index for O(1) lookup instead of HashMap.
     #[derive(Clone, Copy)]
     struct StreamCopyRoute {
         out_idx: usize,
@@ -566,14 +570,18 @@ pub fn run_stream_copy_export_sdk(
         out_time_base: ffmpeg::Rational,
         is_video: bool,
     }
-    let mut stream_routes: HashMap<usize, StreamCopyRoute> = HashMap::with_capacity(4);
+
+    let input_stream_count = input_ctx.nb_streams() as usize;
+    let mut stream_routes: Vec<Option<StreamCopyRoute>> = vec![None; input_stream_count];
+    let mut output_stream_count = 0usize;
     for (in_idx, out_idx, should_copy) in &stream_mapping {
         if !*should_copy || *out_idx == usize::MAX {
             continue;
         }
-        let in_time_base = *time_bases
-            .get(in_idx)
-            .with_context(|| format!("Missing input time base for stream {}", in_idx))?;
+        let in_time_base = input_ctx
+            .stream(*in_idx)
+            .with_context(|| format!("Missing input stream {}", in_idx))?
+            .time_base();
         let out_time_base = output_ctx
             .stream(*out_idx)
             .with_context(|| format!("Missing output stream {}", out_idx))?
@@ -582,16 +590,21 @@ pub fn run_stream_copy_export_sdk(
             .stream(*in_idx)
             .map(|s| s.parameters().medium() == ffmpeg::media::Type::Video)
             .unwrap_or(false);
-        stream_routes.insert(
-            *in_idx,
-            StreamCopyRoute {
-                out_idx: *out_idx,
-                in_time_base,
-                out_time_base,
-                is_video,
-            },
-        );
+        stream_routes[*in_idx] = Some(StreamCopyRoute {
+            out_idx: *out_idx,
+            in_time_base,
+            out_time_base,
+            is_video,
+        });
+        output_stream_count = output_stream_count.max(out_idx + 1);
     }
+
+    // Set faststart
+    let mut opts = ffmpeg::Dictionary::new();
+    opts.set("movflags", "+faststart");
+    output_ctx
+        .write_header_with(opts)
+        .with_context(|| "Failed to write MP4 header for stream copy")?;
 
     // Read packets by output range (seek per range), so stream-copy work scales with kept duration.
     let start_time = Instant::now();
@@ -599,8 +612,11 @@ pub fn run_stream_copy_export_sdk(
     let mut processed_duration: f64 = 0.0;
     let mut output_cursor_secs = 0.0f64;
 
-    let mut last_out_dts_by_stream: HashMap<usize, i64> = HashMap::with_capacity(4);
-    let mut last_out_pts_by_stream: HashMap<usize, i64> = HashMap::with_capacity(4);
+    // Use dense Vecs indexed by output stream index for O(1) lookup instead of HashMap.
+    let mut last_out_dts_by_stream: Vec<Option<i64>> = vec![None; output_stream_count];
+    let mut last_out_pts_by_stream: Vec<Option<i64>> = vec![None; output_stream_count];
+    let route_count = stream_routes.iter().filter(|r| r.is_some()).count();
+
     for (range_index, range) in request.keep_ranges.iter().enumerate() {
         if cancel_flag.load(Ordering::Relaxed) {
             return Ok(ExportOutcome::Cancelled);
@@ -609,27 +625,36 @@ pub fn run_stream_copy_export_sdk(
         let range_output_start_secs = output_cursor_secs;
         output_cursor_secs += range.duration_secs();
         seek_to_seconds(&mut input_ctx, range.start_secs);
-        let mut streams_past_range_end: HashSet<usize> = HashSet::new();
+
+        // Dense Vec<bool> indexed by input stream index instead of HashSet.
+        let mut streams_past_range_end: Vec<bool> = vec![false; input_stream_count];
+        let mut streams_past_range_end_count = 0usize;
 
         // Scan forward until we hit a keyframe at/after the requested range start
         // on each video stream. We must not "unlock" on a keyframe that is before
         // range.start_secs and then drop pre-start packets, because that leaves the
         // first in-range frames without their reference chain and can produce
         // white/corrupt leading frames in stream-copy output.
-        let mut pending_range_start_keyframes: HashSet<usize> = stream_routes
-            .iter()
-            .filter(|(_, r)| r.is_video)
-            .map(|(&idx, _)| idx)
-            .collect();
-        let mut keyframe_scan_done = pending_range_start_keyframes.is_empty();
+        let mut pending_video_keyframes: Vec<bool> = vec![false; input_stream_count];
+        let mut pending_video_keyframe_count = 0usize;
+        for (idx, route) in stream_routes.iter().enumerate() {
+            if let Some(r) = route {
+                if r.is_video {
+                    pending_video_keyframes[idx] = true;
+                    pending_video_keyframe_count += 1;
+                }
+            }
+        }
+        let mut keyframe_scan_done = pending_video_keyframe_count == 0;
 
         for (stream, mut packet) in input_ctx.packets() {
             if cancel_flag.load(Ordering::Relaxed) {
                 return Ok(ExportOutcome::Cancelled);
             }
             let stream_index = stream.index();
-            let Some(route) = stream_routes.get(&stream_index).copied() else {
-                continue;
+            let route = match stream_routes.get(stream_index).copied().flatten() {
+                Some(r) => r,
+                None => continue,
             };
 
             let secs_per_in_tick = match time_base_to_secs_per_tick(route.in_time_base) {
@@ -651,8 +676,11 @@ pub fn run_stream_copy_export_sdk(
             // This keeps A/V aligned to the actual video decode start point.
             if !keyframe_scan_done {
                 if route.is_video && packet.is_key() && pts_secs >= range.start_secs {
-                    pending_range_start_keyframes.remove(&stream_index);
-                    if pending_range_start_keyframes.is_empty() {
+                    if pending_video_keyframes[stream_index] {
+                        pending_video_keyframes[stream_index] = false;
+                        pending_video_keyframe_count -= 1;
+                    }
+                    if pending_video_keyframe_count == 0 {
                         keyframe_scan_done = true;
                     }
                 }
@@ -663,8 +691,11 @@ pub fn run_stream_copy_export_sdk(
 
             // Once all copied streams are comfortably past the range end, stop this range.
             if pts_secs >= range.end_secs + 0.75 {
-                streams_past_range_end.insert(stream_index);
-                if streams_past_range_end.len() >= stream_routes.len() {
+                if !streams_past_range_end[stream_index] {
+                    streams_past_range_end[stream_index] = true;
+                    streams_past_range_end_count += 1;
+                }
+                if streams_past_range_end_count >= route_count {
                     break;
                 }
                 continue;
@@ -695,22 +726,23 @@ pub fn run_stream_copy_export_sdk(
                 fixed_pts = fixed_dts;
             }
 
-            if let Some(last) = last_out_dts_by_stream.get(&route.out_idx) {
-                if fixed_dts < *last {
-                    fixed_dts = *last;
+            // Monotonicity enforcement using dense Vec lookup (O(1) instead of HashMap).
+            if let Some(last) = last_out_dts_by_stream.get(route.out_idx).copied().flatten() {
+                if fixed_dts < last {
+                    fixed_dts = last;
                 }
             }
-            if let Some(last) = last_out_pts_by_stream.get(&route.out_idx) {
-                if fixed_pts < *last {
-                    fixed_pts = *last;
+            if let Some(last) = last_out_pts_by_stream.get(route.out_idx).copied().flatten() {
+                if fixed_pts < last {
+                    fixed_pts = last;
                 }
             }
 
             packet.set_dts(Some(fixed_dts));
             packet.set_pts(Some(fixed_pts));
 
-            last_out_dts_by_stream.insert(route.out_idx, fixed_dts);
-            last_out_pts_by_stream.insert(route.out_idx, fixed_pts);
+            last_out_dts_by_stream[route.out_idx] = Some(fixed_dts);
+            last_out_pts_by_stream[route.out_idx] = Some(fixed_pts);
 
             processed_duration = processed_duration.max(output_pts_secs);
 
