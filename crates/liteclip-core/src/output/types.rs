@@ -48,24 +48,19 @@ impl Muxer {
     ) -> Result<PathBuf> {
         crate::output::saver::log_save_memory("Muxer::mux_clip_entry", None, Some(packets));
 
-        // Separate video and audio by stream type.
-        let mut raw_video_packets: Vec<&EncodedPacket> = packets
-            .iter()
-            .filter(|packet| matches!(packet.stream, StreamType::Video))
-            .collect();
+        // Single-pass partition: separate video and audio by stream type in one
+        // iteration instead of two filter+collect passes over the full packet list.
+        let mut raw_video_packets = Vec::with_capacity(packets.len() / 2);
+        let mut audio_packets = Vec::with_capacity(packets.len() / 4);
+        for packet in packets {
+            match packet.stream {
+                StreamType::Video => raw_video_packets.push(packet),
+                StreamType::SystemAudio | StreamType::Microphone => audio_packets.push(packet),
+            }
+        }
         if raw_video_packets.is_empty() {
             bail!("No video packets available for MP4 generation");
         }
-
-        let mut audio_packets: Vec<&EncodedPacket> = packets
-            .iter()
-            .filter(|packet| {
-                matches!(
-                    packet.stream,
-                    StreamType::SystemAudio | StreamType::Microphone
-                )
-            })
-            .collect();
 
         raw_video_packets.sort_by_key(|packet| packet.pts);
         audio_packets.sort_by_key(|packet| packet.pts);

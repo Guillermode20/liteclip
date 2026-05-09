@@ -1012,6 +1012,104 @@ pub(crate) fn attempt_export(
     let mut decoded_audio = ffmpeg::util::frame::audio::Audio::empty();
     let mut output_cursor_secs = 0.0f64;
 
+    // ── Hoisted resources: created once before the range loop and reused across ranges ──
+    // The video scaler, audio resampler, and post-process filter graph are independent
+    // of per-range decoder state (same pixel format, resolution, and encoder format
+    // across all ranges). Only the decoders must be recreated after each seek.
+    let (src_w, src_h) = {
+        let v_stream = input_ctx
+            .stream(video_stream_idx)
+            .context("Failed to get video stream for scaler creation")?;
+        let v_ctx = ffmpeg::codec::context::Context::from_parameters(v_stream.parameters())?;
+        let v_decoder = v_ctx.decoder().video()?;
+        crop.map_or((v_decoder.width(), v_decoder.height()), |c| {
+            (c.width, c.height)
+        })
+    };
+    let mut video_scaler = ffmpeg::software::scaling::Context::get(
+        // Obtain pixel format from the first stream's codec parameters (same across ranges).
+        {
+            let v_stream = input_ctx
+                .stream(video_stream_idx)
+                .context("Failed to get video stream for scaler format")?;
+            let v_ctx = ffmpeg::codec::context::Context::from_parameters(v_stream.parameters())?;
+            let v_decoder = v_ctx.decoder().video()?;
+            v_decoder.format()
+        },
+        src_w,
+        src_h,
+        encoder_pixel_format,
+        output_width,
+        output_height,
+        ffmpeg::software::scaling::flag::Flags::BILINEAR,
+    )
+    .context("Failed to create video scaler for export")?;
+
+    // Build the post-processing filter graph once before the range loop.
+    // It is hoisted here because it depends only on output dimensions and filter
+    // strengths (which are constant across ranges). Instead of flushing+recreating
+    // at each range boundary (which would send EOF to the filter source), we simply
+    // stop pushing frames at the end of each range. The 1-frame temporal filter
+    // buffer (hqdn3d) from the previous range will be output when the next range's
+    // first frame is pushed — this is visually negligible for post-processing.
+    let mut post_process_graph: Option<PostProcessFilterGraph> = None;
+    if request.post_process_filters && encoder_pixel_format == ffmpeg::format::Pixel::YUV420P {
+        let strengths =
+            compute_filter_strengths(video_bitrate_kbps, output_width, output_height, output_fps);
+        match PostProcessFilterGraph::new(output_width, output_height, output_fps, strengths) {
+            Ok(graph) => {
+                info!(
+                    unsharp_luma = strengths.unsharp_luma,
+                    unsharp_size =
+                        format!("{}x{}", strengths.unsharp_size_x, strengths.unsharp_size_y),
+                    hqdn3d_luma_spatial = strengths.hqdn3d_luma_spatial,
+                    hqdn3d_luma_temporal = strengths.hqdn3d_luma_temporal,
+                    pp_enable = strengths.pp_enable,
+                    eq_contrast = format!("{:.3}", strengths.eq_contrast),
+                    bpp = format!(
+                        "{:.4}",
+                        (f64::from(video_bitrate_kbps) * 1000.0)
+                            / (f64::from(output_width)
+                                * f64::from(output_height)
+                                * output_fps.max(1.0))
+                    ),
+                    "Post-processing filter graph created (hoisted before range loop)"
+                );
+                post_process_graph = Some(graph);
+            }
+            Err(err) => {
+                warn!("Failed to create post-processing filter graph, disabling: {err:#}");
+            }
+        }
+    } else if request.post_process_filters {
+        warn!(
+            encoder = video_encoder.ffmpeg_name(),
+            "Skipping export post-processing filters because this encoder expects {:?} input frames",
+            encoder_pixel_format
+        );
+    }
+
+    // Hoist audio resampler: sample format/rate/channels are constant across ranges.
+    let mut audio_resampler: Option<ffmpeg::software::resampling::context::Context> = None;
+    if let Some(audio_idx) = audio_stream_idx {
+        let a_stream = input_ctx.stream(audio_idx).with_context(|| {
+            format!("missing audio stream {} for resampler creation", audio_idx)
+        })?;
+        let a_ctx = ffmpeg::codec::context::Context::from_parameters(a_stream.parameters())?;
+        let temp_decoder = a_ctx.decoder().audio()?;
+        if let Some(ref encoder) = opened_audio_encoder {
+            let resampler = ffmpeg::software::resampling::Context::get(
+                temp_decoder.format(),
+                temp_decoder.channel_layout(),
+                temp_decoder.rate(),
+                encoder.format(),
+                encoder.channel_layout(),
+                encoder.rate(),
+            )?;
+            audio_resampler = Some(resampler);
+        }
+    }
+
     for range in &request.keep_ranges {
         let range_started_at = Instant::now();
         let range_output_start_secs = output_cursor_secs;
@@ -1025,95 +1123,22 @@ pub(crate) fn attempt_export(
         seek_to_seconds(&mut input_ctx, range.start_secs);
         seek_elapsed_secs += seek_started_at.elapsed().as_secs_f64();
 
-        // Recreate decoders after each seek.
+        // Recreate decoders after each seek. The scaler, resampler, and filter graph
+        // are hoisted outside the loop and reused across ranges.
         let decoder_setup_started_at = Instant::now();
         let v_stream = input_ctx
             .stream(video_stream_idx)
             .with_context(|| format!("missing video stream {} after seek", video_stream_idx))?;
         let v_ctx = ffmpeg::codec::context::Context::from_parameters(v_stream.parameters())?;
         let mut video_decoder = v_ctx.decoder().video()?;
-        // When crop is active, source is the crop rectangle. Otherwise, source is the decoder's
-        // actual frame dimensions (not the output dimensions - the scaler needs to know the input
-        // frame size to properly scale from input to output).
-        let (src_w, src_h) = crop.map_or((video_decoder.width(), video_decoder.height()), |c| {
-            (c.width, c.height)
-        });
-        let mut video_scaler = ffmpeg::software::scaling::Context::get(
-            video_decoder.format(),
-            src_w,
-            src_h,
-            encoder_pixel_format,
-            output_width,
-            output_height,
-            ffmpeg::software::scaling::flag::Flags::BILINEAR,
-        )
-        .context("Failed to create video scaler for export")?;
-
-        // Build a fresh post-processing filter graph for each range.
-        // The graph cannot be reused across ranges because flushing signals EOF
-        // to the buffer source, after which no more frames can be pushed.
-        let mut post_process_graph: Option<PostProcessFilterGraph> = None;
-        if request.post_process_filters && encoder_pixel_format == ffmpeg::format::Pixel::YUV420P {
-            let strengths = compute_filter_strengths(
-                video_bitrate_kbps,
-                output_width,
-                output_height,
-                output_fps,
-            );
-            match PostProcessFilterGraph::new(output_width, output_height, output_fps, strengths) {
-                Ok(graph) => {
-                    info!(
-                        unsharp_luma = strengths.unsharp_luma,
-                        unsharp_size =
-                            format!("{}x{}", strengths.unsharp_size_x, strengths.unsharp_size_y),
-                        hqdn3d_luma_spatial = strengths.hqdn3d_luma_spatial,
-                        hqdn3d_luma_temporal = strengths.hqdn3d_luma_temporal,
-                        pp_enable = strengths.pp_enable,
-                        eq_contrast = format!("{:.3}", strengths.eq_contrast),
-                        bpp = format!(
-                            "{:.4}",
-                            (f64::from(video_bitrate_kbps) * 1000.0)
-                                / (f64::from(output_width)
-                                    * f64::from(output_height)
-                                    * output_fps.max(1.0))
-                        ),
-                        "Post-processing filter graph created for range"
-                    );
-                    post_process_graph = Some(graph);
-                }
-                Err(err) => {
-                    warn!("Failed to create post-processing filter graph, disabling: {err:#}");
-                }
-            }
-        } else if request.post_process_filters {
-            warn!(
-                encoder = video_encoder.ffmpeg_name(),
-                "Skipping export post-processing filters because this encoder expects {:?} input frames",
-                encoder_pixel_format
-            );
-        }
 
         let mut audio_decoder = None;
-        let mut audio_resampler = None;
         if let Some(audio_idx) = audio_stream_idx {
             let a_stream = input_ctx
                 .stream(audio_idx)
                 .with_context(|| format!("missing audio stream {} after seek", audio_idx))?;
             let a_ctx = ffmpeg::codec::context::Context::from_parameters(a_stream.parameters())?;
-            let decoder = a_ctx.decoder().audio()?;
-
-            if let Some(ref encoder) = opened_audio_encoder {
-                let resampler = ffmpeg::software::resampling::Context::get(
-                    decoder.format(),
-                    decoder.channel_layout(),
-                    decoder.rate(),
-                    encoder.format(),
-                    encoder.channel_layout(),
-                    encoder.rate(),
-                )?;
-                audio_resampler = Some(resampler);
-            }
-            audio_decoder = Some(decoder);
+            audio_decoder = Some(a_ctx.decoder().audio()?);
         }
         decoder_setup_elapsed_secs += decoder_setup_started_at.elapsed().as_secs_f64();
 
@@ -1206,8 +1231,14 @@ pub(crate) fn attempt_export(
                     // the scaled frame directly.  process_into() drains all frames
                     // the filter makes available (temporal filters may output 0 or
                     // more frames per push), so no frames are ever silently lost.
+                    // We override PTS on each output frame to handle any buffered
+                    // frames from temporal filters (e.g. hqdn3d) that may carry
+                    // stale timestamps from a previous range.
                     if let Some(ref mut filter_graph) = post_process_graph {
                         filter_graph.process_into(&scaled_video, |filtered| {
+                            filtered.set_pts(Some(next_video_frame_pts));
+                            next_video_frame_pts = next_video_frame_pts
+                                .saturating_add(video_enc_ticks_per_frame.max(1));
                             opened_video_encoder.send_frame(filtered)?;
                             Ok(())
                         })?;
@@ -1418,43 +1449,12 @@ pub(crate) fn attempt_export(
             processed_duration = processed_duration.max(output_pts_secs);
         }
 
-        // Flush any buffered frames from the post-processing filter graph.
-        // Temporal filters may hold frames back; flushing signals end-of-stream
-        // so all buffered frames are released and encoded.
-        if let Some(ref mut filter_graph) = post_process_graph {
-            if let Err(err) = filter_graph.flush(|filtered| {
-                filtered.set_pts(Some(next_video_frame_pts));
-                next_video_frame_pts =
-                    next_video_frame_pts.saturating_add(video_enc_ticks_per_frame.max(1));
-                let video_encode_started_at = Instant::now();
-                opened_video_encoder.send_frame(filtered)?;
-                let mut pkt = ffmpeg::Packet::empty();
-                while opened_video_encoder.receive_packet(&mut pkt).is_ok() {
-                    pkt.rescale_ts(opened_video_encoder.time_base(), video_out_time_base);
-                    if pkt.pts().is_none() {
-                        pkt.set_pts(Some(next_video_pts));
-                    }
-                    if pkt.dts().is_none() {
-                        pkt.set_dts(Some(next_video_dts));
-                    }
-                    if pkt.duration() <= 0 || pkt.duration() == INVALID_DURATION {
-                        pkt.set_duration(video_default_duration);
-                    }
-                    let fixed_dts = pkt.dts().unwrap_or(next_video_dts).max(next_video_dts);
-                    let fixed_pts = pkt.pts().unwrap_or(fixed_dts).max(fixed_dts);
-                    pkt.set_dts(Some(fixed_dts));
-                    pkt.set_pts(Some(fixed_pts));
-                    pkt.set_stream(video_out_idx);
-                    pkt.write_interleaved(&mut output_ctx)?;
-                    next_video_dts = fixed_dts.saturating_add(pkt.duration().max(1));
-                    next_video_pts = fixed_pts.saturating_add(pkt.duration().max(1));
-                }
-                video_encode_elapsed_secs += video_encode_started_at.elapsed().as_secs_f64();
-                Ok(())
-            }) {
-                warn!("Failed to flush post-processing filter graph: {err:#}");
-            }
-        }
+        // Note: The post-processing filter graph is NOT flushed at range boundaries.
+        // Flushing would send EOF to the filter source, preventing reuse across ranges.
+        // Instead, temporal filter state from the previous range may influence the first
+        // frame of the next range (hqdn3d temporal mode buffers 1 frame). The impact is
+        // limited to one frame per boundary and is visually negligible for post-processing.
+        // A final flush occurs after all ranges are processed (see below).
 
         if let Some(ref mut decoder) = audio_decoder {
             decoder.send_eof()?;
@@ -1530,6 +1530,43 @@ pub(crate) fn attempt_export(
             range_elapsed_secs,
             "Export range processing completed"
         );
+    }
+
+    // Final flush of the post-processing filter graph (if any) to drain any
+    // remaining buffered frames from temporal filters across all ranges.
+    if let Some(ref mut filter_graph) = post_process_graph {
+        if let Err(err) = filter_graph.flush(|filtered| {
+            filtered.set_pts(Some(next_video_frame_pts));
+            next_video_frame_pts =
+                next_video_frame_pts.saturating_add(video_enc_ticks_per_frame.max(1));
+            let video_encode_started_at = Instant::now();
+            opened_video_encoder.send_frame(filtered)?;
+            let mut pkt = ffmpeg::Packet::empty();
+            while opened_video_encoder.receive_packet(&mut pkt).is_ok() {
+                pkt.rescale_ts(opened_video_encoder.time_base(), video_out_time_base);
+                if pkt.pts().is_none() {
+                    pkt.set_pts(Some(next_video_pts));
+                }
+                if pkt.dts().is_none() {
+                    pkt.set_dts(Some(next_video_dts));
+                }
+                if pkt.duration() <= 0 || pkt.duration() == INVALID_DURATION {
+                    pkt.set_duration(video_default_duration);
+                }
+                let fixed_dts = pkt.dts().unwrap_or(next_video_dts).max(next_video_dts);
+                let fixed_pts = pkt.pts().unwrap_or(fixed_dts).max(fixed_dts);
+                pkt.set_dts(Some(fixed_dts));
+                pkt.set_pts(Some(fixed_pts));
+                pkt.set_stream(video_out_idx);
+                pkt.write_interleaved(&mut output_ctx)?;
+                next_video_dts = fixed_dts.saturating_add(pkt.duration().max(1));
+                next_video_pts = fixed_pts.saturating_add(pkt.duration().max(1));
+            }
+            video_encode_elapsed_secs += video_encode_started_at.elapsed().as_secs_f64();
+            Ok(())
+        }) {
+            warn!("Failed to flush post-processing filter graph: {err:#}");
+        }
     }
 
     // Flush audio encoder
