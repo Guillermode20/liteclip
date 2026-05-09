@@ -3,7 +3,8 @@
 /target-*
 
 # Cargo
-.cargo
+.cargo/*
+!.cargo/config.toml
 Cargo.lock~
 
 # IDE specific

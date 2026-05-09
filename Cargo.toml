@@ -60,12 +60,19 @@ serde_json = "1"
 [workspace]
 members = ["crates/liteclip-core"]
 
+[profile.dev]
+# Explicit dev profile settings (uses defaults for fastest recompilation)
+opt-level = 0       # No optimization, fastest compile
+debug = true        # Full debug info
+incremental = true  # Enable incremental compilation
+lto = "off"         # No LTO, fastest link
+
 [profile.dev.package.nnnoiseless]
 opt-level = 3
 
 [profile.release]
 codegen-units = 1
-lto = "fat"
+lto = "thin"
 panic = "abort"
 strip = true
 

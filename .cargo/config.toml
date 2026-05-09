@@ -1,0 +1,12 @@
+[target.'cfg(target_os = "windows")']
+# Enable CPU-specific instructions (AVX2, FMA, BMI2) for ~10-20% runtime perf
+# Makes binary non-portable to older CPUs — build machine must match min target
+rustflags = ["-C", "target-cpu=native"]
+
+[env]
+FFMPEG_DIR = { value = "ffmpeg_dev/sdk", relative = true }
+
+ LIBCLANG_PATH = "C:/Program Files/LLVM/bin"
+ BINDGEN_EXTRA_CLANG_ARGS = "-I\"C:/Program Files (x86)/Microsoft Visual Studio/2019/BuildTools/VC/Tools/MSVC/14.29.30133/include\" -I\"C:/Program Files (x86)/Windows Kits/10/Include/10.0.19041.0/ucrt\" -I\"C:/Program Files (x86)/Windows Kits/10/Include/10.0.19041.0/shared\" -I\"C:/Program Files (x86)/Windows Kits/10/Include/10.0.19041.0/um\""
+ BINDGEN_EXTRA_CLANG_ARGS_x86_64-pc-windows-msvc = "-I\"C:/Program Files (x86)/Microsoft Visual Studio/2019/BuildTools/VC/Tools/MSVC/14.29.30133/include\" -I\"C:/Program Files (x86)/Windows Kits/10/Include/10.0.19041.0/ucrt\" -I\"C:/Program Files (x86)/Windows Kits/10/Include/10.0.19041.0/shared\" -I\"C:/Program Files (x86)/Windows Kits/10/Include/10.0.19041.0/um\""
+ BINDGEN_EXTRA_CLANG_ARGS_x86_64_pc_windows_msvc = "-I\"C:/Program Files (x86)/Microsoft Visual Studio/2019/BuildTools/VC/Tools/MSVC/14.29.30133/include\" -I\"C:/Program Files (x86)/Windows Kits/10/Include/10.0.19041.0/ucrt\" -I\"C:/Program Files (x86)/Windows Kits/10/Include/10.0.19041.0/shared\" -I\"C:/Program Files (x86)/Windows Kits/10/Include/10.0.19041.0/um\""
