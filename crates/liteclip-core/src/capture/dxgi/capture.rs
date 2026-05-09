@@ -1053,7 +1053,12 @@ impl DxgiCapture {
                         None => Self::init_capture(config.output_index),
                     };
                     match reinit_result {
-                        Ok(new_state) => {
+                        Ok(mut new_state) => {
+                            // Drain old pool return channels before replacing state to
+                            // collect in-flight pooled textures that have been returned.
+                            // This prevents texture leaks and ensures the new pool starts
+                            // with available items instead of allocating fresh ones.
+                            Self::drain_old_pools_into_new(&mut state, &mut new_state);
                             state = new_state;
                             error_count = 0;
                             reinit_backoff_ms = 100;

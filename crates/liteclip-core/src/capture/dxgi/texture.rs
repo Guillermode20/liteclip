@@ -396,6 +396,109 @@ impl DxgiCapture {
         }
     }
 
+    /// Drain old pool return channels and transfer returned textures to new pools.
+    ///
+    /// Called during capture reinitialization before the old state is replaced.
+    /// This collects any in-flight pooled textures that have been returned via the
+    /// `return_tx` channels (from `D3d11Frame::drop`). For NV12 items, stale output
+    /// views (created with the old `video_processor_enumerator`) are detected and
+    /// recreated using the new state's enumerator to prevent use of invalidated references.
+    pub(super) fn drain_old_pools_into_new(
+        old_state: &mut DxgiCaptureState,
+        new_state: &mut DxgiCaptureState,
+    ) {
+        // Drain BGRA pool return channel — BGRA items have no enumerator-dependent views,
+        // so they can be transferred directly to the new pool.
+        if let (Some(ref mut old_pool), Some(ref mut new_pool)) =
+            (old_state.bgra_pool.as_mut(), new_state.bgra_pool.as_mut())
+        {
+            while let Ok(item) = old_pool.return_rx.try_recv() {
+                if new_pool.available.len() < new_pool.max_capacity {
+                    new_pool.available.push(item);
+                }
+            }
+        }
+
+        // Drain NV12 pool return channel. NV12 items carry an `output_view` that was
+        // created with the old `video_processor_enumerator`. After reinit this view is
+        // stale (dangling enumerator reference), so we recreate it using the new state's
+        // video device and enumerator.
+        if let (Some(ref mut old_pool), Some(ref mut new_pool)) =
+            (old_state.nv12_pool.as_mut(), new_state.nv12_pool.as_mut())
+        {
+            let video_device = match new_state.video_device.as_ref() {
+                Some(vd) => vd,
+                None => {
+                    warn!("Cannot recreate stale NV12 output views: video_device missing in new state");
+                    return;
+                }
+            };
+            let enumerator = match new_state.video_processor_enumerator.as_ref() {
+                Some(e) => e,
+                None => {
+                    warn!(
+                        "Cannot recreate stale NV12 output views: enumerator missing in new state"
+                    );
+                    return;
+                }
+            };
+
+            while let Ok(mut item) = old_pool.return_rx.try_recv() {
+                if new_pool.available.len() >= new_pool.max_capacity {
+                    break;
+                }
+                // Recreate stale output view from the old enumerator.
+                // The underlying texture is still valid — only the view pointer
+                // is invalidated by the enumerator replacement.
+                if item.output_view.is_some() {
+                    match Self::recreate_nv12_output_view(&item.texture, video_device, enumerator) {
+                        Ok(new_view) => {
+                            item.output_view = Some(new_view);
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Failed to recreate stale NV12 output view during reinit: {}",
+                                e
+                            );
+                            continue;
+                        }
+                    }
+                }
+                new_pool.available.push(item);
+            }
+        }
+    }
+
+    /// Recreate an NV12 output view for a pooled texture using the given enumerator.
+    ///
+    /// After capture reinitialization, the old `video_processor_enumerator` is destroyed
+    /// and a new one is created. Any `ID3D11VideoProcessorOutputView` that was created with
+    /// the old enumerator is now stale and must be recreated. The underlying D3D11 texture
+    /// itself remains valid across reinit — only the view-enumerator binding is invalidated.
+    fn recreate_nv12_output_view(
+        texture: &ID3D11Texture2D,
+        video_device: &ID3D11VideoDevice,
+        enumerator: &ID3D11VideoProcessorEnumerator,
+    ) -> Result<ID3D11VideoProcessorOutputView> {
+        unsafe {
+            let output_view_desc = D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC {
+                ViewDimension: D3D11_VPOV_DIMENSION_TEXTURE2D,
+                Anonymous: std::mem::zeroed(),
+            };
+            let mut output_view: Option<ID3D11VideoProcessorOutputView> = None;
+            video_device
+                .CreateVideoProcessorOutputView(
+                    texture,
+                    enumerator,
+                    &output_view_desc,
+                    Some(&mut output_view),
+                )
+                .ok()
+                .context("Failed to recreate stale NV12 output view")?;
+            output_view.context("Recreated NV12 output view is null")
+        }
+    }
+
     pub(super) fn capture_gpu_frame(
         state: &mut DxgiCaptureState,
         captured_texture: &ID3D11Texture2D,
