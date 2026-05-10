@@ -285,14 +285,15 @@ impl SoftwareEncoder {
             let handle = std::thread::Builder::new()
                 .name(format!("sw-encoder-{}", id))
                 .spawn(move || {
-                    // Set BELOW_NORMAL priority so software encoder workers
-                    // don't compete with the game or capture thread for CPU time.
+                    // Set NORMAL priority so software encoder workers can keep up
+                    // with the capture pipeline. BELOW_NORMAL caused encoder lag which
+                    // led to audio packet accumulation and stutter.
                     #[cfg(windows)]
                     unsafe {
                         use windows::Win32::System::Threading::{
-                            GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL,
+                            GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_NORMAL,
                         };
-                        let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+                        let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
                     }
 
                     debug!("Encoder worker {id} started");

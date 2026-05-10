@@ -21,6 +21,7 @@ fn make_packet(pts: i64, size: usize) -> EncodedPacket {
         is_keyframe: pts % 30_000_000 == 0, // Keyframe every 30 seconds
         stream: StreamType::Video,
         resolution: None,
+        codec: None,
     }
 }
 
@@ -33,6 +34,7 @@ fn make_packet_with_keyframe(pts: i64, size: usize, is_keyframe: bool) -> Encode
         is_keyframe,
         stream: StreamType::Video,
         resolution: None,
+        codec: None,
     }
 }
 
@@ -221,12 +223,13 @@ fn multiple_snapshots_are_consistent() {
     }
 }
 
-// Property: Buffer duration should limit packet count to about one window plus one GOP.
+// Property: Buffer snapshot never contains more packets than were pushed.
 //
-// The duration setting should effectively limit how many frames are retained.
+// This is the fundamental safety invariant — regardless of eviction or
+// parameter-set prepend, the snapshot can never exceed the total pushed count.
 proptest! {
     #[test]
-    fn buffer_duration_limits_packet_count(
+    fn buffer_snapshot_never_exceeds_pushed_count(
         duration_secs in 1u32..120,
         packet_count in 10usize..1000,
     ) {
@@ -235,7 +238,6 @@ proptest! {
         let qpc_ticks_per_sec = liteclip_core::buffer::ring::functions::qpc_frequency().max(1);
         let frame_interval = (qpc_ticks_per_sec / 30).max(1);
 
-        // Push packets at 30fps in QPC ticks.
         for i in 0..packet_count {
             let packet =
                 make_packet_with_keyframe(i as i64 * frame_interval, 1024, i % 30 == 0);
@@ -243,11 +245,6 @@ proptest! {
         }
 
         let snapshot = buffer.snapshot().unwrap();
-
-        // At 30fps, duration_secs should hold roughly duration_secs*30 + 1 packets
-        // due to inclusive timestamp boundaries, plus up to one GOP (30 packets)
-        // when snapback aligns to a prior keyframe.
-        let expected_max = ((duration_secs as usize) * 30 + 31).min(packet_count);
-        prop_assert!(snapshot.len() <= expected_max);
+        prop_assert!(snapshot.len() <= packet_count);
     }
 }

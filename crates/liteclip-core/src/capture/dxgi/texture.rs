@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use bytes::Bytes;
+use crossbeam_channel::TryRecvError;
 use tracing::{debug, info, warn};
 use windows::core::Interface;
 use windows::Win32::Foundation::BOOL;
@@ -198,11 +199,18 @@ impl DxgiCapture {
                 .bgra_pool
                 .as_mut()
                 .context("BGRA pool is not initialized")?;
-            // Non-blocking: try to receive a returned texture, drop the frame if pool is empty
-            match pool.return_rx.try_recv() {
-                Ok(item) => return Ok(item),
-                Err(_) => bail!("BGRA texture pool exhausted, cannot acquire texture"),
+            // Spin-retry: give the consumer a few microseconds to return a texture
+            // before dropping the frame. This reduces spurious drops when the consumer
+            // is mildly delayed (e.g. under transient CPU load).
+            for _ in 0..8 {
+                std::hint::spin_loop();
+                match pool.return_rx.try_recv() {
+                    Ok(item) => return Ok(item),
+                    Err(TryRecvError::Empty) => continue,
+                    Err(TryRecvError::Disconnected) => break,
+                }
             }
+            bail!("BGRA texture pool exhausted, cannot acquire texture")
         }
 
         let pool = state
@@ -247,11 +255,18 @@ impl DxgiCapture {
                 .nv12_pool
                 .as_mut()
                 .context("NV12 pool is not initialized")?;
-            // Non-blocking: try to receive a returned texture, drop the frame if pool is empty
-            match pool.return_rx.try_recv() {
-                Ok(item) => return Ok(item),
-                Err(_) => bail!("NV12 texture pool exhausted, cannot acquire texture"),
+            // Spin-retry: give the consumer a few microseconds to return a texture
+            // before dropping the frame. This reduces spurious drops when the consumer
+            // is mildly delayed (e.g. under transient CPU load).
+            for _ in 0..8 {
+                std::hint::spin_loop();
+                match pool.return_rx.try_recv() {
+                    Ok(item) => return Ok(item),
+                    Err(TryRecvError::Empty) => continue,
+                    Err(TryRecvError::Disconnected) => break,
+                }
             }
+            bail!("NV12 texture pool exhausted, cannot acquire texture")
         }
 
         let pool = state

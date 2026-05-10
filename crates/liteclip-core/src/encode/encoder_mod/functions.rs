@@ -146,13 +146,15 @@ fn set_encoder_thread_priority() {
     #[cfg(windows)]
     {
         use windows::Win32::System::Threading::SetThreadIdealProcessor;
-        use windows::Win32::System::Threading::THREAD_PRIORITY_BELOW_NORMAL;
+        use windows::Win32::System::Threading::THREAD_PRIORITY_NORMAL;
         unsafe {
-            // Use BELOW_NORMAL priority to ensure encoder never competes with game
-            if let Err(e) = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL) {
+            // Use NORMAL priority so the encoder keeps pace with the capture pipeline.
+            // BELOW_NORMAL caused encoder back-pressure, leading to audio packet
+            // accumulation and stutter.
+            if let Err(e) = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL) {
                 warn!("Failed to set encoder thread priority: {}", e);
             } else {
-                debug!("Encoder thread priority set to BELOW_NORMAL");
+                debug!("Encoder thread priority set to NORMAL");
             }
 
             // Provide a scheduling hint: prefer a non-boot processor to isolate

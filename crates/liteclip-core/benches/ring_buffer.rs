@@ -21,6 +21,7 @@ fn make_packet(pts: i64, size: usize) -> EncodedPacket {
         is_keyframe: pts % 30_000_000 == 0,
         stream: StreamType::Video,
         resolution: None,
+        codec: None,
     }
 }
 

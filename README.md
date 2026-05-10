@@ -101,6 +101,26 @@ The MSI installer includes these DLLs pre-bundled, so end users don't need to se
 
 This project was developed with assistance from AI coding tools, including code generation, refactoring suggestions, and documentation help. Human oversight and review was applied to all AI-assisted contributions.
 
+## Performance Optimizations
+
+### Build & Configuration
+Sets `target-cpu=native` for CPU-specific instruction scheduling and `lto=thin` for link-time optimization. Cleans up dependencies (crossbeam→crossbeam-channel, optional ureq), adds per-crate dev profile optimizations for hot crates, uses hash-based DLL copy detection to skip redundant FFmpeg copies, and introduces real benchmarks replacing no-op GUI stubs.
+
+### Ring Buffer
+Adds cache line padding to prevent false sharing between producer and consumer threads, relaxes atomic orderings from SeqCst to Acquire/Release inside the mutex, replaces binary search with an O(1) snapshot-from lookup via a `Vec<bool>` presence map, and switches internal locking to `parking_lot::Mutex` for lower contention.
+
+### DXGI Capture
+Introduces a non-blocking texture pool that avoids `recv_timeout` stalls in the main capture loop, wires EMA-based backpressure signaling to throttle capture when downstream processing falls behind, uses `AcquireNextFrame` timeout for low-power idle detection instead of a polling sleep loop, sets the capture thread to `BELOW_NORMAL` priority, and drains stale NV12 views on reinit.
+
+### Audio Pipeline
+Vectorizes the software mixer loop with explicit SIMD intrinsics for float processing, replaces the RNNoise `Vec`+head-index queue with a `VecDeque` to eliminate `O(n)` compaction overhead, sets capture threads to `HIGHEST` priority, converts the forward loop from per-sample writes to a drain-batch pattern, and switches RMS computation to `f32` accumulators for lower instruction count.
+
+### Encoding Layer
+Adds GPU vendor pre-check and D3D11 hardware context caching to avoid redundant device derivation across encoder re-initializations, reuses a pre-allocated mapped QSV frame to eliminate per-frame alloc/map/free cycles, replaces floating-point bilinear scaling with fixed-point integer arithmetic for zero FPU overhead, and streamlines packet pipeline and thread management.
+
+### Output/MP4
+Caches calibration results across clips to skip redundant analysis on short recordings, hoists scaler/resampler/filter graph creation outside the packet range loop and switches to single-pass partition for lower latency, propagates codec type from `EncodedPacket` metadata, replaces `DefaultHasher` with `FxHasher` for thumbnail caching, and replaces `HashMap` routes with dense `Vec` arrays for stream dispatch.
+
 ## License
 
 MIT License. See [LICENSE](LICENSE).

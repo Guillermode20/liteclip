@@ -1194,16 +1194,17 @@ impl DxgiCapture {
         #[cfg(windows)]
         {
             use windows::Win32::System::Threading::{
-                GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL,
+                GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_ABOVE_NORMAL,
             };
             unsafe {
-                // Use BELOW_NORMAL priority to avoid competing with game thread
-                // Game typically runs at HIGH or TIME_CRITICAL
-                if let Err(e) = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL)
+                // Use ABOVE_NORMAL priority so the capture thread can drain DXGI buffers
+                // and feed the encoder quickly. Audio capture already runs at HIGHEST;
+                // this prevents the video capture side from starving under CPU contention.
+                if let Err(e) = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL)
                 {
                     warn!("Failed to set capture thread priority: {}", e);
                 } else {
-                    debug!("Capture thread priority set to BELOW_NORMAL");
+                    debug!("Capture thread priority set to ABOVE_NORMAL");
                 }
             }
         }
