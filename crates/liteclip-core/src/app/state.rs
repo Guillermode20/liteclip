@@ -233,20 +233,20 @@ impl AppState {
     /// # Errors
     ///
     /// Returns an error if configuration is rejected and rollback fails.
-    pub fn apply_config(&mut self, new_config: Config) -> Result<bool> {
+    pub fn apply_config(&mut self, mut new_config: Config) -> Result<bool> {
         let needs_restart = self.config.requires_pipeline_restart(&new_config);
         let needs_hotkey_reregister = self.config.requires_hotkey_reregister(&new_config);
         let audio_changed = self.config.audio != new_config.audio;
 
         if needs_restart {
-            let old_config = self.config.clone();
+            // Validate the new config before swapping it in.
+            new_config.validate();
+            let old_config = std::mem::replace(&mut self.config, new_config);
 
             info!("Stopping pipeline for configuration change...");
             self.pipeline.stop()?;
 
             info!("Restarting pipeline with new configuration...");
-            self.config = new_config;
-            self.config.validate();
 
             self.buffer = ReplayBuffer::new(&self.config)?;
 
@@ -272,8 +272,8 @@ impl AppState {
                 ));
             }
         } else {
+            new_config.validate();
             self.config = new_config;
-            self.config.validate();
 
             if audio_changed && self.pipeline.is_recording() {
                 self.pipeline.update_audio_config(&self.config.audio);

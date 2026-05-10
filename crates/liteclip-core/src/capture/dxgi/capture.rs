@@ -110,7 +110,7 @@ pub(super) struct DxgiCaptureState {
     pub(super) video_context: Option<ID3D11VideoContext>,
     pub(super) video_processor: Option<ID3D11VideoProcessor>,
     pub(super) video_processor_enumerator: Option<ID3D11VideoProcessorEnumerator>,
-    pub(super) input_view_cache: std::collections::HashMap<
+    pub(super) input_view_cache: rustc_hash::FxHashMap<
         isize,
         windows::Win32::Graphics::Direct3D11::ID3D11VideoProcessorInputView,
     >,
@@ -416,7 +416,7 @@ impl DxgiCaptureState {
                 video_context,
                 video_processor,
                 video_processor_enumerator,
-                input_view_cache: std::collections::HashMap::new(),
+                input_view_cache: rustc_hash::FxHashMap::default(),
                 input_view_cache_fifo: std::collections::VecDeque::new(),
                 nv12_conversion_available,
                 nv12_runtime_failures: 0,

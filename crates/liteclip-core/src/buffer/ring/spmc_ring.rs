@@ -43,7 +43,7 @@
 use crate::buffer::BufferResult;
 use crate::encode::{EncodedPacket, StreamType};
 use bytes::Bytes;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, info, trace, warn};
@@ -261,7 +261,11 @@ struct LockFreeInner {
     restart_generation: AtomicUsize,
     outstanding_snapshot_bytes: AtomicUsize,
     param_cache: parking_lot::Mutex<ParameterCache>,
-    first_video_info: std::sync::Mutex<Option<(usize, FirstVideoKind)>>,
+    /// First video kind stored as AtomicU8 so the push path never needs a mutex.
+    /// 0=unknown, 1=H264Sps, 2=HevcVps, 3=Other.
+    first_video_kind: AtomicU8,
+    /// Write index at which the first video packet was stored (accessed only during snapshot).
+    first_video_idx: AtomicUsize,
 }
 
 #[repr(align(64))]
@@ -377,7 +381,8 @@ impl LockFreeReplayBuffer {
                 restart_generation: AtomicUsize::new(0),
                 outstanding_snapshot_bytes: AtomicUsize::new(0),
                 param_cache: parking_lot::Mutex::new(ParameterCache::default()),
-                first_video_info: std::sync::Mutex::new(None),
+                first_video_kind: AtomicU8::new(0),
+                first_video_idx: AtomicUsize::new(0),
             }),
         })
     }
@@ -444,13 +449,20 @@ impl LockFreeReplayBuffer {
         self.cache_parameter_sets(&packet);
 
         if matches!(packet.stream, StreamType::Video) {
-            let mut first_video_info = inner
-                .first_video_info
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if first_video_info.is_none() {
-                let kind = self.detect_first_video_kind(packet.data.as_ref());
-                *first_video_info = Some((inner.write_idx.load(Ordering::Relaxed), kind));
+            // Use compare_exchange to set first_video_kind atomically — no mutex needed.
+            let _ = inner.first_video_kind.compare_exchange(
+                0,
+                self.detect_first_video_kind_as_u8(packet.data.as_ref()),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            );
+            if inner.first_video_idx.load(Ordering::Relaxed) == 0 {
+                let _ = inner.first_video_idx.compare_exchange(
+                    0,
+                    inner.write_idx.load(Ordering::Relaxed),
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                );
             }
         }
 
@@ -514,8 +526,12 @@ impl LockFreeReplayBuffer {
             }
         }
 
-        // Log every 100 video packets for memory tracking
-        if matches!(stream_type, StreamType::Video) && write_idx % 100 == 0 {
+        // Log every 100 video packets for memory tracking (gated to avoid modulo
+        // overhead when tracing is statically disabled).
+        if tracing::level_enabled!(tracing::Level::DEBUG)
+            && matches!(stream_type, StreamType::Video)
+            && write_idx % 100 == 0
+        {
             let evict_frontier = inner.evict_frontier.load(Ordering::Relaxed);
             let packet_count = write_idx.saturating_sub(evict_frontier);
             debug!(
@@ -867,14 +883,25 @@ impl LockFreeReplayBuffer {
         }
     }
 
-    fn detect_first_video_kind(&self, data: &[u8]) -> FirstVideoKind {
+    /// Returns a u8 encoding of the first video kind for atomic storage.
+    /// 0=unknown, 1=H264Sps, 2=HevcVps, 3=Other.
+    fn detect_first_video_kind_as_u8(&self, data: &[u8]) -> u8 {
         if matches!(h264_nal_type(data), Some(7)) {
-            return FirstVideoKind::H264Sps;
+            return 1;
         }
         if matches!(hevc_nal_type(data), Some(32)) {
-            return FirstVideoKind::HevcVps;
+            return 2;
         }
-        FirstVideoKind::Other
+        3
+    }
+
+    fn first_video_kind_from_atomic(val: u8) -> FirstVideoKind {
+        match val {
+            1 => FirstVideoKind::H264Sps,
+            2 => FirstVideoKind::HevcVps,
+            3 => FirstVideoKind::Other,
+            _ => FirstVideoKind::Other,
+        }
     }
 
     /// Gets a snapshot of all packets in the buffer.
@@ -932,24 +959,13 @@ impl LockFreeReplayBuffer {
             }
         }
 
-        // RC2: Lock param_cache FIRST, then first_video_info — matching push_single's
-        // lock order to prevent AB-BA deadlock. Hold both locks concurrently.
+        // RC2: Lock param_cache first, then read the atomic first_video_kind.
+        // The atomic replaces the old first_video_info mutex, so there's no
+        // second lock to acquire — no AB-BA deadlock possible.
         let cache = inner.param_cache.lock();
-        let first_video_is_param_set = inner
-            .first_video_info
-            .lock()
-            .map(|guard| {
-                guard
-                    .map(|(_, kind)| kind.is_parameter_set())
-                    .unwrap_or(true)
-            })
-            .unwrap_or_else(|e| {
-                tracing::warn!(
-                    "first_video_info mutex poisoned: {}, assuming parameter set",
-                    e
-                );
-                true
-            });
+        let first_video_kind_raw = inner.first_video_kind.load(Ordering::Relaxed);
+        let first_video_is_param_set =
+            Self::first_video_kind_from_atomic(first_video_kind_raw).is_parameter_set();
 
         // M3: If cache was cleared between reading first_video_info and locking param_cache,
         // the prepend data may be gone — skip the prepend to avoid stale reference.
@@ -1052,9 +1068,10 @@ impl LockFreeReplayBuffer {
     /// Falls back to the first keyframe after the requested PTS only when no
     /// earlier keyframe is available.
     ///
-    /// Uses a two-pass approach to avoid doubling memory:
-    ///   Pass 1 — scan slot metadata (pts, keyframe, stream) without cloning.
-    ///   Pass 2 — clone only the packets that belong in the final result.
+    /// Uses a lightweight two-sub-pass approach:
+    ///   Sub-pass 1 — scan metadata to determine keyframe boundary (early-break possible).
+    ///   Sub-pass 2 — clone packets from the boundary forward in a single pass
+    ///                (no Vec<bool> bitmask, no Vec<SlotMeta> for every slot).
     ///
     /// # Arguments
     ///
@@ -1071,7 +1088,6 @@ impl LockFreeReplayBuffer {
     /// # Thread Safety
     ///
     /// Safe to call from multiple consumer threads.
-    #[allow(clippy::too_many_lines)]
     pub fn snapshot_from(&self, start_pts: i64) -> BufferResult<TrackedSnapshot> {
         let inner = &self.inner;
         let write_idx = inner.write_idx.load(Ordering::Acquire);
@@ -1080,8 +1096,8 @@ impl LockFreeReplayBuffer {
             return Ok(TrackedSnapshot::new(vec![], Arc::clone(inner)));
         }
 
-        // H1: Capture restart generation BEFORE Pass 1 so we can detect concurrent
-        // restarts between Pass 1 metadata collection and Pass 2 data cloning.
+        // H1: Capture restart generation before the scan so we can detect concurrent
+        // restarts that invalidate our snapshot.
         let gen_before = inner.restart_generation.load(Ordering::Acquire);
 
         // Check outstanding snapshot bytes limit before proceeding
@@ -1103,32 +1119,9 @@ impl LockFreeReplayBuffer {
         let evict_frontier = inner.evict_frontier.load(Ordering::Acquire);
         let first_idx = first_idx.max(evict_frontier);
 
-        // Log buffer state at snapshot start
-        let buffer_total_bytes = inner.total_bytes.load(Ordering::Relaxed);
-        let buffer_packet_count = write_idx.saturating_sub(evict_frontier);
-        debug!(
-            "snapshot_from START: start_pts={}, write_idx={}, evict_frontier={}, buffer_packets={}, buffer_bytes={:.1}MB",
-            start_pts,
-            write_idx,
-            evict_frontier,
-            buffer_packet_count,
-            buffer_total_bytes as f64 / 1_048_576.0
-        );
-
-        // ── Pass 1: scan-only (no clones) ──────────────────────────────────
-        // Record lightweight metadata per slot to determine the keyframe
-        // boundary and the video_start_pts, without cloning any packet data.
-        struct SlotMeta {
-            ring_idx: usize,
-            pts: i64,
-            is_keyframe: bool,
-            stream: StreamType,
-        }
-
-        let capacity_estimate = write_idx.saturating_sub(first_idx);
-        let mut metas: Vec<SlotMeta> = Vec::with_capacity(capacity_estimate);
-        let mut first_keyframe_at_or_after: Option<usize> = None;
+        // ── Sub-pass 1: scan keyframe metadata only (no clones, no Vec<bool>, early-break) ──
         let mut last_keyframe_at_or_before: Option<usize> = None;
+        let mut first_keyframe_at_or_after: Option<usize> = None;
 
         for i in first_idx..write_idx {
             let slot_idx = i & inner.mask;
@@ -1137,20 +1130,18 @@ impl LockFreeReplayBuffer {
             if let Some(packet_guard) = slot.try_lock_snapshot() {
                 if let Some(ref packet) = *packet_guard {
                     if packet.is_keyframe {
-                        if packet.pts >= start_pts && first_keyframe_at_or_after.is_none() {
-                            first_keyframe_at_or_after = Some(i);
-                        }
                         if packet.pts <= start_pts {
                             last_keyframe_at_or_before = Some(i);
                         }
+                        if packet.pts >= start_pts && first_keyframe_at_or_after.is_none() {
+                            first_keyframe_at_or_after = Some(i);
+                        }
                     }
-                    metas.push(SlotMeta {
-                        ring_idx: i,
-                        pts: packet.pts,
-                        is_keyframe: packet.is_keyframe,
-                        stream: packet.stream,
-                    });
                 }
+            }
+            // Early exit: once we have both markers, the boundary is determined.
+            if last_keyframe_at_or_before.is_some() && first_keyframe_at_or_after.is_some() {
+                break;
             }
         }
 
@@ -1158,76 +1149,25 @@ impl LockFreeReplayBuffer {
             .or(first_keyframe_at_or_after)
             .unwrap_or(first_idx);
 
-        // H2: Compute the FIRST video PTS to clamp audio lead-in.
-        // Only include audio that accompanies actual video frames.
-        let first_video_pts = metas
-            .iter()
-            .filter(|m| matches!(m.stream, StreamType::Video))
-            .find(|m| m.ring_idx >= start_idx)
-            .map(|m| m.pts)
-            .unwrap_or(i64::MAX);
+        // ── Sub-pass 2: single clone pass from the keyframe boundary ──────────────────
+        // Build result while scanning. Track first_video_pts on the fly to handle audio
+        // lead-in correctly.
+        let estimated_count = write_idx.saturating_sub(start_idx);
+        let mut result: Vec<EncodedPacket> = Vec::with_capacity(estimated_count);
+        let mut found_first_video_pts: Option<i64> = None;
 
-        // Build inclusion bitmask for O(1) lookup in Pass 2.
-        // Vec<bool> is space-efficient (1 bit per element) and avoids the O(log n)
-        // binary_search cost of Vec<usize>. Total memory for typical 13K slot buffers
-        // is ~1.6 KB, negligible compared to Vec<usize>'s ~104 KB.
-        let range_len = write_idx - first_idx;
-        let mut included_bits = vec![false; range_len];
-        for m in &metas {
-            let dominated = m.ring_idx >= start_idx;
-            let audio_in_range = !dominated
-                && matches!(m.stream, StreamType::SystemAudio | StreamType::Microphone)
-                // H2: Only include audio at or after first_video_pts, preventing
-                // unbounded audio-only lead-in before the first video keyframe.
-                && m.pts >= first_video_pts;
-            if dominated || audio_in_range {
-                included_bits[m.ring_idx - first_idx] = true;
-            }
-        }
-
-        {
-            let video_count = metas
-                .iter()
-                .filter(|m| matches!(m.stream, StreamType::Video))
-                .count();
-            let keyframe_count = metas.iter().filter(|m| m.is_keyframe).count();
-            let included_count = included_bits.iter().filter(|&&b| b).count();
-            debug!(
-                "snapshot_from: all_packets={} ({} video, {} keyframes), start_pts={}, start_idx={}, included={}",
-                metas.len(),
-                video_count,
-                keyframe_count,
-                start_pts,
-                start_idx,
-                included_count
-            );
-        }
-
-        // Release metas — we no longer need it.
-        // Note: clear() + drop() is sufficient. Calling shrink_to_fit() before
-        // drop() would only add cost by reallocating a Vec that is about to be
-        // freed anyway.
-        metas.clear();
-        drop(metas);
-
-        // ── Pass 2: selective clone ────────────────────────────────────────
-        // Use the inclusion bitmask for O(1) lookup per slot.
-        let included_count = included_bits.iter().filter(|&&b| b).count();
-        let mut result: Vec<EncodedPacket> = Vec::with_capacity(included_count);
-
-        for i in first_idx..write_idx {
-            // O(1) check via bitmask instead of O(log n) binary_search
-            if !included_bits[i - first_idx] {
-                continue;
-            }
+        for i in start_idx..write_idx {
             let slot_idx = i & inner.mask;
             let slot = &inner.slots[slot_idx];
 
             if let Some(packet_guard) = slot.try_lock_snapshot() {
                 if let Some(ref packet) = *packet_guard {
-                    // Zero-copy clone: Bytes uses Arc internally, so clone() just bumps
-                    // the refcount. Ring eviction still works because the slot is cleared
-                    // via guard.take(), and the snapshot's clone keeps data alive.
+                    // Track the first video PTS from this range for potential use in
+                    // audio lead-in below (we handle lead-in separately).
+                    if found_first_video_pts.is_none() && matches!(packet.stream, StreamType::Video)
+                    {
+                        found_first_video_pts = Some(packet.pts);
+                    }
                     result.push(EncodedPacket {
                         data: packet.data.clone(),
                         pts: packet.pts,
@@ -1241,9 +1181,36 @@ impl LockFreeReplayBuffer {
             }
         }
 
-        // Release included_bits after loop completes.
-        drop(included_bits);
+        // ── Audio lead-in: include audio packets before start_idx but at or after
+        //     first_video_pts, to prevent unbounded audio-only lead-in. ─────────────
+        let first_video_pts = found_first_video_pts.unwrap_or(i64::MAX);
+        for i in first_idx..start_idx {
+            let slot_idx = i & inner.mask;
+            let slot = &inner.slots[slot_idx];
 
+            if let Some(packet_guard) = slot.try_lock_snapshot() {
+                if let Some(ref packet) = *packet_guard {
+                    let is_audio = matches!(
+                        packet.stream,
+                        StreamType::SystemAudio | StreamType::Microphone
+                    );
+                    if is_audio && packet.pts >= first_video_pts {
+                        result.push(EncodedPacket {
+                            data: packet.data.clone(),
+                            pts: packet.pts,
+                            dts: packet.dts,
+                            stream: packet.stream,
+                            is_keyframe: packet.is_keyframe,
+                            resolution: packet.resolution,
+                            codec: packet.codec,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Sort by PTS, then by stream type for deterministic ordering
+        // (audio lead-in packets may appear before the keyframe slice).
         result.sort_by_key(|p| {
             (
                 p.pts,
@@ -1255,32 +1222,7 @@ impl LockFreeReplayBuffer {
             )
         });
 
-        // Calculate result memory footprint
-        let result_bytes: usize = result.iter().map(|p| p.data.len()).sum();
-        let result_video = result
-            .iter()
-            .filter(|p| matches!(p.stream, StreamType::Video))
-            .count();
-        let result_audio = result.len().saturating_sub(result_video);
-
-        // Log buffer state after snapshot to see if anything changed
-        let buffer_bytes_after = inner.total_bytes.load(Ordering::Relaxed);
-        let evict_after = inner.evict_frontier.load(Ordering::Relaxed);
-        let write_idx_after = inner.write_idx.load(Ordering::Relaxed);
-
-        debug!(
-            "snapshot_from RESULT: result={} packets ({} video, {} audio), result_bytes={:.1}MB, buffer_after={:.1}MB, write_idx {}->{}, evict_frontier {}->{}",
-            result.len(),
-            result_video,
-            result_audio,
-            result_bytes as f64 / 1_048_576.0,
-            buffer_bytes_after as f64 / 1_048_576.0,
-            write_idx,
-            write_idx_after,
-            evict_frontier,
-            evict_after
-        );
-
+        // ── Prepend parameter sets if needed ──────────────────────────────
         if !result.is_empty() {
             let first_video = result
                 .iter()
@@ -1291,20 +1233,8 @@ impl LockFreeReplayBuffer {
                 let first_nal_is_vps = hevc_nal_type(first_data) == Some(32);
                 let first_nal_is_sps = h264_nal_type(first_data) == Some(7);
 
-                debug!(
-                    "snapshot_from: first_video keyframe={}, nal_vps={}, nal_sps={}",
-                    first_is_keyframe, first_nal_is_vps, first_nal_is_sps
-                );
-
                 if first_is_keyframe && !first_nal_is_vps && !first_nal_is_sps {
                     let cache = self.inner.param_cache.lock();
-                    info!(
-                        "snapshot_from: prepending param sets (codec={:?}, vps={}, sps={}, pps={})",
-                        cache.codec_kind,
-                        cache.hevc_vps.is_some(),
-                        cache.hevc_sps.is_some(),
-                        cache.hevc_pps.is_some()
-                    );
                     let first_pts = first_vid.pts;
                     let mut prepend = Vec::new();
 
@@ -1371,11 +1301,6 @@ impl LockFreeReplayBuffer {
                     }
 
                     if !prepend.is_empty() {
-                        trace!(
-                            "snapshot_from: prepending {} parameter sets before keyframe at idx {}",
-                            prepend.len(),
-                            start_idx
-                        );
                         let mut final_result = Vec::with_capacity(prepend.len() + result.len());
                         final_result.extend(prepend);
                         final_result.extend(result);
@@ -1385,11 +1310,11 @@ impl LockFreeReplayBuffer {
             }
         }
 
-        // H1: Check if buffer was restarted between Pass 1 and Pass 2.
+        // H1: Check if buffer was restarted between scanning and cloning.
         let gen_after = inner.restart_generation.load(Ordering::Acquire);
         if gen_before != gen_after {
             warn!(
-                "snapshot_from: buffer restarted between passes (gen {} -> {}); returning empty",
+                "snapshot_from: buffer restarted between scans (gen {} -> {}); returning empty",
                 gen_before, gen_after
             );
             return Ok(TrackedSnapshot::new(vec![], Arc::clone(inner)));
@@ -1441,10 +1366,8 @@ impl LockFreeReplayBuffer {
         inner
             .param_cache_pushes_since_complete
             .store(0, Ordering::Release);
-        *inner
-            .first_video_info
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = None;
+        inner.first_video_kind.store(0, Ordering::Release);
+        inner.first_video_idx.store(0, Ordering::Release);
 
         let cache = inner.param_cache.lock();
         debug!(
@@ -1501,10 +1424,8 @@ impl LockFreeReplayBuffer {
         inner
             .param_cache_pushes_since_complete
             .store(0, Ordering::Release);
-        *inner
-            .first_video_info
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = None;
+        inner.first_video_kind.store(0, Ordering::Release);
+        inner.first_video_idx.store(0, Ordering::Release);
 
         // O1: Preserve param_cache during restart so the next keyframe immediately
         // produces save-able clips — no need to wait for parameter set collection again.
@@ -1555,10 +1476,8 @@ impl LockFreeReplayBuffer {
             .store(0, Ordering::Release);
 
         // Clear first_video_info so next video packet becomes new reference
-        *inner
-            .first_video_info
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = None;
+        inner.first_video_kind.store(0, Ordering::Release);
+        inner.first_video_idx.store(0, Ordering::Release);
     }
 
     /// Gets current buffer statistics.

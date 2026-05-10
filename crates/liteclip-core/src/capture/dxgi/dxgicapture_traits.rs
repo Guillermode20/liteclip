@@ -14,7 +14,6 @@ use anyhow::{bail, Result};
 use crossbeam_channel::Receiver;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::thread::spawn;
 use tracing::{error, info};
 
 use super::DxgiCapture;
@@ -31,9 +30,14 @@ impl CaptureBackend for DxgiCapture {
         let frame_tx = self._frame_tx.clone();
         let fatal_tx = self.fatal_tx.clone();
         let config = self.config.clone();
-        self.capture_thread = Some(spawn(move || {
-            Self::capture_loop(running, frame_tx, fatal_tx, config);
-        }));
+        self.capture_thread = Some(
+            std::thread::Builder::new()
+                .name("capture".to_string())
+                .spawn(move || {
+                    Self::capture_loop(running, frame_tx, fatal_tx, config);
+                })
+                .expect("Failed to spawn capture thread"),
+        );
         Ok(())
     }
     fn stop(&mut self) {

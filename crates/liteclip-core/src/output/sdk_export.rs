@@ -617,6 +617,12 @@ pub fn run_stream_copy_export_sdk(
     let mut last_out_pts_by_stream: Vec<Option<i64>> = vec![None; output_stream_count];
     let route_count = stream_routes.iter().filter(|r| r.is_some()).count();
 
+    // Maximum duration of a single frame in seconds, used to extend the end boundary
+    // so the last frame's full duration is covered and doesn't hang on playback.
+    let max_frame_secs = 1.0 / request.metadata.fps.max(1.0);
+    // Grace period past end_secs to capture one extra frame past the trim boundary.
+    let end_grace_secs = 0.75_f64.max(max_frame_secs);
+
     for (range_index, range) in request.keep_ranges.iter().enumerate() {
         if cancel_flag.load(Ordering::Relaxed) {
             return Ok(ExportOutcome::Cancelled);
@@ -672,8 +678,9 @@ pub fn run_stream_copy_export_sdk(
             };
             let pts_secs = pts_in as f64 * secs_per_in_tick;
 
-            // While finding start keyframes, drop packets from all streams.
-            // This keeps A/V aligned to the actual video decode start point.
+            // While finding start keyframes, drop only non-key video packets.
+            // Audio (and other non-video) packets pass through so they start at
+            // the correct position and don't lag behind the first video frame.
             if !keyframe_scan_done {
                 if route.is_video && packet.is_key() && pts_secs >= range.start_secs {
                     if pending_video_keyframes[stream_index] {
@@ -684,13 +691,18 @@ pub fn run_stream_copy_export_sdk(
                         keyframe_scan_done = true;
                     }
                 }
-                if !keyframe_scan_done {
+                if !keyframe_scan_done && route.is_video {
+                    // Drop non-key video packets during scan — they depend on the
+                    // future keyframe's reference chain and can't be decoded yet.
                     continue;
                 }
+                // Non-video streams (audio, subtitles) pass through so they start
+                // at the trim boundary in sync with the first video frame.
             }
 
             // Once all copied streams are comfortably past the range end, stop this range.
-            if pts_secs >= range.end_secs + 0.75 {
+            let end_boundary = range.end_secs + end_grace_secs;
+            if pts_secs >= end_boundary {
                 if !streams_past_range_end[stream_index] {
                     streams_past_range_end[stream_index] = true;
                     streams_past_range_end_count += 1;
@@ -702,7 +714,9 @@ pub fn run_stream_copy_export_sdk(
             }
             // Skip packets before the requested start (they were captured to satisfy
             // keyframe references but are outside the user's trim window).
-            if pts_secs < range.start_secs || pts_secs >= range.end_secs {
+            // Include one extra frame past end_secs so the last frame doesn't hang.
+            let max_end_pts = range.end_secs + max_frame_secs;
+            if pts_secs < range.start_secs || pts_secs >= max_end_pts {
                 continue;
             }
 

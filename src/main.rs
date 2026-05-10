@@ -595,7 +595,7 @@ async fn spawn_save_clip_task(
     game_detector: &Option<Arc<GameDetector>>,
 ) {
     if save_in_progress
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
         .is_err()
     {
         info!("Save request ignored: clip save already in progress");
@@ -607,7 +607,7 @@ async fn spawn_save_clip_task(
         Ok(x) => x,
         Err(e) => {
             error!("Failed to read app state for clip save: {}", e);
-            save_in_progress.store(false, Ordering::SeqCst);
+            save_in_progress.store(false, Ordering::Release);
             return;
         }
     };
@@ -648,6 +648,6 @@ async fn spawn_save_clip_task(
             }
         }
 
-        save_in_progress_clone.store(false, Ordering::SeqCst);
+        save_in_progress_clone.store(false, Ordering::Release);
     });
 }

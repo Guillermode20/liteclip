@@ -53,7 +53,7 @@ impl AudioForwardHandle {
         }
 
         // Signal shutdown
-        self.running.store(false, Ordering::SeqCst);
+        self.running.store(false, Ordering::Release);
         self.shutdown_tx.take();
         debug!("Signaling audio forwarding thread to stop");
 
@@ -89,7 +89,7 @@ impl AudioForwardHandle {
 
     /// Check if the forwarding thread is still running.
     pub fn is_running(&self) -> bool {
-        self.running.load(Ordering::SeqCst)
+        self.running.load(Ordering::Acquire)
             && self.thread.as_ref().is_some_and(|t| !t.is_finished())
     }
 }
@@ -158,28 +158,22 @@ pub fn start_audio_capture(
     // Shutdown coordination
     let running = Arc::new(AtomicBool::new(true));
     let running_clone = Arc::clone(&running);
-    let (shutdown_tx, shutdown_rx) = crossbeam_channel::bounded::<()>(1);
+    let (shutdown_tx, _shutdown_rx) = crossbeam_channel::bounded::<()>(1);
 
     let thread = std::thread::spawn(move || {
         let mut forwarded_packets = 0u64;
         let mut packet_batch = Vec::with_capacity(32);
+        const FORWARD_TIMEOUT: Duration = Duration::from_millis(75);
 
-        while running_clone.load(Ordering::SeqCst) {
-            crossbeam_channel::select! {
-                recv(shutdown_rx) -> _ => {
-                    break;
-                }
-                recv(audio_packet_rx) -> recv_result => {
-                    let packet = match recv_result {
-                        Ok(packet) => packet,
-                        Err(_) => {
-                            debug!(
-                                "Audio packet channel disconnected, exiting forwarding thread ({})",
-                                context_for_thread
-                            );
-                            break;
-                        }
-                    };
+        while running_clone.load(Ordering::Acquire) {
+            // Use recv_timeout instead of select! to avoid the macro overhead.
+            // Shutdown is signaled by dropping shutdown_tx, which causes
+            // the audio_packet_rx channel to disconnect, or by the periodic
+            // running flag check at the loop header.
+            let recv_result = audio_packet_rx.recv_timeout(FORWARD_TIMEOUT);
+
+            match recv_result {
+                Ok(packet) => {
                     packet_batch.push(packet);
                     forwarded_packets = forwarded_packets.saturating_add(1);
 
@@ -208,10 +202,21 @@ pub fn start_audio_capture(
                         );
                     }
                 }
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                    // No packet within timeout — check running flag at loop top.
+                    continue;
+                }
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                    debug!(
+                        "Audio packet channel disconnected, exiting forwarding thread ({})",
+                        context_for_thread
+                    );
+                    break;
+                }
             }
         }
 
-        running_clone.store(false, Ordering::SeqCst);
+        running_clone.store(false, Ordering::Release);
 
         debug!(
             "Audio forwarding thread stopped after forwarding {} packets ({})",

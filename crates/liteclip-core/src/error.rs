@@ -15,8 +15,14 @@ pub enum LiteClipError {
     #[error("Internal application state error: {0}")]
     StateError(String),
 
-    #[error(transparent)]
-    Unknown(#[from] anyhow::Error),
+    #[error("{0}")]
+    Unknown(String),
+}
+
+impl From<anyhow::Error> for LiteClipError {
+    fn from(e: anyhow::Error) -> Self {
+        LiteClipError::Unknown(e.to_string())
+    }
 }
 
 /// A specialized Result type for LiteClip operations.
@@ -64,8 +70,8 @@ mod tests {
         let anyhow_err = anyhow::anyhow!("something went wrong");
         let err: LiteClipError = anyhow_err.into();
         match err {
-            LiteClipError::Unknown(e) => {
-                assert!(e.to_string().contains("something went wrong"));
+            LiteClipError::Unknown(msg) => {
+                assert!(msg.contains("something went wrong"));
             }
             _ => panic!("Expected Unknown variant"),
         }

@@ -523,10 +523,7 @@ fn render_snippet_list(ui: &mut egui::Ui, editor: &mut EditorState, outcome: &mu
 
 fn render_size_section(ui: &mut egui::Ui, editor: &mut EditorState) {
     let kept_duration = editor.kept_duration_secs();
-    let kept_ranges_len = editor.kept_ranges().len();
-    let max_output_size_mb = editor.max_output_size_mb();
     let total_duration = editor.duration_secs();
-
     let kept_proportion = if total_duration > 0.0 {
         (kept_duration / total_duration).clamp(0.0, 1.0)
     } else {
@@ -534,29 +531,14 @@ fn render_size_section(ui: &mut egui::Ui, editor: &mut EditorState) {
     };
     let auto_target_size_mb = (editor.video.size_mb * kept_proportion).ceil().max(1.0) as u32;
 
-    if editor.target_size_mb > max_output_size_mb {
-        editor.target_size_mb = max_output_size_mb;
-    }
-
-    let (video_kbps, total_kbps) = estimate_export_bitrates_from_editor(
-        editor.target_size_mb,
-        kept_duration,
-        editor.video.metadata.has_audio,
-        editor.audio_bitrate_kbps,
-        kept_ranges_len,
-        editor.use_hardware_acceleration,
-    );
-    let (quality_label, bars) = {
-        let (w, h) = editor.effective_output_resolution();
-        let fps = editor.effective_output_fps();
-        super::quality_estimate(w, h, fps, video_kbps)
-    };
-
     egui::Frame::group(ui.style()).show(ui, |ui| {
         ui.label(egui::RichText::new("Export Settings").strong());
         ui.add_space(6.0);
 
-        // Show stream copy mode when size hasn't been manually adjusted and no crop
+        // When the user hasn't manually adjusted the target size and no crop is active,
+        // we use stream copy (no re-encoding). In this mode, target_size_mb and bitrate
+        // estimates are irrelevant — the output preserves the original encoded data.
+        // Skip all clamping and estimation to avoid any side-effects on the export path.
         if !editor.target_size_manually_adjusted && editor.crop.is_none() {
             ui.horizontal_wrapped(|ui| {
                 ui.label("Output Size:");
@@ -574,12 +556,36 @@ fn render_size_section(ui: &mut egui::Ui, editor: &mut EditorState) {
                 editor.target_size_manually_adjusted = true;
             }
         } else {
+            let max_output_size_mb = editor.max_output_size_mb();
+            let kept_ranges_len = editor.kept_ranges().len();
+
+            // Clamp target_size_mb to max_output_size_mb only in compression mode
+            if editor.target_size_mb > max_output_size_mb {
+                editor.target_size_mb = max_output_size_mb;
+            }
+
+            // Compute bitrate and quality estimates for display in compression mode
+            let (video_kbps, total_kbps) = estimate_export_bitrates_from_editor(
+                editor.target_size_mb,
+                kept_duration,
+                editor.video.metadata.has_audio,
+                editor.audio_bitrate_kbps,
+                kept_ranges_len,
+                editor.use_hardware_acceleration,
+            );
+            let (quality_label, bars) = {
+                let (w, h) = editor.effective_output_resolution();
+                let fps = editor.effective_output_fps();
+                super::quality_estimate(w, h, fps, video_kbps)
+            };
+
             if editor.crop.is_some() {
                 ui.label(
                     egui::RichText::new("Re-encoding required (crop active)")
                         .color(egui::Color32::from_rgb(255, 180, 80)),
                 );
             }
+
             ui.horizontal_wrapped(|ui| {
                 ui.label("Target Output Size:");
                 let prev_size = editor.target_size_mb;
