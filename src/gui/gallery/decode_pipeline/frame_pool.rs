@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 pub(super) const FRAME_POOL_SIZE: usize = 32;
+pub(super) const FRAME_POOL_MAX_SIZE: usize = 48;
 
 pub(super) struct FramePool {
     buffers: Mutex<VecDeque<Vec<u8>>>,
@@ -40,7 +41,10 @@ impl FramePool {
 
     fn release(&self, buffer: Vec<u8>) {
         let mut guard = self.buffers.lock().unwrap_or_else(|e| e.into_inner());
-        guard.push_back(buffer);
+        if guard.len() < FRAME_POOL_MAX_SIZE {
+            guard.push_back(buffer);
+        }
+        // else: drop excess buffers to keep memory bounded
     }
 
     pub(super) fn buffer_size(&self) -> usize {

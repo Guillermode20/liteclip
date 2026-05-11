@@ -75,7 +75,6 @@ pub fn validate_hotkey_config_strings(config: &crate::config::Config) {
     let fields = [
         ("save_clip", config.hotkeys.save_clip.as_str()),
         ("toggle_recording", config.hotkeys.toggle_recording.as_str()),
-        ("screenshot", config.hotkeys.screenshot.as_str()),
         ("open_gallery", config.hotkeys.open_gallery.as_str()),
     ];
 

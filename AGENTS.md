@@ -163,6 +163,30 @@ Tests are inline (`#[cfg(test)]` modules) or in `crates/liteclip-core/tests/`.
 - Ring buffer proactively evicts at 80% memory watermark
 - Max 512MB outstanding for concurrent snapshots
 
+## Performance Critical Paths
+
+### 1. Ring Buffer (SPMC)
+- **Central Hub**: All capture-to-encoder data flows through this lock-free buffer.
+- **Lock-Free Indexing**: Uses `fetch_add` for O(1) slot selection to avoid global capture stalls.
+- **Proactive Eviction**: Evicts at 80% memory watermark to prevent "mutex storms" at full capacity.
+- **Batched Operations**: Evicts in batches (e.g., 8 slots) to reduce per-operation lock contention.
+
+### 2. Capture Loop (DXGI/WASAPI)
+- **Acquisition Stability**: Runs on dedicated high-priority threads.
+- **Zero CPU Stalls**: Uses `ID3D11Fence` for GPU-to-GPU sync (capture -> encoder).
+- **Adaptive FPS**: Uses `fps_divisor` backpressure to drop frames if the encoder falls behind.
+- **Audio Sync**: Buffers system/mic streams separately and syncs by timestamp (max 100ms drift).
+
+### 3. Encoder Orchestration
+- **Thread Isolation**: All encoding happens on an isolated thread to decouple it from UI and capture loops.
+- **Hardware First**: Auto-detects NVENC -> AMF -> QSV before falling back to Software.
+- **Zero-Copy Handover**: Uses `bytes::Bytes` for cheap cloning between capture and output.
+
+### 4. Output & I/O
+- **Async Muxing**: Clip saving is offloaded to background threads to avoid blocking real-time capture.
+- **Memory Pinning**: Outstanding snapshots pin memory in the ring buffer; tracked via 512MB safety cap.
+- **Post-Processing**: Tasks like thumbnail generation are low-priority and spawned after muxing completes.
+
 ## Commit Format
 
 Use conventional commits: `type(scope): description`

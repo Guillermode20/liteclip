@@ -11,6 +11,14 @@ use crate::output::estimate_export_bitrates;
 #[cfg(all(target_os = "windows", not(feature = "ffmpeg")))]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+/// Video file extensions recognized by the gallery scanner.
+///
+/// Covers the most common container formats. All of these are supported
+/// by the underlying FFmpeg decoder for preview, editing, and export.
+const SCANNED_VIDEO_EXTENSIONS: &[&str] = &[
+    "mp4", "mov", "mkv", "webm", "avi", "m4v", "flv", "wmv", "ogv", "3gp", "ts", "mts", "m2ts",
+];
+
 pub(super) fn collect_video_paths_impl(dir: &Path, cache_dir: &Path, output: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -25,12 +33,13 @@ pub(super) fn collect_video_paths_impl(dir: &Path, cache_dir: &Path, output: &mu
         }
         if path.is_dir() {
             collect_video_paths_impl(&path, cache_dir, output);
-        } else if path
-            .extension()
-            .map(|ext| ext.eq_ignore_ascii_case("mp4"))
-            .unwrap_or(false)
-        {
-            output.push(path);
+        } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            if SCANNED_VIDEO_EXTENSIONS
+                .iter()
+                .any(|supported| ext.eq_ignore_ascii_case(supported))
+            {
+                output.push(path);
+            }
         }
     }
 }

@@ -520,63 +520,64 @@ impl eframe::App for GuiManagerApp {
             .frame(frame)
             .show(ctx, |_ui| {});
 
-        if self.settings_open_flag.load(Ordering::Acquire) {
-            let settings_clone = self.settings.clone();
-            let settings_flag = self.settings_open_flag.clone();
-            ctx.show_viewport_deferred(
-                egui::ViewportId::from_hash_of("settings"),
-                egui::ViewportBuilder::default()
-                    .with_title("LiteClip Settings")
-                    .with_inner_size([600.0, 700.0])
-                    .with_resizable(true)
-                    .with_min_inner_size([600.0, 500.0]),
-                move |ctx, class| {
-                    if class == egui::ViewportClass::Embedded {
-                        return;
-                    }
+        // Always register both viewports every frame so the egui viewport system
+        // always has them in its viewport map. The closure handles the case
+        // where the content is None (no window to show yet).
+        let settings_content = self.settings.clone();
+        let settings_flag = self.settings_open_flag.clone();
+        ctx.show_viewport_deferred(
+            egui::ViewportId::from_hash_of("settings"),
+            egui::ViewportBuilder::default()
+                .with_title("LiteClip Settings")
+                .with_inner_size([600.0, 700.0])
+                .with_resizable(true)
+                .with_min_inner_size([600.0, 500.0])
+                .with_visible(self.settings_open_flag.load(Ordering::Acquire)),
+            move |ctx, class| {
+                if class == egui::ViewportClass::Embedded {
+                    return;
+                }
 
-                    let mut lock = settings_clone.lock().unwrap_or_else(|e| e.into_inner());
-                    if let Some(settings) = lock.as_mut() {
-                        let mut is_open = true;
-                        settings.update(ctx, &mut is_open);
-                        if !is_open || ctx.input(|i| i.viewport().close_requested()) {
-                            settings.release_resources();
-                            *lock = None;
-                            settings_flag.store(false, Ordering::Release);
-                        }
+                let mut lock = settings_content.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(settings) = lock.as_mut() {
+                    let mut is_open = true;
+                    settings.update(ctx, &mut is_open);
+                    if !is_open || ctx.input(|i| i.viewport().close_requested()) {
+                        settings.release_resources();
+                        *lock = None;
+                        settings_flag.store(false, Ordering::Release);
                     }
-                },
-            );
-        }
+                }
+            },
+        );
 
-        if self.gallery_open_flag.load(Ordering::Acquire) {
-            let gallery_clone = self.gallery.clone();
-            let gallery_flag = self.gallery_open_flag.clone();
-            ctx.show_viewport_deferred(
-                egui::ViewportId::from_hash_of("gallery"),
-                egui::ViewportBuilder::default()
-                    .with_title("LiteClip Clip & Compress")
-                    .with_inner_size([1280.0, 820.0])
-                    .with_resizable(true)
-                    .with_min_inner_size([720.0, 520.0]),
-                move |ctx, class| {
-                    if class == egui::ViewportClass::Embedded {
-                        return;
-                    }
+        let gallery_content = self.gallery.clone();
+        let gallery_flag = self.gallery_open_flag.clone();
+        ctx.show_viewport_deferred(
+            egui::ViewportId::from_hash_of("gallery"),
+            egui::ViewportBuilder::default()
+                .with_title("LiteClip Clip & Compress")
+                .with_inner_size([1280.0, 820.0])
+                .with_resizable(true)
+                .with_min_inner_size([720.0, 520.0])
+                .with_visible(self.gallery_open_flag.load(Ordering::Acquire)),
+            move |ctx, class| {
+                if class == egui::ViewportClass::Embedded {
+                    return;
+                }
 
-                    let mut lock = gallery_clone.lock().unwrap_or_else(|e| e.into_inner());
-                    if let Some(gallery) = lock.as_mut() {
-                        let mut is_open = true;
-                        gallery.update(ctx, &mut is_open);
-                        if ctx.input(|i| i.viewport().close_requested()) {
-                            gallery.release_all_gui_resources();
-                            *lock = None;
-                            gallery_flag.store(false, Ordering::Release);
-                        }
+                let mut lock = gallery_content.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(gallery) = lock.as_mut() {
+                    let mut is_open = true;
+                    gallery.update(ctx, &mut is_open);
+                    if ctx.input(|i| i.viewport().close_requested()) {
+                        gallery.release_all_gui_resources();
+                        *lock = None;
+                        gallery_flag.store(false, Ordering::Release);
                     }
-                },
-            );
-        }
+                }
+            },
+        );
 
         let now = Instant::now();
 

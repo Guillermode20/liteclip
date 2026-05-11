@@ -52,6 +52,7 @@ impl Drop for DecoderHardwareContext {
 
 pub struct PlaybackFrame {
     pub image: PooledRgbaImage,
+    pub pts_secs: f64,
 }
 
 struct TimedFrame {
@@ -66,7 +67,6 @@ pub struct PlaybackController {
     audio_handle: Option<rodio::OutputStreamHandle>,
     _audio_shutdown_tx: Option<std::sync::mpsc::Sender<()>>,
     audio_stream_thread: Mutex<Option<JoinHandle<()>>>,
-    audio_playback_thread: Mutex<Option<JoinHandle<()>>>,
     audio_preload_thread: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -80,6 +80,8 @@ struct SharedPlaybackState {
     last_error: Mutex<Option<String>>,
     request_generation: AtomicU64,
     video_request_in_flight: AtomicBool,
+    in_playback_mode: AtomicBool,
+    audio_stop_requested: AtomicBool,
     audio_loading: AtomicBool,
     audio_buffer: Mutex<Option<AudioBuffer>>,
     audio_generation: AtomicU64,
@@ -126,8 +128,15 @@ struct DecoderError {
 }
 
 enum DecoderCommand {
-    Preview { request_id: u64, time_secs: f64 },
-    Playback { request_id: u64, time_secs: f64 },
+    Preview {
+        request_id: u64,
+        time_secs: f64,
+        fast: bool,
+    },
+    Playback {
+        request_id: u64,
+        time_secs: f64,
+    },
     Stop,
     Shutdown,
 }
@@ -145,6 +154,7 @@ struct DecoderSession {
     decoder: ffmpeg::decoder::Video,
     scaler: ffmpeg::software::scaling::Context,
     decoded_frame: ffmpeg::util::frame::video::Video,
+    sw_frame: ffmpeg::util::frame::video::Video,
     rgba_frame: ffmpeg::util::frame::video::Video,
     stream_index: usize,
     output_width: u32,
@@ -174,6 +184,8 @@ impl PlaybackController {
             last_error: Mutex::new(None),
             request_generation: AtomicU64::new(1),
             video_request_in_flight: AtomicBool::new(false),
+            in_playback_mode: AtomicBool::new(false),
+            audio_stop_requested: AtomicBool::new(false),
             audio_loading: AtomicBool::new(false),
             audio_buffer: Mutex::new(None),
             audio_generation: AtomicU64::new(1),
@@ -218,7 +230,6 @@ impl PlaybackController {
             audio_handle,
             _audio_shutdown_tx: Some(audio_shutdown_tx),
             audio_stream_thread: Mutex::new(Some(audio_stream_thread)),
-            audio_playback_thread: Mutex::new(None),
             audio_preload_thread: Mutex::new(None),
         };
         controller.begin_audio_preload(video_path);
@@ -237,14 +248,14 @@ impl PlaybackController {
     }
 
     pub fn request_preview_frame(&mut self, time_secs: f64) {
-        self.request_preview_at(time_secs);
+        self.request_preview_at(time_secs, false);
     }
 
     pub fn request_preview_frame_fast(&mut self, time_secs: f64) {
-        self.request_preview_at(time_secs);
+        self.request_preview_at(time_secs, true);
     }
 
-    fn request_preview_at(&mut self, time_secs: f64) {
+    fn request_preview_at(&mut self, time_secs: f64, fast: bool) {
         let clamped_time = self.clamp_time(time_secs);
         self.stop_audio();
         *self
@@ -263,13 +274,21 @@ impl PlaybackController {
             .unwrap_or_else(|e| e.into_inner())
             .clear();
         self.shared.frame_pool.trim_to(FRAME_POOL_IDLE_TRIM_TARGET);
-        self.decoder.stop();
+
+        // Only send Stop if decoder is in a playback loop.
+        // During sustained drag scrubbing we stack Preview commands.
+        // The decoder processes them sequentially without entering a
+        // playback loop, so Stop is just a wasted channel round-trip.
+        let was_playing = self.shared.in_playback_mode.swap(false, Ordering::SeqCst);
+        if was_playing {
+            self.decoder.stop();
+        }
 
         let request_id = self.next_request_id();
         self.shared
             .video_request_in_flight
             .store(true, Ordering::SeqCst);
-        if let Err(err) = self.decoder.request_preview(request_id, clamped_time) {
+        if let Err(err) = self.decoder.request_preview(request_id, clamped_time, fast) {
             self.shared
                 .video_request_in_flight
                 .store(false, Ordering::SeqCst);
@@ -286,11 +305,30 @@ impl PlaybackController {
         self.shared
             .frame_pool
             .trim_to(FRAME_POOL_ACTIVE_TRIM_TARGET);
-        self.shared
-            .frame_queue
+
+        // Preserve the current preview frame as the first playback frame,
+        // giving instant visual feedback while the decoder catches up.
+        let preview_frame = self
+            .shared
+            .latest_frame
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .clear();
+            .take();
+        {
+            let mut queue = self
+                .shared
+                .frame_queue
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            queue.clear();
+            if let Some(frame) = preview_frame {
+                queue.push_back(TimedFrame {
+                    pts_secs: clamped_time,
+                    image: frame.image,
+                });
+            }
+        }
+
         *self
             .shared
             .current_time_secs
@@ -307,7 +345,7 @@ impl PlaybackController {
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some(PlaybackClock {
             start_time_secs: clamped_time,
-            started_at: None, // Wait for first frame to start clock and audio
+            started_at: None, // Will start immediately since queue has a frame
         });
         tracing::info!("play_from: starting at {:.3}s", clamped_time);
 
@@ -315,6 +353,7 @@ impl PlaybackController {
         self.shared
             .video_request_in_flight
             .store(false, Ordering::SeqCst);
+        self.shared.in_playback_mode.store(true, Ordering::SeqCst);
         if let Err(err) = self.decoder.start_playback(request_id, clamped_time) {
             tracing::error!("play_from: failed to start playback: {}", err);
             *self
@@ -327,6 +366,7 @@ impl PlaybackController {
                 .last_error
                 .lock()
                 .unwrap_or_else(|e| e.into_inner()) = Some(err.to_string());
+            self.shared.in_playback_mode.store(false, Ordering::SeqCst);
             return;
         }
         self.stop_audio();
@@ -353,6 +393,7 @@ impl PlaybackController {
         self.shared
             .video_request_in_flight
             .store(false, Ordering::SeqCst);
+        self.shared.in_playback_mode.store(false, Ordering::SeqCst);
         self.next_request_id();
         self.decoder.stop();
         self.stop_audio();
@@ -621,8 +662,10 @@ impl PlaybackController {
                             .shared
                             .latest_frame
                             .lock()
-                            .unwrap_or_else(|e| e.into_inner()) =
-                            Some(PlaybackFrame { image: frame.image });
+                            .unwrap_or_else(|e| e.into_inner()) = Some(PlaybackFrame {
+                            image: frame.image,
+                            pts_secs: frame.pts_secs,
+                        });
                         self.shared
                             .video_request_in_flight
                             .store(false, Ordering::SeqCst);
@@ -806,8 +849,14 @@ impl PlaybackController {
         self.shared
             .audio_started_generation
             .store(generation, Ordering::SeqCst);
+        // Reset the stop flag for this new playback
+        self.shared
+            .audio_stop_requested
+            .store(false, Ordering::SeqCst);
         let shared = self.shared.clone();
-        let handle = thread::spawn(move || {
+        // Detach the audio thread — no JoinHandle needed. The thread exits
+        // via generation check or stop flag, and the Sink drop happens naturally.
+        let _ = thread::spawn(move || {
             let sink = match Sink::try_new(&handle) {
                 Ok(sink) => sink,
                 Err(err) => {
@@ -818,52 +867,30 @@ impl PlaybackController {
             };
             sink.append(AudioSliceSource::new(buffer, start_time));
             loop {
-                if shared.audio_generation.load(Ordering::SeqCst) != generation {
+                if shared.audio_stop_requested.load(Ordering::SeqCst)
+                    || shared.audio_generation.load(Ordering::SeqCst) != generation
+                {
                     sink.stop();
                     break;
                 }
                 if sink.empty() {
                     break;
                 }
-                // Sleep for 50ms instead of 20ms to reduce CPU wake-ups
-                // while still maintaining responsive audio control
                 thread::sleep(Duration::from_millis(50));
             }
             drop(sink);
         });
-        if let Ok(mut guard) = self.audio_playback_thread.lock() {
-            *guard = Some(handle);
-        }
     }
 
     fn stop_audio(&mut self) {
-        // Increment generation to signal audio playback thread to stop
+        // Signal audio playback thread to stop via both generation counter and stop flag.
+        // The flag check is faster (no need to match generation values in the thread).
         self.shared.audio_generation.fetch_add(1, Ordering::SeqCst);
-
-        // Join the audio playback thread with timeout to ensure clean shutdown
-        // during rapid stop/start cycles
-        if let Ok(mut guard) = self.audio_playback_thread.lock() {
-            if let Some(handle) = guard.take() {
-                // Use a timeout pattern: park thread for up to 500ms
-                let start = std::time::Instant::now();
-                const JOIN_TIMEOUT_MS: u64 = 500;
-
-                while start.elapsed().as_millis() < JOIN_TIMEOUT_MS as u128 {
-                    if handle.is_finished() {
-                        let _ = handle.join();
-                        return;
-                    }
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-
-                // Thread didn't finish within timeout - log warning and proceed
-                tracing::warn!(
-                    "Audio playback thread did not stop within {}ms",
-                    JOIN_TIMEOUT_MS
-                );
-                let _ = handle.join();
-            }
-        }
+        self.shared
+            .audio_stop_requested
+            .store(true, Ordering::SeqCst);
+        // Non-blocking: the thread detaches and checks these flags on its next
+        // 50ms sleep cycle, exiting within ~50ms without blocking the caller.
     }
 }
 
@@ -876,6 +903,9 @@ impl Drop for PlaybackController {
             .unwrap_or_else(|e| e.into_inner())
             .take();
         self.shared.audio_generation.fetch_add(1, Ordering::SeqCst);
+        self.shared
+            .audio_stop_requested
+            .store(true, Ordering::SeqCst);
 
         // Clear audio buffer early to free memory
         let _ = self.shared.audio_buffer.lock().map(|mut g| *g = None);
@@ -885,21 +915,16 @@ impl Drop for PlaybackController {
         let _ = self.shared.frame_queue.lock().map(|mut g| g.clear());
         let _ = self.shared.latest_frame.lock().map(|mut g| *g = None);
 
-        // Signal audio thread to stop
+        // Signal audio stream thread to stop
         self._audio_shutdown_tx.take();
 
-        // Join audio threads
+        // Join audio preload and stream threads
         if let Ok(mut guard) = self.audio_preload_thread.lock() {
             if let Some(handle) = guard.take() {
                 let _ = handle.join();
             }
         }
         if let Ok(mut guard) = self.audio_stream_thread.lock() {
-            if let Some(handle) = guard.take() {
-                let _ = handle.join();
-            }
-        }
-        if let Ok(mut guard) = self.audio_playback_thread.lock() {
             if let Some(handle) = guard.take() {
                 let _ = handle.join();
             }
@@ -948,11 +973,12 @@ impl DecodePipeline {
         }
     }
 
-    fn request_preview(&self, request_id: u64, time_secs: f64) -> Result<()> {
+    fn request_preview(&self, request_id: u64, time_secs: f64, fast: bool) -> Result<()> {
         self.command_tx
             .send(DecoderCommand::Preview {
                 request_id,
                 time_secs,
+                fast,
             })
             .map_err(|_| anyhow!("Decoder worker is unavailable"))
     }
@@ -1051,7 +1077,8 @@ fn command_kind(cmd: &DecoderCommand) -> &'static str {
     match cmd {
         DecoderCommand::Shutdown => "Shutdown",
         DecoderCommand::Stop => "Stop",
-        DecoderCommand::Preview { .. } => "Preview",
+        DecoderCommand::Preview { fast: true, .. } => "Preview(fast)",
+        DecoderCommand::Preview { fast: false, .. } => "Preview",
         DecoderCommand::Playback { .. } => "Playback",
     }
 }
@@ -1116,11 +1143,22 @@ fn decoder_worker_loop(
             DecoderCommand::Preview {
                 request_id,
                 time_secs,
+                fast,
             } => {
-                tracing::debug!("Preview request {} at {:.2}s", request_id, time_secs);
-                if let Err(err) =
-                    session.set_skip_frame_mode(ffmpeg::ffi::AVDiscard::AVDISCARD_NONREF)
-                {
+                tracing::debug!(
+                    "Preview request {} at {:.2}s (fast={})",
+                    request_id,
+                    time_secs,
+                    fast
+                );
+                // Fast scrubbing: skip non-intra frames (P/B) to decode only I-frames.
+                // Normal preview: skip only non-reference frames (B) for better accuracy.
+                let skip_mode = if fast {
+                    ffmpeg::ffi::AVDiscard::AVDISCARD_NONINTRA
+                } else {
+                    ffmpeg::ffi::AVDiscard::AVDISCARD_NONREF
+                };
+                if let Err(err) = session.set_skip_frame_mode(skip_mode) {
                     tracing::error!("Failed to set preview skip frame mode: {err:#}");
                     let _ = error_tx.send(DecoderError {
                         request_id,
@@ -1208,10 +1246,14 @@ fn decoder_worker_loop(
                         Ok(DecoderCommand::Preview {
                             request_id,
                             time_secs,
+                            fast,
                         }) => {
-                            if let Err(err) = session
-                                .set_skip_frame_mode(ffmpeg::ffi::AVDiscard::AVDISCARD_NONREF)
-                            {
+                            let skip_mode = if fast {
+                                ffmpeg::ffi::AVDiscard::AVDISCARD_NONINTRA
+                            } else {
+                                ffmpeg::ffi::AVDiscard::AVDISCARD_NONREF
+                            };
+                            if let Err(err) = session.set_skip_frame_mode(skip_mode) {
                                 let _ = error_tx.send(DecoderError {
                                     request_id,
                                     message: format!(
@@ -1323,8 +1365,15 @@ fn decoder_worker_loop(
                                         DecoderCommand::Preview {
                                             request_id,
                                             time_secs,
+                                            fast,
                                         } => {
                                             // Frame intentionally dropped - switching to preview mode
+                                            let skip_mode = if fast {
+                                                ffmpeg::ffi::AVDiscard::AVDISCARD_NONINTRA
+                                            } else {
+                                                ffmpeg::ffi::AVDiscard::AVDISCARD_NONREF
+                                            };
+                                            let _ = session.set_skip_frame_mode(skip_mode);
                                             if let Err(err) = session.seek_to(time_secs) {
                                                 let _ = error_tx.send(DecoderError {
                                                     request_id,
@@ -1458,12 +1507,21 @@ impl DecoderSession {
         )
         .context("Failed to create decoder scaler")?;
 
-        let mut session = Self {
+        let session = Self {
             video_path: video_path.to_path_buf(),
             input,
             decoder,
             scaler,
             decoded_frame: ffmpeg::util::frame::video::Video::empty(),
+            sw_frame: if using_hw {
+                ffmpeg::util::frame::video::Video::new(
+                    ffmpeg::format::Pixel::NV12,
+                    input_width,
+                    input_height,
+                )
+            } else {
+                ffmpeg::util::frame::video::Video::empty()
+            },
             rgba_frame: ffmpeg::util::frame::video::Video::new(
                 ffmpeg::format::Pixel::RGBA,
                 output_width,
@@ -1488,7 +1546,9 @@ impl DecoderSession {
             tracing::info!("Using software decoding");
         }
 
-        session.scan_keyframes();
+        // Keyframe scanning is deferred to the first seek_to() call to avoid
+        // blocking editor open. This shaves 1-3s off the editor launch time
+        // for long recordings.
 
         Ok(session)
     }
@@ -1726,6 +1786,11 @@ impl DecoderSession {
     }
 
     fn seek_to(&mut self, time_secs: f64) -> Result<()> {
+        // Lazy keyframe scan: defer to first seek so editor opens faster.
+        if !self.keyframes_scanned {
+            self.scan_keyframes();
+        }
+
         let seek_time = if self.keyframes_scanned && !self.keyframe_positions.is_empty() {
             let idx = self
                 .keyframe_positions
@@ -1807,17 +1872,18 @@ impl DecoderSession {
                         continue;
                     }
 
-                    let frame_to_scale = if self.hw_context.is_some()
+                    if self.hw_context.is_some()
                         && self.decoded_frame.format() == ffmpeg::format::Pixel::D3D11
                     {
-                        self.transfer_hw_frame_to_cpu()?
+                        self.transfer_hw_frame_to_cpu()?;
+                        self.scaler
+                            .run(&self.sw_frame, &mut self.rgba_frame)
+                            .context("Failed to scale decoded frame")?;
                     } else {
-                        self.decoded_frame.clone()
-                    };
-
-                    self.scaler
-                        .run(&frame_to_scale, &mut self.rgba_frame)
-                        .context("Failed to scale decoded frame")?;
+                        self.scaler
+                            .run(&self.decoded_frame, &mut self.rgba_frame)
+                            .context("Failed to scale decoded frame")?;
+                    }
                     let image = rgba_frame_to_image_pooled(
                         &self.rgba_frame,
                         self.output_width,
@@ -1870,20 +1936,14 @@ impl DecoderSession {
         Ok(())
     }
 
-    fn transfer_hw_frame_to_cpu(&mut self) -> Result<ffmpeg::util::frame::video::Video> {
+    fn transfer_hw_frame_to_cpu(&mut self) -> Result<()> {
         let Some(_hw_context) = self.hw_context.as_mut() else {
             bail!("Hardware decode context is missing");
         };
 
         unsafe {
-            let mut sw_frame = ffmpeg::util::frame::video::Video::new(
-                ffmpeg::format::Pixel::NV12,
-                self.decoded_frame.width(),
-                self.decoded_frame.height(),
-            );
-
             let result = ffmpeg::ffi::av_hwframe_transfer_data(
-                sw_frame.as_mut_ptr(),
+                self.sw_frame.as_mut_ptr(),
                 self.decoded_frame.as_ptr(),
                 0,
             );
@@ -1892,7 +1952,7 @@ impl DecoderSession {
                 bail!("Failed to transfer hardware frame to CPU: {}", result);
             }
 
-            Ok(sw_frame)
+            Ok(())
         }
     }
 
@@ -2101,11 +2161,19 @@ fn rgba_frame_to_image_pooled(
     let row_bytes = width as usize * 4;
     let mut rgba = pool.acquire();
 
-    for y in 0..height as usize {
-        let src_offset = y * stride;
-        let dst_offset = y * row_bytes;
-        rgba[dst_offset..dst_offset + row_bytes]
-            .copy_from_slice(&data[src_offset..src_offset + row_bytes]);
+    // Fast path: when stride == row_bytes (no padding), copy the entire frame
+    // in one contiguous memcpy, avoiding the per-row loop overhead.
+    let total_size = height as usize * row_bytes;
+    if stride == row_bytes {
+        rgba[..total_size].copy_from_slice(&data[..total_size]);
+    } else {
+        // Slow path: stride-padded data, copy row by row
+        for y in 0..height as usize {
+            let src_offset = y * stride;
+            let dst_offset = y * row_bytes;
+            rgba[dst_offset..dst_offset + row_bytes]
+                .copy_from_slice(&data[src_offset..src_offset + row_bytes]);
+        }
     }
 
     PooledRgbaImage::from_pooled_buffer(rgba, width, height)

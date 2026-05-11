@@ -14,11 +14,24 @@ use tracing::{info, warn};
 
 use super::video_file::{
     ClipExportPhase, ClipExportRequest, ClipExportUpdate, CropRect, ExportAttemptResult,
-    ExportOutcome, ExportVideoEncoder,
+    ExportContainerFormat, ExportOutcome, ExportVideoEncoder,
 };
 
+/// Number of audio samples per frame for AAC encoding at 48 kHz.
 const AAC_FRAME_SAMPLES: i64 = 1024;
+/// Number of audio samples per frame for Opus encoding at 48 kHz (20 ms frames).
+const OPUS_FRAME_SAMPLES: i64 = 960;
 const INVALID_DURATION: i64 = i64::MIN;
+
+/// Returns the audio frame sample count for the given container format.
+fn audio_frame_samples_for_container(container: ExportContainerFormat) -> i64 {
+    match container {
+        ExportContainerFormat::WebM => OPUS_FRAME_SAMPLES,
+        ExportContainerFormat::Mp4 | ExportContainerFormat::Mkv | ExportContainerFormat::Mov => {
+            AAC_FRAME_SAMPLES
+        }
+    }
+}
 
 /// Releases FFmpeg internal buffer pools by allocating and immediately freeing
 /// an AVFrame. This replaces the previous no-op `drop(Vec::with_capacity(0))`
@@ -323,6 +336,49 @@ fn export_encoder_pixel_format(encoder: ExportVideoEncoder) -> ffmpeg::format::P
     }
 }
 
+/// Pixel format used for a given video encoder in the specified container.
+/// For WebM (VP9) we always use YUV420P (software only).
+fn export_encoder_pixel_format_for_container(
+    encoder: ExportVideoEncoder,
+    container: ExportContainerFormat,
+) -> ffmpeg::format::Pixel {
+    if container == ExportContainerFormat::WebM {
+        // VP9 only supports YUV420P in the SDK-backed pipeline
+        ffmpeg::format::Pixel::YUV420P
+    } else {
+        export_encoder_pixel_format(encoder)
+    }
+}
+
+/// Returns the container-appropriate muxer header options.
+fn muxer_header_opts_for_container(
+    container: ExportContainerFormat,
+) -> ffmpeg::Dictionary<'static> {
+    let mut opts = ffmpeg::Dictionary::new();
+    match container {
+        ExportContainerFormat::Mp4 | ExportContainerFormat::Mov => {
+            opts.set("movflags", "+faststart");
+        }
+        ExportContainerFormat::Mkv | ExportContainerFormat::WebM => {
+            // MKV and WebM don't need moov atom relocation
+        }
+    }
+    opts
+}
+
+/// Returns the container-appropriate audio codec ID.
+/// WebM uses Opus; all others use AAC.
+fn audio_codec_for_container(
+    container: ExportContainerFormat,
+) -> Option<(ffmpeg::codec::Id, &'static str)> {
+    match container {
+        ExportContainerFormat::WebM => Some((ffmpeg::codec::Id::OPUS, "libopus")),
+        ExportContainerFormat::Mp4 | ExportContainerFormat::Mkv | ExportContainerFormat::Mov => {
+            Some((ffmpeg::codec::Id::AAC, "AAC"))
+        }
+    }
+}
+
 impl Drop for PostProcessFilterGraph {
     fn drop(&mut self) {
         // Explicitly release frame data before the graph is dropped
@@ -485,10 +541,11 @@ pub fn run_stream_copy_export_sdk(
     });
 
     info!(
-        "Stream copy export {:?} -> {:?} ({} kept ranges)",
+        "Stream copy export {:?} -> {:?} ({} kept ranges, container={})",
         request.input_path,
         request.output_path,
-        request.keep_ranges.len()
+        request.keep_ranges.len(),
+        request.container_format.short_label(),
     );
 
     let total_duration_secs = request.output_duration_secs().max(0.1);
@@ -599,12 +656,11 @@ pub fn run_stream_copy_export_sdk(
         output_stream_count = output_stream_count.max(out_idx + 1);
     }
 
-    // Set faststart
-    let mut opts = ffmpeg::Dictionary::new();
-    opts.set("movflags", "+faststart");
+    // Write header with container-appropriate muxer options
+    let header_opts = muxer_header_opts_for_container(request.container_format);
     output_ctx
-        .write_header_with(opts)
-        .with_context(|| "Failed to write MP4 header for stream copy")?;
+        .write_header_with(header_opts)
+        .with_context(|| "Failed to write output header for stream copy")?;
 
     // Read packets by output range (seek per range), so stream-copy work scales with kept duration.
     let start_time = Instant::now();
@@ -828,13 +884,14 @@ pub(crate) fn attempt_export(
     });
 
     info!(
-        "Exporting clipped video {:?} -> {:?} ({} kept ranges, target={} MB, video bitrate={} kbps, encoder={})",
+        "Exporting clipped video {:?} -> {:?} ({} kept ranges, target={} MB, video bitrate={} kbps, codec={}, container={})",
         request.input_path,
         output_path,
         request.keep_ranges.len(),
         request.target_size_mb,
         video_bitrate_kbps,
-        video_encoder.ffmpeg_name()
+        video_encoder.ffmpeg_name_for_container(request.container_format),
+        request.container_format.short_label(),
     );
 
     // Open input
@@ -874,10 +931,12 @@ pub(crate) fn attempt_export(
         .with_context(|| format!("Failed to create output: {:?}", output_path))?;
 
     // Add video stream with encoder - use encoder name to get hardware encoder if needed
-    let codec_name = video_encoder.ffmpeg_name();
+    // The codec name is resolved per-container (e.g., VP9 for WebM, H.265 for others).
+    let codec_name = video_encoder.ffmpeg_name_for_container(request.container_format);
     let codec = ffmpeg::encoder::find_by_name(codec_name)
         .with_context(|| format!("Encoder {} not found", codec_name))?;
-    let encoder_pixel_format = export_encoder_pixel_format(video_encoder);
+    let encoder_pixel_format =
+        export_encoder_pixel_format_for_container(video_encoder, request.container_format);
 
     let output_width = request.output_width.unwrap_or(request.metadata.width);
     let output_height = request.output_height.unwrap_or(request.metadata.height);
@@ -906,23 +965,30 @@ pub(crate) fn attempt_export(
 
     // Set codec-specific options
     let mut opts = ffmpeg::Dictionary::new();
-    match video_encoder {
-        ExportVideoEncoder::SoftwareHevc => {
-            opts.set("preset", "slow");
-        }
-        ExportVideoEncoder::HevcNvenc => {
-            opts.set("preset", "p5");
-            opts.set("tune", "hq");
-            opts.set("rc", "vbr");
-        }
-        ExportVideoEncoder::HevcAmf => {
-            opts.set("quality", "quality");
-            opts.set("rc", "vbr_peak");
-        }
-        ExportVideoEncoder::HevcQsv => {
-            opts.set("preset", "medium");
-            opts.set("look_ahead", "0");
-            opts.set("rc", "vbr");
+    // For WebM (VP9), we override with VP9-specific options regardless of the encoder enum.
+    if request.container_format == ExportContainerFormat::WebM {
+        opts.set("cpu-used", "2"); // Balanced speed/quality (0=best, 5=fastest)
+        opts.set("deadline", "good"); // Good quality encoding
+        opts.set("pix_fmt", "yuv420p");
+    } else {
+        match video_encoder {
+            ExportVideoEncoder::SoftwareHevc => {
+                opts.set("preset", "slow");
+            }
+            ExportVideoEncoder::HevcNvenc => {
+                opts.set("preset", "p5");
+                opts.set("tune", "hq");
+                opts.set("rc", "vbr");
+            }
+            ExportVideoEncoder::HevcAmf => {
+                opts.set("quality", "quality");
+                opts.set("rc", "vbr_peak");
+            }
+            ExportVideoEncoder::HevcQsv => {
+                opts.set("preset", "medium");
+                opts.set("look_ahead", "0");
+                opts.set("rc", "vbr");
+            }
         }
     }
 
@@ -946,8 +1012,10 @@ pub(crate) fn attempt_export(
     let mut opened_audio_encoder = None;
     let mut audio_out_time_base = None;
     let audio_out_idx = if audio_stream_idx.is_some() {
-        let audio_codec =
-            ffmpeg::encoder::find(ffmpeg::codec::Id::AAC).context("AAC encoder not found")?;
+        let (audio_codec_id, codec_label) = audio_codec_for_container(request.container_format)
+            .context("No audio codec configured for this container format")?;
+        let audio_codec = ffmpeg::encoder::find(audio_codec_id)
+            .with_context(|| format!("{} encoder not found", codec_label))?;
 
         let audio_enc_ctx = ffmpeg::codec::context::Context::new_with_codec(audio_codec);
         let mut audio_encoder = audio_enc_ctx
@@ -965,9 +1033,11 @@ pub(crate) fn attempt_export(
             .open()
             .context("Failed to open audio encoder")?;
 
+        let stream_codec = ffmpeg::encoder::find(audio_codec_id)
+            .context("Failed to find audio codec for output stream")?;
         let (audio_idx_out, audio_tb_out) = {
             let mut audio_out_stream = output_ctx
-                .add_stream(ffmpeg::encoder::find(ffmpeg::codec::Id::AAC))
+                .add_stream(stream_codec)
                 .context("Failed to add audio stream")?;
             audio_out_stream.set_time_base((1, 48_000));
             audio_out_stream.set_parameters(&opened);
@@ -981,11 +1051,10 @@ pub(crate) fn attempt_export(
         None
     };
 
-    // Write header
-    let mut opts = ffmpeg::Dictionary::new();
-    opts.set("movflags", "+faststart");
+    // Write header with container-appropriate muxer options
+    let header_opts = muxer_header_opts_for_container(request.container_format);
     output_ctx
-        .write_header_with(opts)
+        .write_header_with(header_opts)
         .with_context(|| "Failed to write output header")?;
 
     // The muxer may adjust stream time bases after the header is written. Re-read them now;
@@ -1026,11 +1095,12 @@ pub(crate) fn attempt_export(
     let audio_default_duration = if let Some(audio_tb) = audio_out_time_base {
         let audio_ticks_per_second =
             f64::from(audio_tb.denominator()) / f64::from(audio_tb.numerator().max(1));
-        ((AAC_FRAME_SAMPLES as f64) * (audio_ticks_per_second / 48_000.0))
+        let frame_samples = audio_frame_samples_for_container(request.container_format);
+        ((frame_samples as f64) * (audio_ticks_per_second / 48_000.0))
             .round()
             .max(1.0) as i64
     } else {
-        AAC_FRAME_SAMPLES
+        audio_frame_samples_for_container(request.container_format)
     };
 
     let mut next_video_pts = 0i64;

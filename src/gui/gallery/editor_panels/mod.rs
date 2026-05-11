@@ -8,7 +8,7 @@ use super::{
     SCRUB_SAMPLE_MIN_DT_SECS,
 };
 
-use crate::output::CropRect;
+use crate::output::{CropRect, ExportContainerFormat};
 
 const CROP_HANDLE_SIZE: f32 = 10.0;
 const CROP_MIN_PIXELS: u32 = 64;
@@ -634,6 +634,37 @@ fn render_size_section(ui: &mut egui::Ui, editor: &mut EditorState) {
                 &mut editor.use_hardware_acceleration,
                 "Use hardware acceleration (fallback to software if unavailable)",
             );
+
+            ui.add_space(8.0);
+
+            // Output format selector
+            ui.horizontal(|ui| {
+                ui.label("Output Format:");
+                egui::ComboBox::from_id_salt("export_container_format")
+                    .selected_text(editor.container_format.short_label())
+                    .width(140.0)
+                    .show_ui(ui, |ui| {
+                        for fmt in [
+                            ExportContainerFormat::Mp4,
+                            ExportContainerFormat::Mkv,
+                            ExportContainerFormat::Mov,
+                            ExportContainerFormat::WebM,
+                        ] {
+                            if ui
+                                .selectable_value(&mut editor.container_format, fmt, fmt.label())
+                                .clicked()
+                            {
+                                // WebM doesn't support stream copy, so if user switches
+                                // to WebM from auto/stream-copy mode we must force re-encode.
+                                if !fmt.supports_stream_copy()
+                                    && !editor.target_size_manually_adjusted
+                                {
+                                    editor.target_size_manually_adjusted = true;
+                                }
+                            }
+                        }
+                    });
+            });
 
             ui.add_space(8.0);
             ui.separator();

@@ -13,7 +13,7 @@
 //! - **General**: Replay duration, auto-start, notifications
 //! - **Video**: Framerate, bitrate, encoder, codec, resolution
 //! - **Audio**: System/mic capture, volume levels
-//! - **Hotkeys**: Key bindings for save, toggle, screenshot
+//! - **Hotkeys**: Key bindings for save, toggle, gallery
 //! - **Advanced**: GPU selection, CPU readback, overlay
 //!
 //! # Key Types

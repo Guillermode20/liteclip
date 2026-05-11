@@ -60,5 +60,5 @@ pub use types::{Muxer, MuxerConfig};
 pub use video_file::{
     estimate_export_bitrates, extract_preview_frame, probe_video_file, spawn_clip_export,
     ClipExportPhase, ClipExportRequest, ClipExportUpdate, CropRect, ExportBitrateEstimate,
-    TimeRange, VideoFileMetadata,
+    ExportContainerFormat, TimeRange, VideoFileMetadata,
 };

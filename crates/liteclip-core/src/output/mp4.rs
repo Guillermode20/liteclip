@@ -58,7 +58,6 @@ impl FfmpegMuxer {
         let video_stream_index = {
             let codec_id = match video_codec {
                 "hevc" => ffmpeg::codec::Id::HEVC,
-                "av1" => ffmpeg::codec::Id::AV1,
                 _ => ffmpeg::codec::Id::H264,
             };
 

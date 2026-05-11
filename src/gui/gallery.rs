@@ -24,7 +24,7 @@ use crate::config::{Config, EncoderType};
 use crate::gui::manager::{show_toast, ToastKind};
 use crate::output::{
     generate_thumbnail, probe_video_file, spawn_clip_export, ClipExportRequest, ClipExportUpdate,
-    CropRect, TimeRange, VideoFileMetadata,
+    CropRect, ExportContainerFormat, TimeRange, VideoFileMetadata,
 };
 use crate::platform::AppEvent;
 
@@ -277,6 +277,8 @@ pub(super) struct EditorState {
     crop: Option<CropRect>,
     /// Whether the visual crop overlay is visible on the preview.
     crop_editor_visible: bool,
+    /// Output container format (MP4, MKV, MOV, WebM).
+    container_format: ExportContainerFormat,
 }
 
 impl EditorState {
@@ -326,6 +328,7 @@ impl EditorState {
             snippets_dirty: true,
             crop: None,
             crop_editor_visible: false,
+            container_format: ExportContainerFormat::Mp4,
         }
     }
 
@@ -837,7 +840,13 @@ impl ClipCompressApp {
         let tx = self.dialog_tx.clone();
         std::thread::spawn(move || {
             let picked = rfd::FileDialog::new()
-                .add_filter("Video", &["mp4", "mov", "mkv", "webm", "avi", "m4v"])
+                .add_filter(
+                    "All Video",
+                    &[
+                        "mp4", "mov", "mkv", "webm", "avi", "m4v", "flv", "wmv", "ogv", "3gp",
+                        "ts", "mts", "m2ts",
+                    ],
+                )
                 .pick_file();
             let _ = tx.send(DialogResult::ImportVideo(picked));
         });
@@ -848,17 +857,25 @@ impl ClipCompressApp {
             return;
         }
         self.save_dialog_pending = true;
+        let editor_container = self
+            .editor
+            .as_ref()
+            .map(|e| e.container_format)
+            .unwrap_or(crate::output::ExportContainerFormat::Mp4);
+        let ext = editor_container.extension();
+        let filter_name = editor_container.short_label().to_uppercase();
         let tx = self.dialog_tx.clone();
+        let output_path_clone = output_path.clone();
         std::thread::spawn(move || {
-            let suggested_name = output_path
+            let suggested_name = output_path_clone
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "clip.mp4".to_string());
+                .unwrap_or_else(|| format!("clip.{}", ext));
             let picked = rfd::FileDialog::new()
-                .add_filter("MP4", &["mp4"])
+                .add_filter(&filter_name, &[ext])
                 .set_file_name(&suggested_name)
                 .set_directory(
-                    output_path
+                    output_path_clone
                         .parent()
                         .unwrap_or_else(|| std::path::Path::new(".")),
                 )
@@ -915,8 +932,14 @@ impl ClipCompressApp {
             return;
         }
 
+        // Adaptive debounce: 1.5× the frame interval, min 20ms, max 100ms.
+        // This ensures we don't request more frames than the display can show,
+        // tuned to the video's frame rate rather than a hardcoded 50ms.
+        let debounce_secs = (1.5 / editor.video.metadata.fps.max(1.0)).clamp(0.02, 0.10);
         if let Some(last_requested) = editor.last_requested_preview_time {
-            if editor.preview_texture.is_some() && (last_requested - timestamp_secs).abs() < 0.05 {
+            if editor.preview_texture.is_some()
+                && (last_requested - timestamp_secs).abs() < debounce_secs
+            {
                 return;
             }
         }
@@ -940,10 +963,14 @@ impl ClipCompressApp {
             return;
         }
 
-        // More aggressive debouncing during scrubbing (150ms instead of 100ms)
-        // This prevents overwhelming the decoder with requests during fast scrub
+        // Adaptive debounce for fast scrubbing: 3× the frame interval, min 40ms, max 150ms.
+        // During fast scrubbing we only decode I-frames, so the debounce can be more
+        // aggressive — the user is moving quickly and doesn't need every frame.
+        let debounce_secs = (3.0 / editor.video.metadata.fps.max(1.0)).clamp(0.04, 0.15);
         if let Some(last_requested) = editor.last_requested_preview_time {
-            if editor.preview_texture.is_some() && (last_requested - timestamp_secs).abs() < 0.08 {
+            if editor.preview_texture.is_some()
+                && (last_requested - timestamp_secs).abs() < debounce_secs
+            {
                 return;
             }
         }
@@ -1027,6 +1054,11 @@ impl ClipCompressApp {
                         egui::TextureOptions::LINEAR,
                     ));
                 }
+                // Snap cursor to the actual decoded frame PTS.
+                // During fast scrub (I-frame only) this corrects the significant
+                // gap between requested position and nearest keyframe. During normal
+                // preview the difference is ≤1 frame interval (imperceptible).
+                editor.current_time_secs = frame.pts_secs;
                 editor.preview_frame_in_flight = false;
                 editor.error_message = None;
                 if let Some(pending) = editor.pending_preview_request.take() {
@@ -1165,7 +1197,23 @@ impl ClipCompressApp {
                 .editor
                 .as_ref()
                 .filter(|e| e.is_playing)
-                .map(|e| (1000.0 / e.playback.playback_fps()).clamp(8.0, 50.0) as u64)
+                .map(|e| {
+                    // Dynamic repaint interval based on frame queue depth.
+                    // When the queue is well-stocked (≥12), match frame rate exactly.
+                    // When the queue is low (<6), repaint more frequently to catch frames.
+                    // When the queue is critically low (<3), repaint at 2× rate.
+                    let queue_depth = e.playback.cached_frame_count();
+                    let base_ms = (1000.0 / e.playback.playback_fps()).clamp(8.0, 50.0);
+                    if queue_depth >= 12 {
+                        base_ms as u64
+                    } else if queue_depth >= 6 {
+                        (base_ms * 0.75) as u64
+                    } else if queue_depth >= 3 {
+                        (base_ms * 0.5) as u64
+                    } else {
+                        (base_ms * 0.3).max(8.0) as u64
+                    }
+                })
                 .unwrap_or(80);
             ctx.request_repaint_after(Duration::from_millis(repaint_ms));
         }
@@ -1341,10 +1389,13 @@ fn start_export(editor: &mut EditorState) {
         return;
     }
 
-    let output_path = editor
+    let base_path = editor
         .custom_output_path
         .clone()
         .unwrap_or_else(|| build_clipped_output_path(&editor.video));
+    // Replace the extension with the one matching the chosen container format.
+    let ext = editor.container_format.extension();
+    let output_path = base_path.with_extension(ext);
     let (progress_tx, progress_rx) = mpsc::channel();
     let cancel_flag = Arc::new(AtomicBool::new(false));
 
@@ -1359,7 +1410,10 @@ fn start_export(editor: &mut EditorState) {
             preferred_encoder: editor.preferred_encoder,
             metadata: editor.video.metadata.clone(),
             // Cropping requires re-encoding, so force stream_copy off when crop is active.
-            stream_copy: !editor.target_size_manually_adjusted && editor.crop.is_none(),
+            // WebM also requires re-encoding (H.265 source can't be stream-copied to VP9).
+            stream_copy: !editor.target_size_manually_adjusted
+                && editor.crop.is_none()
+                && editor.container_format.supports_stream_copy(),
             output_width: if editor.use_auto_resolution {
                 let (w, _h) = editor.effective_output_resolution();
                 Some(w)
@@ -1374,7 +1428,8 @@ fn start_export(editor: &mut EditorState) {
             },
             output_fps: Some(editor.effective_output_fps()),
             crop: editor.crop,
-            post_process_filters: true,
+            post_process_filters: editor.use_auto_resolution,
+            container_format: editor.container_format,
         },
         progress_tx,
         cancel_flag.clone(),

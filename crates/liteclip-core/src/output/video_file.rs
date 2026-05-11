@@ -10,6 +10,75 @@ use std::sync::{
     mpsc::Sender,
     Arc, Mutex, OnceLock,
 };
+
+/// Output container format for clip export.
+///
+/// Determines the file container and (for WebM) the video codec used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ExportContainerFormat {
+    /// MP4 container with H.265/HEVC video + AAC audio (default).
+    Mp4,
+    /// Matroska container with H.265/HEVC video + AAC audio.
+    Mkv,
+    /// QuickTime MOV container with H.265/HEVC video + AAC audio.
+    Mov,
+    /// WebM container with VP9 video + Opus audio.
+    WebM,
+}
+
+impl ExportContainerFormat {
+    /// File extension for this container format (without leading dot).
+    pub fn extension(self) -> &'static str {
+        match self {
+            ExportContainerFormat::Mp4 => "mp4",
+            ExportContainerFormat::Mkv => "mkv",
+            ExportContainerFormat::Mov => "mov",
+            ExportContainerFormat::WebM => "webm",
+        }
+    }
+
+    /// Human-readable label for UI display.
+    pub fn label(self) -> &'static str {
+        match self {
+            ExportContainerFormat::Mp4 => "MP4 (H.265)",
+            ExportContainerFormat::Mkv => "MKV (H.265)",
+            ExportContainerFormat::Mov => "MOV (H.265)",
+            ExportContainerFormat::WebM => "WebM (VP9)",
+        }
+    }
+
+    /// Returns true if this container can use stream copy with H.265 source.
+    /// WebM only supports VP8/VP9, so it always requires re-encoding.
+    pub fn supports_stream_copy(self) -> bool {
+        matches!(
+            self,
+            ExportContainerFormat::Mp4 | ExportContainerFormat::Mkv | ExportContainerFormat::Mov
+        )
+    }
+
+    /// Returns the FFmpeg codec name for video encoding in this container.
+    /// For WebM we use libvpx-vp9 (VP9), for all others we use H.265.
+    /// Hardware encoders are handled separately via ExportVideoEncoder;
+    /// this returns the fallback software encoder name.
+    pub fn default_video_codec_name(self) -> &'static str {
+        match self {
+            ExportContainerFormat::WebM => "libvpx-vp9",
+            ExportContainerFormat::Mp4
+            | ExportContainerFormat::Mkv
+            | ExportContainerFormat::Mov => "libx265",
+        }
+    }
+
+    /// Human-readable short label for dropdowns.
+    pub fn short_label(self) -> &'static str {
+        match self {
+            ExportContainerFormat::Mp4 => "MP4",
+            ExportContainerFormat::Mkv => "MKV",
+            ExportContainerFormat::Mov => "MOV",
+            ExportContainerFormat::WebM => "WebM",
+        }
+    }
+}
 use std::thread;
 use std::time::Instant;
 use tracing::{error, info, warn};
@@ -117,6 +186,9 @@ pub struct ClipExportRequest {
     /// Enable adaptive post-processing filters (deblocking, sharpening, contrast) during export.
     /// Filter strengths are computed automatically from bitrate/resolution.
     pub post_process_filters: bool,
+    /// Output container format (MP4, MKV, MOV, WebM).
+    /// Determines the file extension and (for WebM) the video codec.
+    pub container_format: ExportContainerFormat,
 }
 
 impl ClipExportRequest {
@@ -1189,6 +1261,15 @@ impl ExportVideoEncoder {
         }
     }
 
+    /// Returns the codec name for this encoder when used with the given container format.
+    /// For WebM containers, overrides to VP9 software encoder since H.265 is not supported.
+    pub fn ffmpeg_name_for_container(self, container: ExportContainerFormat) -> &'static str {
+        match container {
+            ExportContainerFormat::WebM => "libvpx-vp9",
+            _ => self.ffmpeg_name(),
+        }
+    }
+
     pub fn supports_two_pass(self) -> bool {
         false
     }
@@ -1216,6 +1297,21 @@ fn ordered_hardware_encoder_preferences(preferred: EncoderType) -> Vec<ExportVid
         }
     }
     order
+}
+
+/// Ordered encoder preferences for a given container format.
+/// For WebM, hardware encoders are skipped (no widely-supported HW VP9 encoders in FFmpeg).
+fn ordered_encoders_for_container(
+    preferred: EncoderType,
+    container: ExportContainerFormat,
+) -> Vec<ExportVideoEncoder> {
+    if container == ExportContainerFormat::WebM {
+        // WebM uses VP9 — hardware encoders are not commonly available,
+        // so we always fall back to software libvpx-vp9 via SoftwareHevc
+        // (which gets remapped to libvpx-vp9 at codec selection time).
+        return vec![ExportVideoEncoder::SoftwareHevc];
+    }
+    ordered_hardware_encoder_preferences(preferred)
 }
 
 fn export_encoder_type(encoder: ExportVideoEncoder) -> EncoderType {
@@ -1247,7 +1343,9 @@ fn select_export_video_encoder(request: &ClipExportRequest) -> Result<ExportVide
         return Ok(ExportVideoEncoder::SoftwareHevc);
     }
 
-    for encoder in ordered_hardware_encoder_preferences(request.preferred_encoder) {
+    for encoder in
+        ordered_encoders_for_container(request.preferred_encoder, request.container_format)
+    {
         if export_encoder_is_available(encoder) {
             return Ok(encoder);
         }
@@ -1266,6 +1364,7 @@ fn should_fallback_to_software_encoder(err: &anyhow::Error) -> bool {
         "hevc_nvenc",
         "hevc_amf",
         "hevc_qsv",
+        "libvpx-vp9",
         "error while opening encoder",
         "initializing an internal mfx session failed",
         "amf initialization",
@@ -1342,6 +1441,7 @@ mod tests {
             output_fps: None,
             crop: None,
             post_process_filters: true,
+            container_format: ExportContainerFormat::Mp4,
         }
     }
 

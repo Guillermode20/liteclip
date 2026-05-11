@@ -218,12 +218,12 @@ fn probe_encoder_available(encoder_name: &str) -> bool {
     options.set("bf", "0");
 
     match encoder_name {
-        "h264_amf" | "hevc_amf" | "av1_amf" => {
+        "h264_amf" | "hevc_amf" => {
             options.set("usage", "lowlatency");
             options.set("quality", "speed");
             options.set("preanalysis", "0");
         }
-        "h264_nvenc" | "hevc_nvenc" | "av1_nvenc" => {
+        "h264_nvenc" | "hevc_nvenc" => {
             options.set("preset", "p4");
             options.set("tune", "ll");
             options.set("zerolatency", "1");

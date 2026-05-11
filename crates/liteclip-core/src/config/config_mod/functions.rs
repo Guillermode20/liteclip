@@ -96,9 +96,6 @@ pub(super) fn default_hotkey_save() -> String {
 pub(super) fn default_hotkey_toggle() -> String {
     "Ctrl+Shift+R".to_string()
 }
-pub(super) fn default_hotkey_screenshot() -> String {
-    "Ctrl+Shift+P".to_string()
-}
 pub(super) fn default_hotkey_gallery() -> String {
     "Ctrl+Shift+G".to_string()
 }

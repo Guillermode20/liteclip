@@ -303,6 +303,18 @@ impl AudioMixer {
         mic_packet: Option<EncodedPacket>,
     ) -> Vec<EncodedPacket> {
         let mut output = Vec::new();
+        self.mix_packets_into(system_packet, mic_packet, &mut output);
+        output
+    }
+
+    /// Mix audio packets into a caller-owned output buffer.
+    pub fn mix_packets_into(
+        &mut self,
+        system_packet: Option<EncodedPacket>,
+        mic_packet: Option<EncodedPacket>,
+        output: &mut Vec<EncodedPacket>,
+    ) {
+        output.clear();
 
         // Add received packets to their respective buffers (sorted by PTS)
         if let Some(packet) = system_packet {
@@ -313,8 +325,8 @@ impl AudioMixer {
         }
 
         // Drain any pending outputs from previous timeout processing
-        let pending: Vec<_> = self.extra_outputs.drain(..).collect();
-        for pending_packet in pending {
+        self.extra_outputs.reverse();
+        while let Some(pending_packet) = self.extra_outputs.pop() {
             let pts = pending_packet.pts;
             if let Some(mixed) = self.process_matching_packets(None, Some(&pending_packet), pts) {
                 output.push(mixed);
@@ -337,8 +349,6 @@ impl AudioMixer {
 
         // Handle timeout for packets that are too old
         self.handle_timeouts();
-
-        output
     }
 
     /// Find and remove the earliest matching packets from both streams

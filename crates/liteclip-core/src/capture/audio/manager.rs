@@ -228,6 +228,9 @@ impl WasapiAudioManager {
         let mut last_peak_decay = Instant::now();
         let mut last_telemetry = Instant::now();
         let wait_timeout = Duration::from_millis(20);
+        let mut batch_system: Vec<EncodedPacket> = Vec::with_capacity(8);
+        let mut batch_mic: Vec<EncodedPacket> = Vec::with_capacity(8);
+        let mut mixed_packets: Vec<EncodedPacket> = Vec::with_capacity(4);
 
         'forward: while running.load(Ordering::SeqCst) {
             while let Ok(new_config) = config_update_rx.try_recv() {
@@ -239,8 +242,10 @@ impl WasapiAudioManager {
             let mut mic_disconnected = false;
 
             // ── Drain-batch: collect ALL available packets from both channels ──
-            let mut batch_system: Vec<EncodedPacket> = pending_system.take().into_iter().collect();
-            let mut batch_mic: Vec<EncodedPacket> = pending_mic.take().into_iter().collect();
+            batch_system.clear();
+            batch_mic.clear();
+            batch_system.extend(pending_system.take());
+            batch_mic.extend(pending_mic.take());
 
             // Drain all available system packets
             if let Some(rx) = system_rx.as_ref() {
@@ -288,13 +293,17 @@ impl WasapiAudioManager {
 
             // ── Batch process: mix all collected packet pairs ──
             if !batch_system.is_empty() || !batch_mic.is_empty() {
-                let max_pairs = batch_system.len().max(batch_mic.len());
-                for i in 0..max_pairs {
-                    let sys = batch_system.get(i).cloned();
-                    let mic = batch_mic.get(i).cloned();
-                    let mixed_packets = mixer.mix_packets(sys, mic);
+                let mut system_iter = batch_system.drain(..);
+                let mut mic_iter = batch_mic.drain(..);
+                loop {
+                    let sys = system_iter.next();
+                    let mic = mic_iter.next();
+                    if sys.is_none() && mic.is_none() {
+                        break;
+                    }
+                    mixer.mix_packets_into(sys, mic, &mut mixed_packets);
 
-                    for mixed_packet in mixed_packets {
+                    for mixed_packet in mixed_packets.drain(..) {
                         if packet_tx.send(mixed_packet).is_err() {
                             warn!("Audio manager output channel disconnected while forwarding mixed audio");
                             running.store(false, Ordering::SeqCst);

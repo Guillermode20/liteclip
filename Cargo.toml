@@ -15,7 +15,6 @@ default = ["ffmpeg"]
 ffmpeg = ["liteclip-core/ffmpeg"]
 # Update checker (enables ureq dependency)
 updater = ["dep:ureq"]
-# parakeet = ["liteclip-core/parakeet"]
 
 [dependencies]
 liteclip-core = { path = "crates/liteclip-core", default-features = false }
