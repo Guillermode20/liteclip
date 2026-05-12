@@ -2,6 +2,15 @@
 //!
 //! Tests complete user scenarios from triggering an action
 //! through verifying the expected outcome.
+//!
+//! ## Concurrency note
+//!
+//! These tests use real DXGI display capture. Windows allows only one
+//! `IDXGIOutputDuplication` per display output at a time. Running
+//! multiple tests that call `start_recording()` in parallel will cause
+//! `DXGI_ERROR_NOT_CURRENTLY_AVAILABLE` failures.
+//!
+//! Run with: `cargo test --test e2e --features ffmpeg -- --test-threads=1`
 
 use crate::common;
 use crate::common::app_harness::{AppHarness, HarnessBuilder};
@@ -11,7 +20,6 @@ use crate::common::output_verifier::{
 use crate::common::test_defaults::{fast_test_config, quality_test_config};
 use anyhow::Result;
 use liteclip::platform::HotkeyAction;
-use serial_test::serial;
 use std::time::Duration;
 
 /// Workflow: Save clip via hotkey simulation.
@@ -24,7 +32,6 @@ use std::time::Duration;
 /// Note: In headless environments without display capture, no valid clip
 /// will be produced. The test verifies the system doesn't panic.
 #[tokio::test]
-#[serial]
 async fn workflow_save_clip_via_hotkey() -> Result<()> {
     let harness = AppHarness::new().await?;
 
@@ -65,7 +72,6 @@ async fn workflow_save_clip_via_hotkey() -> Result<()> {
 ///
 /// Tests the toggle functionality that stops and restarts recording.
 #[tokio::test]
-#[serial]
 async fn workflow_toggle_recording() -> Result<()> {
     let harness = AppHarness::new().await?;
 
@@ -94,7 +100,6 @@ async fn workflow_toggle_recording() -> Result<()> {
 /// Same as hotkey workflow but through tray interface.
 /// In headless environments, verifies graceful handling without panic.
 #[tokio::test]
-#[serial]
 async fn workflow_save_clip_via_tray() -> Result<()> {
     use liteclip::platform::TrayEvent;
 
@@ -129,7 +134,6 @@ async fn workflow_save_clip_via_tray() -> Result<()> {
 /// proper debouncing and sequential processing.
 /// In headless environments, verifies graceful handling without panic.
 #[tokio::test]
-#[serial]
 async fn workflow_multiple_rapid_saves() -> Result<()> {
     let harness = AppHarness::new().await?;
 
@@ -160,7 +164,6 @@ async fn workflow_multiple_rapid_saves() -> Result<()> {
 /// Verifies that quality presets produce correct output when capture is available.
 /// In headless environments, verifies graceful handling without panic.
 #[tokio::test]
-#[serial]
 async fn workflow_quality_settings_output() -> Result<()> {
     let config = quality_test_config();
     let harness = HarnessBuilder::new().with_config(config).build().await?;
@@ -198,7 +201,6 @@ async fn workflow_quality_settings_output() -> Result<()> {
 ///
 /// Tests tray-based recording control.
 #[tokio::test]
-#[serial]
 async fn workflow_tray_toggle_recording() -> Result<()> {
     use liteclip::platform::TrayEvent;
 
@@ -230,7 +232,6 @@ async fn workflow_tray_toggle_recording() -> Result<()> {
 /// Verifies that very short replay durations work correctly.
 /// In headless environments, verifies graceful handling without panic.
 #[tokio::test]
-#[serial]
 async fn workflow_short_replay_duration() -> Result<()> {
     let mut config = fast_test_config();
     config.general.replay_duration_secs = 5; // 5 seconds
@@ -265,7 +266,6 @@ async fn workflow_short_replay_duration() -> Result<()> {
 ///
 /// Verifies behavior when save is triggered while recording is stopped.
 #[tokio::test]
-#[serial]
 async fn workflow_save_while_not_recording() -> Result<()> {
     let harness = AppHarness::new().await?;
 

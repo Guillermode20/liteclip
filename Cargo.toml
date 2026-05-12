@@ -16,6 +16,10 @@ ffmpeg = ["liteclip-core/ffmpeg"]
 # Update checker (enables ureq dependency)
 updater = ["dep:ureq"]
 
+# Test categorization (forwarded to liteclip-core)
+test-slow = ["liteclip-core/test-slow"]
+test-stress = ["liteclip-core/test-stress"]
+
 [dependencies]
 liteclip-core = { path = "crates/liteclip-core", default-features = false }
 

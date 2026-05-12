@@ -2,11 +2,19 @@
 //!
 //! Tests the full application lifecycle from initialization through
 //! recording, clip saving, and graceful shutdown.
+//!
+//! ## Concurrency note
+//!
+//! These tests use real DXGI display capture. Windows allows only one
+//! `IDXGIOutputDuplication` per display output at a time. Running
+//! multiple tests that call `start_recording()` in parallel will cause
+//! `DXGI_ERROR_NOT_CURRENTLY_AVAILABLE` failures.
+//!
+//! Run with: `cargo test --test e2e --features ffmpeg -- --test-threads=1`
 
 use crate::common::app_harness::AppHarness;
 use crate::common::test_defaults;
 use anyhow::Result;
-use serial_test::serial;
 use std::time::Duration;
 
 /// Test: App initializes correctly with default configuration.
@@ -16,7 +24,6 @@ use std::time::Duration;
 /// - Config is properly loaded
 /// - No recording active initially
 #[tokio::test]
-#[serial]
 async fn test_app_initializes_correctly() -> Result<()> {
     let harness = AppHarness::new().await?;
 
@@ -40,7 +47,6 @@ async fn test_app_initializes_correctly() -> Result<()> {
 /// - Stop recording succeeds
 /// - Cleanup happens properly
 #[tokio::test]
-#[serial]
 async fn test_recording_start_stop_lifecycle() -> Result<()> {
     let harness = AppHarness::new().await?;
 
@@ -72,7 +78,6 @@ async fn test_recording_start_stop_lifecycle() -> Result<()> {
 /// - Releases all resources
 /// - Cleans up temp directory
 #[tokio::test]
-#[serial]
 async fn test_graceful_shutdown_while_recording() -> Result<()> {
     let harness = AppHarness::new().await?;
 
@@ -97,7 +102,6 @@ async fn test_graceful_shutdown_while_recording() -> Result<()> {
 /// Verifies that the app can handle repeated recording toggles
 /// without resource leaks or state corruption.
 #[tokio::test]
-#[serial]
 async fn test_multiple_recording_cycles() -> Result<()> {
     let harness = AppHarness::new().await?;
 
@@ -132,7 +136,6 @@ async fn test_multiple_recording_cycles() -> Result<()> {
 /// Verifies that pipeline health checking works correctly
 /// in different states.
 #[tokio::test]
-#[serial]
 async fn test_pipeline_health_check() -> Result<()> {
     let harness = AppHarness::new().await?;
 
@@ -156,7 +159,6 @@ async fn test_pipeline_health_check() -> Result<()> {
 ///
 /// Verifies that test configs are properly loaded and used.
 #[tokio::test]
-#[serial]
 async fn test_custom_config_applied() -> Result<()> {
     let mut config = test_defaults::fast_test_config();
     config.video.framerate = 60;
@@ -175,7 +177,6 @@ async fn test_custom_config_applied() -> Result<()> {
 ///
 /// Verifies that each harness gets its own temp directory.
 #[tokio::test]
-#[serial]
 async fn test_isolated_directories() -> Result<()> {
     let harness1 = AppHarness::new().await?;
     let harness2 = AppHarness::new().await?;

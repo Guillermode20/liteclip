@@ -3,6 +3,8 @@
 //! Lives outside the `capture` module so the encoder stack does not depend on
 //! capture-backend traits or DXGI plumbing.
 
+pub mod nal;
+
 use bytes::Bytes;
 use std::sync::Arc;
 #[cfg(windows)]

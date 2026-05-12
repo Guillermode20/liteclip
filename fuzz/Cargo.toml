@@ -1,0 +1,35 @@
+[package]
+name = "liteclip-fuzz"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+liteclip-core = { path = "../crates/liteclip-core", default-features = false }
+bytes = "1"
+toml = "0.8"
+
+# Prevent this from accidentally running in CI without explicit opt-in
+[profile.dev]
+opt-level = 0
+
+[profile.release]
+opt-level = 3
+debug-assertions = true  # Keep assertions enabled during fuzzing
+overflow-checks = true
+
+[[bin]]
+name = "ring_buffer"
+path = "fuzz_targets/ring_buffer.rs"
+
+[[bin]]
+name = "config_parsing"
+path = "fuzz_targets/config_parsing.rs"
+
+[[bin]]
+name = "hotkey_parsing"
+path = "fuzz_targets/hotkey_parsing.rs"

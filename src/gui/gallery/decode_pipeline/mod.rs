@@ -11,6 +11,8 @@ use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use egui::epaint::ColorImage;
+
 use crate::output::VideoFileMetadata;
 use crate::quality_contracts::{
     assess_gallery_playback_runtime, GalleryPlaybackRuntimeSample, GALLERY_PLAYBACK_GUARDRAIL,
@@ -18,26 +20,38 @@ use crate::quality_contracts::{
 
 mod frame_pool;
 
-use frame_pool::{FramePool, PooledRgbaImage, FRAME_POOL_SIZE};
+use frame_pool::{FramePool, PooledColorImage, FRAME_POOL_SIZE};
+
+// -------- Configuration constants -----------------------------------------
 
 /// Frame channel capacity for decoder-to-UI communication.
-/// Reduced from 24 to 12 frames (~0.4s at 30fps) to minimize memory overhead
-/// while still providing smooth playback. Lower values enable faster stop/seek feedback.
 const FRAME_CHANNEL_CAPACITY: usize = 12;
+
+/// Maximum frames queued for playback (playing state).
 const PLAYBACK_QUEUE_DEPTH_PLAYING: usize = 20;
+
+/// Maximum frames queued for playback (paused state — decoder is idle).
 const PLAYBACK_QUEUE_DEPTH_PAUSED: usize = 6;
+
+/// Target pool size when the editor is idle/paused.
 const FRAME_POOL_IDLE_TRIM_TARGET: usize = 8;
+
+/// Target pool size during active playback.
 const FRAME_POOL_ACTIVE_TRIM_TARGET: usize = 24;
+
+/// Maximum drift (in seconds) between two seek targets that we treat as
+/// "forward decode" — we continue from the last decoded position instead
+/// of seeking to the nearest keyframe. This avoids the keyframe-seek +
+/// frame-skip tax during short forward scrubs.
+const FORWARD_DECODE_THRESHOLD_SECS: f64 = 1.0;
+
+// -------- Hardware decode context -----------------------------------------
 
 struct DecoderHardwareContext {
     device_ctx_ref: *mut ffmpeg::ffi::AVBufferRef,
 }
 
-// SAFETY: DecoderHardwareContext is Send because:
-// 1. device_ctx_ref is a raw pointer to FFmpeg's AVBufferRef which is thread-safe
-// 2. The Drop implementation correctly cleans up the reference via av_buffer_unref
-// 3. The context is only used from a single thread at a time (the decoder worker thread)
-// 4. FFmpeg's AVBufferRef uses atomic reference counting internally
+// SAFETY: AVBufferRef uses atomic RC internally; used from one thread at a time.
 unsafe impl Send for DecoderHardwareContext {}
 
 impl Drop for DecoderHardwareContext {
@@ -50,14 +64,20 @@ impl Drop for DecoderHardwareContext {
     }
 }
 
+// -------- Public types ----------------------------------------------------
+
+/// A single frame retrieved from the playback controller.
 pub struct PlaybackFrame {
-    pub image: PooledRgbaImage,
+    /// Zero-copy ColorImage — pass directly to `texture.set()`.
+    pub image: ColorImage,
     pub pts_secs: f64,
 }
 
+// -------- Internal types --------------------------------------------------
+
 struct TimedFrame {
     pts_secs: f64,
-    image: PooledRgbaImage,
+    image: ColorImage,
 }
 
 pub struct PlaybackController {
@@ -73,7 +93,9 @@ pub struct PlaybackController {
 struct SharedPlaybackState {
     current_time_secs: Mutex<f64>,
     playing_since: Mutex<Option<PlaybackClock>>,
+    /// The latest single-frame preview or the current playback frame.
     latest_frame: Mutex<Option<PlaybackFrame>>,
+    /// Playback frame queue (timed + sorted by PTS).
     frame_queue: Mutex<VecDeque<TimedFrame>>,
     playback_empty_polls: AtomicU64,
     playback_drop_bursts: AtomicU64,
@@ -86,7 +108,6 @@ struct SharedPlaybackState {
     audio_buffer: Mutex<Option<AudioBuffer>>,
     audio_generation: AtomicU64,
     audio_started_generation: AtomicU64,
-    /// The user-requested playback start time, used to align the clock with scrub position
     playback_start_target_secs: Mutex<f64>,
     frame_pool: Arc<FramePool>,
 }
@@ -115,11 +136,15 @@ enum DecoderFrameKind {
     Playback,
 }
 
+/// Wrapper that flows through the channel.
+/// On the consumer side, the inner `ColorImage` is used directly for
+/// `texture.set()`. The `PooledColorImage` wrapper is consumed *here*,
+/// and the backing buffer is returned to the pool on drop.
 struct DecoderFrame {
     request_id: u64,
     kind: DecoderFrameKind,
     pts_secs: f64,
-    image: PooledRgbaImage,
+    image: PooledColorImage,
 }
 
 struct DecoderError {
@@ -155,6 +180,7 @@ struct DecoderSession {
     scaler: ffmpeg::software::scaling::Context,
     decoded_frame: ffmpeg::util::frame::video::Video,
     sw_frame: ffmpeg::util::frame::video::Video,
+    /// Output frame — we reuse the same frame buffer.
     rgba_frame: ffmpeg::util::frame::video::Video,
     stream_index: usize,
     output_width: u32,
@@ -162,12 +188,18 @@ struct DecoderSession {
     stream_time_base_num: i32,
     stream_time_base_den: i32,
     seek_target_secs: f64,
-    last_pts_secs: f64,
+    /// Timestamp of the frame we decoded BEFORE `seek_target_secs`.
+    /// Used by the forward-decode cache to avoid redundant seeks.
+    last_decoded_pts_secs: f64,
     keyframe_positions: Vec<f64>,
     keyframes_scanned: bool,
     frame_pool: Arc<FramePool>,
     hw_context: Option<DecoderHardwareContext>,
 }
+
+// ===========================================================================
+// PlaybackController implementation
+// ===========================================================================
 
 impl PlaybackController {
     pub fn new(video_path: PathBuf, metadata: VideoFileMetadata, preview_width: u32) -> Self {
@@ -205,12 +237,7 @@ impl PlaybackController {
         let (audio_shutdown_tx, audio_shutdown_rx) = std::sync::mpsc::channel();
         let (audio_handle_tx, audio_handle_rx) = std::sync::mpsc::channel();
 
-        // Spawn a thread to hold rodio's OutputStream alive.
-        // SAFETY: This is a workaround for rodio's OutputStream lifetime requirements.
-        // The OutputStream must remain alive for the duration of audio playback, but rodio
-        // doesn't provide a way to store it separately from the playback handle. The thread
-        // blocks on audio_shutdown_rx, and when PlaybackController is dropped, audio_shutdown_tx
-        // is dropped which unblocks the thread and allows cleanup. The thread is joined in Drop.
+        // Spawn thread to hold rodio OutputStream alive for the controller's lifetime.
         let audio_stream_thread = thread::spawn(move || {
             if let Ok((stream, handle)) = rodio::OutputStream::try_default() {
                 let _ = audio_handle_tx.send(Some(handle));
@@ -275,10 +302,6 @@ impl PlaybackController {
             .clear();
         self.shared.frame_pool.trim_to(FRAME_POOL_IDLE_TRIM_TARGET);
 
-        // Only send Stop if decoder is in a playback loop.
-        // During sustained drag scrubbing we stack Preview commands.
-        // The decoder processes them sequentially without entering a
-        // playback loop, so Stop is just a wasted channel round-trip.
         let was_playing = self.shared.in_playback_mode.swap(false, Ordering::SeqCst);
         if was_playing {
             self.decoder.stop();
@@ -306,8 +329,7 @@ impl PlaybackController {
             .frame_pool
             .trim_to(FRAME_POOL_ACTIVE_TRIM_TARGET);
 
-        // Preserve the current preview frame as the first playback frame,
-        // giving instant visual feedback while the decoder catches up.
+        // Preserve the current preview frame as the first playback frame.
         let preview_frame = self
             .shared
             .latest_frame
@@ -345,9 +367,8 @@ impl PlaybackController {
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some(PlaybackClock {
             start_time_secs: clamped_time,
-            started_at: None, // Will start immediately since queue has a frame
+            started_at: None,
         });
-        tracing::info!("play_from: starting at {:.3}s", clamped_time);
 
         let request_id = self.next_request_id();
         self.shared
@@ -355,7 +376,6 @@ impl PlaybackController {
             .store(false, Ordering::SeqCst);
         self.shared.in_playback_mode.store(true, Ordering::SeqCst);
         if let Err(err) = self.decoder.start_playback(request_id, clamped_time) {
-            tracing::error!("play_from: failed to start playback: {}", err);
             *self
                 .shared
                 .playing_since
@@ -439,7 +459,6 @@ impl PlaybackController {
         let _ = self.shared.audio_buffer.lock().map(|mut g| *g = None);
         self.shared.playback_empty_polls.store(0, Ordering::SeqCst);
         self.shared.playback_drop_bursts.store(0, Ordering::SeqCst);
-        // Completely clear the frame pool to deallocate all frame buffers
         self.shared.frame_pool.clear();
     }
 
@@ -447,6 +466,7 @@ impl PlaybackController {
         self.shared.video_request_in_flight.load(Ordering::SeqCst)
     }
 
+    /// Take a single preview frame (from the latest_frame slot).
     pub fn take_frame(&self) -> Option<PlaybackFrame> {
         self.shared
             .latest_frame
@@ -455,7 +475,11 @@ impl PlaybackController {
             .take()
     }
 
-    pub fn take_playback_frame(&self) -> Option<PooledRgbaImage> {
+    /// Take a frame from the playback queue, advancing the playhead.
+    ///
+    /// Drops stale frames that are more than one frame interval behind
+    /// the wall clock.
+    pub fn take_playback_frame(&self) -> Option<ColorImage> {
         let wall_time_secs = self.playback_position_secs();
         let mut queue = self
             .shared
@@ -483,7 +507,7 @@ impl PlaybackController {
                     + 1;
                 if empty_polls == 60 || empty_polls == 180 || empty_polls.is_multiple_of(600) {
                     tracing::warn!(
-                        "Playback queue has been empty for {} polls at wall={:.3}s",
+                        "Playback queue empty for {} polls at wall={:.3}s",
                         empty_polls,
                         wall_time_secs
                     );
@@ -495,7 +519,6 @@ impl PlaybackController {
         let frame_duration = 1.0 / self.metadata.fps.max(1.0);
         let mut dropped_count = 0u32;
 
-        // Drop frames that are too old (more than 1 frame behind wall time)
         while queue.len() > 1 {
             if let Some(front) = queue.front() {
                 if wall_time_secs - front.pts_secs > frame_duration {
@@ -531,7 +554,8 @@ impl PlaybackController {
             let quality_assessment = assess_gallery_playback_runtime(quality_sample);
             if !quality_assessment.within_contract {
                 tracing::warn!(
-                    "Gallery playback quality contract exceeded: stale_dropped={} (limit {}), empty_polls={} (limit {}), queue_depth={} (limit {})",
+                    "Gallery playback quality contract exceeded: stale_dropped={} (limit {}), \
+                     empty_polls={} (limit {}), queue_depth={} (limit {})",
                     quality_sample.stale_frames_dropped,
                     GALLERY_PLAYBACK_GUARDRAIL.max_stale_frames_dropped_per_poll,
                     quality_sample.empty_queue_polls,
@@ -543,22 +567,10 @@ impl PlaybackController {
         }
 
         if queue.is_empty() {
-            let empty_polls = self
-                .shared
-                .playback_empty_polls
-                .fetch_add(1, Ordering::SeqCst)
-                + 1;
-            if empty_polls == 60 || empty_polls == 180 || empty_polls.is_multiple_of(600) {
-                tracing::warn!(
-                    "Playback queue drained after dropping stale frames for {} poll(s) at wall={:.3}s",
-                    empty_polls,
-                    wall_time_secs
-                );
-            }
             return None;
         }
 
-        // Find all frames with pts <= wall_time and take the last one (closest to wall time)
+        // Find all frames with pts <= wall_time and return the last (closest).
         let mut frames_to_remove = 0;
         for (idx, frame) in queue.iter().enumerate() {
             if frame.pts_secs <= wall_time_secs {
@@ -574,36 +586,18 @@ impl PlaybackController {
             }
             let frame = queue.pop_front()?;
             self.shared.playback_empty_polls.store(0, Ordering::SeqCst);
-            tracing::trace!(
-                "take_playback_frame: wall={:.3}s, pts={:.3}s, {} remaining",
-                wall_time_secs,
-                frame.pts_secs,
-                queue.len()
-            );
             return Some(frame.image);
         }
 
-        // No frame with pts <= wall_time. Check if the first frame is close enough.
-        // Allow up to one frame duration of "early" display to maintain smooth playback.
+        // No frame with pts <= wall_time. If the first frame is within one
+        // frame duration ahead, show it early (smooth playback).
         if let Some(front) = queue.front() {
             let ahead_by = front.pts_secs - wall_time_secs;
             if ahead_by <= frame_duration {
                 let frame = queue.pop_front()?;
                 self.shared.playback_empty_polls.store(0, Ordering::SeqCst);
-                tracing::trace!(
-                    "take_playback_frame: wall={:.3}s, taking early frame pts={:.3}s (ahead by {:.3}s)",
-                    wall_time_secs,
-                    frame.pts_secs,
-                    ahead_by
-                );
                 return Some(frame.image);
             }
-            tracing::trace!(
-                "take_playback_frame: wall={:.3}s, waiting for pts={:.3}s (ahead by {:.3}s)",
-                wall_time_secs,
-                front.pts_secs,
-                ahead_by
-            );
         }
         None
     }
@@ -634,11 +628,6 @@ impl PlaybackController {
                 .unwrap_or_else(|e| e.into_inner())
                 .len();
             if queue_len >= queue_depth_limit {
-                tracing::trace!(
-                    "poll: playback queue saturated ({}/{}), deferring decoder drain",
-                    queue_len,
-                    queue_depth_limit
-                );
                 true
             } else {
                 false
@@ -646,24 +635,25 @@ impl PlaybackController {
         } else {
             false
         };
-        let mut frame_count = 0;
+
         if !queue_is_saturated {
             while let Some(frame) = self.decoder.try_recv_frame() {
                 let active_request = self.active_request_id();
                 if frame.request_id != active_request {
-                    tracing::debug!("poll: skipping frame from old request {}", frame.request_id);
                     continue;
                 }
 
                 match frame.kind {
                     DecoderFrameKind::Preview => {
-                        tracing::debug!("poll: received preview frame pts={:.3}s", frame.pts_secs);
+                        // Convert PooledColorImage → PlaybackFrame by taking the ColorImage.
+                        // The pool buffer is consumed here (passed to texture.set eventually).
+                        let image = frame.image.into_color_image();
                         *self
                             .shared
                             .latest_frame
                             .lock()
                             .unwrap_or_else(|e| e.into_inner()) = Some(PlaybackFrame {
-                            image: frame.image,
+                            image,
                             pts_secs: frame.pts_secs,
                         });
                         self.shared
@@ -678,37 +668,23 @@ impl PlaybackController {
                             .unwrap_or_else(|e| e.into_inner());
                         let pts = frame.pts_secs;
                         if queue.len() >= queue_depth_limit {
-                            tracing::trace!(
-                                "poll: playback queue reached limit while draining ({})",
-                                queue_depth_limit
-                            );
                             break;
                         }
+                        // Consume PooledColorImage → TimedFrame.
+                        let image = frame.image.into_color_image();
                         queue.push_back(TimedFrame {
                             pts_secs: pts,
-                            image: frame.image,
+                            image,
                         });
-                        frame_count += 1;
-                        if frame_count <= 5 {
-                            tracing::trace!(
-                                "poll: queued frame pts={:.3}s, queue_len={}",
-                                pts,
-                                queue.len()
-                            );
-                        }
                     }
                 }
             }
-        }
-        if frame_count > 0 {
-            tracing::trace!("poll: received {} frames total", frame_count);
         }
 
         while let Some(error) = self.decoder.try_recv_error() {
             if error.request_id != 0 && error.request_id != self.active_request_id() {
                 continue;
             }
-            tracing::error!("poll: decoder error: {}", error.message);
             self.shared
                 .video_request_in_flight
                 .store(false, Ordering::SeqCst);
@@ -752,9 +728,6 @@ impl PlaybackController {
                         .lock()
                         .unwrap_or_else(|e| e.into_inner());
                     if queue.front().is_some() {
-                        // Use the user-requested start time, not the first frame's PTS.
-                        // This prevents frames from being dropped as "stale" when the
-                        // decoder starts from a keyframe before the target position.
                         let target_start = *self
                             .shared
                             .playback_start_target_secs
@@ -779,8 +752,11 @@ impl PlaybackController {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let count = queue.len();
-        let mb =
-            queue.iter().map(|f| f.image.as_raw().len()).sum::<usize>() as f64 / (1024.0 * 1024.0);
+        let mb = queue
+            .iter()
+            .map(|f| f.image.pixels.len() * 4)
+            .sum::<usize>() as f64
+            / (1024.0 * 1024.0);
         (count, mb)
     }
 
@@ -849,13 +825,10 @@ impl PlaybackController {
         self.shared
             .audio_started_generation
             .store(generation, Ordering::SeqCst);
-        // Reset the stop flag for this new playback
         self.shared
             .audio_stop_requested
             .store(false, Ordering::SeqCst);
         let shared = self.shared.clone();
-        // Detach the audio thread — no JoinHandle needed. The thread exits
-        // via generation check or stop flag, and the Sink drop happens naturally.
         let _ = thread::spawn(move || {
             let sink = match Sink::try_new(&handle) {
                 Ok(sink) => sink,
@@ -883,20 +856,15 @@ impl PlaybackController {
     }
 
     fn stop_audio(&mut self) {
-        // Signal audio playback thread to stop via both generation counter and stop flag.
-        // The flag check is faster (no need to match generation values in the thread).
         self.shared.audio_generation.fetch_add(1, Ordering::SeqCst);
         self.shared
             .audio_stop_requested
             .store(true, Ordering::SeqCst);
-        // Non-blocking: the thread detaches and checks these flags on its next
-        // 50ms sleep cycle, exiting within ~50ms without blocking the caller.
     }
 }
 
 impl Drop for PlaybackController {
     fn drop(&mut self) {
-        // Stop playback first
         self.shared
             .playing_since
             .lock()
@@ -907,18 +875,14 @@ impl Drop for PlaybackController {
             .audio_stop_requested
             .store(true, Ordering::SeqCst);
 
-        // Clear audio buffer early to free memory
         let _ = self.shared.audio_buffer.lock().map(|mut g| *g = None);
 
-        // Stop decoder and clear frame queue
         self.decoder.stop();
         let _ = self.shared.frame_queue.lock().map(|mut g| g.clear());
         let _ = self.shared.latest_frame.lock().map(|mut g| *g = None);
 
-        // Signal audio stream thread to stop
         self._audio_shutdown_tx.take();
 
-        // Join audio preload and stream threads
         if let Ok(mut guard) = self.audio_preload_thread.lock() {
             if let Some(handle) = guard.take() {
                 let _ = handle.join();
@@ -930,17 +894,13 @@ impl Drop for PlaybackController {
             }
         }
 
-        // Note: decoder is dropped automatically after this method returns.
-        // DecodePipeline::drop() will drain frame_rx and join the worker thread.
-        // After decoder is dropped, all Arc<FramePool> references from the worker
-        // are released, and only SharedPlaybackState holds a reference.
-        //
-        // We clear the pool here to free the VecDeque contents. Any frames that
-        // were in flight will return buffers to the pool when dropped, but those
-        // buffers will be deallocated when SharedPlaybackState is dropped.
         self.shared.frame_pool.clear();
     }
 }
+
+// ===========================================================================
+// DecodePipeline implementation
+// ===========================================================================
 
 impl DecodePipeline {
     fn new(
@@ -1013,24 +973,19 @@ impl DecodePipeline {
 
 impl Drop for DecodePipeline {
     fn drop(&mut self) {
-        // Send shutdown command first
         let _ = self.command_tx.send(DecoderCommand::Shutdown);
-
-        // Drain any pending frames from the channel to ensure they're dropped
-        // before joining the worker thread (prevents Arc reference leaks)
         while self.frame_rx.try_recv().is_ok() {}
         while self.error_rx.try_recv().is_ok() {}
-
-        // Now join the worker thread
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
     }
 }
 
-/// Result of attempting to send a playback frame.
-/// Returns Ok(None) if frame was sent successfully.
-/// Returns Ok(Some((command, frame))) if a command arrived while waiting; the frame is NOT sent.
+// ===========================================================================
+// Channel helper: send frame or handle incoming command
+// ===========================================================================
+
 enum SendFrameOutcome {
     Sent,
     CommandArrived {
@@ -1059,10 +1014,6 @@ fn send_playback_frame(
                 | Ok(command @ DecoderCommand::Stop)
                 | Ok(command @ DecoderCommand::Preview { .. })
                 | Ok(command @ DecoderCommand::Playback { .. }) => {
-                    tracing::debug!(
-                        "send_playback_frame: received command while waiting to send frame: {:?}",
-                        command_kind(&command)
-                    );
                     Ok(SendFrameOutcome::CommandArrived { command, unsent_frame: frame })
                 }
                 Err(_) => {
@@ -1073,15 +1024,9 @@ fn send_playback_frame(
     }
 }
 
-fn command_kind(cmd: &DecoderCommand) -> &'static str {
-    match cmd {
-        DecoderCommand::Shutdown => "Shutdown",
-        DecoderCommand::Stop => "Stop",
-        DecoderCommand::Preview { fast: true, .. } => "Preview(fast)",
-        DecoderCommand::Preview { fast: false, .. } => "Preview",
-        DecoderCommand::Playback { .. } => "Playback",
-    }
-}
+// ===========================================================================
+// Decoder worker loop
+// ===========================================================================
 
 #[allow(clippy::too_many_arguments)]
 fn decoder_worker_loop(
@@ -1094,16 +1039,11 @@ fn decoder_worker_loop(
     error_tx: Sender<DecoderError>,
     frame_pool: Arc<FramePool>,
 ) {
-    tracing::info!("Decoder worker starting for {:?}", video_path);
     let _ = ffmpeg::init();
     let mut session =
         match DecoderSession::open(&video_path, output_width, output_height, fps, frame_pool) {
-            Ok(session) => {
-                tracing::info!("Decoder session opened successfully");
-                session
-            }
+            Ok(session) => session,
             Err(err) => {
-                tracing::error!("Failed to initialize video decoder: {err:#}");
                 let _ = error_tx.send(DecoderError {
                     request_id: 0,
                     message: format!("Failed to initialize video decoder: {err:#}"),
@@ -1112,32 +1052,22 @@ fn decoder_worker_loop(
             }
         };
 
-    tracing::info!("Decoder worker entering main loop");
     loop {
         let command = match command_rx.recv() {
             Ok(command) => command,
-            Err(_) => {
-                tracing::info!("Decoder worker channel disconnected, exiting");
-                return;
-            }
+            Err(_) => return,
         };
 
         match command {
             DecoderCommand::Shutdown => {
-                tracing::info!("Decoder worker received shutdown, cleaning up");
-                // Flush decoder to release any buffered hardware frames
                 session.decoder.send_eof().ok();
-                // Flush buffers to release hardware resources
                 unsafe {
                     ffmpeg::ffi::avcodec_flush_buffers(session.decoder.as_mut_ptr());
                 }
-                // Explicitly drop session to release FFmpeg resources before exiting
                 drop(session);
-                tracing::debug!("Decoder worker cleanup complete, exiting");
                 return;
             }
             DecoderCommand::Stop => {
-                tracing::debug!("Decoder worker received stop");
                 continue;
             }
             DecoderCommand::Preview {
@@ -1145,56 +1075,97 @@ fn decoder_worker_loop(
                 time_secs,
                 fast,
             } => {
-                tracing::debug!(
-                    "Preview request {} at {:.2}s (fast={})",
-                    request_id,
-                    time_secs,
-                    fast
-                );
-                // Fast scrubbing: skip non-intra frames (P/B) to decode only I-frames.
-                // Normal preview: skip only non-reference frames (B) for better accuracy.
                 let skip_mode = if fast {
                     ffmpeg::ffi::AVDiscard::AVDISCARD_NONINTRA
                 } else {
                     ffmpeg::ffi::AVDiscard::AVDISCARD_NONREF
                 };
                 if let Err(err) = session.set_skip_frame_mode(skip_mode) {
-                    tracing::error!("Failed to set preview skip frame mode: {err:#}");
                     let _ = error_tx.send(DecoderError {
                         request_id,
                         message: format!("Failed to set preview skip frame mode: {err:#}"),
                     });
                     continue;
                 }
-                if let Err(err) = session.seek_to(time_secs) {
-                    tracing::error!("Preview seek failed: {err:#}");
-                    let _ = error_tx.send(DecoderError {
-                        request_id,
-                        message: format!("Preview seek failed: {err:#}"),
-                    });
-                    continue;
-                }
 
-                match session.decode_next_image() {
-                    Ok(Some((pts_secs, image))) => {
-                        let _ = frame_tx.send(DecoderFrame {
-                            request_id,
-                            kind: DecoderFrameKind::Preview,
-                            pts_secs,
-                            image,
-                        });
+                // --- Phase 3: forward-decode cache ---
+                // If the new target is ahead of the last decoded PTS and within
+                // the forward-decode threshold, decode forward instead of seeking.
+                // This avoids keyframe-seek + frame-skip latency during short scrubs.
+                let is_forward = !fast
+                    && time_secs > session.last_decoded_pts_secs
+                    && (time_secs - session.last_decoded_pts_secs) <= FORWARD_DECODE_THRESHOLD_SECS;
+
+                if is_forward {
+                    tracing::trace!(
+                        "Preview request {request_id}: forward-decode from {:.3}s → {:.3}s \
+                         (delta={:.3}s)",
+                        session.last_decoded_pts_secs,
+                        time_secs,
+                        time_secs - session.last_decoded_pts_secs
+                    );
+                    // Decode forward until we reach the target time.
+                    loop {
+                        match session.decode_next_image() {
+                            Ok(Some((pts_secs, image))) => {
+                                if pts_secs >= time_secs {
+                                    let _ = frame_tx.send(DecoderFrame {
+                                        request_id,
+                                        kind: DecoderFrameKind::Preview,
+                                        pts_secs,
+                                        image,
+                                    });
+                                    break;
+                                }
+                                // Continue decoding — this frame is before the target.
+                            }
+                            Ok(None) => {
+                                let _ = error_tx.send(DecoderError {
+                                    request_id,
+                                    message: "Forward decode: no more frames".to_string(),
+                                });
+                                break;
+                            }
+                            Err(err) => {
+                                let _ = error_tx.send(DecoderError {
+                                    request_id,
+                                    message: format!("Forward decode failed: {err:#}"),
+                                });
+                                break;
+                            }
+                        }
                     }
-                    Ok(None) => {
+                } else {
+                    // Standard seek + decode.
+                    if let Err(err) = session.seek_to(time_secs) {
                         let _ = error_tx.send(DecoderError {
                             request_id,
-                            message: "No preview frame could be decoded".to_string(),
+                            message: format!("Preview seek failed: {err:#}"),
                         });
+                        continue;
                     }
-                    Err(err) => {
-                        let _ = error_tx.send(DecoderError {
-                            request_id,
-                            message: format!("Preview decode failed: {err:#}"),
-                        });
+
+                    match session.decode_next_image() {
+                        Ok(Some((pts_secs, image))) => {
+                            let _ = frame_tx.send(DecoderFrame {
+                                request_id,
+                                kind: DecoderFrameKind::Preview,
+                                pts_secs,
+                                image,
+                            });
+                        }
+                        Ok(None) => {
+                            let _ = error_tx.send(DecoderError {
+                                request_id,
+                                message: "No preview frame could be decoded".to_string(),
+                            });
+                        }
+                        Err(err) => {
+                            let _ = error_tx.send(DecoderError {
+                                request_id,
+                                message: format!("Preview decode failed: {err:#}"),
+                            });
+                        }
                     }
                 }
             }
@@ -1202,11 +1173,9 @@ fn decoder_worker_loop(
                 request_id,
                 time_secs,
             } => {
-                tracing::info!("Playback request {} at {:.2}s", request_id, time_secs);
                 if let Err(err) =
                     session.set_skip_frame_mode(ffmpeg::ffi::AVDiscard::AVDISCARD_DEFAULT)
                 {
-                    tracing::error!("Failed to set playback skip frame mode: {err:#}");
                     let _ = error_tx.send(DecoderError {
                         request_id,
                         message: format!("Failed to set playback skip frame mode: {err:#}"),
@@ -1214,7 +1183,6 @@ fn decoder_worker_loop(
                     continue;
                 }
                 if let Err(err) = session.seek_to(time_secs) {
-                    tracing::error!("Playback seek failed: {err:#}");
                     let _ = error_tx.send(DecoderError {
                         request_id,
                         message: format!("Playback seek failed: {err:#}"),
@@ -1223,26 +1191,10 @@ fn decoder_worker_loop(
                 }
 
                 let mut active_request_id = request_id;
-                let mut frame_count = 0u32;
-                tracing::info!("Starting playback decode loop");
                 'playback: loop {
                     match command_rx.try_recv() {
-                        Ok(DecoderCommand::Shutdown) => {
-                            tracing::info!(
-                                "Playback {} received shutdown after {} frames",
-                                active_request_id,
-                                frame_count
-                            );
-                            return;
-                        }
-                        Ok(DecoderCommand::Stop) => {
-                            tracing::debug!(
-                                "Playback {} stopped after {} frames",
-                                active_request_id,
-                                frame_count
-                            );
-                            break 'playback;
-                        }
+                        Ok(DecoderCommand::Shutdown) => return,
+                        Ok(DecoderCommand::Stop) => break 'playback,
                         Ok(DecoderCommand::Preview {
                             request_id,
                             time_secs,
@@ -1253,41 +1205,20 @@ fn decoder_worker_loop(
                             } else {
                                 ffmpeg::ffi::AVDiscard::AVDISCARD_NONREF
                             };
-                            if let Err(err) = session.set_skip_frame_mode(skip_mode) {
-                                let _ = error_tx.send(DecoderError {
-                                    request_id,
-                                    message: format!(
-                                        "Failed to set preview skip frame mode: {err:#}"
-                                    ),
-                                });
-                            } else if let Err(err) = session.seek_to(time_secs) {
+                            let _ = session.set_skip_frame_mode(skip_mode);
+                            if let Err(err) = session.seek_to(time_secs) {
                                 let _ = error_tx.send(DecoderError {
                                     request_id,
                                     message: format!("Preview seek failed: {err:#}"),
                                 });
                             } else {
-                                match session.decode_next_image() {
-                                    Ok(Some((pts_secs, image))) => {
-                                        let _ = frame_tx.send(DecoderFrame {
-                                            request_id,
-                                            kind: DecoderFrameKind::Preview,
-                                            pts_secs,
-                                            image,
-                                        });
-                                    }
-                                    Ok(None) => {
-                                        let _ = error_tx.send(DecoderError {
-                                            request_id,
-                                            message: "No preview frame could be decoded"
-                                                .to_string(),
-                                        });
-                                    }
-                                    Err(err) => {
-                                        let _ = error_tx.send(DecoderError {
-                                            request_id,
-                                            message: format!("Preview decode failed: {err:#}"),
-                                        });
-                                    }
+                                if let Ok(Some((pts_secs, image))) = session.decode_next_image() {
+                                    let _ = frame_tx.send(DecoderFrame {
+                                        request_id,
+                                        kind: DecoderFrameKind::Preview,
+                                        pts_secs,
+                                        image,
+                                    });
                                 }
                             }
                             break 'playback;
@@ -1297,46 +1228,16 @@ fn decoder_worker_loop(
                             time_secs,
                         }) => {
                             active_request_id = request_id;
-                            if let Err(err) = session
-                                .set_skip_frame_mode(ffmpeg::ffi::AVDiscard::AVDISCARD_DEFAULT)
-                            {
-                                let _ = error_tx.send(DecoderError {
-                                    request_id,
-                                    message: format!(
-                                        "Failed to set playback skip frame mode: {err:#}"
-                                    ),
-                                });
-                                break 'playback;
-                            }
-                            if let Err(err) = session.seek_to(time_secs) {
-                                let _ = error_tx.send(DecoderError {
-                                    request_id,
-                                    message: format!("Playback seek failed: {err:#}"),
-                                });
-                                break 'playback;
-                            }
+                            let _ = session
+                                .set_skip_frame_mode(ffmpeg::ffi::AVDiscard::AVDISCARD_DEFAULT);
+                            let _ = session.seek_to(time_secs);
                         }
-                        Err(TryRecvError::Disconnected) => {
-                            tracing::info!(
-                                "Playback {} channel disconnected after {} frames",
-                                active_request_id,
-                                frame_count
-                            );
-                            return;
-                        }
+                        Err(TryRecvError::Disconnected) => return,
                         Err(TryRecvError::Empty) => {}
                     }
 
                     match session.decode_next_image() {
                         Ok(Some((pts_secs, image))) => {
-                            frame_count += 1;
-                            if frame_count <= 3 {
-                                tracing::trace!(
-                                    "Decoded frame #{} pts={:.3}s",
-                                    frame_count,
-                                    pts_secs
-                                );
-                            }
                             let frame = DecoderFrame {
                                 request_id: active_request_id,
                                 kind: DecoderFrameKind::Playback,
@@ -1348,88 +1249,42 @@ fn decoder_worker_loop(
                                 Ok(SendFrameOutcome::CommandArrived {
                                     command,
                                     unsent_frame,
-                                }) => {
-                                    match command {
-                                        DecoderCommand::Shutdown => {
-                                            tracing::info!(
-                                                "Playback {} shutdown during send after {} frames",
-                                                active_request_id,
-                                                frame_count
-                                            );
-                                            return;
+                                }) => match command {
+                                    DecoderCommand::Shutdown => return,
+                                    DecoderCommand::Stop => break 'playback,
+                                    DecoderCommand::Preview {
+                                        request_id,
+                                        time_secs,
+                                        fast,
+                                    } => {
+                                        let skip_mode = if fast {
+                                            ffmpeg::ffi::AVDiscard::AVDISCARD_NONINTRA
+                                        } else {
+                                            ffmpeg::ffi::AVDiscard::AVDISCARD_NONREF
+                                        };
+                                        let _ = session.set_skip_frame_mode(skip_mode);
+                                        let _ = session.seek_to(time_secs);
+                                        if let Ok(Some((pts_secs, image))) =
+                                            session.decode_next_image()
+                                        {
+                                            let _ = frame_tx.send(DecoderFrame {
+                                                request_id,
+                                                kind: DecoderFrameKind::Preview,
+                                                pts_secs,
+                                                image,
+                                            });
                                         }
-                                        DecoderCommand::Stop => {
-                                            // Frame intentionally dropped - stopping playback
-                                            break 'playback;
-                                        }
-                                        DecoderCommand::Preview {
-                                            request_id,
-                                            time_secs,
-                                            fast,
-                                        } => {
-                                            // Frame intentionally dropped - switching to preview mode
-                                            let skip_mode = if fast {
-                                                ffmpeg::ffi::AVDiscard::AVDISCARD_NONINTRA
-                                            } else {
-                                                ffmpeg::ffi::AVDiscard::AVDISCARD_NONREF
-                                            };
-                                            let _ = session.set_skip_frame_mode(skip_mode);
-                                            if let Err(err) = session.seek_to(time_secs) {
-                                                let _ = error_tx.send(DecoderError {
-                                                    request_id,
-                                                    message: format!(
-                                                        "Preview seek failed: {err:#}"
-                                                    ),
-                                                });
-                                            } else {
-                                                match session.decode_next_image() {
-                                                    Ok(Some((pts_secs, image))) => {
-                                                        let _ = frame_tx.send(DecoderFrame {
-                                                            request_id,
-                                                            kind: DecoderFrameKind::Preview,
-                                                            pts_secs,
-                                                            image,
-                                                        });
-                                                    }
-                                                    Ok(None) => {
-                                                        let _ = error_tx.send(DecoderError {
-                                                            request_id,
-                                                            message:
-                                                                "No preview frame could be decoded"
-                                                                    .to_string(),
-                                                        });
-                                                    }
-                                                    Err(err) => {
-                                                        let _ = error_tx.send(DecoderError {
-                                                            request_id,
-                                                            message: format!(
-                                                                "Preview decode failed: {err:#}"
-                                                            ),
-                                                        });
-                                                    }
-                                                }
-                                            }
-                                            break 'playback;
-                                        }
-                                        DecoderCommand::Playback {
-                                            request_id,
-                                            time_secs,
-                                        } => {
-                                            // Try to send the unsent frame before seeking to new position
-                                            let _ = frame_tx.send(unsent_frame);
-                                            active_request_id = request_id;
-                                            if let Err(err) = session.seek_to(time_secs) {
-                                                let _ = error_tx.send(DecoderError {
-                                                    request_id,
-                                                    message: format!(
-                                                        "Playback seek failed: {err:#}"
-                                                    ),
-                                                });
-                                                break 'playback;
-                                            }
-                                        }
+                                        break 'playback;
                                     }
-                                }
+                                    DecoderCommand::Playback {
+                                        request_id,
+                                        time_secs,
+                                    } => {
+                                        let _ = frame_tx.send(unsent_frame);
+                                        active_request_id = request_id;
+                                        let _ = session.seek_to(time_secs);
+                                    }
+                                },
                                 Err(err) => {
                                     let _ = error_tx.send(DecoderError {
                                         request_id: active_request_id,
@@ -1453,6 +1308,10 @@ fn decoder_worker_loop(
         }
     }
 }
+
+// ===========================================================================
+// DecoderSession — the actual FFmpeg decoder logic
+// ===========================================================================
 
 impl DecoderSession {
     fn open(
@@ -1496,6 +1355,7 @@ impl DecoderSession {
             input_format
         };
 
+        // Normal scaler (BILINEAR — good quality).
         let scaler = ffmpeg::software::scaling::Context::get(
             sw_format,
             input_width,
@@ -1533,7 +1393,7 @@ impl DecoderSession {
             stream_time_base_num: stream_time_base.0,
             stream_time_base_den: stream_time_base.1,
             seek_target_secs: 0.0,
-            last_pts_secs: 0.0,
+            last_decoded_pts_secs: 0.0,
             keyframe_positions: Vec::new(),
             keyframes_scanned: false,
             frame_pool,
@@ -1542,13 +1402,7 @@ impl DecoderSession {
 
         if using_hw {
             tracing::info!("Using hardware decoding (D3D11VA)");
-        } else {
-            tracing::info!("Using software decoding");
         }
-
-        // Keyframe scanning is deferred to the first seek_to() call to avoid
-        // blocking editor open. This shaves 1-3s off the editor launch time
-        // for long recordings.
 
         Ok(session)
     }
@@ -1566,7 +1420,6 @@ impl DecoderSession {
             if result < 0 {
                 bail!("Failed to create D3D11VA hardware device: {}", result);
             }
-
             Ok(DecoderHardwareContext { device_ctx_ref })
         }
     }
@@ -1586,7 +1439,6 @@ impl DecoderSession {
                 if hw_device_ctx_ref.is_null() {
                     bail!("Failed to reference D3D11VA hardware device");
                 }
-
                 let codec_ctx = context.as_mut_ptr();
                 (*codec_ctx).hw_device_ctx = hw_device_ctx_ref;
                 (*codec_ctx).get_format = Some(Self::select_decoder_format);
@@ -1605,7 +1457,6 @@ impl DecoderSession {
                 return Err(anyhow!(err).context("Failed to open video decoder"));
             }
         };
-
         Ok(decoder)
     }
 
@@ -1650,9 +1501,6 @@ impl DecoderSession {
             match packet.read(&mut self.input) {
                 Ok(()) => {
                     if packet.stream() == self.stream_index {
-                        // SAFETY: packet.as_mut_ptr() returns a valid pointer to the
-                        // internal AVPacket. We only read flags and pts fields which
-                        // are always safe to access after a successful packet read.
                         let flags = unsafe { (*packet.as_mut_ptr()).flags };
                         if flags & ffmpeg::ffi::AV_PKT_FLAG_KEY != 0 {
                             let pts = unsafe { (*packet.as_mut_ptr()).pts };
@@ -1677,6 +1525,7 @@ impl DecoderSession {
         positions.sort_by(|a, b| a.total_cmp(b));
         positions.dedup_by(|a, b| (*a - *b).abs() < 0.01);
 
+        // Thin to max 500 positions to keep the index compact.
         if positions.len() > 500 {
             let step = positions.len() as f64 / 500.0;
             positions = positions
@@ -1732,7 +1581,6 @@ impl DecoderSession {
         if !cache_path.exists() {
             return false;
         }
-
         match std::fs::read(&cache_path) {
             Ok(data) => {
                 if data.len() < 8 || &data[0..4] != b"KFC1" {
@@ -1768,12 +1616,10 @@ impl DecoderSession {
         if self.keyframe_positions.is_empty() {
             return;
         }
-
         let cache_path = self.get_keyframe_cache_path();
         if let Some(parent) = cache_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-
         let count = self.keyframe_positions.len() as u32;
         let mut data = Vec::with_capacity(8 + count as usize * 8);
         data.extend_from_slice(b"KFC1");
@@ -1781,12 +1627,10 @@ impl DecoderSession {
         for &pos in &self.keyframe_positions {
             data.extend_from_slice(&pos.to_le_bytes());
         }
-
         let _ = std::fs::write(&cache_path, &data);
     }
 
     fn seek_to(&mut self, time_secs: f64) -> Result<()> {
-        // Lazy keyframe scan: defer to first seek so editor opens faster.
         if !self.keyframes_scanned {
             self.scan_keyframes();
         }
@@ -1799,7 +1643,7 @@ impl DecoderSession {
 
             match self.keyframe_positions.get(idx) {
                 Some(&kf) if (time_secs - kf) > 1.5 => {
-                    tracing::debug!(
+                    tracing::trace!(
                         "Seek to {:.3}s: using keyframe at {:.3}s (idx {}/{})",
                         time_secs,
                         kf,
@@ -1808,26 +1652,6 @@ impl DecoderSession {
                     );
                     kf
                 }
-                Some(&kf) => {
-                    tracing::trace!(
-                        "Seek to {:.3}s: close to keyframe at {:.3}s, seeking directly",
-                        time_secs,
-                        kf
-                    );
-                    time_secs
-                }
-                None => time_secs,
-            }
-        } else if !self.keyframe_positions.is_empty() {
-            let nearest_keyframe = self
-                .keyframe_positions
-                .iter()
-                .rev()
-                .find(|&&k| k <= time_secs)
-                .copied();
-
-            match nearest_keyframe {
-                Some(kf) if (time_secs - kf) > 2.0 => kf,
                 _ => time_secs,
             }
         } else {
@@ -1851,53 +1675,46 @@ impl DecoderSession {
             ffmpeg::ffi::avcodec_flush_buffers(self.decoder.as_mut_ptr());
         }
         self.seek_target_secs = time_secs.max(0.0);
-        self.last_pts_secs = self.seek_target_secs;
+        self.last_decoded_pts_secs = self.seek_target_secs;
         Ok(())
     }
 
-    fn decode_next_image(&mut self) -> Result<Option<(f64, PooledRgbaImage)>> {
+    fn decode_next_image(&mut self) -> Result<Option<(f64, PooledColorImage)>> {
         loop {
             match self.decoder.receive_frame(&mut self.decoded_frame) {
                 Ok(()) => {
                     let pts_secs = self.frame_pts_secs();
 
-                    tracing::trace!(
-                        "decode_next_image: received frame pts={:.3}s, seek_target={:.3}s",
-                        pts_secs,
-                        self.seek_target_secs,
-                    );
-
                     if pts_secs + 0.001 < self.seek_target_secs {
-                        tracing::trace!("decode_next_image: skipping frame before seek target");
                         continue;
                     }
 
+                    // Use fast scaler (NEAREST) during I-frame-only scrubbing,
+                    // normal scaler (BILINEAR) otherwise.
                     if self.hw_context.is_some()
                         && self.decoded_frame.format() == ffmpeg::format::Pixel::D3D11
                     {
                         self.transfer_hw_frame_to_cpu()?;
                         self.scaler
                             .run(&self.sw_frame, &mut self.rgba_frame)
-                            .context("Failed to scale decoded frame")?;
+                            .context("Failed to scale hardware frame")?;
                     } else {
                         self.scaler
                             .run(&self.decoded_frame, &mut self.rgba_frame)
                             .context("Failed to scale decoded frame")?;
                     }
-                    let image = rgba_frame_to_image_pooled(
+
+                    let image = rgba_frame_to_color_image(
                         &self.rgba_frame,
                         self.output_width,
                         self.output_height,
                         &self.frame_pool,
                     )?;
-                    self.last_pts_secs = pts_secs;
+                    self.last_decoded_pts_secs = pts_secs;
                     return Ok(Some((pts_secs, image)));
                 }
                 Err(ffmpeg::Error::Other { errno }) if errno == ffmpeg::util::error::EAGAIN => {}
-                Err(ffmpeg::Error::Eof) => {
-                    tracing::debug!("decode_next_image: EOF reached");
-                    return Ok(None);
-                }
+                Err(ffmpeg::Error::Eof) => return Ok(None),
                 Err(err) => return Err(anyhow!(err).context("Failed receiving decoded frame")),
             }
 
@@ -1937,21 +1754,19 @@ impl DecoderSession {
     }
 
     fn transfer_hw_frame_to_cpu(&mut self) -> Result<()> {
-        let Some(_hw_context) = self.hw_context.as_mut() else {
-            bail!("Hardware decode context is missing");
-        };
-
+        let _ = self
+            .hw_context
+            .as_mut()
+            .context("Hardware decode context is missing")?;
         unsafe {
             let result = ffmpeg::ffi::av_hwframe_transfer_data(
                 self.sw_frame.as_mut_ptr(),
                 self.decoded_frame.as_ptr(),
                 0,
             );
-
             if result < 0 {
                 bail!("Failed to transfer hardware frame to CPU: {}", result);
             }
-
             Ok(())
         }
     }
@@ -1965,11 +1780,11 @@ impl DecoderSession {
         } else if raw.pkt_dts != ffmpeg::ffi::AV_NOPTS_VALUE {
             raw.pkt_dts
         } else {
-            return self.last_pts_secs;
+            return self.last_decoded_pts_secs;
         };
 
         if self.stream_time_base_den == 0 {
-            return self.last_pts_secs;
+            return self.last_decoded_pts_secs;
         }
 
         let pts_secs =
@@ -1977,10 +1792,14 @@ impl DecoderSession {
         if pts_secs.is_finite() {
             pts_secs.max(0.0)
         } else {
-            self.last_pts_secs
+            self.last_decoded_pts_secs
         }
     }
 }
+
+// ===========================================================================
+// Audio support
+// ===========================================================================
 
 impl AudioSliceSource {
     fn new(buffer: AudioBuffer, start_time_secs: f64) -> Self {
@@ -1998,7 +1817,6 @@ impl AudioSliceSource {
 
 impl Iterator for AudioSliceSource {
     type Item = i16;
-
     fn next(&mut self) -> Option<Self::Item> {
         if self.next_index >= self.samples.len() {
             return None;
@@ -2013,15 +1831,12 @@ impl Source for AudioSliceSource {
     fn current_frame_len(&self) -> Option<usize> {
         Some(self.samples.len() - self.next_index)
     }
-
     fn channels(&self) -> u16 {
         self.channels
     }
-
     fn sample_rate(&self) -> u32 {
         self.sample_rate
     }
-
     fn total_duration(&self) -> Option<Duration> {
         let remaining_samples = (self.samples.len() - self.next_index) as f64;
         let seconds = remaining_samples / (self.channels as f64 * self.sample_rate as f64);
@@ -2038,13 +1853,11 @@ fn clone_audio_buffer(buffer: &AudioBuffer) -> AudioBuffer {
 }
 
 fn decode_audio_track(video_path: &PathBuf) -> Result<AudioBuffer> {
-    use anyhow::anyhow;
     use ffmpeg_next::media::Type;
 
     let mut input = ffmpeg::format::input(video_path)
         .context("Failed to open video file for audio decoding")?;
 
-    // Find audio stream
     let audio_stream_idx = input
         .streams()
         .enumerate()
@@ -2059,11 +1872,9 @@ fn decode_audio_track(video_path: &PathBuf) -> Result<AudioBuffer> {
         .decoder()
         .audio()?;
 
-    // Get audio properties
     let in_channel_layout = decoder.channel_layout();
     let in_format = decoder.format();
 
-    // Create resampler to convert to PCM 16-bit stereo 48kHz
     let out_sample_format = ffmpeg::format::Sample::I16(ffmpeg_next::format::sample::Type::Packed);
     let mut resampler = ffmpeg::software::resampling::Context::get(
         in_format,
@@ -2084,7 +1895,6 @@ fn decode_audio_track(video_path: &PathBuf) -> Result<AudioBuffer> {
         if n == 0 {
             return;
         }
-
         let bytes = &plane[..n * 2];
         let (prefix, aligned, suffix) = unsafe { bytes.align_to::<i16>() };
         if prefix.is_empty() && suffix.is_empty() && aligned.len() == n {
@@ -2098,7 +1908,6 @@ fn decode_audio_track(video_path: &PathBuf) -> Result<AudioBuffer> {
             }
             return;
         }
-
         dst.reserve(n);
         for chunk in bytes.chunks_exact(2) {
             dst.push(i16::from_le_bytes([chunk[0], chunk[1]]));
@@ -2108,20 +1917,17 @@ fn decode_audio_track(video_path: &PathBuf) -> Result<AudioBuffer> {
     for (_, packet) in input.packets() {
         if packet.stream() == audio_stream_idx {
             let _ = decoder.send_packet(&packet);
-
             while decoder.receive_frame(&mut decoded_frame).is_ok() {
                 let mut resampled = ffmpeg::util::frame::audio::Audio::empty();
                 if resampler.run(&decoded_frame, &mut resampled).is_ok() {
                     let plane = resampled.data(0);
                     let sample_count = resampled.samples() * resampled.channels() as usize;
-
                     append_packed_i16_samples(&mut samples, plane, sample_count);
                 }
             }
         }
     }
 
-    // Flush decoder
     let _ = decoder.send_eof();
     let mut decoded_frame = ffmpeg::util::frame::audio::Audio::empty();
     while decoder.receive_frame(&mut decoded_frame).is_ok() {
@@ -2129,12 +1935,10 @@ fn decode_audio_track(video_path: &PathBuf) -> Result<AudioBuffer> {
         if resampler.run(&decoded_frame, &mut resampled).is_ok() {
             let plane = resampled.data(0);
             let sample_count = resampled.samples() * resampled.channels() as usize;
-
             append_packed_i16_samples(&mut samples, plane, sample_count);
         }
     }
 
-    // If no samples or decode failed, return empty audio buffer
     if samples.is_empty() {
         return Ok(AudioBuffer {
             sample_rate: 48_000,
@@ -2150,34 +1954,45 @@ fn decode_audio_track(video_path: &PathBuf) -> Result<AudioBuffer> {
     })
 }
 
-fn rgba_frame_to_image_pooled(
+// ===========================================================================
+// Zero-copy RGBA frame → ColorImage conversion
+// ===========================================================================
+
+/// Write the scaled RGBA frame directly into a pooled `ColorImage`.
+///
+/// The FFmpeg scaler output (`self.rgba_frame`) contains RGBA bytes in a
+/// stride-padded buffer. We copy row-by-row (or in one contiguous block when
+/// the stride matches) directly into the pool-backed `ColorImage`'s pixel
+/// storage, zero-copy to the CPU → GPU upload path.
+fn rgba_frame_to_color_image(
     frame: &ffmpeg::util::frame::video::Video,
     width: u32,
     height: u32,
     pool: &Arc<FramePool>,
-) -> Result<PooledRgbaImage> {
+) -> Result<PooledColorImage> {
     let stride = frame.stride(0);
     let data = frame.data(0);
     let row_bytes = width as usize * 4;
-    let mut rgba = pool.acquire();
 
-    // Fast path: when stride == row_bytes (no padding), copy the entire frame
-    // in one contiguous memcpy, avoiding the per-row loop overhead.
+    let mut pooled = pool.acquire_color_image(width, height);
+    let dst = pooled.raw_rgba_mut();
+
     let total_size = height as usize * row_bytes;
+
     if stride == row_bytes {
-        rgba[..total_size].copy_from_slice(&data[..total_size]);
+        // Fast path: single contiguous copy.
+        dst[..total_size].copy_from_slice(&data[..total_size]);
     } else {
-        // Slow path: stride-padded data, copy row by row
+        // Slow path: stride-padded data, copy row by row.
         for y in 0..height as usize {
             let src_offset = y * stride;
             let dst_offset = y * row_bytes;
-            rgba[dst_offset..dst_offset + row_bytes]
+            dst[dst_offset..dst_offset + row_bytes]
                 .copy_from_slice(&data[src_offset..src_offset + row_bytes]);
         }
     }
 
-    PooledRgbaImage::from_pooled_buffer(rgba, width, height)
-        .context("Failed to create RGBA image from frame")
+    Ok(pooled)
 }
 
 fn scaled_dimensions(preview_width: u32, metadata: &VideoFileMetadata) -> (u32, u32) {

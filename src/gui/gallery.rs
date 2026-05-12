@@ -1020,13 +1020,13 @@ impl ClipCompressApp {
                         "poll_background_work: displaying frame at wall_time={:.3}s",
                         wall_time
                     );
-                    let color_image = color_image_from_rgba(&image);
+                    // Direct zero-copy: ColorImage consumed by texture.set()
                     if let Some(texture) = &mut editor.preview_texture {
-                        texture.set(color_image, egui::TextureOptions::LINEAR);
+                        texture.set(image, egui::TextureOptions::LINEAR);
                     } else {
                         editor.preview_texture = Some(ctx.load_texture(
                             format!("preview:{}", editor.video.filename),
-                            color_image,
+                            image,
                             egui::TextureOptions::LINEAR,
                         ));
                     }
@@ -1044,13 +1044,13 @@ impl ClipCompressApp {
 
             // Static / single-frame preview path (paused).
             if let Some(frame) = editor.playback.take_frame() {
-                let color_image = color_image_from_rgba(&frame.image);
+                // Direct zero-copy: ColorImage consumed by texture.set()
                 if let Some(texture) = &mut editor.preview_texture {
-                    texture.set(color_image, egui::TextureOptions::LINEAR);
+                    texture.set(frame.image, egui::TextureOptions::LINEAR);
                 } else {
                     editor.preview_texture = Some(ctx.load_texture(
                         format!("preview:{}", editor.video.filename),
-                        color_image,
+                        frame.image,
                         egui::TextureOptions::LINEAR,
                     ));
                 }

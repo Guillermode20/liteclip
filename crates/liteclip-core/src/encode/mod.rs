@@ -51,7 +51,6 @@ pub mod encoder_mod;
 pub mod error;
 #[cfg(feature = "ffmpeg")]
 pub mod ffmpeg;
-pub mod sw_encoder;
 
 pub use encoder_mod::*;
 

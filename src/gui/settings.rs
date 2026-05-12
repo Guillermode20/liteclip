@@ -1030,24 +1030,6 @@ impl eframe::App for SettingsApp {
         let mut _dummy = true;
         self.render(ctx, &mut _dummy);
 
-        if self.level_monitor.is_some() && self.current_tab == SettingsTab::Audio {
-            let mut request_ms = 220;
-            if let Some(ref monitor) = self.level_monitor {
-                let system = monitor.get_system_levels();
-                let mic = monitor.get_mic_levels();
-                let changed = self
-                    .last_audio_levels
-                    .map(|last| last != (system, mic))
-                    .unwrap_or(true);
-                self.last_audio_levels = Some((system, mic));
-
-                if changed || system.level > 0 || mic.level > 0 || system.peak > 0 || mic.peak > 0 {
-                    request_ms = 100;
-                }
-            }
-            ctx.request_repaint_after(std::time::Duration::from_millis(request_ms));
-        }
-
         // Auto-refresh logs tab every 2 seconds
         if self.current_tab == SettingsTab::Logs {
             ctx.request_repaint_after(std::time::Duration::from_secs(2));

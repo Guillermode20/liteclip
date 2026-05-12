@@ -592,6 +592,17 @@ impl eframe::App for GuiManagerApp {
             return;
         }
 
+        // Keep the parent event loop alive while child windows are open.
+        // The settings/gallery viewports call request_repaint_after on their
+        // own child contexts, but those timers may not reliably propagate to
+        // wake the parent event loop. Without this, the parent sleeps between
+        // external events and child viewport rendering stutters.
+        if self.settings_open_flag.load(Ordering::Acquire)
+            || self.gallery_open_flag.load(Ordering::Acquire)
+        {
+            ctx.request_repaint_after(Duration::from_millis(16));
+        }
+
         if self.should_shutdown_for_idle(ctx, now) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }

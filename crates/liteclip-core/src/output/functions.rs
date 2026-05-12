@@ -9,55 +9,8 @@ pub const AUDIO_SAMPLE_RATE: u32 = 48_000;
 #[cfg(feature = "ffmpeg")]
 pub const AUDIO_CHANNELS: u16 = 2;
 
-/// Extracts the H.264 NAL unit type from byte data.
-///
-/// # Arguments
-///
-/// * `data` - Byte slice containing H.264 NAL unit.
-///
-/// # Returns
-///
-/// NAL unit type (0-23 for non-VCL, 24-31 for VCL), or None if parsing fails.
-pub fn h264_nal_type(data: &[u8]) -> Option<u8> {
-    if data.len() >= 5 && data[0..4] == [0x00, 0x00, 0x00, 0x01] {
-        return Some(data[4] & 0x1f);
-    }
-    if data.len() >= 4 && data[0..3] == [0x00, 0x00, 0x01] {
-        return Some(data[3] & 0x1f);
-    }
-    if data.len() >= 5 {
-        let nal_len = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
-        if nal_len > 0 && data.len() >= 4 + nal_len {
-            return Some(data[4] & 0x1f);
-        }
-    }
-    None
-}
-
-/// Extracts the HEVC NAL unit type from byte data.
-///
-/// # Arguments
-///
-/// * `data` - Byte slice containing HEVC NAL unit.
-///
-/// # Returns
-///
-/// NAL unit type, or None if parsing fails.
-pub fn hevc_nal_type(data: &[u8]) -> Option<u8> {
-    if data.len() >= 6 && data[0..4] == [0x00, 0x00, 0x00, 0x01] {
-        return Some((data[4] >> 1) & 0x3f);
-    }
-    if data.len() >= 5 && data[0..3] == [0x00, 0x00, 0x01] {
-        return Some((data[3] >> 1) & 0x3f);
-    }
-    if data.len() >= 6 {
-        let nal_len = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
-        if nal_len > 1 && data.len() >= 4 + nal_len {
-            return Some((data[4] >> 1) & 0x3f);
-        }
-    }
-    None
-}
+// Re-export NAL type helpers from the shared module.
+pub use crate::media::nal::{h264_nal_type, hevc_nal_type};
 
 /// Calculates the starting PTS for a clip based on duration.
 ///
@@ -171,77 +124,7 @@ pub fn generate_thumbnail(video_path: &Path, save_directory: &Path) -> Result<Pa
 mod tests {
     use super::*;
 
-    #[test]
-    fn h264_nal_type_start_code_4byte() {
-        let data = [0x00, 0x00, 0x00, 0x01, 0x67];
-        assert_eq!(h264_nal_type(&data), Some(0x67 & 0x1f));
-    }
-
-    #[test]
-    fn h264_nal_type_start_code_3byte() {
-        let data = [0x00, 0x00, 0x01, 0x65];
-        assert_eq!(h264_nal_type(&data), Some(0x65 & 0x1f));
-    }
-
-    #[test]
-    fn h264_nal_type_length_prefixed() {
-        let data = vec![0x00, 0x00, 0x00, 0x02, 0x21, 0x00];
-        assert_eq!(h264_nal_type(&data), Some(0x21 & 0x1f));
-    }
-
-    #[test]
-    fn h264_nal_type_too_short() {
-        let data = [0x00, 0x00, 0x01];
-        assert_eq!(h264_nal_type(&data), None);
-    }
-
-    #[test]
-    fn h264_nal_type_sps() {
-        let data = [0x00, 0x00, 0x00, 0x01, 0x67];
-        assert_eq!(h264_nal_type(&data), Some(7));
-    }
-
-    #[test]
-    fn h264_nal_type_idr() {
-        let data = [0x00, 0x00, 0x00, 0x01, 0x65];
-        assert_eq!(h264_nal_type(&data), Some(5));
-    }
-
-    #[test]
-    fn hevc_nal_type_start_code_4byte() {
-        let data = [0x00, 0x00, 0x00, 0x01, 0x40, 0x01];
-        assert_eq!(hevc_nal_type(&data), Some((0x40 >> 1) & 0x3f));
-    }
-
-    #[test]
-    fn hevc_nal_type_start_code_3byte() {
-        let data = [0x00, 0x00, 0x01, 0x42, 0x01];
-        assert_eq!(hevc_nal_type(&data), Some((0x42 >> 1) & 0x3f));
-    }
-
-    #[test]
-    fn hevc_nal_type_vps() {
-        let data = [0x00, 0x00, 0x00, 0x01, 0x40, 0x01];
-        assert_eq!(hevc_nal_type(&data), Some(32));
-    }
-
-    #[test]
-    fn hevc_nal_type_sps() {
-        let data = [0x00, 0x00, 0x00, 0x01, 0x42, 0x01];
-        assert_eq!(hevc_nal_type(&data), Some(33));
-    }
-
-    #[test]
-    fn hevc_nal_type_idr() {
-        let data = [0x00, 0x00, 0x00, 0x01, 0x26, 0x01];
-        assert_eq!(hevc_nal_type(&data), Some(19));
-    }
-
-    #[test]
-    fn hevc_nal_type_too_short() {
-        let data = [0x00, 0x00, 0x01];
-        assert_eq!(hevc_nal_type(&data), None);
-    }
+    // NAL type tests live in crate::media::nal::tests
 
     #[test]
     fn generate_output_path_with_game() {

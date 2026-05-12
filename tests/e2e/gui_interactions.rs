@@ -2,17 +2,24 @@
 //!
 //! Tests GUI components using headless testing approaches.
 //! Note: Full GUI automation requires additional setup.
+//!
+//! ## Concurrency note
+//!
+//! These tests use real DXGI display capture. Windows allows only one
+//! `IDXGIOutputDuplication` per display output at a time. Running
+//! multiple tests that call `start_recording()` in parallel will cause
+//! `DXGI_ERROR_NOT_CURRENTLY_AVAILABLE` failures.
+//!
+//! Run with: `cargo test --test e2e --features ffmpeg -- --test-threads=1`
 
 use crate::common::app_harness::AppHarness;
 use anyhow::Result;
-use serial_test::serial;
 use std::time::Duration;
 
 /// Test: GUI module loads correctly.
 ///
 /// Verifies that GUI components can be initialized.
 #[tokio::test]
-#[serial]
 async fn gui_module_initializes() -> Result<()> {
     let harness = AppHarness::new().await?;
 
@@ -30,7 +37,6 @@ async fn gui_module_initializes() -> Result<()> {
 /// This tests the config update path that would be triggered by
 /// the settings GUI.
 #[tokio::test]
-#[serial]
 async fn gui_config_change_flow() -> Result<()> {
     let harness = AppHarness::new().await?;
 
@@ -60,7 +66,6 @@ async fn gui_config_change_flow() -> Result<()> {
 /// Verifies that the gallery can access clip data.
 /// In headless environments, verifies graceful handling without panic.
 #[tokio::test]
-#[serial]
 async fn gui_gallery_data_loading() -> Result<()> {
     use liteclip::platform::HotkeyAction;
 
@@ -103,7 +108,6 @@ async fn gui_gallery_data_loading() -> Result<()> {
 ///
 /// Verifies that tray state reflects recording status.
 #[tokio::test]
-#[serial]
 async fn gui_tray_state_tracking() -> Result<()> {
     let harness = AppHarness::new().await?;
 
@@ -127,7 +131,6 @@ async fn gui_tray_state_tracking() -> Result<()> {
 /// Verifies that toast notifications can be triggered and tracked.
 /// Note: Actual UI testing requires a display.
 #[tokio::test]
-#[serial]
 async fn gui_toast_notification_trigger() -> Result<()> {
     // Create a harness to test within app context
     let harness = AppHarness::new().await?;

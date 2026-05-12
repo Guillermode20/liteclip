@@ -569,11 +569,11 @@ fn qpc_to_sample_index(delta_qpc: i64) -> usize {
 }
 
 fn is_parameter_set_payload(data: &[u8]) -> bool {
-    if let Some(32..=34) = crate::buffer::ring::hevc_nal_type(data) {
+    if let Some(32..=34) = crate::media::nal::hevc_nal_type(data) {
         return true;
     }
 
-    matches!(crate::buffer::ring::h264_nal_type(data), Some(7 | 8))
+    matches!(crate::media::nal::h264_nal_type(data), Some(7 | 8))
 }
 
 fn audio_stream_id(packet: &EncodedPacket) -> u8 {

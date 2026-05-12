@@ -19,50 +19,11 @@ pub fn qpc_frequency() -> i64 {
     })
 }
 
-/// Extracts the NAL unit type from an H.264 byte stream.
-///
-/// This function identifies the NAL type by looking for the `00 00 00 01` or
-/// `00 00 01` start code and masking the following byte with `0x1f`.
-///
-/// Useful for Identifying:
-/// - IDR Frames (Keyframes: 5)
-/// - SPS (Sequence Parameter Set: 7)
-/// - PPS (Picture Parameter Set: 8)
-pub(crate) fn h264_nal_type(data: &[u8]) -> Option<u8> {
-    if data.len() >= 5 && data[0..4] == [0x00, 0x00, 0x00, 0x01] {
-        return Some(data[4] & 0x1f);
-    }
-    if data.len() >= 4 && data[0..3] == [0x00, 0x00, 0x01] {
-        return Some(data[3] & 0x1f);
-    }
-    None
-}
-
-/// Extracts the NAL unit type from an HEVC (H.265) byte stream.
-///
-/// This function identifies the NAL type by looking for the `00 00 00 01` or
-/// `00 00 01` start code, extracting the NAL unit header (typically 2 bytes),
-/// and shifting the first byte right by 1 and masking with `0x3f`.
-///
-/// Useful for Identifying:
-/// - IDR Frames (Keyframes: 19 or 20)
-/// - VPS (Video Parameter Set: 32)
-/// - SPS (Sequence Parameter Set: 33)
-/// - PPS (Picture Parameter Set: 34)
-pub(crate) fn hevc_nal_type(data: &[u8]) -> Option<u8> {
-    if data.len() >= 6 && data[0..4] == [0x00, 0x00, 0x00, 0x01] {
-        return Some((data[4] >> 1) & 0x3f);
-    }
-    if data.len() >= 5 && data[0..3] == [0x00, 0x00, 0x01] {
-        return Some((data[3] >> 1) & 0x3f);
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use crate::buffer::ring::spmc_ring::LockFreeReplayBuffer;
     use crate::encode::{EncodedPacket, StreamType};
+    use crate::media::nal;
     use bytes::Bytes;
 
     fn create_test_packet(pts: i64, is_keyframe: bool, size: usize) -> EncodedPacket {
@@ -286,19 +247,19 @@ mod tests {
     #[test]
     fn test_hevc_nal_type_detection() {
         assert_eq!(
-            super::hevc_nal_type(&[0x00, 0x00, 0x00, 0x01, 0x40, 0x01]),
+            nal::hevc_nal_type(&[0x00, 0x00, 0x00, 0x01, 0x40, 0x01]),
             Some(32)
         );
         assert_eq!(
-            super::hevc_nal_type(&[0x00, 0x00, 0x00, 0x01, 0x42, 0x01]),
+            nal::hevc_nal_type(&[0x00, 0x00, 0x00, 0x01, 0x42, 0x01]),
             Some(33)
         );
         assert_eq!(
-            super::hevc_nal_type(&[0x00, 0x00, 0x00, 0x01, 0x44, 0x01]),
+            nal::hevc_nal_type(&[0x00, 0x00, 0x00, 0x01, 0x44, 0x01]),
             Some(34)
         );
         assert_eq!(
-            super::hevc_nal_type(&[0x00, 0x00, 0x00, 0x01, 0x26, 0x01]),
+            nal::hevc_nal_type(&[0x00, 0x00, 0x00, 0x01, 0x26, 0x01]),
             Some(19)
         );
     }
@@ -331,10 +292,10 @@ mod tests {
 
         let snapshot = buffer.snapshot().unwrap();
         assert_eq!(snapshot.len(), 4);
-        assert_eq!(super::hevc_nal_type(&snapshot[0].data), Some(32));
-        assert_eq!(super::hevc_nal_type(&snapshot[1].data), Some(33));
-        assert_eq!(super::hevc_nal_type(&snapshot[2].data), Some(34));
-        assert_eq!(super::hevc_nal_type(&snapshot[3].data), Some(19));
+        assert_eq!(nal::hevc_nal_type(&snapshot[0].data), Some(32));
+        assert_eq!(nal::hevc_nal_type(&snapshot[1].data), Some(33));
+        assert_eq!(nal::hevc_nal_type(&snapshot[2].data), Some(34));
+        assert_eq!(nal::hevc_nal_type(&snapshot[3].data), Some(19));
     }
 
     #[test]
@@ -367,9 +328,9 @@ mod tests {
         buffer.push(create_hevc_idr_packet(4_000_000));
         let snapshot = buffer.snapshot().unwrap();
         assert_eq!(snapshot.len(), 4);
-        assert_eq!(super::hevc_nal_type(&snapshot[0].data), Some(32));
-        assert_eq!(super::hevc_nal_type(&snapshot[1].data), Some(33));
-        assert_eq!(super::hevc_nal_type(&snapshot[2].data), Some(34));
+        assert_eq!(nal::hevc_nal_type(&snapshot[0].data), Some(32));
+        assert_eq!(nal::hevc_nal_type(&snapshot[1].data), Some(33));
+        assert_eq!(nal::hevc_nal_type(&snapshot[2].data), Some(34));
     }
 
     /// Test that evict_frontier is correctly updated after ring wrap.

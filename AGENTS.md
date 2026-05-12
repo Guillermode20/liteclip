@@ -10,9 +10,13 @@ Essential guidelines for autonomous agents working on LiteClip — a native Wind
 | Build (release) | `cargo build --release --features ffmpeg` |
 | Run | `cargo run` |
 | Fast check | `cargo check` |
-| **Test all** | `cargo test` |
+| **Test all (fast)** | `cargo test` |
 | **Test single** | `cargo test test_name` |
 | **Test with output** | `cargo test -- --nocapture` |
+| **Test slow/integration** | `cargo test --features test-slow` |
+| **Test stress** | `cargo test --features test-stress` |
+| **Test E2E (root crate)** | `cargo test --test e2e --features ffmpeg` |
+| **Benchmarks** | `cargo bench` |
 | **Format check** | `cargo fmt --check` |
 | **Lint** | `cargo clippy -- -D warnings` |
 
@@ -106,8 +110,24 @@ liteclip-recorder/
 
 ## Testing
 
+### Test Categories
+
+Tests are organized into tiers. Run the default command for fast feedback:
+
+| Tier | Feature Flag | Command | Expected Runtime |
+|------|-------------|---------|-----------------|
+| **Unit** (default) | _(none)_ | `cargo test` | \< 10s |
+| **Slow integration** | `test-slow` | `cargo test --features test-slow` | 10-60s |
+| **Stress** | `test-stress` | `cargo test --features test-stress` | 1-5m |
+| **E2E** | `ffmpeg` (implied) | `cargo test --test e2e --features ffmpeg` | 1-10m |
+
+**Tagging convention:**
+- No annotation = fast unit test (runs on every `cargo test`)
+- `#[cfg_attr(not(feature = "test-slow"), ignore)]` = slow integration test
+- `#[cfg_attr(not(feature = "test-stress"), ignore)]` = stress test (high concurrency, torture)
+
 ```bash
-# Run all tests
+# Fast feedback (unit tests only — default)
 cargo test
 
 # Run specific test by name
@@ -119,6 +139,9 @@ cargo test --test config_roundtrip
 # Run with println! output visible
 cargo test -- --nocapture
 
+# Full suite (all categories)
+cargo test --features "test-slow test-stress" -- --include-ignored
+
 # Compile tests without running
 cargo test --no-run
 
@@ -127,6 +150,50 @@ cargo run --example minimal_engine --features ffmpeg
 ```
 
 Tests are inline (`#[cfg(test)]` modules) or in `crates/liteclip-core/tests/`.
+
+### Benchmarking
+
+```bash
+# All criterion benchmarks
+cargo bench
+
+# Specific benchmark suite
+cargo bench --bench ring_buffer
+cargo bench --bench encoder_bench
+cargo bench --bench audio_mixer
+cargo bench --bench config_serialization
+
+# GUI benchmarks (root crate)
+cargo bench --bench gui_interactions --features ffmpeg
+```
+
+### Fuzz Testing
+
+Fuzz targets live in `fuzz/fuzz_targets/` and require `cargo-fuzz`:
+
+```bash
+# Install cargo-fuzz (one time)
+cargo install cargo-fuzz
+
+# Fuzz ring buffer (runs until crash or Ctrl+C)
+cd fuzz && cargo fuzz run ring_buffer -- -max_len=65536 -timeout=5
+
+# Fuzz config parsing
+cd fuzz && cargo fuzz run config_parsing -- -max_len=4096 -timeout=5
+
+# Fuzz hotkey parsing
+cd fuzz && cargo fuzz run hotkey_parsing -- -max_len=64 -timeout=5
+```
+
+The fuzz crate is **not** a workspace member — change into `fuzz/` to run.
+
+### Writing New Tests
+
+1. **Unit tests**: Add a `#[cfg(test)] mod tests { ... }` block at the bottom of the source file.
+2. **Integration tests**: Add a file in `crates/liteclip-core/tests/` or `tests/` (root crate).
+3. **Slow tests**: Add `#[cfg_attr(not(feature = "test-slow"), ignore)]` above the test.
+4. **Stress tests**: Add `#[cfg_attr(not(feature = "test-stress"), ignore)]` above the test.
+5. **Fuzz targets**: Add a file in `fuzz/fuzz_targets/` and register it in `fuzz/Cargo.toml`.
 
 ## Critical Gotchas
 

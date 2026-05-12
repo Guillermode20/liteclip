@@ -2863,7 +2863,6 @@ dependencies = [
  "ffmpeg-next",
  "image",
  "libc",
- "memchr",
  "nnnoiseless",
  "parking_lot",
  "proptest",

@@ -48,8 +48,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, info, trace, warn};
 
-use super::functions::{h264_nal_type, hevc_nal_type, qpc_frequency};
+use super::functions::qpc_frequency;
 use super::types::BufferStats;
+use crate::media::nal::{h264_nal_type, hevc_nal_type};
 
 /// Memory usage percentage at which proactive eviction begins.
 /// This prevents sudden mutex storms when memory hits 100% by smoothing
