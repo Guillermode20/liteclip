@@ -921,15 +921,32 @@ impl ClipCompressApp {
 
         let timestamp_secs = timestamp_secs.clamp(0.0, editor.duration_secs());
 
-        // Skip if decoder is already processing a request
+        // Skip if decoder is already processing a request.
+        // Note: this also catches the case where pause_at() stopped the
+        // decoder mid-flight — video_request_in_flight is set to false,
+        // so is_frame_request_in_flight() returns false and we fall through
+        // to the preview_frame_in_flight stale-flag recovery below.
         if editor.playback.is_frame_request_in_flight() {
+            tracing::trace!(
+                "queue_preview_request({:.3}s): request in flight, pending",
+                timestamp_secs
+            );
             editor.pending_preview_request = Some(timestamp_secs);
             return;
         }
 
+        // If preview_frame_in_flight is true but the decoder has no request
+        // in flight (e.g., pause_at() called which stopped the decoder but
+        // didn't reset this EditorState flag), then the flag is stale.
+        // Without this recovery, we'd deadlock: no frame can ever arrive
+        // (decoder was stopped), so poll_background_work never clears the
+        // flag, and queue_preview_request keeps short-circuiting here.
         if editor.preview_frame_in_flight {
-            editor.pending_preview_request = Some(timestamp_secs);
-            return;
+            tracing::trace!(
+                "queue_preview_request({:.3}s): stale preview_frame_in_flight, resetting",
+                timestamp_secs
+            );
+            editor.preview_frame_in_flight = false;
         }
 
         // Adaptive debounce: 1.5× the frame interval, min 20ms, max 100ms.
@@ -940,6 +957,8 @@ impl ClipCompressApp {
             if editor.preview_texture.is_some()
                 && (last_requested - timestamp_secs).abs() < debounce_secs
             {
+                tracing::trace!("queue_preview_request({:.3}s): debounce skipped (last={:.3}s, threshold={:.3}s)",
+                    timestamp_secs, last_requested, debounce_secs);
                 return;
             }
         }
@@ -948,6 +967,7 @@ impl ClipCompressApp {
         editor.preview_frame_in_flight = true;
         editor.pending_preview_request = None;
         editor.playback.request_preview_frame(timestamp_secs);
+        tracing::trace!("queue_preview_request({:.3}s): sent", timestamp_secs);
     }
 
     fn queue_fast_preview_request(&mut self, timestamp_secs: f64) {
@@ -1044,6 +1064,10 @@ impl ClipCompressApp {
 
             // Static / single-frame preview path (paused).
             if let Some(frame) = editor.playback.take_frame() {
+                tracing::trace!(
+                    "poll_background_work: received preview frame at {:.3}s",
+                    frame.pts_secs
+                );
                 // Direct zero-copy: ColorImage consumed by texture.set()
                 if let Some(texture) = &mut editor.preview_texture {
                     texture.set(frame.image, egui::TextureOptions::LINEAR);
@@ -1068,6 +1092,7 @@ impl ClipCompressApp {
                 }
             }
             if let Some(error) = editor.playback.take_error() {
+                tracing::warn!("poll_background_work: decoder error: {}", error);
                 editor.preview_frame_in_flight = false;
                 editor.error_message = Some(error);
                 if let Some(pending) = editor.pending_preview_request.take() {

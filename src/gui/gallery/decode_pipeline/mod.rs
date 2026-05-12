@@ -130,7 +130,7 @@ struct AudioSliceSource {
     sample_rate: u32,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DecoderFrameKind {
     Preview,
     Playback,
@@ -636,6 +636,12 @@ impl PlaybackController {
             while let Some(frame) = self.decoder.try_recv_frame() {
                 let active_request = self.active_request_id();
                 if frame.request_id != active_request {
+                    tracing::trace!(
+                        "poll: discarding {0:?} frame request_id={1} != active={2}",
+                        frame.kind,
+                        frame.request_id,
+                        active_request
+                    );
                     continue;
                 }
 
@@ -1048,11 +1054,31 @@ fn decoder_worker_loop(
             }
         };
 
+    // Proactively scan keyframes at startup so the first preview request
+    // (typically at time=0) doesn't block on a full-file sequential read.
+    // Without this, seek_to() would call scan_keyframes() synchronously,
+    // blocking the decoder worker for many seconds on large files and
+    // causing the preview request to go stale (request_generation bumped
+    // by pause_at() when the user scrubs, leading to the frame being
+    // discarded by the request_id check in poll()).
+    tracing::info!(
+        "Keyframe scan complete ({} positions), entering command loop",
+        session.keyframe_positions.len()
+    );
+
     loop {
         let command = match command_rx.recv() {
             Ok(command) => command,
-            Err(_) => return,
+            Err(_) => {
+                tracing::debug!("Decoder command channel disconnected, exiting");
+                return;
+            }
         };
+
+        tracing::trace!(
+            "Decoder received command: {:?}",
+            std::mem::discriminant(&command)
+        );
 
         match command {
             DecoderCommand::Shutdown => {
@@ -1133,7 +1159,15 @@ fn decoder_worker_loop(
                     }
                 } else {
                     // Standard seek + decode.
+                    tracing::trace!(
+                        "Preview request {request_id}: seek+decode to {:.3}s",
+                        time_secs
+                    );
                     if let Err(err) = session.seek_to(time_secs) {
+                        tracing::warn!(
+                            "Preview request {request_id}: seek_to({:.3}s) failed: {err:#}",
+                            time_secs
+                        );
                         let _ = error_tx.send(DecoderError {
                             request_id,
                             message: format!("Preview seek failed: {err:#}"),
@@ -1143,6 +1177,10 @@ fn decoder_worker_loop(
 
                     match session.decode_next_image() {
                         Ok(Some((pts_secs, image))) => {
+                            tracing::trace!(
+                                "Preview request {request_id}: decoded frame at {:.3}s",
+                                pts_secs
+                            );
                             let _ = frame_tx.send(DecoderFrame {
                                 request_id,
                                 kind: DecoderFrameKind::Preview,
@@ -1475,82 +1513,72 @@ impl DecoderSession {
     }
 
     fn scan_keyframes(&mut self) {
-        if self.try_load_cached_keyframes() {
+        let loaded = self.try_load_cached_keyframes();
+
+        if loaded {
             tracing::info!("Loaded {} cached keyframes", self.keyframe_positions.len());
             self.keyframes_scanned = true;
-            let _ = unsafe {
-                ffmpeg::ffi::av_seek_frame(
-                    self.input.as_mut_ptr(),
-                    -1,
-                    0,
-                    ffmpeg::ffi::AVSEEK_FLAG_BACKWARD,
-                )
-            };
-            return;
-        }
+        } else {
+            let start = Instant::now();
+            let mut keyframe_pts: Vec<i64> = Vec::new();
 
-        let start = Instant::now();
-        let mut keyframe_pts: Vec<i64> = Vec::new();
-
-        loop {
-            let mut packet = ffmpeg::Packet::empty();
-            match packet.read(&mut self.input) {
-                Ok(()) => {
-                    if packet.stream() == self.stream_index {
-                        let flags = unsafe { (*packet.as_mut_ptr()).flags };
-                        if flags & ffmpeg::ffi::AV_PKT_FLAG_KEY != 0 {
-                            let pts = unsafe { (*packet.as_mut_ptr()).pts };
-                            if pts != ffmpeg::ffi::AV_NOPTS_VALUE {
-                                keyframe_pts.push(pts);
+            loop {
+                let mut packet = ffmpeg::Packet::empty();
+                match packet.read(&mut self.input) {
+                    Ok(()) => {
+                        if packet.stream() == self.stream_index {
+                            let flags = unsafe { (*packet.as_mut_ptr()).flags };
+                            if flags & ffmpeg::ffi::AV_PKT_FLAG_KEY != 0 {
+                                let pts = unsafe { (*packet.as_mut_ptr()).pts };
+                                if pts != ffmpeg::ffi::AV_NOPTS_VALUE {
+                                    keyframe_pts.push(pts);
+                                }
                             }
                         }
                     }
+                    Err(ffmpeg::Error::Eof) => break,
+                    Err(_) => break,
                 }
-                Err(ffmpeg::Error::Eof) => break,
-                Err(_) => break,
             }
-        }
 
-        let time_base = self.stream_time_base_num as f64 / self.stream_time_base_den as f64;
-        let mut positions: Vec<f64> = keyframe_pts
-            .into_iter()
-            .map(|pts| (pts as f64 * time_base).max(0.0))
-            .filter(|&t| t.is_finite())
-            .collect();
-
-        positions.sort_by(|a, b| a.total_cmp(b));
-        positions.dedup_by(|a, b| (*a - *b).abs() < 0.01);
-
-        // Thin to max 500 positions to keep the index compact.
-        if positions.len() > 500 {
-            let step = positions.len() as f64 / 500.0;
-            positions = positions
+            let time_base = self.stream_time_base_num as f64 / self.stream_time_base_den as f64;
+            let mut positions: Vec<f64> = keyframe_pts
                 .into_iter()
-                .enumerate()
-                .filter(|(i, _)| (*i as f64 / step).fract() < 0.5)
-                .map(|(_, v)| v)
+                .map(|pts| (pts as f64 * time_base).max(0.0))
+                .filter(|&t| t.is_finite())
                 .collect();
+
+            positions.sort_by(|a, b| a.total_cmp(b));
+            positions.dedup_by(|a, b| (*a - *b).abs() < 0.01);
+
+            // Thin to max 500 positions to keep the index compact.
+            if positions.len() > 500 {
+                let step = positions.len() as f64 / 500.0;
+                positions = positions
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(i, _)| (*i as f64 / step).fract() < 0.5)
+                    .map(|(_, v)| v)
+                    .collect();
+            }
+
+            self.keyframe_positions = positions;
+            self.keyframes_scanned = true;
+
+            tracing::info!(
+                "Scanned {} keyframes in {:.1}ms",
+                self.keyframe_positions.len(),
+                start.elapsed().as_secs_f64() * 1000.0
+            );
+
+            self.save_keyframes_cache();
         }
 
-        self.keyframe_positions = positions;
-        self.keyframes_scanned = true;
-
-        tracing::info!(
-            "Scanned {} keyframes in {:.1}ms",
-            self.keyframe_positions.len(),
-            start.elapsed().as_secs_f64() * 1000.0
-        );
-
-        self.save_keyframes_cache();
-
-        let _ = unsafe {
-            ffmpeg::ffi::av_seek_frame(
-                self.input.as_mut_ptr(),
-                -1,
-                0,
-                ffmpeg::ffi::AVSEEK_FLAG_BACKWARD,
-            )
-        };
+        // NOTE: We do NOT seek here. The input is left at EOF (after reading
+        // all packets). seek_to() handles positioning via avformat_flush +
+        // av_seek_frame when the first Preview/Playback command arrives.
+        // Avoiding a redundant seek-to-0 here prevents potential demuxer
+        // confusion from double-seeking to the same position.
     }
 
     fn get_keyframe_cache_path(&self) -> PathBuf {
@@ -1627,6 +1655,8 @@ impl DecoderSession {
     }
 
     fn seek_to(&mut self, time_secs: f64) -> Result<()> {
+        // Keyframes should already be scanned at startup (decoder_worker_loop),
+        // but fall through gracefully if not (defensive).
         if !self.keyframes_scanned {
             self.scan_keyframes();
         }
@@ -1638,7 +1668,7 @@ impl DecoderSession {
                 .saturating_sub(1);
 
             match self.keyframe_positions.get(idx) {
-                Some(&kf) if (time_secs - kf) > 1.5 => {
+                Some(&kf) => {
                     tracing::trace!(
                         "Seek to {:.3}s: using keyframe at {:.3}s (idx {}/{})",
                         time_secs,
@@ -1646,25 +1676,56 @@ impl DecoderSession {
                         idx,
                         self.keyframe_positions.len()
                     );
-                    kf
+                    // Use the nearest keyframe AT or BEFORE the target.
+                    // For time_secs=0 this picks the first keyframe, avoiding
+                    // seeks to timestamp 0 which can fail on files with edit
+                    // lists ("Missing key frame while searching for timestamp: 0").
+                    kf.max(0.001)
                 }
-                _ => time_secs,
+                None => time_secs,
             }
         } else {
             time_secs
         };
 
-        let timestamp = (seek_time.max(0.0) * ffmpeg::ffi::AV_TIME_BASE as f64).round() as i64;
+        // Add a small epsilon (1 ms) to avoid exact-timestamp-0 seeks that
+        // fail on some MP4 files with edit lists (no keyframe at time 0).
+        let timestamp =
+            ((seek_time.max(0.0) + 0.001) * ffmpeg::ffi::AV_TIME_BASE as f64).round() as i64;
+        // Use avformat_seek_file (more robust than av_seek_frame) so the
+        // demuxer can freely pick the right stream/timebase for seeking.
         let result = unsafe {
-            ffmpeg::ffi::av_seek_frame(
+            ffmpeg::ffi::avformat_seek_file(
                 self.input.as_mut_ptr(),
                 -1,
+                i64::MIN,
                 timestamp,
+                i64::MAX,
                 ffmpeg::ffi::AVSEEK_FLAG_BACKWARD,
             )
         };
         if result < 0 {
-            bail!("seek failed with error code {result}");
+            // If seek fails, try one more time with AVSEEK_FLAG_ANY.
+            // This allows seeking to NON-keyframe positions, which is
+            // needed on some files where no keyframe exists at the
+            // exact target time (e.g., edit lists shifting PTS).
+            let result = unsafe {
+                ffmpeg::ffi::avformat_seek_file(
+                    self.input.as_mut_ptr(),
+                    -1,
+                    i64::MIN,
+                    timestamp,
+                    i64::MAX,
+                    ffmpeg::ffi::AVSEEK_FLAG_BACKWARD | ffmpeg::ffi::AVSEEK_FLAG_ANY,
+                )
+            };
+            if result < 0 {
+                bail!(
+                    "seek to {:.3}s failed with error code {}",
+                    time_secs,
+                    result
+                );
+            }
         }
         unsafe {
             ffmpeg::ffi::avformat_flush(self.input.as_mut_ptr());
