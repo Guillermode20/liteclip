@@ -627,11 +627,7 @@ impl PlaybackController {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .len();
-            if queue_len >= queue_depth_limit {
-                true
-            } else {
-                false
-            }
+            queue_len >= queue_depth_limit
         } else {
             false
         };
