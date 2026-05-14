@@ -54,7 +54,7 @@ winit = "0.30"
 rayon = "1.11.0"
 rodio = "0.20"
 rustc-hash = "2.0"
-ffmpeg-next = { version = "7.1.0", default-features = false, features = ["codec", "format", "software-scaling", "software-resampling"] }
+ffmpeg-next = { version = "8.1.0", default-features = false, features = ["codec", "format", "software-scaling", "software-resampling"] }
 
 # Update checker (optional, enabled via "updater" feature)
 ureq = { version = "3", features = ["json"], optional = true }
