@@ -99,7 +99,7 @@ winres = "0.1"
 tempfile = "3"
 assert_matches = "1.5"
 serial_test = "3"
-rstest = "0.23"
+rstest = "0.26"
 bytes = "1"
 toml = "0.8"
 
